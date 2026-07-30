@@ -81,7 +81,20 @@
         "sessionId": { "type": "string" },
         "requestId": { "type": "string" },
         "usage": { "type": ["object", "null"] },
-        "usageIsIncomplete": { "type": "boolean" }
+        "usageIsIncomplete": { "type": "boolean" },
+        "filesChanged": {
+          "type": "object",
+          "required": ["count", "paths", "truncated"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "paths": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "truncated": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": true
     },

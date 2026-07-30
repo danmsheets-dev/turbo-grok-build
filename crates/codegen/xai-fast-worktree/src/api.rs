@@ -682,7 +682,9 @@ fn remove_worktree_from_disk(
             ))?;
         }
         Ok(_) => {
-            std::fs::remove_dir_all(worktree_path).context(format!(
+            // Windows: deep engine caches (`.godot/imported/…`) exceed MAX_PATH
+            // and fail with "Filename too long" unless we use `\\?\` long paths.
+            xai_grok_paths::remove_dir_all_long(worktree_path).context(format!(
                 "failed to remove worktree directory: {}",
                 worktree_path.display()
             ))?;
@@ -699,7 +701,7 @@ fn remove_worktree_from_disk(
             registration_dir = %reg_dir.display(),
             "removing worktree registration from .git/worktrees/"
         );
-        let _ = std::fs::remove_dir_all(&reg_dir);
+        let _ = xai_grok_paths::remove_dir_all_long(&reg_dir);
     }
 
     Ok(RemoveReport {

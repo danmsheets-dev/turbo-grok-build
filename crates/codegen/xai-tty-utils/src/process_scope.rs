@@ -213,6 +213,64 @@ pub fn global_process_scope() -> &'static ProcessScope {
     GLOBAL.get_or_init(ProcessScope::new)
 }
 
+/// Env var / CLI opt-in: put the **current Hyper process** into a Win32 Job
+/// Object with `KILL_ON_JOB_CLOSE` so a harness can kill the entire tree by
+/// closing the job handle (not by guessing PIDs).
+///
+/// - Env: `HYPER_JOB_OBJECT=1` (or `true` / `yes`)
+/// - CLI: `--job-object` (see pager CLI)
+///
+/// Interactive users leave this off — nested jobs or an already-jobbed parent
+/// (CI, Windows Terminal containers) can make `AssignProcessToJobObject` fail
+/// harmlessly; we log and continue.
+///
+/// On non-Windows this is a no-op.
+pub fn enter_self_job_object_if_requested(force: bool) {
+    let env_on = std::env::var("HYPER_JOB_OBJECT")
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false);
+    if !force && !env_on {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        if let Err(e) = enter_self_job_object_windows() {
+            // Already-in-a-job (no nested-job support) is expected under some
+            // harnesses — do not abort startup.
+            eprintln!("warning: HYPER_JOB_OBJECT: could not enter job object: {e}");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = force;
+        // Job Objects are a Windows construct; Unix relies on process groups
+        // + ProcessScope::kill_all. Deliberately no process-wide session kill
+        // opt-in here — interactive shells share a session with the TTY.
+    }
+}
+
+/// Hold the process-wide job handle for the lifetime of the process so
+/// `KILL_ON_JOB_CLOSE` only fires when the process exits (or a harness closes
+/// a duplicated handle). Static so Drop never runs mid-session.
+#[cfg(windows)]
+fn enter_self_job_object_windows() -> io::Result<()> {
+    use std::sync::OnceLock;
+    static SELF_JOB: OnceLock<ProcessGroup> = OnceLock::new();
+
+    if SELF_JOB.get().is_some() {
+        return Ok(());
+    }
+    let mut group = ProcessGroup::new()?;
+    let pid = std::process::id();
+    group.attach_pid(pid)?;
+    // Ignore the error if already set (race); the first handle is enough.
+    let _ = SELF_JOB.set(group);
+    Ok(())
+}
+
 impl Drop for ScopeInner {
     fn drop(&mut self) {
         // RAII backstop: if the last scope handle drops without an explicit
@@ -228,21 +286,32 @@ impl Drop for ScopeInner {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
 
     fn sleeper() -> tokio::process::Command {
-        let mut c = tokio::process::Command::new("sleep");
-        c.arg("1000");
-        c
+        #[cfg(unix)]
+        {
+            let mut c = tokio::process::Command::new("sleep");
+            c.arg("1000");
+            c
+        }
+        #[cfg(windows)]
+        {
+            // Long-running child; job kill should reap it (and any grandchild
+            // it starts). `timeout` is a real process tree under cmd.
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/C", "timeout", "/T", "120", "/NOBREAK"]);
+            c
+        }
     }
 
     /// `wait()` completing == the process actually died (and is reaped). If the
-    /// kill failed, the `sleep 1000` would run on and `wait()` would time out.
+    /// kill failed, the long sleep/timeout would run on and `wait()` would time out.
     async fn died(child: &mut tokio::process::Child) -> bool {
-        tokio::time::timeout(Duration::from_secs(3), child.wait())
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
             .is_ok()
     }
@@ -259,6 +328,26 @@ mod tests {
         scope.kill_all();
         assert!(died(&mut c1).await, "child 1 must die after kill_all");
         assert!(died(&mut c2).await, "child 2 must die after kill_all");
+    }
+
+    /// Windows: dropping the ProcessGroup (job handle) with KILL_ON_JOB_CLOSE
+    /// must kill the enrolled child **and** its grandchild (`timeout.exe`
+    /// spawned by `cmd.exe`). Both join the job unless breakaway is requested.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_job_kill_reaps_grandchild_on_scope_drop() {
+        let scope = ProcessScope::new();
+        // cmd.exe (child) → timeout.exe (grandchild); both in the job.
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.args(["/C", "timeout", "/T", "120", "/NOBREAK"]);
+        let (mut child, group) = scope.spawn(cmd).unwrap();
+        // Give the grandchild a moment to start under cmd.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(group); // closes job handle → KILL_ON_JOB_CLOSE
+        assert!(
+            died(&mut child).await,
+            "enrolled child (and its job tree) must die when job handle drops"
+        );
     }
 
     #[tokio::test]

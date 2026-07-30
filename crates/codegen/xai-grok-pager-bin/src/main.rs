@@ -1868,6 +1868,10 @@ fn main() {
         std::process::exit(code);
     }
     let args = PagerArgs::parse_cli();
+    // Opt-in Windows Job Object for the whole process tree so harnesses can
+    // kill Hyper cleanly (see docs/windows-process-tree.md). Must run early —
+    // children inherit the job automatically when breakaway is not requested.
+    xai_tty_utils::enter_self_job_object_if_requested(args.job_object);
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;
     }
@@ -2412,6 +2416,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                require_changes: args.require_changes,
             },
         )
         .await;

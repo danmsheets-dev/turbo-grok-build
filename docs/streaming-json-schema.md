@@ -50,9 +50,22 @@ started. Partial ledgers set `"usageIsIncomplete": true`.
   "stopReason": "…",
   "sessionId": "…",
   "requestId": "…",
-  "usage": { "…": "…" } | null
+  "usage": { "…": "…" } | null,
+  "filesChanged": {
+    "count": 3,
+    "paths": ["src/a.rs", "src/b.rs"],
+    "truncated": false
+  }
 }
 ```
+
+`filesChanged` lists paths the agent **edited/created/deleted through tools**
+(ACP Edit-kind tool calls). Build outputs are not included. `paths` is capped
+(200 entries / ~32 KB); `count` is the full unique set and `truncated` is true
+when the list is a prefix.
+
+With `--require-changes`, a successful run that changed nothing sets
+`stopReason` to `NoChanges` and exits non-zero.
 
 ## `tool_denied`
 

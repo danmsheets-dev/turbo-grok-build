@@ -15,5 +15,8 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "process"] }
+
 [lints]
 workspace = true

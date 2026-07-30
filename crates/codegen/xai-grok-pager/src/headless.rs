@@ -193,6 +193,9 @@ pub struct HeadlessOptions {
     pub wait_for_background: bool,
     /// Max time to wait for background quiescence after the first turn ends.
     pub background_wait_timeout: Duration,
+    /// When true, a run that changed no files exits non-zero with
+    /// `stopReason: "NoChanges"`.
+    pub require_changes: bool,
 }
 
 // ── CLI flag helpers ─────────────────────────────────────────────────────
@@ -318,6 +321,11 @@ fn apply_agent_flag(agent: &Option<String>, config: &mut xai_grok_shell::agent::
 
 // ── Emitter ──────────────────────────────────────────────────────────────
 
+/// Cap for `filesChanged.paths` on the `end` event (harness convention).
+const FILES_CHANGED_MAX_PATHS: usize = 200;
+/// Soft cap on total path-list bytes before marking `truncated`.
+const FILES_CHANGED_MAX_BYTES: usize = 32 * 1024;
+
 struct HeadlessEmitter {
     format: OutputFormat,
     parse_structured_output: bool,
@@ -328,6 +336,11 @@ struct HeadlessEmitter {
     structured_output: Option<Result<serde_json::Value, String>>,
     /// From `_meta.usage`, projected onto the final result when present.
     usage: Option<serde_json::Value>,
+    /// Absolute/display paths the agent edited via tools this run (Edit
+    /// tool-call locations). Used for `filesChanged` on the `end` event —
+    /// build products are not included because only Edit-kind tool calls
+    /// contribute.
+    files_changed: std::collections::BTreeSet<String>,
 }
 
 impl HeadlessEmitter {
@@ -339,7 +352,48 @@ impl HeadlessEmitter {
             thought_buffer: String::new(),
             structured_output: None,
             usage: None,
+            files_changed: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Record paths from a completed Edit tool call (agent tool edits only).
+    fn note_edit_locations(&mut self, locations: &[acp::ToolCallLocation]) {
+        for loc in locations {
+            let path = loc.path.display().to_string();
+            if !path.is_empty() {
+                self.files_changed.insert(path);
+            }
+        }
+    }
+
+    /// Build the capped `filesChanged` object for terminal events.
+    fn files_changed_json(&self) -> serde_json::Value {
+        let mut paths: Vec<String> = Vec::new();
+        let mut bytes = 0usize;
+        let mut truncated = false;
+        for p in &self.files_changed {
+            if paths.len() >= FILES_CHANGED_MAX_PATHS {
+                truncated = true;
+                break;
+            }
+            let add = p.len() + 1;
+            if bytes + add > FILES_CHANGED_MAX_BYTES {
+                truncated = true;
+                break;
+            }
+            bytes += add;
+            paths.push(p.clone());
+        }
+        // Count is the full unique set; paths may be a capped prefix.
+        let count = self.files_changed.len();
+        if count > paths.len() {
+            truncated = true;
+        }
+        serde_json::json!({
+            "count": count,
+            "paths": paths,
+            "truncated": truncated,
+        })
     }
 
     /// Read structured output from the prompt-response `_meta` — the same
@@ -517,14 +571,16 @@ impl HeadlessEmitter {
                     "schemaVersion": 1,
                     "stopReason": stop_reason,
                     "sessionId": session_id,
-                    "requestId": request_id
+                    "requestId": request_id,
+                    "filesChanged": self.files_changed_json(),
                 });
                 self.attach_usage_fields(&mut end, false);
                 self.attach_structured_output(&mut end);
                 println!("{end}");
             }
             OutputFormat::Json => {
-                let result = self.build_json_result(stop_reason, session_id, request_id);
+                let mut result = self.build_json_result(stop_reason, session_id, request_id);
+                result["filesChanged"] = self.files_changed_json();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
@@ -1430,7 +1486,7 @@ pub async fn run_single_turn(
     // Agent cancel + join (SessionEnd flush) runs in AgentShutdownGuard::drop.
     match prompt_result {
         Some(Ok(resp)) => {
-            let stop_reason = format!("{:?}", resp.stop_reason);
+            let mut stop_reason = format!("{:?}", resp.stop_reason);
             emitter.set_structured_output_from_meta(resp.meta.as_ref());
             emitter.set_usage_from_meta(resp.meta.as_ref());
             let sid = resp
@@ -1451,6 +1507,12 @@ pub async fn run_single_turn(
                 .and_then(|m| m.get("cancellationCategory"))
                 .and_then(|v| v.as_str())
                 == Some("max_turns_reached");
+            // --require-changes: treat a productive stop with zero agent
+            // tool edits as NoChanges so harnesses can key on stopReason.
+            let no_changes = options.require_changes && emitter.files_changed.is_empty();
+            if no_changes && !is_max_turns {
+                stop_reason = "NoChanges".to_string();
+            }
             if is_max_turns {
                 match emitter.format {
                     OutputFormat::Plain => eprintln!("Max turns reached"),
@@ -1465,6 +1527,9 @@ pub async fn run_single_turn(
                 anyhow::bail!("max turns reached");
             }
             emitter.on_end(&stop_reason, sid, rid);
+            if no_changes {
+                anyhow::bail!("require-changes: run finished with no agent file edits");
+            }
             Ok(())
         }
         Some(Err(err)) => {
@@ -1705,6 +1770,28 @@ fn handle_headless_acp_message(
                             );
                         }
                         emitter.on_thought_chunk(&text.text);
+                    }
+                }
+                // Agent tool edits only (Edit kind). Build products from bash
+                // are deliberately excluded — harnesses key on agent edits.
+                acp::SessionUpdate::ToolCall(tc) => {
+                    if matches!(tc.kind, acp::ToolKind::Edit)
+                        && matches!(
+                            tc.status,
+                            acp::ToolCallStatus::Completed | acp::ToolCallStatus::InProgress
+                        )
+                    {
+                        // Prefer completed; still record locations when the
+                        // initial ToolCall already carries them (InProgress).
+                        emitter.note_edit_locations(&tc.locations);
+                    }
+                }
+                acp::SessionUpdate::ToolCallUpdate(tcu) => {
+                    if matches!(tcu.fields.kind, Some(acp::ToolKind::Edit))
+                        && matches!(tcu.fields.status, Some(acp::ToolCallStatus::Completed))
+                        && let Some(locs) = tcu.fields.locations.as_ref()
+                    {
+                        emitter.note_edit_locations(locs);
                     }
                 }
                 _ => {}
@@ -2223,6 +2310,56 @@ mod tests {
                 .to_string()
                 .contains("invalid JSON")
         );
+    }
+
+    #[test]
+    fn files_changed_json_counts_and_lists_paths() {
+        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        emitter.files_changed.insert("src/a.rs".into());
+        emitter.files_changed.insert("src/b.rs".into());
+        let v = emitter.files_changed_json();
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["truncated"], false);
+        let paths = v["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|p| p == "src/a.rs"));
+        assert!(paths.iter().any(|p| p == "src/b.rs"));
+    }
+
+    #[test]
+    fn files_changed_json_empty_when_no_edits() {
+        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        let v = emitter.files_changed_json();
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["truncated"], false);
+        assert!(v["paths"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn files_changed_json_truncates_path_list() {
+        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        for i in 0..(FILES_CHANGED_MAX_PATHS + 5) {
+            emitter.files_changed.insert(format!("f{i}.rs"));
+        }
+        let v = emitter.files_changed_json();
+        assert_eq!(v["count"], FILES_CHANGED_MAX_PATHS + 5);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(
+            v["paths"].as_array().unwrap().len(),
+            FILES_CHANGED_MAX_PATHS
+        );
+    }
+
+    #[test]
+    fn require_changes_flag_detects_empty_set() {
+        // Mirrors the headless exit gate: require_changes && no edit paths.
+        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        assert!(emitter.files_changed.is_empty());
+        let require_changes = true;
+        assert!(require_changes && emitter.files_changed.is_empty());
+        let mut emitter2 = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        emitter2.files_changed.insert("x.rs".into());
+        assert!(!(require_changes && emitter2.files_changed.is_empty()));
     }
 
     fn make_ext_notif(

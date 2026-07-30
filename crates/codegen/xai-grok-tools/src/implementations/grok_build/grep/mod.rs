@@ -338,9 +338,19 @@ impl xai_tool_runtime::Tool for GrepTool {
         } = match prepare_grep(&ctx, &input).await? {
             GrepStep::Ready(ready) => ready,
             GrepStep::Early(out) => {
+                // Always log Early returns at INFO so a ~2 ms empty-body
+                // failure is diagnosable (spawn fail / path-not-found used to
+                // leave no "grep finished" line and no span fields).
                 tracing::Span::current().record("wall_ms", started.elapsed().as_millis() as u64);
                 tracing::Span::current().record("early_kill", false);
-                return Ok(out);
+                tracing::info!(
+                    wall_ms = started.elapsed().as_millis() as u64,
+                    exit_code = out.exit_code,
+                    stdout_len = out.stdout.len(),
+                    stderr_len = out.stderr.len(),
+                    "grep finished"
+                );
+                return Ok(ensure_nonempty_grep_body(out));
             }
         };
         tracing::Span::current().record("effective_head_limit", config.effective_head_limit as u64);
@@ -415,13 +425,13 @@ impl xai_tool_runtime::Tool for GrepTool {
             "grep finished"
         );
 
-        Ok(finalize_grep(
+        Ok(ensure_nonempty_grep_body(finalize_grep(
             stdout_buf,
             stdout_truncated,
             stderr_buf,
             exit_code,
             &config,
-        ))
+        )))
     }
 }
 
@@ -445,9 +455,19 @@ fn grep_progress_stream(
             Ok(GrepStep::Early(out)) => {
                 // Mirror `run`'s Early arm so path-not-found / spawn short-circuits
                 // still populate the `tool.grep` span in the streaming (prod) path.
-                span.record("wall_ms", stream_started.elapsed().as_millis() as u64);
+                let wall_ms = stream_started.elapsed().as_millis() as u64;
+                span.record("wall_ms", wall_ms);
                 span.record("early_kill", false);
-                yield xai_tool_runtime::ToolStreamItem::Terminal(Ok(out));
+                span.in_scope(|| {
+                    tracing::info!(
+                        wall_ms,
+                        exit_code = out.exit_code,
+                        stdout_len = out.stdout.len(),
+                        stderr_len = out.stderr.len(),
+                        "grep finished"
+                    );
+                });
+                yield xai_tool_runtime::ToolStreamItem::Terminal(Ok(ensure_nonempty_grep_body(out)));
                 return;
             }
             Err(e) => {
@@ -641,10 +661,44 @@ fn grep_progress_stream(
             );
         });
 
-        let output =
-            finalize_grep(stdout_buf, stdout_truncated, stderr_buf, exit_code, &config);
+        let output = ensure_nonempty_grep_body(finalize_grep(
+            stdout_buf,
+            stdout_truncated,
+            stderr_buf,
+            exit_code,
+            &config,
+        ));
         yield xai_tool_runtime::ToolStreamItem::Terminal(Ok(output));
     })
+}
+
+/// Guarantee the model never sees a silent empty grep body.
+///
+/// `to_prompt_format` for GrepSearch surfaces **stdout only**. A failure that
+/// only populated stderr (historical spawn-failure Early path) rendered as an
+/// empty success to the agent. Promote stderr (or a synthetic notice) into
+/// stdout whenever stdout is empty and the call did not cleanly succeed with
+/// zero matches already formatted by [`finalize_grep`].
+fn ensure_nonempty_grep_body(mut out: GrepSearchOutput) -> GrepSearchOutput {
+    if !out.stdout.is_empty() {
+        return out;
+    }
+    if !out.stderr.is_empty() {
+        out.stdout = out.stderr.clone();
+        return out;
+    }
+    // Last resort: never return empty bytes. exit 0/1 with empty stdout should
+    // have been formatted already; anything else is a bug we still surface.
+    let notice = if out.exit_code == 0 || out.exit_code == 1 {
+        "No matches found (empty ripgrep output).".to_string()
+    } else {
+        format!(
+            "Error calling tool: grep produced no output (exit {})",
+            out.exit_code
+        )
+    };
+    out.stdout = notice.into_bytes();
+    out
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -753,7 +807,7 @@ async fn prepare_grep(
 
     let rg_exec = rg_path();
 
-    let mut cmd = Command::new(rg_exec);
+    let mut cmd = Command::new(&rg_exec);
     cmd.arg("--heading")
         .arg("--with-filename")
         .arg("--line-number")
@@ -823,15 +877,36 @@ async fn prepare_grep(
     cmd.arg("--max-filesize").arg("5M");
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Deliberately **not** enrolled in ProcessScope: rg is sub-second and
+    // short-lived. When Hyper is launched with `--job-object` /
+    // `HYPER_JOB_OBJECT=1`, children inherit the process job automatically
+    // (no CREATE_BREAKAWAY). Enrolling every rg would thrash Job Object
+    // handles for no kill-reliability gain. See docs/windows-process-tree.md.
     crate::util::detach_command(&mut cmd);
     cmd.stdin(Stdio::null());
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
+            // Model-facing prompt text is built from **stdout only**
+            // (`ToolOutput::to_prompt_format` for GrepSearch). Putting the
+            // spawn reason solely in stderr produced a silent empty body on
+            // Windows when `CreateProcess` rejected an extensionless bundled
+            // `rg` PE — the failure completed in ~2 ms with no matches and no
+            // explanation. Always put the reason in stdout.
+            let msg = format!(
+                "Error calling tool: failed to spawn ripgrep ({}): {}",
+                rg_exec.display(),
+                e
+            );
+            tracing::warn!(
+                error = %e,
+                rg = %rg_exec.display(),
+                "grep: ripgrep spawn failed"
+            );
             return Ok(GrepStep::Early(GrepSearchOutput {
-                stdout: Vec::new(),
-                stderr: format!("Error calling tool: {}", e).into_bytes(),
+                stdout: msg.clone().into_bytes(),
+                stderr: msg.into_bytes(),
                 exit_code: -1,
                 match_count: 0,
                 file_matches: Vec::new(),
@@ -1048,9 +1123,16 @@ fn finalize_grep(
     }
 
     if exit_code != 0 {
+        // Prefer stderr text when present so spawn/rg diagnostics reach the
+        // model (stdout-only prompt path). Fall back to a generic notice.
+        let detail = if stderr.trim().is_empty() {
+            format!("unknown error (exit {exit_code})")
+        } else {
+            format!("{} (exit {exit_code})", stderr.trim())
+        };
         let error_msg = format!(
-            "Error calling tool: unknown error (exit {}, root: {})",
-            exit_code, config.cwd_display
+            "Error calling tool: {detail} (root: {})",
+            config.cwd_display
         );
         return GrepSearchOutput {
             stdout: error_msg.into_bytes(),
@@ -1757,6 +1839,86 @@ mod tests {
         assert!(output.match_count > 0);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("main"));
+    }
+
+    /// Regression: Windows field report — grep returned an empty body for a
+    /// present pattern (~2.4 ms, no "grep finished" log). Must find the needle
+    /// and never render a silent empty success. Runs on every platform.
+    #[tokio::test]
+    async fn tool_grep_finds_needle_marker_nonempty_body() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.rs"), "fn needle_marker() {}\n").unwrap();
+
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+
+        let output = xai_tool_runtime::Tool::run(
+            &GrepTool,
+            test_ctx(resources.into_shared()),
+            make_grep_input("needle_marker"),
+        )
+        .await
+        .unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.trim().is_empty(),
+            "grep body must never be empty; got exit={} stderr={:?}",
+            output.exit_code,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.exit_code, 0,
+            "expected match for needle_marker; body={stdout}"
+        );
+        assert!(
+            stdout.contains("needle_marker"),
+            "expected match text in body: {stdout}"
+        );
+        assert!(output.match_count > 0);
+
+        // Model-facing prompt path (stdout-only historically) must also be non-empty.
+        let prompt =
+            crate::types::output::ToolOutput::GrepSearch(output.clone()).to_prompt_format();
+        assert!(
+            !prompt.trim().is_empty() && prompt.contains("needle_marker"),
+            "to_prompt_format must surface the match: {prompt}"
+        );
+    }
+
+    /// Spawn / Early failures must put a non-empty explanation in the model body.
+    #[test]
+    fn ensure_nonempty_grep_body_promotes_stderr() {
+        let out = ensure_nonempty_grep_body(GrepSearchOutput {
+            stdout: Vec::new(),
+            stderr: b"Error calling tool: failed to spawn".to_vec(),
+            exit_code: -1,
+            match_count: 0,
+            file_matches: Vec::new(),
+        });
+        assert!(!out.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("failed to spawn"),
+            "stdout should carry stderr: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    #[test]
+    fn ensure_nonempty_grep_body_synthetic_when_both_empty() {
+        let out = ensure_nonempty_grep_body(GrepSearchOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: -1,
+            match_count: 0,
+            file_matches: Vec::new(),
+        });
+        assert!(!out.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("Error calling tool"),
+            "{:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 
     /// `DenyReadGlobs` become ripgrep excludes so a search can't read a

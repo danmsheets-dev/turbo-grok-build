@@ -813,6 +813,17 @@ pub struct PagerArgs {
         env = "GROK_CONFINE"
     )]
     pub confine: Option<PathBuf>,
+    /// Put this Hyper process in a Windows Job Object (`KILL_ON_JOB_CLOSE`) so
+    /// a harness can kill the whole process tree by closing the job handle.
+    /// Also enabled by env `HYPER_JOB_OBJECT=1`. Off by default so interactive
+    /// users are unaffected. No-op on non-Windows.
+    #[arg(long = "job-object")]
+    pub job_object: bool,
+    /// Exit non-zero when a headless run finishes without any agent tool
+    /// edits (create/edit/delete). Sets `stopReason` to `NoChanges` on the
+    /// streaming-json `end` event. Off by default.
+    #[arg(long = "require-changes")]
+    pub require_changes: bool,
     /// Session storage mode: local or writeback.
     #[arg(long = "storage-mode", value_name = "MODE", hide = true)]
     pub storage_mode: Option<String>,

@@ -4860,6 +4860,9 @@ mod tests {
         );
     }
 
+    // `parse_login_env_capture` is unix-only (login-shell rc sourcing); gate
+    // these tests so `cargo test -p xai-grok-tools --lib` builds on Windows.
+    #[cfg(unix)]
     #[test]
     fn test_parse_login_env_capture() {
         let stdout = "motd noise\n\x01/opt/rc/bin:/usr/bin\x01\
@@ -4890,6 +4893,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_login_env_capture_path_only() {
         let (path, env) = parse_login_env_capture("\x01/usr/bin\x01");

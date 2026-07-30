@@ -192,6 +192,14 @@ pub(crate) async fn run_search_replace(
             "File path is a directory".to_owned(),
         ));
     }
+    // Refuse known binary / regenerable engine assets before any read/write so
+    // we never corrupt `.blend` / `.pck` / `.godot/` caches with text patches.
+    if let Some(reason) = crate::util::binary::refuse_text_edit_reason(&path) {
+        return Ok(SearchReplaceOutput::InvalidInput(format!(
+            "Refusing to text-edit `{}`: {reason}",
+            input.file_path
+        )));
+    }
     let is_legacy = SearchReplaceVersion::from_contract(contract_version.as_deref()).is_legacy();
     if !is_legacy {
         let res = resources.lock().await;
