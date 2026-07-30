@@ -514,6 +514,16 @@ impl HeadlessEmitter {
         }
     }
 
+    /// Arm process-wide emission of `confine_violation` NDJSON lines so the
+    /// permission manager can report escapes on the same streaming-json
+    /// channel without knowing about the headless emitter.
+    fn enable_confine_violation_emit(&self) {
+        xai_grok_tools::types::resources::set_streaming_json_confine_emit(matches!(
+            self.format,
+            OutputFormat::StreamingJson
+        ));
+    }
+
     fn attach_structured_output(&self, target: &mut serde_json::Value) {
         if !self.parse_structured_output {
             return;
@@ -1186,6 +1196,8 @@ pub async fn run_single_turn(
     };
 
     let mut emitter = HeadlessEmitter::new(options.output_format, options.json_schema.is_some());
+    // Arm process-wide confine_violation NDJSON emission for streaming-json.
+    emitter.enable_confine_violation_emit();
 
     // Load config and spawn agent
     let t_spawn = Instant::now();

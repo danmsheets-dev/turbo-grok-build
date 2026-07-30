@@ -1,0 +1,217 @@
+﻿cargo :    Compiling xai-proto-build v0.0.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\build\xai-proto-build)
+At line:1 char:224
++ ... :CARGO_TERM_COLOR='never'; cargo check -p xai-grok-shell 2>&1 | Out-F ...
++                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling xa...ai-proto-build):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking xai-tracing v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\common\xai-tracing)
+    Checking prod-mc-cli-chat-proxy-types v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\prod\mc\cli-chat-proxy-types)
+    Checking xai-tty-utils v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-tty-utils)
+   Compiling xai-grok-tools v0.1.220-alpha.4 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-tools)
+    Checking xai-grok-auth v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-auth)
+    Checking xai-grok-env v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-env)
+    Checking xai-grok-compaction v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\common\xai-grok-compaction)
+    Checking xai-grok-models v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-models)
+    Checking xai-grok-secrets v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-secrets)
+warning: unused import: `AsRawHandle`
+   --> crates\codegen\xai-tty-utils\src\lib.rs:563:36
+    |
+563 |         use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    |                                    ^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Checking xai-gix-status v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-gix-status)
+   Compiling cranelift-codegen v0.118.0
+    Checking xai-sqlite-journal v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-sqlite-journal)
+    Building [==================>    ] 1055/1248: xai-grok-secrets, prod-mc-cΓÇª
+    Checking xai-mixpanel v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-mixpanel)
+    Building [==================>    ] 1056/1248: xai-mixpanel, prod-mc-cli-cΓÇª
+warning: `xai-tty-utils` (lib) generated 1 warning (run `cargo fix --lib -p xai-tty-utils` to apply 1 suggestion)
+    Checking xai-codebase-graph v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-codebase-graph)
+    Building [==================>    ] 1070/1248: xai-mixpanel, prod-mc-cli-cΓÇª
+    Checking xai-fsnotify v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-fsnotify)
+    Building [==================>    ] 1078/1248: xai-mixpanel, prod-mc-cli-cΓÇª
+    Checking xai-acp-lib v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-acp-lib)
+    Building [==================>    ] 1083/1248: prod-mc-cli-chat-proxy-typeΓÇª
+    Checking xai-fast-worktree v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-fast-worktree)
+    Checking xai-hunk-tracker v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-hunk-tracker)
+    Building [===================>   ] 1086/1248: xai-fast-worktree, prod-mc-ΓÇª
+   Compiling xai-grok-tools-api v0.1.220-alpha.4 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-tools-api)
+    Building [===================>   ] 1087/1248: xai-fast-worktree, prod-mc-ΓÇª
+   Compiling xai-grok-shell v0.2.114-r5 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-shell)
+    Checking xai-hooks-plugins-types v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-hooks-plugins-types)
+    Checking xai-workflow v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-workflow)
+    Checking xai-system-power v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-system-power)
+    Building [====================>  ] 1186/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Checking xai-agent-lifecycle v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-agent-lifecycle)
+    Building [====================>  ] 1187/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Checking xai-prompt-queue v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-prompt-queue)
+    Building [====================>  ] 1189/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Building [=====================> ] 1197/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Building [=====================> ] 1198/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Building [=====================> ] 1199/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Building [=====================> ] 1200/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Building [=====================> ] 1201/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Building [=====================> ] 1202/1248: xai-fast-worktree, prod-mc-ΓÇª
+    Building [=====================> ] 1203/1248: xai-fast-worktree, prod-mc-ΓÇª
+warning: variant `Failed` is never constructed
+    --> crates\codegen\xai-fast-worktree\src\api.rs:1596:9
+     |
+1590 |     pub(crate) enum LiveCwdScan {
+     |                     ----------- variant in this enum
+...
+1596 |         Failed,
+     |         ^^^^^^
+     |
+     = note: `LiveCwdScan` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored 
+during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scan_contains_cwd` is never used
+    --> crates\codegen\xai-fast-worktree\src\api.rs:1604:8
+     |
+1604 |     fn scan_contains_cwd(cwds: &[PathBuf], path: &Path) -> bool {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: function `validate_cwd_scan` is never used
+    --> crates\codegen\xai-fast-worktree\src\api.rs:1617:8
+     |
+1617 |     fn validate_cwd_scan(cwds: Vec<PathBuf>) -> LiveCwdScan {
+     |        ^^^^^^^^^^^^^^^^^
+
+    Building [=====================> ] 1204/1248: xai-fast-worktree, prod-mc-ΓÇª
+warning: `xai-fast-worktree` (lib) generated 3 warnings
+    Building [=====================> ] 1205/1248: prod-mc-cli-chat-proxy-typeΓÇª
+    Checking xai-grok-config v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-config)
+    Checking xai-file-utils v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-file-utils)
+    Building [=====================> ] 1206/1248: xai-hunk-tracker, xai-grok-ΓÇª
+error: failed to run custom build command for `cranelift-codegen v0.118.0`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codeg
+en-f382ed7c81a8ef3e\build-script-build` (exit code: 1)
+  --- stdout
+  cargo:rustc-cfg=feature="x86"
+  cargo:rerun-if-changed=build.rs
+  cargo:rerun-if-changed=src\prelude.isle
+  cargo:rerun-if-changed=src\prelude_opt.isle
+  cargo:rerun-if-changed=src\opts\arithmetic.isle
+  cargo:rerun-if-changed=src\opts\bitops.isle
+  cargo:rerun-if-changed=src\opts\cprop.isle
+  cargo:rerun-if-changed=src\opts\extends.isle
+  cargo:rerun-if-changed=src\opts\icmp.isle
+  cargo:rerun-if-changed=src\opts\remat.isle
+  cargo:rerun-if-changed=src\opts\selects.isle
+  cargo:rerun-if-changed=src\opts\shifts.isle
+  cargo:rerun-if-changed=src\opts\spaceship.isle
+  cargo:rerun-if-changed=src\opts\spectre.isle
+  cargo:rerun-if-changed=src\opts\vector.isle
+  cargo:rerun-if-changed=src\prelude.isle
+  cargo:rerun-if-changed=src\prelude_lower.isle
+  cargo:rerun-if-changed=src\isa\x64\inst.isle
+  cargo:rerun-if-changed=src\isa\x64\lower.isle
+  cargo:rerun-if-changed=C:\Users\dan_m\.claude\plugins\data\grok-build-inline\worktrees\run-ms81jp4g-2zixon\target\deb
+ug\build\cranelift-assembler-x64-bd5ab5436f4b97e3\out\assembler-definitions.isle
+  cargo:rerun-if-changed=src\prelude.isle
+  cargo:rerun-if-changed=src\prelude_lower.isle
+  cargo:rerun-if-changed=src\isa\aarch64\inst.isle
+  cargo:rerun-if-changed=src\isa\aarch64\inst_neon.isle
+  cargo:rerun-if-changed=src\isa\aarch64\lower.isle
+  cargo:rerun-if-changed=src\isa\aarch64\lower_dynamic_neon.isle
+  cargo:rerun-if-changed=src\prelude.isle
+  cargo:rerun-if-changed=src\prelude_lower.isle
+  cargo:rerun-if-changed=src\isa\s390x\inst.isle
+  cargo:rerun-if-changed=src\isa\s390x\lower.isle
+  cargo:rerun-if-changed=src\prelude.isle
+  cargo:rerun-if-changed=src\prelude_lower.isle
+  cargo:rerun-if-changed=src\isa\riscv64\inst.isle
+  cargo:rerun-if-changed=src\isa\riscv64\inst_vector.isle
+  cargo:rerun-if-changed=src\isa\riscv64\lower.isle
+  cargo:rerun-if-changed=src\prelude.isle
+  cargo:rerun-if-changed=src\prelude_lower.isle
+  cargo:rerun-if-changed=src\isa\pulley_shared\inst.isle
+  cargo:rerun-if-changed=src\isa\pulley_shared\lower.isle
+
+  --- stderr
+  Writing generated file: 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\settings.rs
+  Writing generated file: 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\types.rs
+  Writing generated file: 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\opcodes.rs
+  Writing generated file: C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270
+c5db0d7f\out\inst_builder.rs
+  Writing generated file: C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270
+c5db0d7f\out\settings-pulley.rs
+  Writing generated file: C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270
+c5db0d7f\out\settings-pulley.rs
+  Writing generated file: C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270
+c5db0d7f\out\settings-x86.rs
+  Writing generated file: 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\clif_opt.isle
+  Writing generated file: C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270
+c5db0d7f\out\clif_lower.isle
+  Rebuilding 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\isle_opt.rs
+  Writing ISLE-generated Rust code to 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\isle_opt.rs
+  Rebuilding 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\isle_x64.rs
+  Error building ISLE files:
+  cannot read file C:\Users\dan_m\.claude\plugins\data\grok-build-inline\worktrees\run-ms81jp4g-2zixon\target\debug\bui
+ld\cranelift-assembler-x64-bd5ab5436f4b97e3\out\assembler-definitions.isle
+  Os { code: 3, kind: NotFound, message: "The system cannot find the path specified." }
+
+
+  To see a more detailed error report, run: 
+
+      $ cargo check -p cranelift-codegen --features isle-errors
+
+  Rebuilding C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\
+isle_aarch64.rs
+  Writing ISLE-generated Rust code to C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-code
+gen-452e9270c5db0d7f\out\isle_aarch64.rs
+  Rebuilding 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\isle_s390x.rs
+  Writing ISLE-generated Rust code to 
+C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\isle_s390x.rs
+  Rebuilding C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\
+isle_riscv64.rs
+  Writing ISLE-generated Rust code to C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-code
+gen-452e9270c5db0d7f\out\isle_riscv64.rs
+  Rebuilding C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-codegen-452e9270c5db0d7f\out\
+isle_pulley_shared.rs
+  Writing ISLE-generated Rust code to C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\target\debug\build\cranelift-code
+gen-452e9270c5db0d7f\out\isle_pulley_shared.rs
+warning: build failed, waiting for other jobs to finish...
+    Building [=====================> ] 1207/1248: xai-hunk-tracker, xai-grok-ΓÇª
+    Building [=====================> ] 1208/1248: xai-grok-tools-api(build), ΓÇª
+    Building [=====================> ] 1209/1248: xai-grok-tools-api(build), ΓÇª
+    Building [=====================> ] 1210/1248: xai-grok-config, xai-file-uΓÇª
+warning: field `directory` is never read
+   --> crates\codegen\xai-grok-config\src\managed_text\source.rs:131:5
+    |
+128 | pub(super) struct ParentAnchor {
+    |                   ------------ field in this struct
+...
+131 |     directory: fs::File,
+    |     ^^^^^^^^^
+    |
+    = note: `ParentAnchor` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead 
+code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `xai-grok-config` (lib) generated 1 warning
+    Building [=====================> ] 1211/1248: xai-file-utils              

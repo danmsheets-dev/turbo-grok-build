@@ -1,0 +1,243 @@
+﻿cargo :    Compiling xai-grok-tools-api v0.1.220-alpha.4 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-tools-api)
+At line:1 char:230
++ ... OR='never'; cargo check -p xai-grok-pager -p xai-grok-shell 2>&1 | Ou ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling xa...grok-tools-api):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused import: `AsRawHandle`
+   --> crates\codegen\xai-tty-utils\src\lib.rs:563:36
+    |
+563 |         use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    |                                    ^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `xai-tty-utils` (lib) generated 1 warning (run `cargo fix --lib -p xai-tty-utils` to apply 1 suggestion)
+warning: field `directory` is never read
+   --> crates\codegen\xai-grok-config\src\managed_text\source.rs:131:5
+    |
+128 | pub(super) struct ParentAnchor {
+    |                   ------------ field in this struct
+...
+131 |     directory: fs::File,
+    |     ^^^^^^^^^
+    |
+    = note: `ParentAnchor` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead 
+code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `xai-grok-config` (lib) generated 1 warning
+   Compiling cranelift-assembler-x64 v0.118.0
+warning: variant `Failed` is never constructed
+    --> crates\codegen\xai-fast-worktree\src\api.rs:1596:9
+     |
+1590 |     pub(crate) enum LiveCwdScan {
+     |                     ----------- variant in this enum
+...
+1596 |         Failed,
+     |         ^^^^^^
+     |
+     = note: `LiveCwdScan` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored 
+during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scan_contains_cwd` is never used
+    --> crates\codegen\xai-fast-worktree\src\api.rs:1604:8
+     |
+1604 |     fn scan_contains_cwd(cwds: &[PathBuf], path: &Path) -> bool {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: function `validate_cwd_scan` is never used
+    --> crates\codegen\xai-fast-worktree\src\api.rs:1617:8
+     |
+1617 |     fn validate_cwd_scan(cwds: Vec<PathBuf>) -> LiveCwdScan {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: `xai-fast-worktree` (lib) generated 3 warnings
+warning: unused imports: `Command` and `Stdio`
+  --> crates\codegen\xai-grok-voice\src\live\playback.rs:37:27
+   |
+37 | use std::process::{Child, Command, Stdio};
+   |                           ^^^^^^^  ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Child` is never constructed
+   --> crates\codegen\xai-grok-voice\src\live\playback.rs:482:5
+    |
+480 | enum Teardown {
+    |      -------- variant in this enum
+481 |     /// A subprocess player (Linux/macOS helper): kill + reap on stop.
+482 |     Child(Option<Child>),
+    |     ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+    Checking xai-grok-mermaid v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-mermaid)
+warning: `xai-grok-voice` (lib) generated 2 warnings (run `cargo fix --lib -p xai-grok-voice` to apply 1 suggestion)
+   Compiling xai-grok-pager v0.2.114-r5 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-pager)
+    Building [=====================> ] 1443/1496: xai-grok-pager(build), xai-ΓÇª
+    Building [=====================> ] 1444/1496: xai-grok-mermaid, xai-grok-ΓÇª
+    Building [=====================> ] 1445/1496: xai-grok-tools-api, xai-groΓÇª
+    Building [=====================> ] 1446/1496: xai-grok-tools-api, xai-groΓÇª
+    Building [=====================> ] 1447/1496: xai-grok-tools-api, craneliΓÇª
+    Building [=====================> ] 1448/1496: cranelift-assembler-x64, crΓÇª
+    Checking xai-tool-runtime v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\common\xai-tool-runtime)
+    Building [=====================> ] 1449/1496: xai-tool-runtime, craneliftΓÇª
+    Checking xai-computer-hub-core v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\common\xai-computer-hub-core)
+    Building [=====================> ] 1450/1496: cranelift-assembler-x64, crΓÇª
+    Building [=====================> ] 1451/1496: cranelift-assembler-x64, xaΓÇª
+   Compiling cranelift-codegen-meta v0.118.0
+    Building [=====================> ] 1451/1496: cranelift-assembler-x64, crΓÇª
+    Building [=====================> ] 1452/1496: cranelift-codegen-meta, xaiΓÇª
+    Checking xai-computer-hub-sdk v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\common\xai-computer-hub-sdk)
+    Building [=====================> ] 1453/1496: xai-computer-hub-sdk, craneΓÇª
+   Compiling cranelift-codegen v0.118.0
+    Building [=====================> ] 1454/1496: xai-computer-hub-sdk, craneΓÇª
+    Building [=====================> ] 1455/1496: xai-computer-hub-sdk, craneΓÇª
+    Checking xai-grok-tools v0.1.220-alpha.4 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-tools)
+    Checking xai-computer-hub-mcp-adapter v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\common\xai-computer-hub-mcp-adapter)
+    Checking xai-grok-workspace-client v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-workspace-client)
+    Building [=====================> ] 1456/1496: cranelift-codegen(build), xΓÇª
+    Building [=====================> ] 1457/1496: cranelift-codegen(build), xΓÇª
+    Building [=====================> ] 1458/1496: cranelift-codegen(build), xΓÇª
+    Building [=====================> ] 1459/1496: cranelift-codegen, xai-grokΓÇª
+warning: variable does not need to be mutable
+    --> crates\codegen\xai-grok-tools\src\computer\local\terminal.rs:3135:9
+     |
+3135 |     let mut build_cmd = |with_breakaway: bool| {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+    Checking cranelift-frontend v0.118.0
+    Checking cranelift-native v0.118.0
+    Building [=====================> ] 1460/1496: cranelift-frontend, craneliΓÇª
+    Building [=====================> ] 1461/1496: cranelift-frontend, xai-groΓÇª
+    Checking wasmtime-cranelift v31.0.0
+    Building [=====================> ] 1462/1496: wasmtime-cranelift, xai-groΓÇª
+warning: field `login_shell_capture` is never read
+   --> crates\codegen\xai-grok-tools\src\computer\local\terminal.rs:514:5
+    |
+465 | struct LocalTerminalActor {
+    |        ------------------ field in this struct
+...
+514 |     login_shell_capture: bool,
+    |     ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+    Checking wasmtime v31.0.0
+    Building [=====================> ] 1463/1496: wasmtime, xai-grok-tools    
+warning: `xai-grok-tools` (lib) generated 2 warnings (run `cargo fix --lib -p xai-grok-tools` to apply 1 suggestion)
+    Checking xai-grok-sampling-types v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-sampling-types)
+    Checking xai-grok-announcements v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-announcements)
+    Checking xai-grok-hooks v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-hooks)
+    Building [=====================> ] 1464/1496: xai-grok-sampling-types, waΓÇª
+    Building [=====================> ] 1465/1496: xai-grok-sampling-types, waΓÇª
+    Building [=====================> ] 1466/1496: xai-grok-sampling-types, waΓÇª
+    Checking xai-grok-sampler v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-sampler)
+    Checking xai-grok-agent v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-agent)
+    Checking xai-chat-state v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-chat-state)
+    Building [=====================> ] 1467/1496: xai-grok-agent, wasmtime, xΓÇª
+    Building [=====================> ] 1468/1496: xai-grok-agent, wasmtime, xΓÇª
+    Checking xai-grok-extension-runtime v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-extension-runtime)
+    Building [=====================> ] 1469/1496: xai-grok-agent, xai-grok-exΓÇª
+    Building [=====================> ] 1470/1496: xai-grok-agent, xai-grok-saΓÇª
+    Checking xai-grok-plugin-marketplace v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-plugin-marketplace)
+    Checking xai-grok-subagent-resolution v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-subagent-resolution)
+    Building [=====================> ] 1471/1496: xai-grok-subagent-resolutioΓÇª
+    Checking xai-grok-telemetry v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-telemetry)
+    Building [=====================> ] 1472/1496: xai-grok-subagent-resolutioΓÇª
+    Building [=====================> ] 1473/1496: xai-grok-plugin-marketplaceΓÇª
+    Building [=====================> ] 1474/1496: xai-grok-telemetry          
+    Checking xai-grok-mcp v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-mcp)
+    Building [=====================> ] 1475/1496: xai-grok-mcp                
+    Checking xai-grok-config-types v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-config-types)
+    Building [=====================> ] 1476/1496: xai-grok-config-types       
+    Checking xai-grok-workspace v0.1.220-alpha.4 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-workspace)
+    Checking xai-grok-shared v0.0.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-shared)
+    Building [=====================> ] 1477/1496: xai-grok-workspace, xai-groΓÇª
+warning: unused imports: `Command` and `Stdio`
+    --> crates\codegen\xai-grok-shared\src\clipboard.rs:1196:24
+     |
+1196 |     use std::process::{Command, Stdio};
+     |                        ^^^^^^^  ^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `arboard_error` is never read
+    --> crates\codegen\xai-grok-shared\src\clipboard.rs:1986:33
+     |
+1986 |         let mut arboard_error = None;
+     |                                 ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `arboard_error` is never read
+    --> crates\codegen\xai-grok-shared\src\clipboard.rs:2099:33
+     |
+2099 |         let mut arboard_error = None;
+     |                                 ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: `xai-grok-shared` (lib) generated 3 warnings (run `cargo fix --lib -p xai-grok-shared` to apply 1 suggestion)
+    Checking xai-grok-shell-base v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-shell-base)
+    Building [=====================> ] 1478/1496: xai-grok-workspace, xai-groΓÇª
+    Building [=====================> ] 1479/1496: xai-grok-workspace          
+    Checking xai-grok-http v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-http)
+    Checking xai-grok-pager-render v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-pager-render)
+    Building [=====================> ] 1480/1496: xai-grok-http, xai-grok-pagΓÇª
+    Checking xai-grok-shell-session-support v0.1.0 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-shell-session-support)
+    Checking xai-grok-memory v0.1.0 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-memory)
+    Building [=====================> ] 1481/1496: xai-grok-shell-session-suppΓÇª
+warning: unused import: `std::time::Duration`
+  --> crates\codegen\xai-grok-pager-render\src\terminal\probe.rs:13:5
+   |
+13 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=====================> ] 1482/1496: xai-grok-pager-render, xai-ΓÇª
+    Checking xai-grok-shell v0.2.114-r5 (C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-shell)
+    Building [=====================> ] 1483/1496: xai-grok-shell, xai-grok-paΓÇª
+warning: `xai-grok-pager-render` (lib) generated 1 warning (run `cargo fix --lib -p xai-grok-pager-render` to apply 1 
+suggestion)
+    Building [=====================> ] 1484/1496: xai-grok-shell              
+    Checking xai-grok-update v0.1.220-alpha.4 
+(C:\Users\dan_m\AppData\Local\Temp\gb\w\53b3b4f5\crates\codegen\xai-grok-update)
+    Building [=====================> ] 1485/1496: trace_classify(bin), chat-hΓÇª
+    Building [=====================> ] 1486/1496: trace_classify(bin), xai-grΓÇª
+    Building [=====================> ] 1487/1496: xai-grok-update, test-samplΓÇª
+    Building [=====================> ] 1488/1496: xai-grok-update             
+    Building [=====================> ] 1489/1496: xai-grok-pager              
+    Building [=====================> ] 1490/1496: scrollback-selection-playgrΓÇª
+    Building [=====================> ] 1491/1496: scrollback-selection-playgrΓÇª
+    Building [=====================> ] 1492/1496: scrollback-selection-playgrΓÇª
+    Building [=====================> ] 1493/1496: scrollback-selection-playgrΓÇª
+    Building [=====================> ] 1494/1496: scrollback-selection-playgrΓÇª
+    Building [=====================> ] 1495/1496: scrollback-selection-playgrΓÇª
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 48s

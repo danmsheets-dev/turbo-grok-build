@@ -1879,18 +1879,31 @@ impl WorkspaceHandle {
         }
         Ok(normalized)
     }
+    /// Whether session-scoped FS confinement is active: config flag **or**
+    /// process-wide `--confine` / `--workspace-root`. The CLI root must reach
+    /// this layer so `x.ai/fs/*` cannot rely solely on the permission check.
+    fn fs_confinement_active(&self) -> bool {
+        self.shared.confine_fs_to_workspace_root
+            || xai_grok_tools::types::resources::process_confine_root().is_some()
+    }
+
     /// Confine `path` to the workspace root (reject `..`, absolute-outside-root,
     /// symlink escapes) when confinement is enabled. Returns the resolved path and
     /// an optional walk root: `Some(root)` confines a `list`, `None` leaves it
     /// unconfined. Off by default (see
     /// [`WorkspaceConfig::confine_fs_to_workspace_root`](crate::config::WorkspaceConfig::confine_fs_to_workspace_root)):
     /// the absolute `path` is returned as-is, following out-of-root symlinks.
+    /// When `--confine` stamped a process root, that root is preferred so the
+    /// harness boundary is the same as the permission layer.
     pub async fn confine_to_workspace_root(
         &self,
         path: &std::path::Path,
     ) -> WorkspaceResult<(PathBuf, Option<PathBuf>)> {
-        if !self.shared.confine_fs_to_workspace_root {
+        if !self.fs_confinement_active() {
             return Ok((path.to_path_buf(), None));
+        }
+        if let Some(process_root) = xai_grok_tools::types::resources::process_confine_root() {
+            return self.confine_to_root(path, process_root).await;
         }
         let path_str = path.to_str().ok_or_else(|| {
             WorkspaceError::HubError(format!("non-UTF-8 path: {}", path.display()))
@@ -1906,7 +1919,7 @@ impl WorkspaceHandle {
         path: &std::path::Path,
         root: &std::path::Path,
     ) -> WorkspaceResult<(PathBuf, Option<PathBuf>)> {
-        if !self.shared.confine_fs_to_workspace_root {
+        if !self.fs_confinement_active() {
             return Ok((path.to_path_buf(), None));
         }
         let path_str = path.to_str().ok_or_else(|| {

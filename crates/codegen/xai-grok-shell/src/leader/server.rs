@@ -1105,6 +1105,10 @@ async fn handle_workspace_start(
         std::env::var("GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED").as_deref() != Ok("false");
     crate::agent::folder_trust::resolve_and_record(&cwd_path, None, false);
     let project_lsp_trusted = crate::agent::folder_trust::project_scope_allowed(&cwd_path);
+    // When `--confine` / `--workspace-root` stamped a process root, enable
+    // session-scoped FS confinement with the same boundary so hub `fs/*`
+    // paths honour the harness root rather than relying only on permissions.
+    let confine_fs = xai_grok_tools::types::resources::process_confine_root().is_some();
     let handle = xai_grok_workspace::connect_local_workspace(
         cwd_path.clone(),
         url,
@@ -1118,7 +1122,7 @@ async fn handle_workspace_start(
         project_lsp_trusted,
         None,
         false,
-        false,
+        confine_fs,
     )
     .await
     .map_err(|e| workspace_err(format!("failed to connect workspace to hub: {e}")))?;

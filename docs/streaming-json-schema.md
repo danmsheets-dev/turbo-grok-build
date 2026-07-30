@@ -107,16 +107,30 @@ Emitted at most once per run when the headless question-recovery path fires.
 }
 ```
 
-## `confine_violation`
+## `confine_violation` (schemaVersion 1)
+
+Emitted when `--confine` / `--workspace-root` blocks a write (Edit tool or
+shell write/`cd` operand) that resolves outside the root. Harnesses count
+these to detect attempted escapes without diffing the filesystem afterwards.
 
 ```json
 {
   "type": "confine_violation",
-  "tool": "search_replace",
-  "path": "C:\\outside\\file.rs",
-  "root": "C:\\worktrees\\feat"
+  "tool": "write",
+  "path": "C:/…/Main Repo/d.txt",
+  "resolvedPath": "C:/…/Main Repo/d.txt",
+  "root": "C:/…/wt",
+  "schemaVersion": 1
 }
 ```
+
+| Field | Meaning |
+|---|---|
+| `tool` | Tool name that requested the write (e.g. `write`, `search_replace`, `bash`) |
+| `path` | Operand as supplied by the model / shell |
+| `resolvedPath` | Canonical form after ancestor walk (8.3, `..`, symlinks) |
+| `root` | Canonical confine root |
+| `schemaVersion` | `1` |
 
 See also `docs/streaming-json.schema.json` for a JSON Schema draft of the event
 union.

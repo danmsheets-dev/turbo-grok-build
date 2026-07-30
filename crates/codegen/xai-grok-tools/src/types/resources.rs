@@ -537,48 +537,159 @@ pub fn resolve_model_path_confined(
     }
 }
 
-/// True when `path` is the confine root or a descendant, using prefix matching
-/// after lightweight normalisation (no full symlink walk — that is done by
-/// workspace confinement when enabled). Handles Windows case-folding and
-/// separator differences so drive-letter absolute paths cannot slip past.
-pub fn path_is_under_confine_root(path: &std::path::Path, root: &std::path::Path) -> bool {
-    let path_n = normalize_for_confine_compare(path);
-    let root_n = normalize_for_confine_compare(root);
-    if path_n == root_n {
-        return true;
-    }
-    // Ensure root ends with a separator in the comparison so `C:\work` does not
-    // match `C:\work-evil\file`. Path::starts_with already does component-wise
-    // matching, which is the safe form on Windows.
-    path_n.starts_with(&root_n)
+/// Outcome of reducing a path for permission / confine comparisons.
+///
+/// Both the confine check and managed path-rule matching MUST use this helper
+/// (via [`path_is_under_confine_root`] / [`canonical_path_for_permission`]) so
+/// the two layers cannot drift on `..`, 8.3 short names, or non-existent write
+/// targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalPermissionPath {
+    /// Form used for prefix / equality compares (case-folded on Windows).
+    pub compare: PathBuf,
+    /// Human-readable form (dunce-simplified, original case) for denial text
+    /// and `confine_violation` events.
+    pub display: PathBuf,
+    /// `true` when **no** existing ancestor could be `fs::canonicalize`'d.
+    ///
+    /// Under confine this MUST deny (fail closed). A pure lexical clean still
+    /// collapses `..` but leaves 8.3 aliases (`MAINRE~1`) and symlink targets
+    /// untouched — that is exactly how prior escapes landed real files in a
+    /// protected checkout. Do not "simplify" this flag away.
+    pub lexical_only: bool,
 }
 
-fn normalize_for_confine_compare(path: &std::path::Path) -> PathBuf {
-    // Prefer real path when available so `..` and short-name aliases collapse.
-    let base = std::fs::canonicalize(path)
-        .map(|p| dunce::simplified(&p).to_path_buf())
-        .unwrap_or_else(|_| {
-            // Path may not exist yet (write targets). Clean `..` lexically.
-            let mut out = PathBuf::new();
-            for c in path.components() {
-                match c {
-                    std::path::Component::ParentDir => {
-                        out.pop();
-                    }
-                    std::path::Component::CurDir => {}
-                    other => out.push(other.as_os_str()),
-                }
+/// Reduce `path` to a canonical form for permission decisions.
+///
+/// - Resolves `.` / `..`, 8.3 short names, symlinks, and junctions via
+///   `std::fs::canonicalize`, then strips the `\\?\` prefix with
+///   `dunce::simplified`.
+/// - **Non-existent write targets** (the common case): walk up to the nearest
+///   existing ancestor, canonicalize that, then re-join the remaining
+///   components (lexically cleaned). `…/MAINRE~1/new.txt` therefore resolves
+///   its parent to `…/Main Repo` and is correctly denied by a
+///   `Main Repo/**` rule.
+/// - If no ancestor can be canonicalized, fall back to a lexical clean only
+///   and set [`CanonicalPermissionPath::lexical_only`]. Callers under confine
+///   treat that as outside the root — never as allow.
+pub fn canonicalize_for_permission(path: &std::path::Path) -> CanonicalPermissionPath {
+    let (display, lexical_only) = canonicalize_with_ancestor_walk(path);
+    let compare = fold_for_compare(&display);
+    CanonicalPermissionPath {
+        compare,
+        display,
+        lexical_only,
+    }
+}
+
+/// Shared reduction used by confine and path-rule matching.
+/// Prefer [`canonicalize_for_permission`] when you need the full struct.
+pub fn canonical_path_for_permission(path: &std::path::Path) -> PathBuf {
+    canonicalize_for_permission(path).compare
+}
+
+/// True when `path` is the confine root or a descendant after
+/// [`canonicalize_for_permission`].
+///
+/// **Fail closed:** if `path` cannot be resolved via any existing ancestor
+/// (`lexical_only`), returns `false` and logs why. An unresolvable path must
+/// never mean "allow" under confine — that was the previous escape hatch.
+pub fn path_is_under_confine_root(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let path_c = canonicalize_for_permission(path);
+    let root_c = canonicalize_for_permission(root);
+    if path_c.lexical_only {
+        // Fail closed: no fs-backed resolution → treat as outside the root.
+        // Lexical-only collapse of `..` is not enough (8.3 / symlink escapes).
+        tracing::warn!(
+            path = %path.display(),
+            resolved = %path_c.display.display(),
+            root = %root.display(),
+            "confine: path has no canonicalizable ancestor; denying (fail closed)"
+        );
+        return false;
+    }
+    if path_c.compare == root_c.compare {
+        return true;
+    }
+    // Component-wise prefix so `C:\work` does not match `C:\work-evil\file`.
+    path_c.compare.starts_with(&root_c.compare)
+}
+
+/// Canonicalise via `fs::canonicalize` when the path exists; otherwise walk
+/// up to the nearest existing ancestor, canonicalize that, and re-join the
+/// non-existent tail. Returns `(display_path, lexical_only)`.
+fn canonicalize_with_ancestor_walk(path: &std::path::Path) -> (PathBuf, bool) {
+    // Fast path: path exists (or is a symlink the OS can resolve).
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return (dunce::simplified(&canon).to_path_buf(), false);
+    }
+
+    // Write targets usually do not exist yet. Walk up until canonicalize
+    // succeeds, then push the remaining components back on. Without this
+    // walk, a pure lexical clean of `…/MAINRE~1/new.txt` leaves the 8.3
+    // segment intact and deny/confine globs keyed on the long name miss it.
+    let mut cursor = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        let parent = match cursor.parent() {
+            Some(p) if p != cursor.as_path() => p.to_path_buf(),
+            _ => break,
+        };
+        if let Some(name) = cursor.file_name() {
+            tail.push(name.to_os_string());
+        }
+        cursor = parent;
+        if let Ok(canon) = std::fs::canonicalize(&cursor) {
+            let mut out = dunce::simplified(&canon).to_path_buf();
+            // Re-join farthest-parent → leaf (tail was pushed leaf-first).
+            for component in tail.into_iter().rev() {
+                out.push(component);
             }
-            out
-        });
+            // Collapse `.` / `..` that lived only in the non-existent tail.
+            return (lexical_clean(&out), false);
+        }
+    }
+
+    // No ancestor could be canonicalized (missing drive, deleted volume, …).
+    // Lexical fallback still collapses `..` for best-effort messages, but
+    // callers MUST treat `lexical_only = true` as deny under confine.
+    //
+    // Cost of "simplifying" this to always-allow-on-lexical: WP-H4 escapes —
+    // `…/wt/../Main Repo/d.txt` and `…/MAINRE~1/h.txt` both wrote into a
+    // denied checkout because short names and unresolved ancestors never
+    // matched the deny glob lexically. Do not reintroduce that.
+    tracing::debug!(
+        path = %path.display(),
+        "canonicalize_for_permission: no ancestor could be canonicalized; lexical-only fallback"
+    );
+    (lexical_clean(path), true)
+}
+
+/// Collapse `.` and `..` without touching the filesystem. Does **not** expand
+/// 8.3 short names or follow symlinks — that requires the ancestor walk above.
+fn lexical_clean(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn fold_for_compare(path: &std::path::Path) -> PathBuf {
     #[cfg(windows)]
     {
-        // Case-insensitive compare on Windows.
-        PathBuf::from(base.to_string_lossy().to_lowercase())
+        // Case-insensitive compare on Windows only.
+        PathBuf::from(path.to_string_lossy().to_lowercase())
     }
     #[cfg(not(windows))]
     {
-        base
+        path.to_path_buf()
     }
 }
 
@@ -598,6 +709,38 @@ pub fn set_process_confine_root(root: PathBuf) {
 /// Current process confine root, if any.
 pub fn process_confine_root() -> Option<&'static PathBuf> {
     PROCESS_CONFINE_ROOT.get()
+}
+
+/// When true, [`emit_confine_violation`] prints an NDJSON event on stdout
+/// (streaming-json channel). Set from the headless emitter at startup.
+static STREAMING_JSON_CONFINE_EMIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Enable/disable stdout emission of `confine_violation` NDJSON events.
+/// Headless `streaming-json` turns this on; other formats leave it off so TUI
+/// sessions never print harness events onto the UI stream.
+pub fn set_streaming_json_confine_emit(enabled: bool) {
+    STREAMING_JSON_CONFINE_EMIT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Emit a `confine_violation` event on the streaming-json channel when enabled.
+///
+/// Harnesses count these to detect attempted escapes without diffing the
+/// filesystem after the run. Safe no-op when streaming-json emit is off.
+pub fn emit_confine_violation(tool: &str, path: &str, resolved_path: &str, root: &str) {
+    if !STREAMING_JSON_CONFINE_EMIT.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // Same NDJSON channel as HeadlessEmitter (`println!` one object per line).
+    let event = serde_json::json!({
+        "type": "confine_violation",
+        "tool": tool,
+        "path": path,
+        "resolvedPath": resolved_path,
+        "root": root,
+        "schemaVersion": 1,
+    });
+    println!("{event}");
 }
 /// Strip surrounding whitespace (e.g. a trailing newline from block-form
 /// tool args) and quotes that models occasionally emit around path args.
@@ -1783,5 +1926,164 @@ mod tests {
         // Relative inside-root path succeeds.
         let ok = super::resolve_model_path_confined(root, None, root, "src/a.rs").unwrap();
         assert!(super::path_is_under_confine_root(&ok, root));
+    }
+
+    /// WP-H4 regression: table-driven confine escapes that previously wrote
+    /// into a denied checkout because matching was lexical only.
+    #[test]
+    fn confine_canonical_path_table() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("wt");
+        let sibling = base.path().join("Main Repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(root.join("ok.txt"), "in").unwrap();
+        std::fs::write(sibling.join("seed.txt"), "out").unwrap();
+
+        // Write inside the root — allowed.
+        assert!(
+            super::path_is_under_confine_root(&root.join("ok.txt"), &root),
+            "in-root write must be allowed"
+        );
+
+        // Absolute outside, forward slashes.
+        let outside_fwd = sibling.join("a.txt");
+        let outside_fwd_str = outside_fwd.to_string_lossy().replace('\\', "/");
+        assert!(
+            !super::path_is_under_confine_root(std::path::Path::new(&outside_fwd_str), &root),
+            "absolute outside (forward slashes) must be denied"
+        );
+
+        // Absolute outside, backslashes (Windows) / native separators.
+        assert!(
+            !super::path_is_under_confine_root(&sibling.join("b.txt"), &root),
+            "absolute outside (native separators) must be denied"
+        );
+
+        // Different case on Windows.
+        #[cfg(windows)]
+        {
+            let lower = sibling.to_string_lossy().to_lowercase() + "\\c.txt";
+            assert!(
+                !super::path_is_under_confine_root(std::path::Path::new(&lower), &root),
+                "absolute outside (different case) must be denied"
+            );
+        }
+
+        // Parent traversal: `<root>/../<sibling>/x.txt`.
+        let traversal = root.join("..").join("Main Repo").join("d.txt");
+        assert!(
+            !super::path_is_under_confine_root(&traversal, &root),
+            "parent traversal into sibling must be denied"
+        );
+
+        // Extended-length `\\?\` form (Windows).
+        #[cfg(windows)]
+        {
+            let extended = format!(r"\\?\{}", sibling.join("e.txt").display());
+            assert!(
+                !super::path_is_under_confine_root(std::path::Path::new(&extended), &root),
+                "\\\\?\\ extended-length form outside root must be denied"
+            );
+        }
+
+        // Non-existent parent inside root — allowed (write target).
+        let nested_new = root.join("sub").join("deep").join("new.txt");
+        assert!(
+            super::path_is_under_confine_root(&nested_new, &root),
+            "non-existent path under root must be allowed after ancestor walk"
+        );
+
+        // Non-existent parent outside root — denied.
+        let outside_new = sibling.join("missing").join("new.txt");
+        assert!(
+            !super::path_is_under_confine_root(&outside_new, &root),
+            "non-existent path outside root must be denied"
+        );
+
+        // 8.3 short name of an ancestor (Windows only; skip if disabled).
+        #[cfg(windows)]
+        {
+            match short_path_name(&sibling) {
+                Ok(short) => {
+                    let via_short = std::path::Path::new(&short).join("h.txt");
+                    assert!(
+                        !super::path_is_under_confine_root(&via_short, &root),
+                        "8.3 short-name form of sibling must be denied (got short={short})"
+                    );
+                    // Ancestor walk: non-existent file under short-name parent.
+                    let via_short_new = std::path::Path::new(&short).join("brand_new.txt");
+                    assert!(
+                        !super::path_is_under_confine_root(&via_short_new, &root),
+                        "write under 8.3 short-name ancestor must be denied"
+                    );
+                }
+                Err(reason) => {
+                    // Do not silently pass — surface why the case was skipped.
+                    eprintln!("skipping 8.3 short-name confine case: {reason}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonicalize_for_permission_resolves_dotdot_via_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("wt");
+        std::fs::create_dir_all(&root).unwrap();
+        let via_dotdot = root.join("sub").join("..").join("file.txt");
+        let c = super::canonicalize_for_permission(&via_dotdot);
+        assert!(!c.lexical_only, "existing ancestor must resolve");
+        assert!(
+            c.compare.starts_with(&super::canonicalize_for_permission(&root).compare),
+            "dotdot path should land under root: {:?}",
+            c.display
+        );
+    }
+
+    /// Resolve the 8.3 short path for `path`, or a skip reason when generation
+    /// is disabled on the volume (`fsutil 8dot3name` off).
+    #[cfg(windows)]
+    fn short_path_name(path: &std::path::Path) -> Result<String, String> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let long = PCWSTR(wide.as_ptr());
+        // SAFETY: `wide` is NUL-terminated and lives for both calls; first call
+        // with None returns the required buffer length.
+        let needed = unsafe { GetShortPathNameW(long, None) };
+        if needed == 0 {
+            return Err(
+                "GetShortPathNameW failed (8.3 generation may be disabled on this volume)"
+                    .into(),
+            );
+        }
+        let mut buf = vec![0u16; needed as usize];
+        let written = unsafe { GetShortPathNameW(long, Some(&mut buf)) };
+        if written == 0 {
+            return Err("GetShortPathNameW second call failed".into());
+        }
+        buf.truncate(written as usize);
+        let short = std::ffi::OsString::from_wide(&buf);
+        let short = short.to_string_lossy().into_owned();
+        // If the "short" form still contains spaces, 8.3 is not active for this path.
+        if short.contains(' ') {
+            return Err(format!(
+                "8.3 short name not generated (got `{short}`); volume may have 8dot3 disabled"
+            ));
+        }
+        // Require at least one `~` segment so we know we actually got a short alias.
+        if !short.contains('~') {
+            return Err(format!(
+                "no 8.3 tilde alias in `{short}`; 8dot3 generation appears disabled"
+            ));
+        }
+        Ok(short)
     }
 }
