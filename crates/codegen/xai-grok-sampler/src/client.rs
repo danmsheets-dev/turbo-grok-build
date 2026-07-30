@@ -1579,6 +1579,15 @@ impl SamplingClient {
         if streaming && !compat.supports_usage_in_streaming {
             object.remove("stream_options");
         }
+        // HYPER-LOCAL: `prompt_cache_key` is stamped onto every chat request
+        // from the session/conversation id, but it is an OpenAI-only parameter.
+        // Strict OpenAI-compatible gateways (NVIDIA Integrate, vLLM, and other
+        // NIM-style endpoints) reject unknown top-level params outright, and
+        // the resulting 400 is indistinguishable from a genuine bad-request.
+        // Gate it like every neighbouring OpenAI-only field.
+        if !compat.supports_prompt_cache_key {
+            object.remove("prompt_cache_key");
+        }
         if !compat.supports_strict_mode {
             Self::strip_strict_tool_fields(body);
         }
@@ -1678,6 +1687,15 @@ impl SamplingClient {
                 }
                 if !kwargs.is_empty() {
                     body["chat_template_kwargs"] = serde_json::Value::Object(kwargs);
+                }
+                // HYPER-LOCAL: top-level `reasoning_budget`, scoped to this arm
+                // so it can only ever reach a model configured for the
+                // chat-template thinking dialect (i.e. Nemotron). Deliberately
+                // NOT gated on `effort_string.is_some()`: the effort menu is
+                // unreliably populated for nvidia catalog rows, and gating on
+                // it would make this silently inert.
+                if let Some(budget) = compat.reasoning_budget {
+                    body["reasoning_budget"] = serde_json::json!(budget);
                 }
             }
         }
