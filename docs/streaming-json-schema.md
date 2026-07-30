@@ -67,6 +67,36 @@ when the list is a prefix.
 With `--require-changes`, a successful run that changed nothing sets
 `stopReason` to `NoChanges` and exits non-zero.
 
+### Headless question recovery (HYPER-1)
+
+A headless run (`-p` / `--prompt-file` / non-`plain` `--output-format`) injects
+a non-negotiable system-prompt clause declaring there is **no interactive
+user**. If the first turn still ends as a pure question (normal `EndTurn`,
+**zero tool calls**, assistant text that reads as a question), Hyper:
+
+1. Emits `{"type":"auto_continue","reason":"headless_question","attempt":1}`
+2. Injects one internal nudge (“assume no to optional features; proceed”)
+3. Bounds the recovery to **one** auto-continue — never a loop
+
+If the second turn also makes no tool calls, the terminal event uses
+`stopReason: "AwaitingUserInput"` (not `EndTurn`) with `filesChanged.count: 0`,
+and the process exits non-zero. Harnesses that key `completed-blind` off a
+clean `EndTurn` will correctly treat a question-only run as a failure.
+
+Opt out only with `--allow-interactive-questions` (rare).
+
+## `auto_continue`
+
+```json
+{
+  "type": "auto_continue",
+  "reason": "headless_question",
+  "attempt": 1
+}
+```
+
+Emitted at most once per run when the headless question-recovery path fires.
+
 ## `tool_denied`
 
 ```json

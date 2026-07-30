@@ -80,14 +80,26 @@ pub async fn list_available_models(agent_config: &AgentConfig, args: &ModelsArgs
 
     if args.json {
         let mut entries = Vec::with_capacity(models.len());
-        for id in models.keys() {
+        for (id, entry) in models.iter() {
             let billing = billing_for_model_id(id);
+            let info = entry.info();
+            // Full effort ladder the model advertises (HYPER-2). Empty when
+            // the model does not support reasoning effort — harnesses should
+            // check `supportsReasoningEffort` before spending a run at a
+            // tier the route will reject or ignore.
+            let supported_efforts: Vec<&str> = info
+                .reasoning_efforts
+                .iter()
+                .map(|o| o.value.as_str())
+                .collect();
             entries.push(serde_json::json!({
                 "id": id,
                 "platform": platform_for_model_id(id),
                 "billing": billing.as_str(),
                 "route": platform_for_model_id(id),
                 "default": id == &default_model,
+                "supportsReasoningEffort": info.supports_reasoning_effort,
+                "supportedEfforts": supported_efforts,
             }));
         }
         // Stable order for harnesses.
@@ -156,5 +168,11 @@ mod tests {
             billing_for_model_id("anthropic/claude-sonnet-4"),
             BillingClass::PayPerToken
         );
+    }
+
+    #[test]
+    fn platform_for_unprefixed_is_xai() {
+        assert_eq!(platform_for_model_id("grok-4.5"), "xai");
+        assert_eq!(platform_for_model_id("openai-codex/gpt-5"), "openai-codex");
     }
 }

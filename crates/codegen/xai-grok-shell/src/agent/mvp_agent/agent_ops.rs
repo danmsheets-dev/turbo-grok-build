@@ -1343,6 +1343,21 @@ impl MvpAgent {
     /// Synchronous by design: the decide→send→advance sequence cannot
     /// interleave with another gate call on the LocalSet.
     pub(super) fn emit_announcements(&self, mode: AnnouncementsPushMode) {
+        // Headless / non-interactive runs have no UI to paint banners or CTAs
+        // on, and must never burn a turn waiting on an announcement click.
+        // Defence for the general class of "CTA reaches a non-interactive
+        // stream" (HYPER-1 companion): drop the push entirely rather than
+        // relying on the client to ignore `x.ai/announcements/update`.
+        {
+            let cfg = self.cfg.borrow();
+            // Headless (`hyper -p` / streaming-json) has no UI for banners or
+            // CTAs. Other modes (TUI, Leader, Stdio) may still host a client
+            // that paints them.
+            if cfg.mode == crate::agent::config::AgentMode::Headless {
+                tracing::debug!("announcements push skipped: headless mode");
+                return;
+            }
+        }
         let payload_list = {
             let cfg = self.cfg.borrow();
             let last = self.last_emitted_announcements.borrow();

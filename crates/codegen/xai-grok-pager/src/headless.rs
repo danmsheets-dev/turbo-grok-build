@@ -196,6 +196,10 @@ pub struct HeadlessOptions {
     /// When true, a run that changed no files exits non-zero with
     /// `stopReason: "NoChanges"`.
     pub require_changes: bool,
+    /// Opt out of the non-negotiable headless no-questions system-prompt
+    /// clause and of the question-ending auto-continue recovery (HYPER-1).
+    /// Rare: only for harnesses that genuinely want the model to ask.
+    pub allow_interactive_questions: bool,
 }
 
 // ── CLI flag helpers ─────────────────────────────────────────────────────
@@ -331,6 +335,13 @@ struct HeadlessEmitter {
     parse_structured_output: bool,
     text_buffer: String,
     thought_buffer: String,
+    /// Full assistant text for the *current* prompt turn. Always accumulated
+    /// (even when streaming) so the headless question detector can inspect
+    /// the final message without depending on `--json-schema` buffering.
+    turn_assistant_text: String,
+    /// Tool calls observed on the *current* prompt turn (any kind). Used to
+    /// detect the HYPER-1 shape: EndTurn + zero tools + question text.
+    turn_tool_calls: u32,
     /// Agent's schema-validated output (both backends), read from the
     /// prompt-response `_meta`.
     structured_output: Option<Result<serde_json::Value, String>>,
@@ -350,10 +361,23 @@ impl HeadlessEmitter {
             parse_structured_output,
             text_buffer: String::new(),
             thought_buffer: String::new(),
+            turn_assistant_text: String::new(),
+            turn_tool_calls: 0,
             structured_output: None,
             usage: None,
             files_changed: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Clear per-turn counters before a follow-up auto-continue prompt so
+    /// the second turn is judged on its own tool activity, not the first.
+    fn reset_turn_tracking(&mut self) {
+        self.turn_assistant_text.clear();
+        self.turn_tool_calls = 0;
+    }
+
+    fn note_tool_call(&mut self) {
+        self.turn_tool_calls = self.turn_tool_calls.saturating_add(1);
     }
 
     /// Record paths from a completed Edit tool call (agent tool edits only).
@@ -418,6 +442,8 @@ impl HeadlessEmitter {
     }
 
     fn on_text_chunk(&mut self, text: &str) {
+        // Always accumulate for the headless question detector (HYPER-1).
+        self.turn_assistant_text.push_str(text);
         match self.format {
             OutputFormat::Plain => {
                 use std::io::Write as _;
@@ -433,6 +459,27 @@ impl HeadlessEmitter {
             OutputFormat::Json => {
                 self.text_buffer.push_str(text);
             }
+        }
+    }
+
+    /// Stream event when headless auto-continues after a question-only turn.
+    /// Harnesses count these to detect HYPER-1 recovery (and to bound loops).
+    fn on_auto_continue(&self, reason: &str, attempt: u32) {
+        match self.format {
+            OutputFormat::StreamingJson => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "auto_continue",
+                        "reason": reason,
+                        "attempt": attempt,
+                    })
+                );
+            }
+            OutputFormat::Plain => {
+                eprintln!("headless: auto-continuing ({reason}, attempt {attempt})");
+            }
+            OutputFormat::Json => {}
         }
     }
 
@@ -758,6 +805,7 @@ async fn authenticate(
 fn build_headless_init_request(
     rules: Option<&str>,
     system_prompt_override: Option<&str>,
+    allow_interactive_questions: bool,
 ) -> acp::InitializeRequest {
     let mut meta = serde_json::json!({
         "clientType": HEADLESS_CLIENT_TYPE,
@@ -769,11 +817,17 @@ fn build_headless_init_request(
     if let Some(system_prompt_override) = system_prompt_override {
         meta["systemPromptOverride"] = serde_json::json!(system_prompt_override);
     }
+    // `nonInteractive: true` is what `build_spawn_system_prompt` keys on for
+    // the HYPER-1 no-questions clause. Only suppress that clause when the
+    // harness explicitly opts back into interactive questions.
     meta["startupHints"] = serde_json::json!({
         "nonInteractive": true,
         "skipGitStatus": true,
         "skipProjectLayout": true,
     });
+    if allow_interactive_questions {
+        meta["allowInteractiveQuestions"] = serde_json::json!(true);
+    }
 
     acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(
@@ -782,6 +836,94 @@ fn build_headless_init_request(
                 .terminal(false),
         )
         .meta(meta.as_object().cloned())
+}
+
+// ── HYPER-1: headless question detection + one-shot auto-continue ────────
+
+/// Internal nudge after a headless turn that only asked a question. Bounded
+/// to **one** auto-continue per run — never loop.
+const HEADLESS_QUESTION_NUDGE: &str = "\
+There is no interactive user. Assume the answer is no to any optional feature \
+and proceed with the task as given.";
+
+/// Whether `stop_reason` is a normal successful end (Debug of ACP `EndTurn`).
+/// Other reasons (Cancelled, MaxTokens, Refusal, …) are not question-shaped
+/// failures and must not trigger auto-continue.
+fn is_normal_end_turn(stop_reason: &str) -> bool {
+    stop_reason == "EndTurn" || stop_reason == "end_turn"
+}
+
+/// Heuristic: the assistant's final message reads as a question to the user.
+///
+/// Field incident shape (HYPER-1):
+/// `"…Want to try it? (Requires opening a local URL)"` — ends in a question
+/// mark, optionally followed by a short parenthetical note. We deliberately
+/// do **not** match the browser-feature string itself (it is not in this repo
+/// and would bitrot); any turn whose final substance is a question is the
+/// structural failure mode.
+///
+/// Long post-`?` tails ("Is X true? Here is a full multi-sentence answer.")
+/// are **not** treated as questions — those runs did work verbally.
+pub(crate) fn looks_like_user_question(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Whole body first (covers single-paragraph field incident).
+    if line_reads_as_question(trimmed) {
+        return true;
+    }
+    // Multi-line: last non-empty line is the usual place for a closing opt-in.
+    let last_line = trimmed
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(trimmed);
+    line_reads_as_question(last_line)
+}
+
+/// A line/body is a question when it ends with `?`, or ends with a short
+/// parenthetical after a `?` (e.g. `Want to try it? (Requires opening a local
+/// URL)`).
+fn line_reads_as_question(s: &str) -> bool {
+    let s = s.trim();
+    if s.ends_with('?') {
+        return true;
+    }
+    // `…? (short note)` — field incident browser opt-in.
+    if let Some(q) = s.rfind('?') {
+        let tail = s[q + 1..].trim();
+        if tail.is_empty() {
+            return true;
+        }
+        if tail.starts_with('(') && tail.ends_with(')') && tail.len() <= 80 {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when a headless turn is the exact HYPER-1 failure shape: normal end,
+/// zero tool calls, assistant text that is a question, and the harness has
+/// not opted into interactive questions.
+fn should_auto_continue_headless_question(
+    stop_reason: &str,
+    tool_calls: u32,
+    assistant_text: &str,
+    allow_interactive_questions: bool,
+    already_continued: bool,
+) -> bool {
+    if allow_interactive_questions || already_continued {
+        return false;
+    }
+    if !is_normal_end_turn(stop_reason) {
+        return false;
+    }
+    if tool_calls > 0 {
+        return false;
+    }
+    looks_like_user_question(assistant_text)
 }
 
 struct OpenedSession {
@@ -1143,6 +1285,7 @@ pub async fn run_single_turn(
     let init_req = build_headless_init_request(
         options.rules.as_deref(),
         options.system_prompt_override.as_deref(),
+        options.allow_interactive_questions,
     );
     let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
         Ok(r) => r,
@@ -1306,10 +1449,13 @@ pub async fn run_single_turn(
         emitter.on_model_resolved(served_s);
     }
 
-    // Send prompt and stream response
-    let prompt_blocks = prompt.into_content_blocks();
+    // Send prompt and stream response. Outer loop allows exactly one
+    // HYPER-1 auto-continue after a question-only first turn.
+    let mut prompt_blocks = prompt.into_content_blocks();
+    let mut headless_question_continued = false;
+    let mut awaiting_user_input = false;
 
-    let prompt_meta = {
+    let prompt_meta_base = {
         let mut meta = serde_json::Map::new();
         if verbatim {
             meta.insert("verbatim".to_string(), serde_json::Value::Bool(true));
@@ -1323,14 +1469,9 @@ pub async fn run_single_turn(
             "screenMode".to_string(),
             serde_json::Value::String("headless".to_string()),
         );
-        Some(meta)
+        meta
     };
 
-    let request = acp::PromptRequest::new(session_id.clone(), prompt_blocks).meta(prompt_meta);
-    let t_prompt = Instant::now();
-    let mut ttf_logged = false;
-    let mut prompt_fut = Box::pin(acp_send(request, &acp_tx));
-    let mut prompt_result = None;
     // Pending background work: bash/monitor via x.ai/task_backgrounded +
     // task_completed; background subagents via SubagentSpawned + SubagentFinished
     // on x.ai/session_notification (prefixed `subagent:{id}` in pending_bg).
@@ -1342,90 +1483,35 @@ pub async fn run_single_turn(
     // task_completed can arrive before task_backgrounded; remember those IDs
     // so a late backgrounded does not re-arm waiting.
     let mut completed_before_bg: HashSet<String> = HashSet::new();
-    let mut prompt_done_at: Option<Instant> = None;
+    let mut prompt_result = None;
 
-    loop {
-        // First turn done and no tracked bg/monitor tasks still running.
-        // Drain buffered ACP first: PromptResponse can complete while
-        // task_backgrounded is still queued on acp_rx (never reached select!).
-        if options.wait_for_background && prompt_result.is_some() && pending_bg.is_empty() {
-            while let Ok(msg) = acp_rx.try_recv() {
-                handle_headless_acp_message(
-                    msg.boxed(),
-                    &mut emitter,
-                    t_prompt,
-                    &mut ttf_logged,
-                    options.yolo,
-                    options.permission_mode_flag.as_deref(),
-                    options.output_format,
-                    &mut pending_bg,
-                    &mut completed_before_bg,
-                );
-            }
-            if pending_bg.is_empty() {
-                tracing::debug!("headless: no pending background tasks, exiting");
-                break;
-            }
+    // Bound: one user prompt + at most one internal nudge. Never loop further.
+    for prompt_attempt in 0u32..2 {
+        if prompt_attempt > 0 {
+            // Second attempt is the HYPER-1 nudge only.
+            emitter.reset_turn_tracking();
+            pending_bg.clear();
+            completed_before_bg.clear();
         }
 
-        // Safety valve so evals don't hang on long-lived monitors or stuck tasks.
-        if options.wait_for_background
-            && let Some(done_at) = prompt_done_at
-            && done_at.elapsed() >= options.background_wait_timeout
-        {
-            tracing::warn!(
-                pending_bg = pending_bg.len(),
-                timeout_secs = options.background_wait_timeout.as_secs(),
-                "headless: background wait timed out, exiting"
-            );
-            break;
-        }
+        let request =
+            acp::PromptRequest::new(session_id.clone(), prompt_blocks.clone()).meta(Some(
+                prompt_meta_base.clone(),
+            ));
+        let t_prompt = Instant::now();
+        let mut ttf_logged = false;
+        let mut prompt_fut = Box::pin(acp_send(request, &acp_tx));
+        let mut this_result = None;
+        let mut prompt_done_at: Option<Instant> = None;
 
-        // Only needed while waiting on tasks (timeout enforcement); otherwise
-        // the loop blocks on ACP until task_completed or PromptResponse.
-        let timeout_deadline = if options.wait_for_background
-            && prompt_result.is_some()
-            && !pending_bg.is_empty()
-            && let Some(done_at) = prompt_done_at
-        {
-            let remaining = options
-                .background_wait_timeout
-                .saturating_sub(done_at.elapsed());
-            if remaining.is_zero() {
-                Duration::from_millis(50)
-            } else {
-                remaining
-            }
-        } else {
-            Duration::from_secs(3600)
-        };
-
-        tokio::select! {
-            biased;
-            msg = acp_rx.recv() => {
-                let Some(msg) = msg else {
-                    emitter.on_error("Connection closed unexpectedly");
-                    anyhow::bail!("Connection closed unexpectedly");
-                };
-                handle_headless_acp_message(
-                    msg.boxed(),
-                    &mut emitter,
-                    t_prompt,
-                    &mut ttf_logged,
-                    options.yolo,
-                    options.permission_mode_flag.as_deref(),
-                    options.output_format,
-                    &mut pending_bg,
-                    &mut completed_before_bg,
-                );
-            }
-            res = &mut prompt_fut, if prompt_result.is_none() => {
-                prompt_result = Some(res);
-                prompt_done_at = Some(Instant::now());
-                if !options.wait_for_background {
-                    drain_acp_with_grace(
-                        &mut acp_rx,
-                        Duration::from_millis(750),
+        loop {
+            // First turn done and no tracked bg/monitor tasks still running.
+            // Drain buffered ACP first: PromptResponse can complete while
+            // task_backgrounded is still queued on acp_rx (never reached select!).
+            if options.wait_for_background && this_result.is_some() && pending_bg.is_empty() {
+                while let Ok(msg) = acp_rx.try_recv() {
+                    handle_headless_acp_message(
+                        msg.boxed(),
                         &mut emitter,
                         t_prompt,
                         &mut ttf_logged,
@@ -1434,45 +1520,157 @@ pub async fn run_single_turn(
                         options.output_format,
                         &mut pending_bg,
                         &mut completed_before_bg,
-                    )
-                    .await;
+                    );
+                }
+                if pending_bg.is_empty() {
+                    tracing::debug!("headless: no pending background tasks, exiting");
                     break;
                 }
-                // With wait_for_background: keep draining ACP for task_completed.
             }
-            _ = tokio::time::sleep(timeout_deadline), if options.wait_for_background
-                && prompt_result.is_some()
-                && !pending_bg.is_empty() =>
+
+            // Safety valve so evals don't hang on long-lived monitors or stuck tasks.
+            if options.wait_for_background
+                && let Some(done_at) = prompt_done_at
+                && done_at.elapsed() >= options.background_wait_timeout
             {
-                // Wake to re-check background_wait_timeout at the top of the loop.
+                tracing::warn!(
+                    pending_bg = pending_bg.len(),
+                    timeout_secs = options.background_wait_timeout.as_secs(),
+                    "headless: background wait timed out, exiting"
+                );
+                break;
+            }
+
+            // Only needed while waiting on tasks (timeout enforcement); otherwise
+            // the loop blocks on ACP until task_completed or PromptResponse.
+            let timeout_deadline = if options.wait_for_background
+                && this_result.is_some()
+                && !pending_bg.is_empty()
+                && let Some(done_at) = prompt_done_at
+            {
+                let remaining = options
+                    .background_wait_timeout
+                    .saturating_sub(done_at.elapsed());
+                if remaining.is_zero() {
+                    Duration::from_millis(50)
+                } else {
+                    remaining
+                }
+            } else {
+                Duration::from_secs(3600)
+            };
+
+            tokio::select! {
+                biased;
+                msg = acp_rx.recv() => {
+                    let Some(msg) = msg else {
+                        emitter.on_error("Connection closed unexpectedly");
+                        anyhow::bail!("Connection closed unexpectedly");
+                    };
+                    handle_headless_acp_message(
+                        msg.boxed(),
+                        &mut emitter,
+                        t_prompt,
+                        &mut ttf_logged,
+                        options.yolo,
+                        options.permission_mode_flag.as_deref(),
+                        options.output_format,
+                        &mut pending_bg,
+                        &mut completed_before_bg,
+                    );
+                }
+                res = &mut prompt_fut, if this_result.is_none() => {
+                    this_result = Some(res);
+                    prompt_done_at = Some(Instant::now());
+                    if !options.wait_for_background {
+                        drain_acp_with_grace(
+                            &mut acp_rx,
+                            Duration::from_millis(750),
+                            &mut emitter,
+                            t_prompt,
+                            &mut ttf_logged,
+                            options.yolo,
+                            options.permission_mode_flag.as_deref(),
+                            options.output_format,
+                            &mut pending_bg,
+                            &mut completed_before_bg,
+                        )
+                        .await;
+                        break;
+                    }
+                    // With wait_for_background: keep draining ACP for task_completed.
+                }
+                _ = tokio::time::sleep(timeout_deadline), if options.wait_for_background
+                    && this_result.is_some()
+                    && !pending_bg.is_empty() =>
+                {
+                    // Wake to re-check background_wait_timeout at the top of the loop.
+                }
             }
         }
-    }
 
-    // Track lifecycle notifications still queued at loop exit so the reaper
-    // sees them (the timeout path breaks without draining).
-    while let Ok(msg) = acp_rx.try_recv() {
-        handle_headless_acp_message(
-            msg.boxed(),
-            &mut emitter,
-            t_prompt,
-            &mut ttf_logged,
-            options.yolo,
-            options.permission_mode_flag.as_deref(),
-            options.output_format,
-            &mut pending_bg,
-            &mut completed_before_bg,
-        );
-    }
+        // Drain lifecycle notifications still queued at loop exit so the
+        // reaper sees them (the timeout path breaks without draining).
+        while let Ok(msg) = acp_rx.try_recv() {
+            handle_headless_acp_message(
+                msg.boxed(),
+                &mut emitter,
+                t_prompt,
+                &mut ttf_logged,
+                options.yolo,
+                options.permission_mode_flag.as_deref(),
+                options.output_format,
+                &mut pending_bg,
+                &mut completed_before_bg,
+            );
+        }
 
-    // Kill background tasks/subagents still pending at exit (background-wait
-    // timeout or --no-wait-for-background) so they don't outlive the process.
-    if !pending_bg.is_empty() {
-        tracing::warn!(
-            pending_bg = pending_bg.len(),
-            "headless: killing background work still pending at exit"
-        );
-        reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
+        // Kill background tasks/subagents still pending after this prompt so
+        // they don't outlive the process (or pollute the auto-continue turn).
+        if !pending_bg.is_empty() {
+            tracing::warn!(
+                pending_bg = pending_bg.len(),
+                "headless: killing background work still pending after prompt"
+            );
+            reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
+            pending_bg.clear();
+        }
+
+        prompt_result = this_result;
+
+        // HYPER-1: if the first turn was a pure question with no tools, nudge
+        // once and re-enter. Hard bound: never auto-continue a second time.
+        let Some(Ok(resp)) = prompt_result.as_ref() else {
+            break;
+        };
+        let stop_reason = format!("{:?}", resp.stop_reason);
+        if should_auto_continue_headless_question(
+            &stop_reason,
+            emitter.turn_tool_calls,
+            &emitter.turn_assistant_text,
+            options.allow_interactive_questions,
+            headless_question_continued,
+        ) {
+            headless_question_continued = true;
+            emitter.on_auto_continue("headless_question", 1);
+            tracing::info!(
+                "headless: question-ending turn with zero tool calls; auto-continuing once"
+            );
+            prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                HEADLESS_QUESTION_NUDGE,
+            ))];
+            continue;
+        }
+        // Second turn also made no tool calls after the nudge → honest
+        // AwaitingUserInput (never report a clean EndTurn for a run that
+        // only asked a question). Harnesses key completed-blind off EndTurn.
+        if headless_question_continued
+            && is_normal_end_turn(&stop_reason)
+            && emitter.turn_tool_calls == 0
+        {
+            awaiting_user_input = true;
+        }
+        break;
     }
 
     // Flush buffered unified log entries before exit.
@@ -1510,7 +1708,11 @@ pub async fn run_single_turn(
             // --require-changes: treat a productive stop with zero agent
             // tool edits as NoChanges so harnesses can key on stopReason.
             let no_changes = options.require_changes && emitter.files_changed.is_empty();
-            if no_changes && !is_max_turns {
+            if awaiting_user_input {
+                // Distinct terminal signal: the run only asked a question
+                // (even after one auto-continue). filesChanged.count stays 0.
+                stop_reason = "AwaitingUserInput".to_string();
+            } else if no_changes && !is_max_turns {
                 stop_reason = "NoChanges".to_string();
             }
             if is_max_turns {
@@ -1527,6 +1729,11 @@ pub async fn run_single_turn(
                 anyhow::bail!("max turns reached");
             }
             emitter.on_end(&stop_reason, sid, rid);
+            if awaiting_user_input {
+                anyhow::bail!(
+                    "headless: run ended awaiting user input (question-only turn; no tools)"
+                );
+            }
             if no_changes {
                 anyhow::bail!("require-changes: run finished with no agent file edits");
             }
@@ -1772,9 +1979,10 @@ fn handle_headless_acp_message(
                         emitter.on_thought_chunk(&text.text);
                     }
                 }
-                // Agent tool edits only (Edit kind). Build products from bash
-                // are deliberately excluded — harnesses key on agent edits.
+                // Any tool call counts for the HYPER-1 "did work" check; Edit
+                // locations still feed filesChanged separately.
                 acp::SessionUpdate::ToolCall(tc) => {
+                    emitter.note_tool_call();
                     if matches!(tc.kind, acp::ToolKind::Edit)
                         && matches!(
                             tc.status,
@@ -1787,6 +1995,8 @@ fn handle_headless_acp_message(
                     }
                 }
                 acp::SessionUpdate::ToolCallUpdate(tcu) => {
+                    // Updates do not re-count as new tool calls (the ToolCall
+                    // event already did). Only harvest Edit locations.
                     if matches!(tcu.fields.kind, Some(acp::ToolKind::Edit))
                         && matches!(tcu.fields.status, Some(acp::ToolCallStatus::Completed))
                         && let Some(locs) = tcu.fields.locations.as_ref()
@@ -1933,6 +2143,10 @@ fn handle_ext_notification(
 
     match method {
         "x.ai/session_notification" | "x.ai/session/update" => {}
+        // Announcement / CTA pushes (`x.ai/announcements/update`) are
+        // intentionally dropped here. Headless has no UI to paint them, and
+        // the shell also skips the push when `is_headless` (HYPER-1 defence).
+        // Do not stream them as text or wait for a click.
         _ => return ExtEvent::None,
     }
 
@@ -2488,5 +2702,79 @@ mod tests {
             handle_ext_notification(&notif, OutputFormat::Plain),
             ExtEvent::None
         ));
+    }
+
+    // ── HYPER-1: question shape + auto-continue bound ────────────────────
+
+    #[test]
+    fn looks_like_user_question_detects_trailing_question() {
+        assert!(looks_like_user_question("Want to try it?"));
+        assert!(looks_like_user_question(
+            "I can put together mockups.\n\nWant to try it?"
+        ));
+        assert!(looks_like_user_question("Proceed with the default?\n"));
+        // Rhetorical mid-body `?` with a real answer after — not a
+        // question-ending turn.
+        assert!(!looks_like_user_question(
+            "Is the bug in foo? Yes — I fixed it in src/main.rs and re-ran tests."
+        ));
+        assert!(!looks_like_user_question("I edited src/main.rs and ran tests."));
+        assert!(!looks_like_user_question(""));
+        assert!(!looks_like_user_question("   \n  "));
+    }
+
+    #[test]
+    fn looks_like_user_question_field_incident_shape() {
+        // The real field text: question mid-body, parenthetical after.
+        // Detector must catch this — it is the exact HYPER-1 failure.
+        let field = "Some of what we're working on might be easier to explain if I can show \
+it to you in a web browser. I can put together mockups, diagrams, comparisons, \
+and other visuals as we go. This feature is still new and can be token-intensive. \
+Want to try it? (Requires opening a local URL)";
+        assert!(
+            looks_like_user_question(field),
+            "field-incident browser opt-in must count as a user question"
+        );
+    }
+
+    #[test]
+    fn should_auto_continue_only_once_on_question_end_turn() {
+        let q = "Want to try the browser feature?";
+        assert!(should_auto_continue_headless_question(
+            "EndTurn", 0, q, false, false
+        ));
+        // Bound: already continued → never again.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 0, q, false, true
+        ));
+        // Opt-out.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 0, q, true, false
+        ));
+        // Did work.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 1, q, false, false
+        ));
+        // Not a normal end.
+        assert!(!should_auto_continue_headless_question(
+            "Cancelled", 0, q, false, false
+        ));
+        // Not a question.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 0, "Done.", false, false
+        ));
+    }
+
+    #[test]
+    fn build_headless_init_sets_non_interactive_and_opt_out() {
+        let req = build_headless_init_request(Some("be brief"), None, false);
+        let meta = req.meta.as_ref().expect("meta");
+        assert_eq!(meta["startupHints"]["nonInteractive"], true);
+        assert!(meta.get("allowInteractiveQuestions").is_none());
+        assert_eq!(meta["rules"], "be brief");
+
+        let req2 = build_headless_init_request(None, None, true);
+        let meta2 = req2.meta.as_ref().expect("meta");
+        assert_eq!(meta2["allowInteractiveQuestions"], true);
     }
 }

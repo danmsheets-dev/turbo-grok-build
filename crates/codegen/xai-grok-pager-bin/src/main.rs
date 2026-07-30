@@ -2417,6 +2417,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     args.background_wait_timeout_secs,
                 ),
                 require_changes: args.require_changes,
+                allow_interactive_questions: args.allow_interactive_questions,
             },
         )
         .await;

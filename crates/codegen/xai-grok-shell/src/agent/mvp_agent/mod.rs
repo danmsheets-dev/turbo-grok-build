@@ -1018,6 +1018,85 @@ fn read_session_or_init_meta_str<'a>(
     };
     read(session_meta).or_else(|| read(init_meta))
 }
+/// Read a bool from session meta first, then init meta. Missing/non-bool → None.
+fn read_session_or_init_meta_bool(
+    session_meta: Option<&acp::Meta>,
+    init_meta: Option<&acp::Meta>,
+    key: &str,
+) -> Option<bool> {
+    let read = |m: Option<&acp::Meta>| -> Option<bool> {
+        m.and_then(|m| m.get(key)).and_then(|v| v.as_bool())
+    };
+    read(session_meta).or_else(|| read(init_meta))
+}
+/// Whether this session is non-interactive (headless `-p` / streaming-json /
+/// non-TTY harness). Drawn from `startupHints.nonInteractive` on session or
+/// init meta — the same flag the shell already uses for permission denials
+/// and MCP OAuth interactivity.
+fn is_non_interactive_from_meta(
+    session_meta: Option<&acp::Meta>,
+    init_meta: Option<&acp::Meta>,
+) -> bool {
+    let read_hints = |m: Option<&acp::Meta>| -> Option<bool> {
+        m.and_then(|m| m.get("startupHints"))
+            .and_then(|v| v.get("nonInteractive"))
+            .and_then(|v| v.as_bool())
+    };
+    read_hints(session_meta)
+        .or_else(|| read_hints(init_meta))
+        .unwrap_or(false)
+}
+/// Explicit opt-out for the headless no-questions clause. Harnesses that
+/// genuinely want interactive questions (rare) set
+/// `_meta.allowInteractiveQuestions: true` or pass `--allow-interactive-questions`.
+fn allow_interactive_questions_from_meta(
+    session_meta: Option<&acp::Meta>,
+    init_meta: Option<&acp::Meta>,
+) -> bool {
+    read_session_or_init_meta_bool(session_meta, init_meta, "allowInteractiveQuestions")
+        .unwrap_or(false)
+}
+/// Non-negotiable headless clause: a headless run has no user who can answer.
+///
+/// **Field incident (HYPER-1, 2026-07):** two of three Terra-high headless
+/// runs (`--background --write --isolate`, no TTY) spent the entire turn
+/// emitting a browser-feature opt-in question verbatim —
+/// "Some of what we're working on might be easier to explain if I can show
+/// it to you in a web browser… Want to try it?" — then EndTurn-ed 0.3s later
+/// with zero tool calls. The string does **not** live in this repository
+/// (not a Hyper TUI banner, not `xai-grok-announcements`); it is the model's
+/// own assistant turn, almost certainly offered by the provider system
+/// prompt on the `openai-codex/*` route. A retry on a warm session succeeded,
+/// suggesting once-per-new-session behaviour.
+///
+/// Do **not** delete this as boilerplate. The fix is structural: headless
+/// must declare "no human present" so the model cannot end the turn waiting
+/// for an answer that will never arrive. Suppressible only via explicit
+/// `_meta.allowInteractiveQuestions` / `--allow-interactive-questions`.
+pub(crate) const HEADLESS_NO_QUESTIONS_CLAUSE: &str = "\
+You are running non-interactively. There is no human present and no input will ever arrive. Never \
+ask a question, never request confirmation, and never offer an optional feature and wait — take \
+the safest reasonable default, proceed with the task, and record the assumption in your final \
+report. A turn that ends in a question is a failed turn.";
+/// Append [`HEADLESS_NO_QUESTIONS_CLAUSE`] when the run is non-interactive and
+/// the harness has not opted back into questions. Idempotent (won't double-append).
+fn append_headless_no_questions_if_needed(
+    prompt: &mut String,
+    session_meta: Option<&acp::Meta>,
+    init_meta: Option<&acp::Meta>,
+) {
+    if !is_non_interactive_from_meta(session_meta, init_meta) {
+        return;
+    }
+    if allow_interactive_questions_from_meta(session_meta, init_meta) {
+        return;
+    }
+    if prompt.contains(HEADLESS_NO_QUESTIONS_CLAUSE) {
+        return;
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(HEADLESS_NO_QUESTIONS_CLAUSE);
+}
 use xai_chat_state::conversation_util::replace_or_insert_system_head;
 /// Non-empty `systemPromptOverride` from session meta (preferred) or init meta.
 /// A blank string (empty or whitespace-only) is treated as "no override" so a
@@ -1034,6 +1113,12 @@ fn system_prompt_override_from_meta<'a>(
 /// `<human_rules>`. Note: `rules` is applied at creation only — resumed sessions
 /// sync `systemPromptOverride` (see `enqueue_replace_system_prompt_override`) but
 /// not `rules`, by design.
+///
+/// Headless / non-interactive runs always get [`HEADLESS_NO_QUESTIONS_CLAUSE`]
+/// **before** user-supplied `--rules` (so harness rules cannot "override" the
+/// no-questions contract by appearing earlier in the prompt). A full
+/// `systemPromptOverride` still receives the clause after the override text
+/// unless `--allow-interactive-questions` is set.
 fn build_spawn_system_prompt(
     session_meta: Option<&acp::Meta>,
     init_meta: Option<&acp::Meta>,
@@ -1043,9 +1128,17 @@ fn build_spawn_system_prompt(
         session_meta,
         init_meta,
     ) {
-        override_prompt.to_owned()
+        let mut prompt = override_prompt.to_owned();
+        // Override replaces the agent template, but the headless contract is
+        // non-negotiable: still append unless the harness opted out.
+        append_headless_no_questions_if_needed(&mut prompt, session_meta, init_meta);
+        prompt
     } else {
         let mut prompt = agent_system_prompt.to_owned();
+        // Insert BEFORE <human_rules> so user `--rules` cannot dilute the
+        // no-questions contract by ordering (models often weight earlier
+        // system text more strongly than late appendices).
+        append_headless_no_questions_if_needed(&mut prompt, session_meta, init_meta);
         if let Some(rules) = read_session_or_init_meta_str(
             session_meta,
             init_meta,
@@ -1066,7 +1159,8 @@ fn build_spawn_system_prompt(
 /// folded into the prompt at session creation only (see
 /// `build_spawn_system_prompt`); resumed sessions keep their original prompt
 /// unless a full override is supplied. Updating `rules` mid-session is out of
-/// scope by design.
+/// scope by design. The headless no-questions clause is re-appended here so a
+/// mid-session override cannot silently re-enable interactive questions.
 fn enqueue_replace_system_prompt_override(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
     session_meta: Option<&acp::Meta>,
@@ -1076,9 +1170,11 @@ fn enqueue_replace_system_prompt_override(
     else {
         return;
     };
+    let mut system_prompt = override_prompt.to_owned();
+    append_headless_no_questions_if_needed(&mut system_prompt, session_meta, init_meta);
     let _ = cmd_tx
         .send(crate::session::SessionCommand::ReplaceSystemPrompt {
-            system_prompt: override_prompt.to_owned(),
+            system_prompt,
         });
 }
 /// Warn that a `ValidateType` arrived for an evicted/unknown parent session,

@@ -73,6 +73,16 @@
     },
     {
       "type": "object",
+      "required": ["type", "reason", "attempt"],
+      "properties": {
+        "type": { "const": "auto_continue" },
+        "reason": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
       "required": ["type", "schemaVersion", "stopReason", "usage"],
       "properties": {
         "type": { "const": "end" },

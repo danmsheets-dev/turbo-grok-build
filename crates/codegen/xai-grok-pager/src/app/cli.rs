@@ -393,11 +393,13 @@ pub struct AgentArgs {
     /// Model ID to use
     #[arg(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
-    /// Reasoning effort for reasoning models
+    /// Reasoning effort: none · minimal · low · medium (default) · high · xhigh · max · ultra.
+    /// Aliases `max`/`ultra` keep their existing wire mapping (see sampling-types).
     #[clap(
         long = "reasoning-effort",
         visible_alias = "effort",
         value_name = "EFFORT",
+        value_parser = crate::app::cli::parse_reasoning_effort_arg,
         overrides_with = "reasoning_effort"
     )]
     pub reasoning_effort: Option<String>,
@@ -641,11 +643,13 @@ pub struct PagerArgs {
     /// Model ID to use.
     #[clap(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
-    /// Reasoning effort for reasoning models
+    /// Reasoning effort: none · minimal · low · medium (default) · high · xhigh · max · ultra.
+    /// Aliases `max`/`ultra` keep their existing wire mapping (see sampling-types).
     #[clap(
         long = "reasoning-effort",
         visible_alias = "effort",
         value_name = "EFFORT",
+        value_parser = crate::app::cli::parse_reasoning_effort_arg,
         overrides_with = "reasoning_effort"
     )]
     pub reasoning_effort: Option<String>,
@@ -824,6 +828,15 @@ pub struct PagerArgs {
     /// streaming-json `end` event. Off by default.
     #[arg(long = "require-changes")]
     pub require_changes: bool,
+    /// Allow the model to ask interactive questions in headless mode.
+    ///
+    /// Default is off: headless runs (`-p` / `--prompt-file` / non-plain
+    /// `--output-format`) inject a non-negotiable "no human present" system
+    /// clause and auto-continue once if the model ends a turn with a pure
+    /// question (HYPER-1). Only enable this for harnesses that genuinely
+    /// want questions and can answer them.
+    #[arg(long = "allow-interactive-questions")]
+    pub allow_interactive_questions: bool,
     /// Session storage mode: local or writeback.
     #[arg(long = "storage-mode", value_name = "MODE", hide = true)]
     pub storage_mode: Option<String>,
@@ -1130,6 +1143,21 @@ impl PagerArgs {
             .filter(|s| !s.is_empty())
     }
 }
+
+/// Clap `value_parser` for `--reasoning-effort` / `--effort`.
+///
+/// Accepts the full ladder from `ReasoningEffort` (`none` · `minimal` · `low`
+/// · `medium` · `high` · `xhigh` · `max` · `ultra`). Returns the canonical
+/// lowercase token so existing plumbing (which stores `Option<String>`) is
+/// unchanged. On typo, surfaces the full accepted set — harnesses previously
+/// capped themselves at `low|medium|high` because the flag was an unvalidated
+/// free string with no help text (HYPER-2).
+pub fn parse_reasoning_effort_arg(s: &str) -> Result<String, String> {
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    let effort: ReasoningEffort = s.parse().map_err(|e: String| e)?;
+    Ok(effort.as_str().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1695,12 +1723,30 @@ mod tests {
         assert_eq!(alias.reasoning_effort.as_deref(), Some("high"));
     }
     #[test]
-    fn reasoning_effort_accepts_max_and_remapped_ids() {
-        let max = PagerArgs::try_parse_from(["grok", "--effort", "max"]).expect("max parses");
-        assert_eq!(max.reasoning_effort.as_deref(), Some("max"));
-        let deep =
-            PagerArgs::try_parse_from(["grok", "--reasoning-effort", "deep"]).expect("deep parses");
-        assert_eq!(deep.reasoning_effort.as_deref(), Some("deep"));
+    fn reasoning_effort_accepts_full_ladder_including_max_ultra_xhigh() {
+        // Full ladder (HYPER-2). `max`/`ultra` keep distinct tokens here;
+        // wire mapping to Chat Completions `"max"` is sampling-types' job.
+        for token in [
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+        ] {
+            let args = PagerArgs::try_parse_from(["grok", "--effort", token])
+                .unwrap_or_else(|e| panic!("--effort {token} must parse: {e}"));
+            assert_eq!(args.reasoning_effort.as_deref(), Some(token));
+        }
+    }
+    #[test]
+    fn reasoning_effort_rejects_unknown_with_full_ladder_in_error() {
+        // "deep" is not a tier — harnesses used to pass free strings silently.
+        let err = PagerArgs::try_parse_from(["grok", "--reasoning-effort", "deep"])
+            .expect_err("unknown effort must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("none")
+                && msg.contains("minimal")
+                && msg.contains("xhigh")
+                && msg.contains("ultra"),
+            "error must name the full ladder, got: {msg}"
+        );
     }
     #[test]
     fn reasoning_effort_last_flag_wins_when_both_names_set() {

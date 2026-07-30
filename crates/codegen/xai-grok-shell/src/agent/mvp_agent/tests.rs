@@ -959,6 +959,81 @@ fn system_prompt_override_from_meta_prefers_session_and_rejects_empty() {
     );
     assert_eq!(system_prompt_override_from_meta(None, None), None);
 }
+/// Headless no-questions clause (HYPER-1) must land before user `--rules` and
+/// must not fire for interactive sessions.
+#[test]
+fn build_spawn_system_prompt_appends_headless_clause_before_rules() {
+    let init = serde_json::json!({
+        "startupHints": { "nonInteractive": true },
+        "rules": "Always speak pirate.",
+    });
+    let prompt = build_spawn_system_prompt(None, init.as_object(), "BASE_PROMPT");
+    assert!(
+        prompt.contains(HEADLESS_NO_QUESTIONS_CLAUSE),
+        "headless clause missing: {prompt}"
+    );
+    assert!(
+        prompt.contains("<human_rules>\nAlways speak pirate.\n</human_rules>"),
+        "user rules missing: {prompt}"
+    );
+    let clause_pos = prompt.find(HEADLESS_NO_QUESTIONS_CLAUSE).unwrap();
+    let rules_pos = prompt.find("<human_rules>").unwrap();
+    assert!(
+        clause_pos < rules_pos,
+        "headless clause must precede user --rules so harness rules cannot dilute it"
+    );
+    // Clause is after the agent template body.
+    assert!(prompt.starts_with("BASE_PROMPT"));
+}
+#[test]
+fn build_spawn_system_prompt_skips_headless_clause_when_interactive() {
+    let init = serde_json::json!({
+        "startupHints": { "nonInteractive": false },
+        "rules": "Be brief.",
+    });
+    let prompt = build_spawn_system_prompt(None, init.as_object(), "BASE");
+    assert!(
+        !prompt.contains(HEADLESS_NO_QUESTIONS_CLAUSE),
+        "interactive sessions must not get the headless clause"
+    );
+    assert!(prompt.contains("<human_rules>"));
+}
+#[test]
+fn build_spawn_system_prompt_opt_out_allow_interactive_questions() {
+    let init = serde_json::json!({
+        "startupHints": { "nonInteractive": true },
+        "allowInteractiveQuestions": true,
+    });
+    let prompt = build_spawn_system_prompt(None, init.as_object(), "BASE");
+    assert!(
+        !prompt.contains(HEADLESS_NO_QUESTIONS_CLAUSE),
+        "explicit opt-out must suppress the clause"
+    );
+}
+#[test]
+fn build_spawn_system_prompt_override_still_gets_headless_clause() {
+    let init = serde_json::json!({
+        "startupHints": { "nonInteractive": true },
+        "systemPromptOverride": "CUSTOM ONLY",
+    });
+    let prompt = build_spawn_system_prompt(None, init.as_object(), "BASE_IGNORED");
+    assert!(prompt.starts_with("CUSTOM ONLY"));
+    assert!(
+        prompt.contains(HEADLESS_NO_QUESTIONS_CLAUSE),
+        "override must not strip the non-negotiable headless clause"
+    );
+    assert!(!prompt.contains("BASE_IGNORED"));
+}
+#[test]
+fn build_spawn_system_prompt_clause_is_idempotent() {
+    let init = serde_json::json!({
+        "startupHints": { "nonInteractive": true },
+        "systemPromptOverride": format!("X\n\n{HEADLESS_NO_QUESTIONS_CLAUSE}"),
+    });
+    let prompt = build_spawn_system_prompt(None, init.as_object(), "BASE");
+    let count = prompt.matches(HEADLESS_NO_QUESTIONS_CLAUSE).count();
+    assert_eq!(count, 1, "must not double-append the clause");
+}
 #[test]
 fn enqueue_replace_system_prompt_override_sends_when_present() {
     use crate::session::SessionCommand;
