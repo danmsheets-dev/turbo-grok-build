@@ -133,7 +133,7 @@ pub enum Command {
     /// Manage cross-session memory
     Memory(crate::memory_cmd::MemoryArgs),
     /// List available models and exit
-    Models,
+    Models(ModelsArgs),
     /// List, search, or restore sessions
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// Fetch and install managed configuration
@@ -237,6 +237,16 @@ pub struct DashboardArgs {
     #[arg(long, requires = "web")]
     pub no_open: bool,
 }
+
+/// `hyper models` / `grok models` flags.
+#[derive(Debug, clap::Args, Clone, Default)]
+pub struct ModelsArgs {
+    /// Emit machine-readable JSON (`schemaVersion`, `defaultModel`, `models[]`
+    /// with `billing` classification). Exit 0 on success.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Arguments for the subscription-backed Codex connector.
 #[derive(Debug, clap::Args, Clone)]
 pub struct CodexArgs {
@@ -792,6 +802,17 @@ pub struct PagerArgs {
     /// Sandbox profile for filesystem and network access.
     #[arg(long, env = "GROK_SANDBOX", value_name = "PROFILE")]
     pub sandbox: Option<String>,
+    /// Confine all filesystem writes (and absolute path resolution) to this
+    /// directory. Cross-platform path-prefix enforcement — not OS sandboxing.
+    /// Alias: `--workspace-root`. Fail-fast if the path is missing or not a
+    /// directory. Harnesses should pass the git worktree they handed the agent.
+    #[arg(
+        long = "confine",
+        visible_alias = "workspace-root",
+        value_name = "PATH",
+        env = "GROK_CONFINE"
+    )]
+    pub confine: Option<PathBuf>,
     /// Session storage mode: local or writeback.
     #[arg(long = "storage-mode", value_name = "MODE", hide = true)]
     pub storage_mode: Option<String>,

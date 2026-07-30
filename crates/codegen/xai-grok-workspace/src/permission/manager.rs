@@ -1615,6 +1615,51 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
+                    // Confine root (`--confine` / `--workspace-root`): path-prefix
+                    // deny for Edit (and shell write operands when we have a
+                    // resolved edit path) BEFORE YOLO — same precedence as
+                    // managed deny rules. Globs cannot express "not under this
+                    // root" safely on Windows.
+                    if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+                        let confine_hit = match &access {
+                            AccessKind::Edit(path) => {
+                                let resolved = match edit_path_context.as_ref() {
+                                    Some(context) => resolve_model_path(
+                                        &context.real_cwd,
+                                        context.display_cwd.as_deref(),
+                                        path,
+                                    ),
+                                    None => resolve_model_path(cwd.as_path(), None, path),
+                                };
+                                if !xai_grok_tools::types::resources::path_is_under_confine_root(
+                                    &resolved, root,
+                                ) {
+                                    Some((resolved, root.clone()))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some((resolved, root)) = confine_hit {
+                            let reason = format!(
+                                "Denied by confine root: `{}` is outside `{}`",
+                                resolved.display(),
+                                root.display()
+                            );
+                            tracing::info!(
+                                tool = ?tool_name,
+                                path = %resolved.display(),
+                                root = %root.display(),
+                                "confine root: path outside root (enforced before YOLO)"
+                            );
+                            let decision = Decision::PolicyDeny(reason);
+                            emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                            let _ = respond_to.send(decision);
+                            continue;
+                        }
+                    }
+
                     if yolo_mode && !shell_forced_prompt {
                         tracing::debug!("YOLO mode: auto-approving permission request");
                         let decision = Decision::Allow;

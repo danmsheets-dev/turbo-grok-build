@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x.ai/hyper/streaming-json.schema.json",
+  "title": "Hyper streaming-json NDJSON events",
+  "description": "One event per line. schemaVersion is 1 on start/end.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "schemaVersion", "sessionId", "cwd", "binary", "version", "alwaysApprove"],
+      "properties": {
+        "type": { "const": "start" },
+        "schemaVersion": { "const": 1 },
+        "sessionId": { "type": "string" },
+        "cwd": { "type": "string" },
+        "confineRoot": { "type": ["string", "null"] },
+        "requestedModel": { "type": ["string", "null"] },
+        "servedModel": { "type": ["string", "null"] },
+        "permissionMode": { "type": "string" },
+        "sandbox": { "type": ["string", "null"] },
+        "binary": { "type": "string" },
+        "version": { "type": "string" },
+        "alwaysApprove": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "text" },
+        "data": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "thought" },
+        "data": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "tool", "reason"],
+      "properties": {
+        "type": { "const": "tool_denied" },
+        "tool": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "tool", "path", "root"],
+      "properties": {
+        "type": { "const": "confine_violation" },
+        "tool": { "type": "string" },
+        "path": { "type": "string" },
+        "root": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "servedModel"],
+      "properties": {
+        "type": { "const": "model_resolved" },
+        "servedModel": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "schemaVersion", "stopReason", "usage"],
+      "properties": {
+        "type": { "const": "end" },
+        "schemaVersion": { "const": 1 },
+        "stopReason": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "requestId": { "type": "string" },
+        "usage": { "type": ["object", "null"] },
+        "usageIsIncomplete": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "message", "usage"],
+      "properties": {
+        "type": { "const": "error" },
+        "message": { "type": "string" },
+        "usage": { "type": ["object", "null"] },
+        "usageIsIncomplete": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "usage"],
+      "properties": {
+        "type": { "const": "max_turns_reached" },
+        "usage": { "type": ["object", "null"] },
+        "usageIsIncomplete": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  ]
+}

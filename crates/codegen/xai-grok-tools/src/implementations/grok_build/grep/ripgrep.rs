@@ -11,17 +11,58 @@ const RG_BYTES: &[u8] = include_bytes!(concat!(
     ".bin"
 ));
 
+/// File name for the extracted bundled ripgrep binary.
+///
+/// On Windows the binary is a PE image and **must** carry a `.exe` suffix so
+/// `CreateProcess` / `Command::new` reliably treat it as executable. The old
+/// extensionless name (`rg-<ver>-<target>`) is still accepted if already on
+/// disk so existing installs keep working without a re-extract.
+#[cfg(bundle_rg)]
+fn bundled_rg_file_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        concat!(
+            "rg-",
+            env!("GROK_TOOLS_RG_VER"),
+            "-",
+            env!("GROK_TOOLS_RG_TARGET"),
+            ".exe"
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        concat!(
+            "rg-",
+            env!("GROK_TOOLS_RG_VER"),
+            "-",
+            env!("GROK_TOOLS_RG_TARGET")
+        )
+    }
+}
+
 #[cfg(bundle_rg)]
 fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    let p = crate::util::grok_home().join("vendor").join(concat!(
-        "rg-",
-        env!("GROK_TOOLS_RG_VER"),
-        "-",
-        env!("GROK_TOOLS_RG_TARGET")
-    ));
+    let vendor = crate::util::grok_home().join("vendor");
+    let p = vendor.join(bundled_rg_file_name());
+    // Prefer the canonical name. On Windows, fall back to a pre-existing
+    // extensionless extract from older builds so we do not force a rewrite
+    // of a working (if awkward) PE on disk — writing may fail under a
+    // read-only sandbox profile even when enforcement is advisory.
+    #[cfg(target_os = "windows")]
+    {
+        let legacy = vendor.join(concat!(
+            "rg-",
+            env!("GROK_TOOLS_RG_VER"),
+            "-",
+            env!("GROK_TOOLS_RG_TARGET")
+        ));
+        if !p.exists() && legacy.exists() {
+            return Ok(legacy);
+        }
+    }
     if !p.exists() {
         fs::create_dir_all(p.parent().unwrap())?;
         fs::write(&p, RG_BYTES)?;

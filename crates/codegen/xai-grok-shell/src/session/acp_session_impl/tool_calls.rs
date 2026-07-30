@@ -1270,8 +1270,21 @@ impl SessionActor {
             );
             match decision {
                 Decision::PolicyDeny(ref reason) | Decision::Reject(ref reason) => {
-                    let is_policy_deny = matches!(&decision, Decision::PolicyDeny(_));
-                    let message = if is_policy_deny {
+                    // Headless / non-interactive clients cannot answer a prompt.
+                    // Treat their Reject the same as PolicyDeny: feed a non-empty
+                    // error body back to the model and CONTINUE the turn. Ending
+                    // the turn (PermissionReject) leaves the model with no chance
+                    // to adapt — harnesses then narrate over a silent filesystem.
+                    let is_policy_deny = matches!(&decision, Decision::PolicyDeny(_))
+                        || self.startup_hints.non_interactive;
+                    let message = if self.startup_hints.non_interactive
+                        && matches!(&decision, Decision::Reject(_))
+                    {
+                        headless_tool_refusal_message(
+                            &call.function.name,
+                            self.permission_mode_label(),
+                        )
+                    } else if is_policy_deny {
                         format!("Tool `{}` was not executed: {reason}", call.function.name)
                     } else {
                         format!("{reason} for tool `{}`", call.function.name)
@@ -1303,6 +1316,33 @@ impl SessionActor {
                     return Ok(Err(loop_action));
                 }
                 Decision::Cancelled => {
+                    // Same headless contract as Reject: Cancelled is what the
+                    // headless client returns when it cannot approve (no UI).
+                    // Never swallow this as an empty success — the model must
+                    // see a non-empty error body and keep the turn.
+                    if self.startup_hints.non_interactive {
+                        let message = headless_tool_refusal_message(
+                            &call.function.name,
+                            self.permission_mode_label(),
+                        );
+                        self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                            .await?;
+                        let (tool_input_value, tool_input_truncated) =
+                            xai_grok_hooks::event::truncate_payload(raw_input.clone());
+                        self.dispatch_hook(
+                            xai_grok_hooks::event::HookEventName::PermissionDenied,
+                            xai_grok_hooks::event::HookPayload::PermissionDenied {
+                                tool_name: resolved_tool_name.clone(),
+                                tool_use_id: tool_call_id.to_string(),
+                                tool_input: tool_input_value,
+                                tool_input_truncated,
+                            },
+                            None,
+                            Some(&resolved_tool_name),
+                        )
+                        .await;
+                        return Ok(Err(ToolLoop::Continue));
+                    }
                     let message = format!(
                         "User cancelled the execution for tool `{}`",
                         call.function.name
@@ -2787,6 +2827,20 @@ impl SessionActor {
         tool_call_id: &acp::ToolCallId,
         reason: String,
     ) -> Result<(), acp::Error> {
+        // Refuse to ever hand the model an empty tool-result body on a
+        // permission failure. An empty body is interpreted as "no matches" /
+        // "file empty" and causes confident narration over a denied call.
+        debug_assert!(
+            !reason.trim().is_empty(),
+            "tool refusal reason must be non-empty"
+        );
+        let reason = if reason.trim().is_empty() {
+            format!(
+                "Tool was not executed: permission refused (no reason provided)"
+            )
+        } else {
+            reason
+        };
         let tool_update = acp::ToolCallUpdate::new(
             tool_call_id.clone(),
             acp::ToolCallUpdateFields::new()
@@ -2800,6 +2854,39 @@ impl SessionActor {
         let tool_chat = ConversationItem::tool_error(model_call_id.to_owned(), reason);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
+    }
+}
+
+/// Model-facing body for a tool call that headless mode could not approve.
+///
+/// Matches the deny-rule shape (`Tool \`name\` was not executed: …`) so the
+/// model treats it as a hard policy refusal rather than an empty success.
+/// Keep this wording stable — harnesses and regression tests pin on it.
+pub(crate) fn headless_tool_refusal_message(tool_name: &str, permission_mode: &str) -> String {
+    format!(
+        "Tool `{tool_name}` was not executed: no approval is possible in headless mode \
+         (permission mode: {permission_mode}). Re-run with --always-approve, or add an \
+         --allow rule."
+    )
+}
+
+#[cfg(test)]
+mod headless_refusal_tests {
+    use super::headless_tool_refusal_message;
+
+    #[test]
+    fn headless_refusal_is_non_empty_and_names_the_tool() {
+        let msg = headless_tool_refusal_message("grep", "plan");
+        assert!(!msg.trim().is_empty());
+        assert!(msg.contains("grep"), "{msg}");
+        assert!(msg.contains("headless"), "{msg}");
+        assert!(msg.contains("plan"), "{msg}");
+        assert!(msg.contains("--always-approve") || msg.contains("--allow"), "{msg}");
+        // Same outer shape as the policy-deny path.
+        assert!(
+            msg.starts_with("Tool `grep` was not executed:"),
+            "{msg}"
+        );
     }
 }
 /// Execute tool-call display parts. The title peels a redundant leading

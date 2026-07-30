@@ -233,12 +233,19 @@ impl SandboxManager {
             }
         }
     }
-    /// Stub when `enforce` feature is disabled — sandbox is not applied.
+    /// Stub when kernel enforcement is unavailable (Windows, or built without
+    /// the `enforce` feature). **Must not** set `applied = true` or otherwise
+    /// change tool behaviour: a non-enforcing profile that reports active can
+    /// flip `should_auto_allow_bash` and break Grep/vendor extraction paths
+    /// that assume a real writable-path set. Advisory only.
     #[cfg(not(all(feature = "enforce", unix)))]
     pub fn apply(&mut self, _workspace: &Path) -> anyhow::Result<()> {
+        // Keep applied=false so is_active()/should_auto_allow_bash stay off.
+        self.applied = false;
         tracing::info!(
             profile = %self.profile,
-            "Sandbox enforcement unavailable (built without 'enforce' feature)"
+            "Sandbox profile is advisory on this platform (no kernel enforcement); \
+             tool behaviour unchanged"
         );
         Ok(())
     }

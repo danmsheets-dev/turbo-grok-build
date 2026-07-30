@@ -466,13 +466,22 @@ pub struct DisplayCwd(pub PathBuf);
 /// Empty when no managed Read denies apply.
 #[derive(Debug, Clone, Default)]
 pub struct DenyReadGlobs(pub Vec<String>);
+/// Optional confinement root stamped into tool resources when `--confine` /
+/// `--workspace-root` is set. Absolute model paths that do not resolve under
+/// this root must be rejected (see [`path_is_under_confine_root`]) — never
+/// passed through as-is the way unconfined absolute paths historically were.
+#[derive(Debug, Clone)]
+pub struct ConfineRoot(pub PathBuf);
+
 /// Resolve a model-provided path, rewriting absolute paths from conversation
 /// history when [`DisplayCwd`] is set.
 ///
 /// - If `display_cwd` is `None`, falls back to `cwd.join(input)`.
 /// - If `input` starts with the `display_cwd` prefix, strips it and joins
 ///   the suffix onto `cwd` (the real worktree path).
-/// - If `input` is absolute but doesn't match, returns it as-is.
+/// - If `input` is absolute but doesn't match, returns it as-is
+///   (**unconfined** default — see [`resolve_model_path_confined`] when a
+///   confine root is active).
 /// - Leading `~`/`~/` is expanded to the current user's home directory
 ///   before applying the above rules. `~username` is not expanded.
 /// - Relative paths are always joined onto `cwd`.
@@ -502,6 +511,93 @@ pub fn resolve_model_path(
         }
     }
     cwd.join(input_path)
+}
+
+/// Like [`resolve_model_path`], but rejects absolute paths that do not
+/// canonicalise under `confine_root`.
+///
+/// Path-prefix confinement (not globs): globs cannot safely express "not under
+/// this root" on Windows (drive letters, case, `\\?\`, mixed separators).
+/// Relative inputs are joined onto `cwd` first, then checked.
+pub fn resolve_model_path_confined(
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+    confine_root: &std::path::Path,
+    input: &str,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_model_path(cwd, display_cwd, input);
+    if path_is_under_confine_root(&resolved, confine_root) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "path `{}` is outside the confine root `{}`",
+            resolved.display(),
+            confine_root.display()
+        ))
+    }
+}
+
+/// True when `path` is the confine root or a descendant, using prefix matching
+/// after lightweight normalisation (no full symlink walk — that is done by
+/// workspace confinement when enabled). Handles Windows case-folding and
+/// separator differences so drive-letter absolute paths cannot slip past.
+pub fn path_is_under_confine_root(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let path_n = normalize_for_confine_compare(path);
+    let root_n = normalize_for_confine_compare(root);
+    if path_n == root_n {
+        return true;
+    }
+    // Ensure root ends with a separator in the comparison so `C:\work` does not
+    // match `C:\work-evil\file`. Path::starts_with already does component-wise
+    // matching, which is the safe form on Windows.
+    path_n.starts_with(&root_n)
+}
+
+fn normalize_for_confine_compare(path: &std::path::Path) -> PathBuf {
+    // Prefer real path when available so `..` and short-name aliases collapse.
+    let base = std::fs::canonicalize(path)
+        .map(|p| dunce::simplified(&p).to_path_buf())
+        .unwrap_or_else(|_| {
+            // Path may not exist yet (write targets). Clean `..` lexically.
+            let mut out = PathBuf::new();
+            for c in path.components() {
+                match c {
+                    std::path::Component::ParentDir => {
+                        out.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    other => out.push(other.as_os_str()),
+                }
+            }
+            out
+        });
+    #[cfg(windows)]
+    {
+        // Case-insensitive compare on Windows.
+        PathBuf::from(base.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        base
+    }
+}
+
+/// Process-wide confine root set at CLI startup (`--confine` /
+/// `--workspace-root`). The permission manager and path resolvers consult this
+/// so confinement is enforced even when a tool context was built without a
+/// [`ConfineRoot`] resource. `None` = unconfined (legacy default).
+static PROCESS_CONFINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Stamp the confine root for this process. Idempotent first-write-wins (CLI
+/// startup is the only writer). Canonicalise and verify the path is a directory
+/// *before* calling this.
+pub fn set_process_confine_root(root: PathBuf) {
+    let _ = PROCESS_CONFINE_ROOT.set(root);
+}
+
+/// Current process confine root, if any.
+pub fn process_confine_root() -> Option<&'static PathBuf> {
+    PROCESS_CONFINE_ROOT.get()
 }
 /// Strip surrounding whitespace (e.g. a trailing newline from block-form
 /// tool args) and quotes that models occasionally emit around path args.
@@ -1648,5 +1744,44 @@ mod tests {
             result,
             std::path::PathBuf::from("/worktree/abc/path/with\"quote/file.rs"),
         );
+    }
+
+    #[test]
+    fn confine_accepts_paths_under_root_rejects_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let inside = root.join("src").join("main.rs");
+        let _ = std::fs::create_dir_all(inside.parent().unwrap());
+        std::fs::write(&inside, "fn main() {}").unwrap();
+        assert!(
+            super::path_is_under_confine_root(&inside, root),
+            "inside path must be under root"
+        );
+        assert!(
+            super::path_is_under_confine_root(root, root),
+            "root is under itself"
+        );
+        let outside = tmp.path().parent().unwrap().join("outside-sibling.txt");
+        assert!(
+            !super::path_is_under_confine_root(&outside, root),
+            "sibling outside root must be rejected"
+        );
+    }
+
+    #[test]
+    fn resolve_model_path_confined_errors_on_absolute_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let outside = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
+        } else {
+            std::path::PathBuf::from("/etc/hosts")
+        };
+        let err = super::resolve_model_path_confined(root, None, root, outside.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.contains("outside the confine root"), "{err}");
+        // Relative inside-root path succeeds.
+        let ok = super::resolve_model_path_confined(root, None, root, "src/a.rs").unwrap();
+        assert!(super::path_is_under_confine_root(&ok, root));
     }
 }

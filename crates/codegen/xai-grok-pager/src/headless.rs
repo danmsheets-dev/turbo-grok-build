@@ -394,6 +394,25 @@ impl HeadlessEmitter {
         }
     }
 
+    /// Stream a headless permission denial so harnesses see the refusal even
+    /// when the model-facing tool body is also filled (H1). Plain format is
+    /// silent — the model text path already carries the reason.
+    fn on_tool_denied(&mut self, tool: &str, reason: &str) {
+        match self.format {
+            OutputFormat::StreamingJson => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "tool_denied",
+                        "tool": tool,
+                        "reason": reason,
+                    })
+                );
+            }
+            OutputFormat::Json | OutputFormat::Plain => {}
+        }
+    }
+
     fn attach_structured_output(&self, target: &mut serde_json::Value) {
         if !self.parse_structured_output {
             return;
@@ -439,6 +458,54 @@ impl HeadlessEmitter {
         result
     }
 
+    /// First NDJSON line of any `streaming-json` run (H6). Harnesses pin on
+    /// `schemaVersion` and the confine/permission snapshot.
+    fn on_start(
+        &self,
+        session_id: &str,
+        cwd: &std::path::Path,
+        requested_model: Option<&str>,
+        served_model: Option<&str>,
+        permission_mode: &str,
+        sandbox: Option<&str>,
+        always_approve: bool,
+    ) {
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        let confine = xai_grok_tools::types::resources::process_confine_root()
+            .map(|p| p.display().to_string());
+        let start = serde_json::json!({
+            "type": "start",
+            "schemaVersion": 1,
+            "sessionId": session_id,
+            "cwd": cwd.display().to_string(),
+            "confineRoot": confine,
+            "requestedModel": requested_model,
+            "servedModel": served_model,
+            "permissionMode": permission_mode,
+            "sandbox": sandbox,
+            "binary": "hyper",
+            "version": xai_grok_version::VERSION,
+            "alwaysApprove": always_approve,
+        });
+        println!("{start}");
+    }
+
+    /// Served model may only become known after session model resolution.
+    fn on_model_resolved(&self, served_model: &str) {
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "model_resolved",
+                "servedModel": served_model,
+            })
+        );
+    }
+
     fn on_end(&mut self, stop_reason: &str, session_id: &str, request_id: &str) {
         match self.format {
             OutputFormat::Plain => {
@@ -447,13 +514,12 @@ impl HeadlessEmitter {
             OutputFormat::StreamingJson => {
                 let mut end = serde_json::json!({
                     "type": "end",
+                    "schemaVersion": 1,
                     "stopReason": stop_reason,
                     "sessionId": session_id,
                     "requestId": request_id
                 });
-                if let Some(usage) = &self.usage {
-                    attach_result_usage(&mut end, usage);
-                }
+                self.attach_usage_fields(&mut end, false);
                 self.attach_structured_output(&mut end);
                 println!("{end}");
             }
@@ -472,10 +538,26 @@ impl HeadlessEmitter {
             OutputFormat::Plain => eprintln!("{message}"),
             OutputFormat::StreamingJson | OutputFormat::Json => {
                 let mut err = serde_json::json!({"type":"error","message": message});
-                if let Some(usage) = &self.usage {
-                    attach_result_usage(&mut err, usage);
-                }
+                // Always include `usage` on terminal paths (H7): snapshot when
+                // we have one (possibly incomplete), null when the ledger never
+                // started — never omit the key so harnesses do not guess.
+                self.attach_usage_fields(&mut err, true);
                 println!("{err}");
+            }
+        }
+    }
+
+    /// Attach `usage` / `usageIsIncomplete` for every terminal stream event.
+    fn attach_usage_fields(&self, target: &mut serde_json::Value, incomplete_if_present: bool) {
+        match &self.usage {
+            Some(usage) => {
+                attach_result_usage(target, usage);
+                if incomplete_if_present {
+                    target["usageIsIncomplete"] = serde_json::Value::Bool(true);
+                }
+            }
+            None => {
+                target["usage"] = serde_json::Value::Null;
             }
         }
     }
@@ -503,6 +585,68 @@ fn auto_respond_to_permissions(
         }
     }
     None
+}
+
+/// Headless plan mode (and default headless) auto-allow pure read/search
+/// tool kinds. Edit / Execute / Write still require YOLO or an `--allow`.
+///
+/// `ToolKind` here is the ACP wire kind on the permission request — not the
+/// internal `xai_grok_tools` taxonomy. Read/Search/Fetch cover Grep, Glob,
+/// Read, ListDir, WebFetch. Execute stays denied so Bash writes cannot slip
+/// through plan mode.
+fn headless_should_auto_allow_read(
+    req: &acp::RequestPermissionRequest,
+    permission_mode: Option<&str>,
+) -> bool {
+    // Plan mode is the primary case; default headless already auto-allows
+    // read/grep via the permission manager's SAFE_COMMAND path, but a prompt
+    // can still surface for MCP/edge tools that report Read/Search kind —
+    // auto-allow those under plan only so plan mode matches harness
+    // expectations without widening default headless.
+    let plan = matches!(permission_mode, Some("plan"));
+    if !plan {
+        return false;
+    }
+    // ACP wire kinds for pure-read tools. Grep/Glob project as Search; list/read
+    // as Read. Execute/Edit/Delete stay out so plan mode cannot write.
+    // `RequestPermissionRequest.tool_call` is a `ToolCallUpdate` — kind lives
+    // on `.fields`, not the top-level update.
+    matches!(
+        req.tool_call.fields.kind,
+        Some(acp::ToolKind::Read) | Some(acp::ToolKind::Search)
+    )
+}
+
+/// Explicit headless denial: prefer RejectOnce so the shell continues the
+/// turn with a model-visible error; emit a `tool_denied` stream event for
+/// harnesses; fall back to Cancelled only when no reject option exists.
+fn headless_deny_permission(
+    req: &acp::RequestPermissionRequest,
+    permission_mode: Option<&str>,
+    emitter: &mut HeadlessEmitter,
+) -> acp::RequestPermissionResponse {
+    // Title is the human-facing label (e.g. "Grep `pattern`") on
+    // `fields.title`. Best-effort tool label for the stream event — the
+    // model-facing body is composed in the shell from the decision outcome.
+    let tool_name = req
+        .tool_call
+        .fields
+        .title
+        .as_deref()
+        .and_then(|t| t.split_whitespace().next())
+        .unwrap_or("tool");
+    let mode = permission_mode.unwrap_or("default");
+    let reason = format!(
+        "no approval is possible in headless mode (permission mode: {mode}). \
+         Re-run with --always-approve, or add an --allow rule."
+    );
+    emitter.on_tool_denied(tool_name, &reason);
+    if let Some(resp) =
+        auto_respond_to_permissions(req, &[acp::PermissionOptionKind::RejectOnce])
+    {
+        return resp;
+    }
+    acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
 }
 
 /// "Not signed in" error message, tailored to the session type.
@@ -1077,6 +1221,35 @@ pub async fn run_single_turn(
         anyhow::bail!("{msg}");
     }
 
+    // H6: first NDJSON line before any text/thought chunks.
+    let permission_mode = options
+        .permission_mode_flag
+        .as_deref()
+        .unwrap_or(if options.yolo {
+            "bypassPermissions"
+        } else {
+            "default"
+        });
+    let served = session_models
+        .current
+        .as_ref()
+        .map(|m| m.0.to_string());
+    emitter.on_start(
+        session_id.0.as_ref(),
+        &cwd,
+        options.model.as_deref(),
+        served.as_deref(),
+        permission_mode,
+        xai_grok_sandbox::configured_profile_name(),
+        options.yolo,
+    );
+    // If served model only becomes known after SetSessionModel, announce it.
+    if let (Some(requested), Some(served_s)) = (options.model.as_deref(), served.as_deref())
+        && requested != served_s
+    {
+        emitter.on_model_resolved(served_s);
+    }
+
     // Send prompt and stream response
     let prompt_blocks = prompt.into_content_blocks();
 
@@ -1127,6 +1300,7 @@ pub async fn run_single_turn(
                     t_prompt,
                     &mut ttf_logged,
                     options.yolo,
+                    options.permission_mode_flag.as_deref(),
                     options.output_format,
                     &mut pending_bg,
                     &mut completed_before_bg,
@@ -1183,6 +1357,7 @@ pub async fn run_single_turn(
                     t_prompt,
                     &mut ttf_logged,
                     options.yolo,
+                    options.permission_mode_flag.as_deref(),
                     options.output_format,
                     &mut pending_bg,
                     &mut completed_before_bg,
@@ -1199,6 +1374,7 @@ pub async fn run_single_turn(
                         t_prompt,
                         &mut ttf_logged,
                         options.yolo,
+                        options.permission_mode_flag.as_deref(),
                         options.output_format,
                         &mut pending_bg,
                         &mut completed_before_bg,
@@ -1226,6 +1402,7 @@ pub async fn run_single_turn(
             t_prompt,
             &mut ttf_logged,
             options.yolo,
+            options.permission_mode_flag.as_deref(),
             options.output_format,
             &mut pending_bg,
             &mut completed_before_bg,
@@ -1278,7 +1455,9 @@ pub async fn run_single_turn(
                 match emitter.format {
                     OutputFormat::Plain => eprintln!("Max turns reached"),
                     OutputFormat::StreamingJson => {
-                        println!("{}", serde_json::json!({"type": "max_turns_reached"}))
+                        let mut ev = serde_json::json!({"type": "max_turns_reached"});
+                        emitter.attach_usage_fields(&mut ev, true);
+                        println!("{ev}");
                     }
                     OutputFormat::Json => {} // conveyed by stopReason in the final JSON
                 }
@@ -1435,6 +1614,7 @@ async fn drain_acp_with_grace(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
+    permission_mode: Option<&str>,
     output_format: OutputFormat,
     pending_bg: &mut HashSet<String>,
     completed_before_bg: &mut HashSet<String>,
@@ -1448,6 +1628,7 @@ async fn drain_acp_with_grace(
                 t_prompt,
                 ttf_logged,
                 yolo,
+                permission_mode,
                 output_format,
                 pending_bg,
                 completed_before_bg,
@@ -1467,6 +1648,7 @@ async fn drain_acp_with_grace(
                     t_prompt,
                     ttf_logged,
                     yolo,
+                    permission_mode,
                     output_format,
                     pending_bg,
                     completed_before_bg,
@@ -1489,6 +1671,9 @@ fn handle_headless_acp_message(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
+    // CLI `--permission-mode` (e.g. `plan`, `auto`); drives headless
+    // read-class auto-allow and the denial stream event reason.
+    permission_mode: Option<&str>,
     output_format: OutputFormat,
     pending_bg: &mut HashSet<String>,
     completed_before_bg: &mut HashSet<String>,
@@ -1527,7 +1712,13 @@ fn handle_headless_acp_message(
             let _ = boxed.response_tx.send(Ok(()));
         }
         AcpClientMessageBox::RequestPermission(req) => {
-            if yolo {
+            // Headless cannot prompt. Prefer Allow for YOLO / plan-mode
+            // read-class tools; otherwise RejectOnce so the shell maps the
+            // outcome to a non-empty model-facing error (never silent Cancel
+            // alone — Cancelled historically ended the turn with an empty
+            // tool body that models interpret as "no matches").
+            let allow = yolo || headless_should_auto_allow_read(&req.request, permission_mode);
+            if allow {
                 if let Some(resp) = auto_respond_to_permissions(
                     &req.request,
                     &[
@@ -1537,14 +1728,13 @@ fn handle_headless_acp_message(
                 ) {
                     let _ = req.response_tx.send(Ok(resp));
                 } else {
-                    let _ = req.response_tx.send(Ok(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    )));
+                    // No allow option offered — fall through to explicit deny.
+                    let denied = headless_deny_permission(&req.request, permission_mode, emitter);
+                    let _ = req.response_tx.send(Ok(denied));
                 }
             } else {
-                let _ = req.response_tx.send(Ok(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Cancelled,
-                )));
+                let denied = headless_deny_permission(&req.request, permission_mode, emitter);
+                let _ = req.response_tx.send(Ok(denied));
             }
         }
         AcpClientMessageBox::ExtNotification(notif) => {
