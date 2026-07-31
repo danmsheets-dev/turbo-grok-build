@@ -203,7 +203,9 @@ impl AgentBuilder {
             working_directory,
             prompt_working_directory: None,
             terminal_backend,
-            fs_backend: Arc::new(xai_grok_tools::computer::local::LocalFs),
+            fs_backend: xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(
+                Arc::new(xai_grok_tools::computer::local::LocalFs),
+            ),
             notification_handle,
             owner_session_id: None,
             parent_scheduler_handle: None,

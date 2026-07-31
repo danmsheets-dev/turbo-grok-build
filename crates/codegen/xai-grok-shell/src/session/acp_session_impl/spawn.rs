@@ -729,7 +729,11 @@ pub(crate) async fn spawn_session_actor(
                 tool_context.session_id.clone().unwrap(),
             ))
         } else {
-            std::sync::Arc::new(xai_grok_tools::computer::local::LocalFs)
+            // ConfinedFs choke point when --confine is active: every write
+            // tool is bounded even if permission path extraction misses.
+            xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(std::sync::Arc::new(
+                xai_grok_tools::computer::local::LocalFs,
+            ))
         };
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");

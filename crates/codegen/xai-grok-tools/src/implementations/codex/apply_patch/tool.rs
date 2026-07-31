@@ -152,6 +152,61 @@ async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), xai_tool_runti
     Ok(())
 }
 
+/// Reject absolute / drive-prefixed / parent-dir traversal paths before
+/// `cwd.join` (which replaces the base for absolute operands on all platforms).
+fn validate_hunk_path(path: &std::path::Path) -> Result<(), String> {
+    use std::path::Component;
+    if path.is_absolute() {
+        return Err(format!(
+            "apply_patch path must be relative, got absolute: `{}`",
+            path.display()
+        ));
+    }
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                return Err(format!(
+                    "apply_patch path must not contain `..`: `{}`",
+                    path.display()
+                ));
+            }
+            Component::Prefix(_) => {
+                return Err(format!(
+                    "apply_patch path must not contain a drive/UNC prefix: `{}`",
+                    path.display()
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a hunk path under `cwd`, then enforce process confine if active.
+fn resolve_hunk_path(cwd: &std::path::Path, path: &std::path::Path) -> Result<PathBuf, String> {
+    validate_hunk_path(path)?;
+    let resolved = cwd.join(path);
+    if let Some(root) = crate::types::resources::process_confine_root() {
+        if !crate::types::resources::path_is_under_confine_root(&resolved, root) {
+            let root_s = root.display().to_string();
+            let path_s = path.display().to_string();
+            let resolved_s = resolved.display().to_string();
+            crate::types::resources::emit_confine_violation(
+                "apply_patch",
+                &path_s,
+                &resolved_s,
+                &root_s,
+                "apply-patch-path-outside-root",
+            );
+            return Err(format!(
+                "Denied by confine root: apply_patch path `{path_s}` is outside `{root_s}` \
+                 (resolved: `{resolved_s}`)"
+            ));
+        }
+    }
+    Ok(resolved)
+}
+
 /// Compute all file changes in memory without writing anything.
 /// Returns an error string if any hunk can't be applied.
 async fn compute_all_changes(
@@ -164,14 +219,14 @@ async fn compute_all_changes(
     for hunk in hunks {
         match hunk {
             Hunk::AddFile { path, contents } => {
-                let resolved = cwd.join(path);
+                let resolved = resolve_hunk_path(cwd, path)?;
                 changes.push(FileChange::Add {
                     path: resolved,
                     content: contents.clone(),
                 });
             }
             Hunk::DeleteFile { path } => {
-                let resolved = cwd.join(path);
+                let resolved = resolve_hunk_path(cwd, path)?;
                 let original_content = read_file_as_string(fs, &resolved)
                     .await
                     .map_err(|e| format!("Failed to read file: {}, {e}", resolved.display()))?;
@@ -185,7 +240,7 @@ async fn compute_all_changes(
                 move_path,
                 chunks,
             } => {
-                let resolved = cwd.join(path);
+                let resolved = resolve_hunk_path(cwd, path)?;
                 let original_content = read_file_as_string(fs, &resolved).await.map_err(|e| {
                     format!("Failed to read file to update: {}, {e}", resolved.display())
                 })?;
@@ -197,7 +252,7 @@ async fn compute_all_changes(
                     })?;
 
                 if let Some(dest) = move_path {
-                    let resolved_dest = cwd.join(dest);
+                    let resolved_dest = resolve_hunk_path(cwd, dest)?;
                     changes.push(FileChange::Move {
                         source_path: resolved,
                         dest_path: resolved_dest,
@@ -675,6 +730,62 @@ mod tests {
                 );
             }
             other => panic!("Expected Success, got: {other:?}"),
+        }
+    }
+
+    // ── Path confinement / absolute escape ───────────────────────
+
+    #[tokio::test]
+    async fn absolute_hunk_path_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ApplyPatchTool;
+        let resources = test_resources(tmp.path());
+        let shared = resources.into_shared();
+
+        // Absolute path must not reach fs.write via cwd.join replacement.
+        #[cfg(windows)]
+        let abs = "C:/Users/dan_m/.grok/hooks/pwn.ps1";
+        #[cfg(not(windows))]
+        let abs = "/tmp/outside-pwn.txt";
+
+        let patch = wrap_patch(&format!("*** Add File: {abs}\n+pwned"));
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), make_input(&patch))
+                .await
+                .unwrap();
+
+        match result {
+            ApplyPatchOutput::ApplicationError(msg) => {
+                assert!(
+                    msg.contains("absolute") || msg.contains("confine") || msg.contains("relative"),
+                    "expected absolute-path rejection, got: {msg}"
+                );
+            }
+            other => panic!("Expected ApplicationError for absolute path, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_dir_traversal_hunk_path_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ApplyPatchTool;
+        let resources = test_resources(tmp.path());
+        let shared = resources.into_shared();
+
+        let patch = wrap_patch("*** Add File: ../MainRepo/pwned.txt\n+pwned");
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), make_input(&patch))
+                .await
+                .unwrap();
+
+        match result {
+            ApplyPatchOutput::ApplicationError(msg) => {
+                assert!(
+                    msg.contains("..") || msg.contains("relative") || msg.contains("confine"),
+                    "expected traversal rejection, got: {msg}"
+                );
+            }
+            other => panic!("Expected ApplicationError for .. path, got: {other:?}"),
         }
     }
 

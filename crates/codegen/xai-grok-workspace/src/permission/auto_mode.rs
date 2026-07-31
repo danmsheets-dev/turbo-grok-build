@@ -434,7 +434,9 @@ impl HeuristicPermissionClassifier {
             // defense-in-depth fallback so the user is prompted rather than
             // silently auto-approving; non-allowlisted MCP tools land
             // here too.
-            AccessKind::Edit(_) | AccessKind::MCPTool { .. } => ClassifierVerdict::Block,
+            AccessKind::Edit(_) | AccessKind::EditMany(_) | AccessKind::MCPTool { .. } => {
+                ClassifierVerdict::Block
+            }
             AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
                 ClassifierVerdict::Allow
             }
@@ -1176,7 +1178,7 @@ pub fn auto_mode_fast_path(
     }
     // Auto mode accepts ALL file edits by product decision (no workspace
     // restriction), so any edit fast-path-Allows regardless of path.
-    if matches!(access, AccessKind::Edit(_)) {
+    if matches!(access, AccessKind::Edit(_) | AccessKind::EditMany(_)) {
         return AutoFastPath::Allow;
     }
     // Exact no-op commands never need the classifier (temperature-0 verdicts
@@ -1329,7 +1331,7 @@ pub fn build_classifier_messages(
     let access_kind = match access {
         AccessKind::Read(_) => "read",
         AccessKind::Grep { .. } => "grep",
-        AccessKind::Edit(_) => "edit",
+        AccessKind::Edit(_) | AccessKind::EditMany(_) => "edit",
         AccessKind::Bash(_) => "bash",
         AccessKind::MCPTool { .. } => "mcp",
         AccessKind::WebFetch(_) => "web_fetch",

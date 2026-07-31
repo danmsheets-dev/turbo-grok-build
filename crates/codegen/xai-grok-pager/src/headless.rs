@@ -586,12 +586,24 @@ impl HeadlessEmitter {
         }
         let confine = xai_grok_tools::types::resources::process_confine_root()
             .map(|p| p.display().to_string());
+        let confine_inherited = std::env::var(xai_grok_tools::types::resources::ENV_GROK_CONFINE)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let confine_shell = if confine.is_some() {
+            Some(
+                xai_grok_tools::types::resources::confine_shell_enforcement().as_str(),
+            )
+        } else {
+            None
+        };
         let start = serde_json::json!({
             "type": "start",
             "schemaVersion": 1,
             "sessionId": session_id,
             "cwd": cwd.display().to_string(),
             "confineRoot": confine,
+            "confineInherited": confine_inherited,
+            "confineShellEnforcement": confine_shell,
             "requestedModel": requested_model,
             "servedModel": served_model,
             "permissionMode": permission_mode,

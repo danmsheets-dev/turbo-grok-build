@@ -499,7 +499,7 @@ fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
     match filter {
         ToolFilter::Any => true,
         ToolFilter::Bash => matches!(access, AccessKind::Bash(_)),
-        ToolFilter::Edit => matches!(access, AccessKind::Edit(_)),
+        ToolFilter::Edit => matches!(access, AccessKind::Edit(_) | AccessKind::EditMany(_)),
         // A Read rule also governs the Grep tool: grep reads file contents, so a
         // managed `Read` deny/ask on a path must block grepping that same path —
         // otherwise grep is a read-bypass. Grep-specific rules still use `Grep`.
@@ -553,6 +553,9 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
         // deny keyed on the long name. Relative globs (`**/.env`) still match
         // the raw spelling when the canonical form would become absolute.
         AccessKind::Edit(path) => path_glob_matches(path, pattern, cr.matcher),
+        AccessKind::EditMany(paths) => paths
+            .iter()
+            .any(|path| path_glob_matches(path, pattern, cr.matcher)),
         AccessKind::Read(path) => match path {
             Some(p) => path_glob_matches(p, pattern, cr.matcher),
             None => false,

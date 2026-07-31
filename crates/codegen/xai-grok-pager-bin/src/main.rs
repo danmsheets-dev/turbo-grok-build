@@ -1192,6 +1192,7 @@ async fn run_agent_command(
         None | Some(AgentCmd::Stdio) | Some(AgentCmd::Headless(_))
     );
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
+    let process_confine_active = xai_grok_pager::confine::is_process_confined();
     let LeaderMode {
         use_leader,
         policy_disable_reason,
@@ -1203,6 +1204,7 @@ async fn run_agent_command(
         remote_settings.as_ref(),
         leader_eligible,
         requested_confinement,
+        process_confine_active,
     );
     tracing::info!(
         use_leader,

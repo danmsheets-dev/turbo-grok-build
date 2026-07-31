@@ -590,7 +590,7 @@ impl AcpPrompter {
         access: &AccessKind,
     ) -> IndexMap<acp::PermissionOptionId, acp::PermissionOption> {
         match access {
-            AccessKind::Edit(_) => self.edit_options.clone(),
+            AccessKind::Edit(_) | AccessKind::EditMany(_) => self.edit_options.clone(),
             AccessKind::Bash(bash_command) => {
                 // For GrokTUI clients, use the fancy interactive options with term selection
                 // For generic clients (web, etc.), use simpler options that work without
@@ -835,6 +835,7 @@ pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::Read(_) => "read_file".to_owned(),
         AccessKind::Grep { .. } => "grep".to_owned(),
         AccessKind::Edit(_) => "search_replace".to_owned(),
+        AccessKind::EditMany(_) => "apply_patch".to_owned(),
         AccessKind::Bash(_) => "run_terminal_command".to_owned(),
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),

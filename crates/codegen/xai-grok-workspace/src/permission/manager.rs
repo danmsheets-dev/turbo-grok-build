@@ -20,7 +20,7 @@ use crate::permission::policy::{CompiledPolicy, ShellWord};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome};
 use crate::permission::shell_access::{
     command_write_paths_in_tree, edit_target_protection, is_safe_write_sink, shell_confine_operands,
-    tree_has_opaque_shell, words_are_opaque_shell,
+    shell_unmodelled_program_for_confine, tree_has_opaque_shell, words_are_opaque_shell,
 };
 use crate::permission::state::{PermissionState, load_state_from_disk, persist_state};
 use crate::permission::types::{
@@ -1069,7 +1069,8 @@ fn grant_allow(reason: &'static str) -> Option<(Decision, &'static str)> {
     Some((Decision::Allow, reason))
 }
 
-/// One confine denial: original operand, resolved form, human reason.
+/// One confine denial: original operand, resolved form, human reason, rule id.
+#[derive(Debug)]
 struct ConfineHit {
     path: String,
     resolved_path: String,
@@ -1077,6 +1078,8 @@ struct ConfineHit {
     /// When set, a more specific reason than the default outside-root text
     /// (e.g. unparseable shell under confine).
     detail: Option<String>,
+    /// Machine-readable rule that fired (surfaced on `confine_violation`).
+    rule: &'static str,
 }
 
 impl ConfineHit {
@@ -1085,17 +1088,18 @@ impl ConfineHit {
             return detail.clone();
         }
         format!(
-            "Denied by confine root: `{}` is outside `{}` (resolved: `{}`)",
-            self.path, self.root, self.resolved_path
+            "Denied by confine root: `{}` is outside `{}` (resolved: `{}`; rule={})",
+            self.path, self.root, self.resolved_path, self.rule
         )
     }
 }
 
-/// Path-prefix confine check for Edit and Bash, shared so the two access kinds
+/// Path-prefix confine check for Edit, Bash, MCP, shared so access kinds
 /// cannot drift. Returns `Some` when the request must be PolicyDenied.
 ///
-/// **Fail closed:** unparseable shell under confine, and any path whose
-/// nearest existing ancestor cannot be canonicalized, are denials.
+/// **Fail closed:** unparseable shell under confine, unmodelled programs
+/// (default shell enforcement), MCP path-shaped args outside the root, and
+/// any path whose nearest existing ancestor cannot be canonicalized.
 fn confine_access_outside_root(
     access: &AccessKind,
     root: &std::path::Path,
@@ -1112,7 +1116,25 @@ fn confine_access_outside_root(
                 ),
                 None => resolve_model_path(cwd, None, path),
             };
-            confine_resolved_path(path, &resolved, root)
+            confine_resolved_path(path, &resolved, root, "path-outside-root")
+        }
+        AccessKind::EditMany(paths) => {
+            for path in paths {
+                let resolved = match edit_path_context {
+                    Some(context) => resolve_model_path(
+                        &context.real_cwd,
+                        context.display_cwd.as_deref(),
+                        path,
+                    ),
+                    None => resolve_model_path(cwd, None, path),
+                };
+                if let Some(hit) =
+                    confine_resolved_path(path, &resolved, root, "path-outside-root")
+                {
+                    return Some(hit);
+                }
+            }
+            None
         }
         AccessKind::Bash(cmd) => {
             // Fail closed: if we cannot parse write/`cd` operands with
@@ -1127,8 +1149,41 @@ fn confine_access_outside_root(
                         "Denied by confine root: shell command could not be parsed with \
                          confidence under confinement (fail closed): `{cmd}`"
                     )),
+                    rule: "shell-unparseable",
                 });
             };
+
+            // Default under confine: unknown / unmodelled programs are denied
+            // (the operand allowlist is a classifier, not a boundary). Opt out
+            // via GROK_CONFINE_SHELL_MODE=operand. Key off the env flag alone —
+            // this function is only reached when a root is already active, so
+            // we must not also require the process OnceLock (unit tests pass a
+            // root without stamping PROCESS_CONFINE_ROOT).
+            let fail_closed = !matches!(
+                std::env::var(xai_grok_tools::types::resources::ENV_GROK_CONFINE_SHELL_MODE)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "operand" | "operand-scan" | "allowlist" | "legacy"
+            );
+            if fail_closed {
+                if let Some(program) = shell_unmodelled_program_for_confine(cmd) {
+                    return Some(ConfineHit {
+                        path: cmd.clone(),
+                        resolved_path: cmd.clone(),
+                        root: root.display().to_string(),
+                        detail: Some(format!(
+                            "Denied by confine root: shell program `{program}` is not on the \
+                             known-safe/modelled allowlist under confinement (fail closed). \
+                             Set GROK_CONFINE_SHELL_MODE=operand to use legacy operand-scan \
+                             only, or run the write via an Edit tool inside the root. \
+                             Command: `{cmd}`"
+                        )),
+                        rule: "shell-unmodelled-program",
+                    });
+                }
+            }
+
             for operand in operands {
                 if is_safe_write_sink(&operand) {
                     continue;
@@ -1140,22 +1195,180 @@ fn confine_access_outside_root(
                 // escape only via the new cwd still fail closed when the cd
                 // target is outside (or when parse confidence fails).
                 let resolved = resolve_model_path(cwd, None, &operand);
-                if let Some(hit) = confine_resolved_path(&operand, &resolved, root) {
+                if let Some(hit) =
+                    confine_resolved_path(&operand, &resolved, root, "path-outside-root")
+                {
                     return Some(hit);
                 }
             }
             None
         }
-        // Read/Grep/MCP/Web*: confine is a write-boundary for harness
-        // isolation. Managed Read deny rules still apply separately.
+        AccessKind::MCPTool { name, input } => {
+            confine_mcp_tool_paths(name, input, root, cwd)
+        }
+        // Read/Grep/Web*: confine is a write-boundary for harness isolation.
+        // Managed Read deny rules still apply separately.
         _ => None,
     }
+}
+
+/// Path-shaped keys scanned on MCP tool JSON args under confine.
+const MCP_PATH_KEYS: &[&str] = &[
+    "path",
+    "file",
+    "filepath",
+    "file_path",
+    "filePath",
+    "dir",
+    "directory",
+    "dirname",
+    "output",
+    "out",
+    "dest",
+    "destination",
+    "target",
+    "filename",
+    "source",
+    "src",
+    "to",
+    "from",
+    "cwd",
+    "workdir",
+    "working_directory",
+    "workingDirectory",
+    "uri",
+];
+
+fn confine_mcp_tool_paths(
+    tool_name: &str,
+    input: &serde_json::Value,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Option<ConfineHit> {
+    let mut candidates: Vec<String> = Vec::new();
+    collect_mcp_path_candidates(input, &mut candidates, true);
+    for candidate in candidates {
+        // Skip obviously non-path strings (URLs without file scheme, pure ids).
+        if !looks_like_filesystem_path(&candidate) {
+            continue;
+        }
+        let path_str = strip_file_url_prefix(&candidate);
+        let resolved = resolve_model_path(cwd, None, path_str);
+        if let Some(mut hit) =
+            confine_resolved_path(path_str, &resolved, root, "mcp-path-outside-root")
+        {
+            hit.detail = Some(format!(
+                "Denied by confine root: MCP tool `{tool_name}` path `{}` is outside `{}` \
+                 (resolved: `{}`)",
+                hit.path, hit.root, hit.resolved_path
+            ));
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn collect_mcp_path_candidates(
+    value: &serde_json::Value,
+    out: &mut Vec<String>,
+    prefer_known_keys: bool,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map {
+                let key_is_path = MCP_PATH_KEYS.iter().any(|k| {
+                    key.eq_ignore_ascii_case(k)
+                        || key.to_ascii_lowercase().ends_with("_path")
+                        || key.to_ascii_lowercase().ends_with("path")
+                        || key.to_ascii_lowercase().ends_with("_file")
+                        || key.to_ascii_lowercase().ends_with("_dir")
+                        || key.to_ascii_lowercase().ends_with("directory")
+                });
+                if let serde_json::Value::String(s) = v {
+                    if key_is_path || (!prefer_known_keys && looks_like_filesystem_path(s)) {
+                        out.push(s.clone());
+                    } else if looks_like_filesystem_path(s)
+                        && (std::path::Path::new(s).is_absolute()
+                            || s.contains('/')
+                            || s.contains('\\'))
+                    {
+                        // Absolute / separator-bearing strings are path-like
+                        // even under unknown keys (fs MCP often uses free-form).
+                        out.push(s.clone());
+                    }
+                } else {
+                    collect_mcp_path_candidates(v, out, prefer_known_keys);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_mcp_path_candidates(item, out, prefer_known_keys);
+            }
+        }
+        serde_json::Value::String(s) if looks_like_filesystem_path(s) => {
+            out.push(s.clone());
+        }
+        _ => {}
+    }
+}
+
+fn looks_like_filesystem_path(s: &str) -> bool {
+    if s.is_empty() || s.len() > 4096 {
+        return false;
+    }
+    // file:// URLs
+    if s.starts_with("file:") {
+        return true;
+    }
+    let p = std::path::Path::new(s);
+    if p.is_absolute() {
+        return true;
+    }
+    // Drive-relative Windows: `C:foo` or `C:\foo`
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        if bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return true;
+        }
+    }
+    // Relative path with a separator (not a bare identifier / URL host).
+    if (s.contains('/') || s.contains('\\'))
+        && !s.contains("://")
+        && !s.starts_with("http:")
+        && !s.starts_with("https:")
+    {
+        return true;
+    }
+    false
+}
+
+fn strip_file_url_prefix(s: &str) -> &str {
+    s.strip_prefix("file://")
+        .or_else(|| s.strip_prefix("file:"))
+        .map(|rest| {
+            // file:///C:/x → /C:/x on some platforms; trim leading slashes
+            // before a Windows drive letter.
+            #[cfg(windows)]
+            {
+                let trimmed = rest.trim_start_matches('/');
+                if trimmed.len() >= 2
+                    && trimmed.as_bytes()[0].is_ascii_alphabetic()
+                    && trimmed.as_bytes()[1] == b':'
+                {
+                    return trimmed;
+                }
+            }
+            rest
+        })
+        .unwrap_or(s)
 }
 
 fn confine_resolved_path(
     original: &str,
     resolved: &std::path::Path,
     root: &std::path::Path,
+    rule: &'static str,
 ) -> Option<ConfineHit> {
     if xai_grok_tools::types::resources::path_is_under_confine_root(resolved, root) {
         return None;
@@ -1167,6 +1380,7 @@ fn confine_resolved_path(
         resolved_path: canon.display.to_string_lossy().into_owned(),
         root: root.display().to_string(),
         detail: None,
+        rule,
     })
 }
 
@@ -1253,7 +1467,9 @@ fn session_grant_pre_decision(
                 None
             }
         }
-        AccessKind::Edit(_) if allow_edits_for_session => grant_allow(reasons::SESSION_GRANT),
+        AccessKind::Edit(_) | AccessKind::EditMany(_) if allow_edits_for_session => {
+            grant_allow(reasons::SESSION_GRANT)
+        }
         AccessKind::Bash(cmd) => bash_grant_pre_decision(
             cmd,
             bash_evaluation?,
@@ -1264,7 +1480,8 @@ fn session_grant_pre_decision(
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
         | AccessKind::WebSearch(_)
-        | AccessKind::Edit(_) => None,
+        | AccessKind::Edit(_)
+        | AccessKind::EditMany(_) => None,
     }
 }
 
@@ -1539,6 +1756,10 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Read(_) => ("read".to_string(), None),
                         AccessKind::Grep { path, glob: _ } => ("grep".to_string(), path.clone()),
                         AccessKind::Edit(path) => ("edit".to_string(), Some(path.clone())),
+                        AccessKind::EditMany(paths) => (
+                            "edit".to_string(),
+                            Some(paths.join("\n")),
+                        ),
                         AccessKind::Bash(cmd) => ("bash".to_string(), Some(cmd.clone())),
                         // Carry the MCP args (truncated) so the classifier and
                         // telemetry judge the call by what it does, not just its name.
@@ -1678,6 +1899,19 @@ fn spawn_permission_manager_with_pin(
                             let resolved = resolve_model_path(cwd.as_path(), None, path);
                             edit_target_protection(&resolved)
                         }
+                        (AccessKind::EditMany(paths), ctx) => {
+                            paths.iter().find_map(|path| {
+                                let resolved = match ctx {
+                                    Some(context) => resolve_model_path(
+                                        &context.real_cwd,
+                                        context.display_cwd.as_deref(),
+                                        path,
+                                    ),
+                                    None => resolve_model_path(cwd.as_path(), None, path),
+                                };
+                                edit_target_protection(&resolved)
+                            })
+                        }
                         _ => None,
                     };
 
@@ -1744,6 +1978,7 @@ fn spawn_permission_manager_with_pin(
                                 &hit.path,
                                 &hit.resolved_path,
                                 &root.display().to_string(),
+                                hit.rule,
                             );
                             let decision = Decision::PolicyDeny(reason);
                             emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
@@ -2097,7 +2332,7 @@ fn spawn_permission_manager_with_pin(
                             remember_tool_approvals,
                         )
                         .map(|d| (d, reasons::PERSISTED_GRANT)),
-                        AccessKind::Edit(_) => {
+                        AccessKind::Edit(_) | AccessKind::EditMany(_) => {
                             if allow_edits_for_session && protected_edit.is_none() {
                                 Some((Decision::Allow, reasons::PERSISTED_GRANT))
                             } else {
@@ -7988,6 +8223,169 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    // ── Confine boundary tests (path-prefix, no process OnceLock required) ──
+
+    #[test]
+    fn confine_edit_many_denies_absolute_outside_path() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        let escape = outside
+            .path()
+            .join("pwned.txt")
+            .to_string_lossy()
+            .into_owned();
+        let access = AccessKind::EditMany(vec!["ok.txt".into(), escape.clone()]);
+        let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
+        assert!(
+            hit.is_some(),
+            "EditMany with outside path must deny, got None"
+        );
+        let hit = hit.unwrap();
+        assert_eq!(hit.rule, "path-outside-root");
+        assert!(
+            hit.path.contains("pwned") || hit.resolved_path.contains("pwned"),
+            "hit should name the escape path: {hit:?}"
+        );
+    }
+
+    #[test]
+    fn confine_mcp_tool_denies_path_shaped_outside_arg() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        let escape = outside
+            .path()
+            .join("hooks")
+            .join("pwn.ps1")
+            .to_string_lossy()
+            .into_owned();
+        // Windows-style absolute path (drive letter) is the production escape.
+        let access = AccessKind::MCPTool {
+            name: "mcp__fs__write_file".into(),
+            input: serde_json::json!({ "path": escape }),
+        };
+        let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
+        assert!(
+            hit.is_some(),
+            "MCP write outside root must deny, got None"
+        );
+        let hit = hit.unwrap();
+        assert_eq!(hit.rule, "mcp-path-outside-root");
+    }
+
+    #[test]
+    fn confine_mcp_allows_path_inside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        let inside = root_path.join("src").join("ok.rs");
+        let access = AccessKind::MCPTool {
+            name: "mcp__fs__write_file".into(),
+            input: serde_json::json!({ "path": inside.to_string_lossy() }),
+        };
+        let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
+        assert!(
+            hit.is_none(),
+            "MCP write inside root must allow, got {hit:?}"
+        );
+    }
+
+    /// Env mutation is process-global; serialise shell-mode tests.
+    static CONFINE_SHELL_MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn confine_bash_redirect_outside_is_denied() {
+        let _guard = CONFINE_SHELL_MODE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        let escape = outside.path().join("out.txt");
+        // Use a modelled program (echo) so fail-closed unmodelled does not
+        // fire; the redirect operand is the signal under test.
+        let cmd = format!("echo hi > {}", escape.display());
+        // Force operand-scan so this unit test is independent of process
+        // confine root / GROK_CONFINE_SHELL_MODE.
+        let prev = std::env::var("GROK_CONFINE_SHELL_MODE").ok();
+        unsafe {
+            std::env::set_var("GROK_CONFINE_SHELL_MODE", "operand");
+        }
+        let access = AccessKind::Bash(cmd);
+        let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GROK_CONFINE_SHELL_MODE", v) },
+            None => unsafe { std::env::remove_var("GROK_CONFINE_SHELL_MODE") },
+        }
+        assert!(
+            hit.is_some(),
+            "redirect outside root must deny, got None"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn confine_mcp_windows_drive_letter_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        // Absolute path on a temp dir that is not under root.
+        let escape = std::env::temp_dir()
+            .join(format!("hyper-mcp-escape-{}.txt", std::process::id()));
+        let access = AccessKind::MCPTool {
+            name: "mcp__fs__write_file".into(),
+            input: serde_json::json!({
+                "path": escape.to_string_lossy().replace('/', "\\"),
+            }),
+        };
+        let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
+        assert!(
+            hit.is_some(),
+            "Windows drive-letter MCP path outside root must deny"
+        );
+    }
+
+    /// Critical: interpreters with empty write-operand lists must deny under
+    /// fail-closed shell enforcement (iso-bash-write-model-is-an-allowlist).
+    /// Does not stamp PROCESS_CONFINE_ROOT (OnceLock) — that would poison other
+    /// tests in this binary when the tempdir is dropped.
+    #[test]
+    fn confine_bash_unmodelled_python_is_denied_fail_closed() {
+        let _guard = CONFINE_SHELL_MODE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        // Isolate from parallel tests that set GROK_CONFINE_SHELL_MODE=operand.
+        let prev = std::env::var("GROK_CONFINE_SHELL_MODE").ok();
+        unsafe {
+            std::env::remove_var("GROK_CONFINE_SHELL_MODE");
+        }
+        #[cfg(windows)]
+        let cmd = r#"python -c "open(r'C:\Users\x\.ssh\authorized_keys','a').write('k')""#;
+        #[cfg(not(windows))]
+        let cmd = r#"python -c "open('/tmp/pwned','a').write('k')""#;
+        let access = AccessKind::Bash(cmd.into());
+        let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GROK_CONFINE_SHELL_MODE", v) },
+            None => unsafe { std::env::remove_var("GROK_CONFINE_SHELL_MODE") },
+        }
+        assert!(
+            hit.is_some(),
+            "unmodelled python under fail-closed must deny, got None"
+        );
+        let hit = hit.unwrap();
+        assert_eq!(hit.rule, "shell-unmodelled-program");
+        assert!(
+            hit.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("python")
+                || hit.path.contains("python"),
+            "denial must name the program: {hit:?}"
+        );
     }
 
     /// Shell wires live sampling via `set_classifier_with_side_query(..., true)`;

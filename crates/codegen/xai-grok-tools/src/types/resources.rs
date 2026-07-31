@@ -699,6 +699,15 @@ fn fold_for_compare(path: &std::path::Path) -> PathBuf {
 /// [`ConfineRoot`] resource. `None` = unconfined (legacy default).
 static PROCESS_CONFINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// Env var exported by `--confine` so nested hyper / MCP / hooks inherit the root.
+pub const ENV_GROK_CONFINE: &str = "GROK_CONFINE";
+/// Marker set alongside [`ENV_GROK_CONFINE`] when this process applied confine.
+pub const ENV_GROK_CONFINE_INHERIT: &str = "GROK_CONFINE_INHERIT";
+/// Shell confine enforcement mode env. Default under confine is fail-closed
+/// (`fail-closed`); set to `operand` to opt out to the legacy write-operand
+/// scan only (unknown programs allowed when no write operand is extracted).
+pub const ENV_GROK_CONFINE_SHELL_MODE: &str = "GROK_CONFINE_SHELL_MODE";
+
 /// Stamp the confine root for this process. Idempotent first-write-wins (CLI
 /// startup is the only writer). Canonicalise and verify the path is a directory
 /// *before* calling this.
@@ -709,6 +718,65 @@ pub fn set_process_confine_root(root: PathBuf) {
 /// Current process confine root, if any.
 pub fn process_confine_root() -> Option<&'static PathBuf> {
     PROCESS_CONFINE_ROOT.get()
+}
+
+/// Shell confinement enforcement level active for this process.
+///
+/// Reported on the streaming-json `start` event so harnesses record what was
+/// actually enforced rather than assuming a hard OS boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfineShellEnforcement {
+    /// Unknown / unmodelled programs are denied (default under `--confine`).
+    FailClosed,
+    /// Legacy: only extracted write/`cd` operands are checked; unknown programs
+    /// with empty operand lists are allowed.
+    OperandScan,
+}
+
+impl ConfineShellEnforcement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FailClosed => "fail-closed",
+            Self::OperandScan => "operand-scan",
+        }
+    }
+}
+
+/// Resolve shell confine enforcement for the current process.
+///
+/// Default is fail-closed whenever a confine root is active. Callers may opt
+/// into the legacy operand-scan via `GROK_CONFINE_SHELL_MODE=operand`.
+pub fn confine_shell_enforcement() -> ConfineShellEnforcement {
+    if process_confine_root().is_none() {
+        return ConfineShellEnforcement::OperandScan;
+    }
+    match std::env::var(ENV_GROK_CONFINE_SHELL_MODE)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "operand" | "operand-scan" | "allowlist" | "legacy" => {
+            ConfineShellEnforcement::OperandScan
+        }
+        _ => ConfineShellEnforcement::FailClosed,
+    }
+}
+
+/// Pin `GROK_CONFINE` / `GROK_CONFINE_INHERIT` on a child command so the model
+/// cannot unset them via `env -u` / request env. No-op when unconfined.
+pub fn pin_confine_env_on_tokio_command(cmd: &mut tokio::process::Command) {
+    if let Some(root) = process_confine_root() {
+        cmd.env(ENV_GROK_CONFINE, root.as_os_str());
+        cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
+    }
+}
+
+/// [`std::process::Command`] counterpart of [`pin_confine_env_on_tokio_command`].
+pub fn pin_confine_env_on_std_command(cmd: &mut std::process::Command) {
+    if let Some(root) = process_confine_root() {
+        cmd.env(ENV_GROK_CONFINE, root.as_os_str());
+        cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
+    }
 }
 
 /// When true, [`emit_confine_violation`] prints an NDJSON event on stdout
@@ -727,7 +795,17 @@ pub fn set_streaming_json_confine_emit(enabled: bool) {
 ///
 /// Harnesses count these to detect attempted escapes without diffing the
 /// filesystem after the run. Safe no-op when streaming-json emit is off.
-pub fn emit_confine_violation(tool: &str, path: &str, resolved_path: &str, root: &str) {
+///
+/// `rule` names the confine rule that fired (e.g. `path-outside-root`,
+/// `shell-unmodelled-program`, `shell-unparseable`, `mcp-path-outside-root`,
+/// `fs-write-chokepoint`) so operators can act without replaying the run.
+pub fn emit_confine_violation(
+    tool: &str,
+    path: &str,
+    resolved_path: &str,
+    root: &str,
+    rule: &str,
+) {
     if !STREAMING_JSON_CONFINE_EMIT.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -738,6 +816,7 @@ pub fn emit_confine_violation(tool: &str, path: &str, resolved_path: &str, root:
         "path": path,
         "resolvedPath": resolved_path,
         "root": root,
+        "rule": rule,
         "schemaVersion": 1,
     });
     println!("{event}");

@@ -364,6 +364,176 @@ pub(crate) fn shell_confine_operands(cmd: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// First program in `cmd` whose write behaviour is **not** modelled by the
+/// shell confine classifier (interpreters, build tools, opaque `bash -c`, …).
+///
+/// Under `--confine` with fail-closed shell enforcement, any unmodelled
+/// program is a deny — the operand allowlist alone is not a boundary.
+/// Returns `None` when every program is modelled (or the script is empty).
+///
+/// Returns `Some("unparseable")` when the script cannot be parsed with
+/// confidence (same fail-closed posture as [`shell_confine_operands`]).
+pub(crate) fn shell_unmodelled_program_for_confine(cmd: &str) -> Option<String> {
+    let tree = try_parse_shell(cmd)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Some("unparseable".to_owned());
+    }
+    // Opaque re-interpretation shells hide redirects/writes inside a string.
+    if tree_has_opaque_shell(root, cmd) {
+        return Some("opaque-shell".to_owned());
+    }
+    for invocation in shell_command_invocations(root, cmd) {
+        let words = InvocationSlice {
+            words: &invocation.words,
+        }
+        .literal_words();
+        let Some(raw) = words.first() else {
+            continue;
+        };
+        let program = shell_program_name(raw).to_ascii_lowercase();
+        // Strip common Windows extensions so `python.exe` matches `python`.
+        let program = program
+            .strip_suffix(".exe")
+            .or_else(|| program.strip_suffix(".cmd"))
+            .or_else(|| program.strip_suffix(".bat"))
+            .or_else(|| program.strip_suffix(".ps1"))
+            .unwrap_or(program.as_str());
+        if !shell_program_is_modelled_for_confine(program, &words) {
+            return Some(program.to_owned());
+        }
+    }
+    None
+}
+
+/// Whether we understand this program's write side-effects well enough to
+/// trust the operand extractor under confine.
+///
+/// Modelled = known readers, known writers (operand-checked), pure builtins,
+/// path commands (`cp`/`mv`/…), special flag writers (`dd`/`rustc`/…), and
+/// nested hyper (inherits `GROK_CONFINE`). Everything else is fail-closed.
+fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> bool {
+    // Nested hyper/grok re-applies GROK_CONFINE on startup — allow under pin.
+    if matches!(
+        program,
+        "hyper" | "grok" | "xai-grok" | "xai-grok-pager"
+    ) {
+        return true;
+    }
+    // Pure non-writing shell builtins / trivial utilities (no file args that
+    // write). Redirects on these are still caught by command_write_paths_in_tree.
+    if matches!(
+        program,
+        ":"
+            | "true"
+            | "false"
+            | "echo"
+            | "printf"
+            | "pwd"
+            | "cd"
+            | "pushd"
+            | "popd"
+            | "dirs"
+            | "export"
+            | "unset"
+            | "set"
+            | "shift"
+            | "break"
+            | "continue"
+            | "return"
+            | "exit"
+            | "logout"
+            | "hash"
+            | "help"
+            | "history"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "wait"
+            | "ulimit"
+            | "umask"
+            | "alias"
+            | "unalias"
+            | "type"
+            | "which"
+            | "command"
+            | "builtin"
+            | "enable"
+            | "bind"
+            | "complete"
+            | "compgen"
+            | "declare"
+            | "typeset"
+            | "local"
+            | "readonly"
+            | "getopts"
+            | "read" // reads stdin / vars, not arbitrary write paths
+            | "test"
+            | "["
+            | "[["
+            | "basename"
+            | "dirname"
+            | "realpath"
+            | "readlink"
+            | "ls"
+            | "dir"
+            | "clear"
+            | "sleep"
+            | "date"
+            | "whoami"
+            | "id"
+            | "uname"
+            | "hostname"
+            | "nproc"
+            | "arch"
+            | "printenv"
+            | "env" // env alone is ok; `env -u GROK_CONFINE` is pinned at spawn
+            | "times"
+    ) {
+        return true;
+    }
+    // Known readers (ShellFileMode::Read).
+    if matches!(shell_file_mode(program), Some(ShellFileMode::Read)) {
+        // sed -i is a writer; still modelled (operands extracted).
+        return true;
+    }
+    // Known writers with operand extraction.
+    if matches!(shell_file_mode(program), Some(ShellFileMode::Write)) {
+        return true;
+    }
+    // Path-moving / mutating commands with explicit operand tables.
+    if shell_path_command_operands(program, words).is_some() {
+        return true;
+    }
+    // Flag-named writers (dd of=, sort -o, rustc -o, …).
+    if !special_file_operands(program, words).is_empty() {
+        return true;
+    }
+    // sed without -i is a reader; with -i a modelled writer.
+    if program == "sed" {
+        return true;
+    }
+    // Common no-side-effect wrappers that peel in the access gate.
+    if matches!(
+        program,
+        "timeout" | "time" | "nice" | "nohup" | "stdbuf" | "ionice" | "chrt"
+    ) {
+        // Wrapper itself is fine; the next program is checked as its own
+        // invocation when tree-sitter splits it. If not split, fail closed
+        // only if we cannot see an inner program — treat wrapper alone as ok
+        // when it is the sole word (harmless).
+        return words.len() <= 1
+            || words
+                .get(1)
+                .map(|w| {
+                    let inner = shell_program_name(w).to_ascii_lowercase();
+                    shell_program_is_modelled_for_confine(&inner, &words[1..])
+                })
+                .unwrap_or(false);
+    }
+    false
+}
+
 /// Why acceptEdits must still prompt for this edit target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectedEditReason {
@@ -1369,6 +1539,59 @@ mod tests {
     }
 
     /// WP-H4: confine reuses write/`cd` operand extraction; unparseable → None.
+    /// Interpreters / build tools with empty operand lists must fail closed.
+    #[test]
+    fn shell_unmodelled_denies_python_and_interpreters() {
+        // Critical escape: empty operand list for interpreters.
+        for cmd in [
+            r#"python -c "open(r'C:\Users\x\.ssh\authorized_keys','a').write('k')""#,
+            r#"python3 -c "print(1)""#,
+            r#"node -e "require('fs').writeFileSync('C:/x','p')""#,
+            r#"perl -e 'print 1'"#,
+            "cargo build",
+            "blender -b scene.blend",
+            "godot --export-release Windows out.exe",
+        ] {
+            let hit = shell_unmodelled_program_for_confine(cmd);
+            assert!(
+                hit.is_some(),
+                "expected unmodelled program for `{cmd}`, got None"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_modelled_allows_readers_and_known_writers() {
+        for cmd in [
+            "echo hello",
+            "cat src/main.rs",
+            "ls -la",
+            "rg pattern src",
+            "cp a.txt b.txt",
+            "mkdir -p out",
+            "rm -f tmp.txt",
+            "tee out.txt",
+            "cd src",
+            "true",
+            "hyper -p 'hi'",
+        ] {
+            assert_eq!(
+                shell_unmodelled_program_for_confine(cmd),
+                None,
+                "expected modelled for `{cmd}`"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_opaque_bash_c_is_unmodelled() {
+        let hit = shell_unmodelled_program_for_confine("bash -c 'echo x > /outside/f'");
+        assert!(
+            hit.is_some(),
+            "bash -c must fail closed (opaque shell), got None"
+        );
+    }
+
     #[test]
     fn shell_confine_operands_extracts_redirects_and_cd() {
         let writes = shell_confine_operands("echo hi > /tmp/out.txt")
