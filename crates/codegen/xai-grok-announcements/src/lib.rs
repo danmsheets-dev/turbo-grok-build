@@ -10,6 +10,22 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Interactivity gate
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether announcement banners / CTAs should be painted for this client.
+///
+/// Returns `false` for non-interactive runs (headless `-p`, non-TTY stdin,
+/// streaming-json harnesses). CTAs require a human who can click; pushing
+/// them into a headless stream is a no-op at best and a burned turn at worst
+/// (see HYPER-1: headless runs must never stop to ask a question). Callers in
+/// `xai-grok-pager` / `xai-grok-shell` must check this before rendering or
+/// emitting `x.ai/announcements/update`.
+pub fn should_surface_to_user(interactive: bool) -> bool {
+    interactive
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -439,5 +455,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(visible_announcements(&[a1, a2, a3]).len(), 1);
+    }
+
+    #[test]
+    fn should_surface_to_user_false_when_non_interactive() {
+        // Headless / non-TTY harnesses must never paint banners or CTAs.
+        assert!(!should_surface_to_user(false));
+        assert!(should_surface_to_user(true));
     }
 }

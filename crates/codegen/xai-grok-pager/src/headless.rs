@@ -193,6 +193,13 @@ pub struct HeadlessOptions {
     pub wait_for_background: bool,
     /// Max time to wait for background quiescence after the first turn ends.
     pub background_wait_timeout: Duration,
+    /// When true, a run that changed no files exits non-zero with
+    /// `stopReason: "NoChanges"`.
+    pub require_changes: bool,
+    /// Opt out of the non-negotiable headless no-questions system-prompt
+    /// clause and of the question-ending auto-continue recovery (HYPER-1).
+    /// Rare: only for harnesses that genuinely want the model to ask.
+    pub allow_interactive_questions: bool,
 }
 
 // ── CLI flag helpers ─────────────────────────────────────────────────────
@@ -318,16 +325,33 @@ fn apply_agent_flag(agent: &Option<String>, config: &mut xai_grok_shell::agent::
 
 // ── Emitter ──────────────────────────────────────────────────────────────
 
+/// Cap for `filesChanged.paths` on the `end` event (harness convention).
+const FILES_CHANGED_MAX_PATHS: usize = 200;
+/// Soft cap on total path-list bytes before marking `truncated`.
+const FILES_CHANGED_MAX_BYTES: usize = 32 * 1024;
+
 struct HeadlessEmitter {
     format: OutputFormat,
     parse_structured_output: bool,
     text_buffer: String,
     thought_buffer: String,
+    /// Full assistant text for the *current* prompt turn. Always accumulated
+    /// (even when streaming) so the headless question detector can inspect
+    /// the final message without depending on `--json-schema` buffering.
+    turn_assistant_text: String,
+    /// Tool calls observed on the *current* prompt turn (any kind). Used to
+    /// detect the HYPER-1 shape: EndTurn + zero tools + question text.
+    turn_tool_calls: u32,
     /// Agent's schema-validated output (both backends), read from the
     /// prompt-response `_meta`.
     structured_output: Option<Result<serde_json::Value, String>>,
     /// From `_meta.usage`, projected onto the final result when present.
     usage: Option<serde_json::Value>,
+    /// Absolute/display paths the agent edited via tools this run (Edit
+    /// tool-call locations). Used for `filesChanged` on the `end` event —
+    /// build products are not included because only Edit-kind tool calls
+    /// contribute.
+    files_changed: std::collections::BTreeSet<String>,
 }
 
 impl HeadlessEmitter {
@@ -337,9 +361,63 @@ impl HeadlessEmitter {
             parse_structured_output,
             text_buffer: String::new(),
             thought_buffer: String::new(),
+            turn_assistant_text: String::new(),
+            turn_tool_calls: 0,
             structured_output: None,
             usage: None,
+            files_changed: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Clear per-turn counters before a follow-up auto-continue prompt so
+    /// the second turn is judged on its own tool activity, not the first.
+    fn reset_turn_tracking(&mut self) {
+        self.turn_assistant_text.clear();
+        self.turn_tool_calls = 0;
+    }
+
+    fn note_tool_call(&mut self) {
+        self.turn_tool_calls = self.turn_tool_calls.saturating_add(1);
+    }
+
+    /// Record paths from a completed Edit tool call (agent tool edits only).
+    fn note_edit_locations(&mut self, locations: &[acp::ToolCallLocation]) {
+        for loc in locations {
+            let path = loc.path.display().to_string();
+            if !path.is_empty() {
+                self.files_changed.insert(path);
+            }
+        }
+    }
+
+    /// Build the capped `filesChanged` object for terminal events.
+    fn files_changed_json(&self) -> serde_json::Value {
+        let mut paths: Vec<String> = Vec::new();
+        let mut bytes = 0usize;
+        let mut truncated = false;
+        for p in &self.files_changed {
+            if paths.len() >= FILES_CHANGED_MAX_PATHS {
+                truncated = true;
+                break;
+            }
+            let add = p.len() + 1;
+            if bytes + add > FILES_CHANGED_MAX_BYTES {
+                truncated = true;
+                break;
+            }
+            bytes += add;
+            paths.push(p.clone());
+        }
+        // Count is the full unique set; paths may be a capped prefix.
+        let count = self.files_changed.len();
+        if count > paths.len() {
+            truncated = true;
+        }
+        serde_json::json!({
+            "count": count,
+            "paths": paths,
+            "truncated": truncated,
+        })
     }
 
     /// Read structured output from the prompt-response `_meta` — the same
@@ -364,6 +442,8 @@ impl HeadlessEmitter {
     }
 
     fn on_text_chunk(&mut self, text: &str) {
+        // Always accumulate for the headless question detector (HYPER-1).
+        self.turn_assistant_text.push_str(text);
         match self.format {
             OutputFormat::Plain => {
                 use std::io::Write as _;
@@ -382,6 +462,27 @@ impl HeadlessEmitter {
         }
     }
 
+    /// Stream event when headless auto-continues after a question-only turn.
+    /// Harnesses count these to detect HYPER-1 recovery (and to bound loops).
+    fn on_auto_continue(&self, reason: &str, attempt: u32) {
+        match self.format {
+            OutputFormat::StreamingJson => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "auto_continue",
+                        "reason": reason,
+                        "attempt": attempt,
+                    })
+                );
+            }
+            OutputFormat::Plain => {
+                eprintln!("headless: auto-continuing ({reason}, attempt {attempt})");
+            }
+            OutputFormat::Json => {}
+        }
+    }
+
     fn on_thought_chunk(&mut self, text: &str) {
         match self.format {
             OutputFormat::Plain => { /* no-op */ }
@@ -392,6 +493,35 @@ impl HeadlessEmitter {
                 self.thought_buffer.push_str(text);
             }
         }
+    }
+
+    /// Stream a headless permission denial so harnesses see the refusal even
+    /// when the model-facing tool body is also filled (H1). Plain format is
+    /// silent — the model text path already carries the reason.
+    fn on_tool_denied(&mut self, tool: &str, reason: &str) {
+        match self.format {
+            OutputFormat::StreamingJson => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "tool_denied",
+                        "tool": tool,
+                        "reason": reason,
+                    })
+                );
+            }
+            OutputFormat::Json | OutputFormat::Plain => {}
+        }
+    }
+
+    /// Arm process-wide emission of `confine_violation` NDJSON lines so the
+    /// permission manager can report escapes on the same streaming-json
+    /// channel without knowing about the headless emitter.
+    fn enable_confine_violation_emit(&self) {
+        xai_grok_tools::types::resources::set_streaming_json_confine_emit(matches!(
+            self.format,
+            OutputFormat::StreamingJson
+        ));
     }
 
     fn attach_structured_output(&self, target: &mut serde_json::Value) {
@@ -439,6 +569,54 @@ impl HeadlessEmitter {
         result
     }
 
+    /// First NDJSON line of any `streaming-json` run (H6). Harnesses pin on
+    /// `schemaVersion` and the confine/permission snapshot.
+    fn on_start(
+        &self,
+        session_id: &str,
+        cwd: &std::path::Path,
+        requested_model: Option<&str>,
+        served_model: Option<&str>,
+        permission_mode: &str,
+        sandbox: Option<&str>,
+        always_approve: bool,
+    ) {
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        let confine = xai_grok_tools::types::resources::process_confine_root()
+            .map(|p| p.display().to_string());
+        let start = serde_json::json!({
+            "type": "start",
+            "schemaVersion": 1,
+            "sessionId": session_id,
+            "cwd": cwd.display().to_string(),
+            "confineRoot": confine,
+            "requestedModel": requested_model,
+            "servedModel": served_model,
+            "permissionMode": permission_mode,
+            "sandbox": sandbox,
+            "binary": "hyper",
+            "version": xai_grok_version::VERSION,
+            "alwaysApprove": always_approve,
+        });
+        println!("{start}");
+    }
+
+    /// Served model may only become known after session model resolution.
+    fn on_model_resolved(&self, served_model: &str) {
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "model_resolved",
+                "servedModel": served_model,
+            })
+        );
+    }
+
     fn on_end(&mut self, stop_reason: &str, session_id: &str, request_id: &str) {
         match self.format {
             OutputFormat::Plain => {
@@ -447,18 +625,19 @@ impl HeadlessEmitter {
             OutputFormat::StreamingJson => {
                 let mut end = serde_json::json!({
                     "type": "end",
+                    "schemaVersion": 1,
                     "stopReason": stop_reason,
                     "sessionId": session_id,
-                    "requestId": request_id
+                    "requestId": request_id,
+                    "filesChanged": self.files_changed_json(),
                 });
-                if let Some(usage) = &self.usage {
-                    attach_result_usage(&mut end, usage);
-                }
+                self.attach_usage_fields(&mut end, false);
                 self.attach_structured_output(&mut end);
                 println!("{end}");
             }
             OutputFormat::Json => {
-                let result = self.build_json_result(stop_reason, session_id, request_id);
+                let mut result = self.build_json_result(stop_reason, session_id, request_id);
+                result["filesChanged"] = self.files_changed_json();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
@@ -472,10 +651,26 @@ impl HeadlessEmitter {
             OutputFormat::Plain => eprintln!("{message}"),
             OutputFormat::StreamingJson | OutputFormat::Json => {
                 let mut err = serde_json::json!({"type":"error","message": message});
-                if let Some(usage) = &self.usage {
-                    attach_result_usage(&mut err, usage);
-                }
+                // Always include `usage` on terminal paths (H7): snapshot when
+                // we have one (possibly incomplete), null when the ledger never
+                // started — never omit the key so harnesses do not guess.
+                self.attach_usage_fields(&mut err, true);
                 println!("{err}");
+            }
+        }
+    }
+
+    /// Attach `usage` / `usageIsIncomplete` for every terminal stream event.
+    fn attach_usage_fields(&self, target: &mut serde_json::Value, incomplete_if_present: bool) {
+        match &self.usage {
+            Some(usage) => {
+                attach_result_usage(target, usage);
+                if incomplete_if_present {
+                    target["usageIsIncomplete"] = serde_json::Value::Bool(true);
+                }
+            }
+            None => {
+                target["usage"] = serde_json::Value::Null;
             }
         }
     }
@@ -503,6 +698,68 @@ fn auto_respond_to_permissions(
         }
     }
     None
+}
+
+/// Headless plan mode (and default headless) auto-allow pure read/search
+/// tool kinds. Edit / Execute / Write still require YOLO or an `--allow`.
+///
+/// `ToolKind` here is the ACP wire kind on the permission request — not the
+/// internal `xai_grok_tools` taxonomy. Read/Search/Fetch cover Grep, Glob,
+/// Read, ListDir, WebFetch. Execute stays denied so Bash writes cannot slip
+/// through plan mode.
+fn headless_should_auto_allow_read(
+    req: &acp::RequestPermissionRequest,
+    permission_mode: Option<&str>,
+) -> bool {
+    // Plan mode is the primary case; default headless already auto-allows
+    // read/grep via the permission manager's SAFE_COMMAND path, but a prompt
+    // can still surface for MCP/edge tools that report Read/Search kind —
+    // auto-allow those under plan only so plan mode matches harness
+    // expectations without widening default headless.
+    let plan = matches!(permission_mode, Some("plan"));
+    if !plan {
+        return false;
+    }
+    // ACP wire kinds for pure-read tools. Grep/Glob project as Search; list/read
+    // as Read. Execute/Edit/Delete stay out so plan mode cannot write.
+    // `RequestPermissionRequest.tool_call` is a `ToolCallUpdate` — kind lives
+    // on `.fields`, not the top-level update.
+    matches!(
+        req.tool_call.fields.kind,
+        Some(acp::ToolKind::Read) | Some(acp::ToolKind::Search)
+    )
+}
+
+/// Explicit headless denial: prefer RejectOnce so the shell continues the
+/// turn with a model-visible error; emit a `tool_denied` stream event for
+/// harnesses; fall back to Cancelled only when no reject option exists.
+fn headless_deny_permission(
+    req: &acp::RequestPermissionRequest,
+    permission_mode: Option<&str>,
+    emitter: &mut HeadlessEmitter,
+) -> acp::RequestPermissionResponse {
+    // Title is the human-facing label (e.g. "Grep `pattern`") on
+    // `fields.title`. Best-effort tool label for the stream event — the
+    // model-facing body is composed in the shell from the decision outcome.
+    let tool_name = req
+        .tool_call
+        .fields
+        .title
+        .as_deref()
+        .and_then(|t| t.split_whitespace().next())
+        .unwrap_or("tool");
+    let mode = permission_mode.unwrap_or("default");
+    let reason = format!(
+        "no approval is possible in headless mode (permission mode: {mode}). \
+         Re-run with --always-approve, or add an --allow rule."
+    );
+    emitter.on_tool_denied(tool_name, &reason);
+    if let Some(resp) =
+        auto_respond_to_permissions(req, &[acp::PermissionOptionKind::RejectOnce])
+    {
+        return resp;
+    }
+    acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
 }
 
 /// "Not signed in" error message, tailored to the session type.
@@ -558,6 +815,7 @@ async fn authenticate(
 fn build_headless_init_request(
     rules: Option<&str>,
     system_prompt_override: Option<&str>,
+    allow_interactive_questions: bool,
 ) -> acp::InitializeRequest {
     let mut meta = serde_json::json!({
         "clientType": HEADLESS_CLIENT_TYPE,
@@ -569,11 +827,17 @@ fn build_headless_init_request(
     if let Some(system_prompt_override) = system_prompt_override {
         meta["systemPromptOverride"] = serde_json::json!(system_prompt_override);
     }
+    // `nonInteractive: true` is what `build_spawn_system_prompt` keys on for
+    // the HYPER-1 no-questions clause. Only suppress that clause when the
+    // harness explicitly opts back into interactive questions.
     meta["startupHints"] = serde_json::json!({
         "nonInteractive": true,
         "skipGitStatus": true,
         "skipProjectLayout": true,
     });
+    if allow_interactive_questions {
+        meta["allowInteractiveQuestions"] = serde_json::json!(true);
+    }
 
     acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(
@@ -582,6 +846,94 @@ fn build_headless_init_request(
                 .terminal(false),
         )
         .meta(meta.as_object().cloned())
+}
+
+// ── HYPER-1: headless question detection + one-shot auto-continue ────────
+
+/// Internal nudge after a headless turn that only asked a question. Bounded
+/// to **one** auto-continue per run — never loop.
+const HEADLESS_QUESTION_NUDGE: &str = "\
+There is no interactive user. Assume the answer is no to any optional feature \
+and proceed with the task as given.";
+
+/// Whether `stop_reason` is a normal successful end (Debug of ACP `EndTurn`).
+/// Other reasons (Cancelled, MaxTokens, Refusal, …) are not question-shaped
+/// failures and must not trigger auto-continue.
+fn is_normal_end_turn(stop_reason: &str) -> bool {
+    stop_reason == "EndTurn" || stop_reason == "end_turn"
+}
+
+/// Heuristic: the assistant's final message reads as a question to the user.
+///
+/// Field incident shape (HYPER-1):
+/// `"…Want to try it? (Requires opening a local URL)"` — ends in a question
+/// mark, optionally followed by a short parenthetical note. We deliberately
+/// do **not** match the browser-feature string itself (it is not in this repo
+/// and would bitrot); any turn whose final substance is a question is the
+/// structural failure mode.
+///
+/// Long post-`?` tails ("Is X true? Here is a full multi-sentence answer.")
+/// are **not** treated as questions — those runs did work verbally.
+pub(crate) fn looks_like_user_question(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Whole body first (covers single-paragraph field incident).
+    if line_reads_as_question(trimmed) {
+        return true;
+    }
+    // Multi-line: last non-empty line is the usual place for a closing opt-in.
+    let last_line = trimmed
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(trimmed);
+    line_reads_as_question(last_line)
+}
+
+/// A line/body is a question when it ends with `?`, or ends with a short
+/// parenthetical after a `?` (e.g. `Want to try it? (Requires opening a local
+/// URL)`).
+fn line_reads_as_question(s: &str) -> bool {
+    let s = s.trim();
+    if s.ends_with('?') {
+        return true;
+    }
+    // `…? (short note)` — field incident browser opt-in.
+    if let Some(q) = s.rfind('?') {
+        let tail = s[q + 1..].trim();
+        if tail.is_empty() {
+            return true;
+        }
+        if tail.starts_with('(') && tail.ends_with(')') && tail.len() <= 80 {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when a headless turn is the exact HYPER-1 failure shape: normal end,
+/// zero tool calls, assistant text that is a question, and the harness has
+/// not opted into interactive questions.
+fn should_auto_continue_headless_question(
+    stop_reason: &str,
+    tool_calls: u32,
+    assistant_text: &str,
+    allow_interactive_questions: bool,
+    already_continued: bool,
+) -> bool {
+    if allow_interactive_questions || already_continued {
+        return false;
+    }
+    if !is_normal_end_turn(stop_reason) {
+        return false;
+    }
+    if tool_calls > 0 {
+        return false;
+    }
+    looks_like_user_question(assistant_text)
 }
 
 struct OpenedSession {
@@ -844,6 +1196,8 @@ pub async fn run_single_turn(
     };
 
     let mut emitter = HeadlessEmitter::new(options.output_format, options.json_schema.is_some());
+    // Arm process-wide confine_violation NDJSON emission for streaming-json.
+    emitter.enable_confine_violation_emit();
 
     // Load config and spawn agent
     let t_spawn = Instant::now();
@@ -943,6 +1297,7 @@ pub async fn run_single_turn(
     let init_req = build_headless_init_request(
         options.rules.as_deref(),
         options.system_prompt_override.as_deref(),
+        options.allow_interactive_questions,
     );
     let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
         Ok(r) => r,
@@ -1077,10 +1432,42 @@ pub async fn run_single_turn(
         anyhow::bail!("{msg}");
     }
 
-    // Send prompt and stream response
-    let prompt_blocks = prompt.into_content_blocks();
+    // H6: first NDJSON line before any text/thought chunks.
+    let permission_mode = options
+        .permission_mode_flag
+        .as_deref()
+        .unwrap_or(if options.yolo {
+            "bypassPermissions"
+        } else {
+            "default"
+        });
+    let served = session_models
+        .current
+        .as_ref()
+        .map(|m| m.0.to_string());
+    emitter.on_start(
+        session_id.0.as_ref(),
+        &cwd,
+        options.model.as_deref(),
+        served.as_deref(),
+        permission_mode,
+        xai_grok_sandbox::configured_profile_name(),
+        options.yolo,
+    );
+    // If served model only becomes known after SetSessionModel, announce it.
+    if let (Some(requested), Some(served_s)) = (options.model.as_deref(), served.as_deref())
+        && requested != served_s
+    {
+        emitter.on_model_resolved(served_s);
+    }
 
-    let prompt_meta = {
+    // Send prompt and stream response. Outer loop allows exactly one
+    // HYPER-1 auto-continue after a question-only first turn.
+    let mut prompt_blocks = prompt.into_content_blocks();
+    let mut headless_question_continued = false;
+    let mut awaiting_user_input = false;
+
+    let prompt_meta_base = {
         let mut meta = serde_json::Map::new();
         if verbatim {
             meta.insert("verbatim".to_string(), serde_json::Value::Bool(true));
@@ -1094,14 +1481,9 @@ pub async fn run_single_turn(
             "screenMode".to_string(),
             serde_json::Value::String("headless".to_string()),
         );
-        Some(meta)
+        meta
     };
 
-    let request = acp::PromptRequest::new(session_id.clone(), prompt_blocks).meta(prompt_meta);
-    let t_prompt = Instant::now();
-    let mut ttf_logged = false;
-    let mut prompt_fut = Box::pin(acp_send(request, &acp_tx));
-    let mut prompt_result = None;
     // Pending background work: bash/monitor via x.ai/task_backgrounded +
     // task_completed; background subagents via SubagentSpawned + SubagentFinished
     // on x.ai/session_notification (prefixed `subagent:{id}` in pending_bg).
@@ -1113,133 +1495,194 @@ pub async fn run_single_turn(
     // task_completed can arrive before task_backgrounded; remember those IDs
     // so a late backgrounded does not re-arm waiting.
     let mut completed_before_bg: HashSet<String> = HashSet::new();
-    let mut prompt_done_at: Option<Instant> = None;
+    let mut prompt_result = None;
 
-    loop {
-        // First turn done and no tracked bg/monitor tasks still running.
-        // Drain buffered ACP first: PromptResponse can complete while
-        // task_backgrounded is still queued on acp_rx (never reached select!).
-        if options.wait_for_background && prompt_result.is_some() && pending_bg.is_empty() {
-            while let Ok(msg) = acp_rx.try_recv() {
-                handle_headless_acp_message(
-                    msg.boxed(),
-                    &mut emitter,
-                    t_prompt,
-                    &mut ttf_logged,
-                    options.yolo,
-                    options.output_format,
-                    &mut pending_bg,
-                    &mut completed_before_bg,
-                );
-            }
-            if pending_bg.is_empty() {
-                tracing::debug!("headless: no pending background tasks, exiting");
-                break;
-            }
+    // Bound: one user prompt + at most one internal nudge. Never loop further.
+    for prompt_attempt in 0u32..2 {
+        if prompt_attempt > 0 {
+            // Second attempt is the HYPER-1 nudge only.
+            emitter.reset_turn_tracking();
+            pending_bg.clear();
+            completed_before_bg.clear();
         }
 
-        // Safety valve so evals don't hang on long-lived monitors or stuck tasks.
-        if options.wait_for_background
-            && let Some(done_at) = prompt_done_at
-            && done_at.elapsed() >= options.background_wait_timeout
-        {
-            tracing::warn!(
-                pending_bg = pending_bg.len(),
-                timeout_secs = options.background_wait_timeout.as_secs(),
-                "headless: background wait timed out, exiting"
-            );
-            break;
-        }
+        let request =
+            acp::PromptRequest::new(session_id.clone(), prompt_blocks.clone()).meta(Some(
+                prompt_meta_base.clone(),
+            ));
+        let t_prompt = Instant::now();
+        let mut ttf_logged = false;
+        let mut prompt_fut = Box::pin(acp_send(request, &acp_tx));
+        let mut this_result = None;
+        let mut prompt_done_at: Option<Instant> = None;
 
-        // Only needed while waiting on tasks (timeout enforcement); otherwise
-        // the loop blocks on ACP until task_completed or PromptResponse.
-        let timeout_deadline = if options.wait_for_background
-            && prompt_result.is_some()
-            && !pending_bg.is_empty()
-            && let Some(done_at) = prompt_done_at
-        {
-            let remaining = options
-                .background_wait_timeout
-                .saturating_sub(done_at.elapsed());
-            if remaining.is_zero() {
-                Duration::from_millis(50)
-            } else {
-                remaining
-            }
-        } else {
-            Duration::from_secs(3600)
-        };
-
-        tokio::select! {
-            biased;
-            msg = acp_rx.recv() => {
-                let Some(msg) = msg else {
-                    emitter.on_error("Connection closed unexpectedly");
-                    anyhow::bail!("Connection closed unexpectedly");
-                };
-                handle_headless_acp_message(
-                    msg.boxed(),
-                    &mut emitter,
-                    t_prompt,
-                    &mut ttf_logged,
-                    options.yolo,
-                    options.output_format,
-                    &mut pending_bg,
-                    &mut completed_before_bg,
-                );
-            }
-            res = &mut prompt_fut, if prompt_result.is_none() => {
-                prompt_result = Some(res);
-                prompt_done_at = Some(Instant::now());
-                if !options.wait_for_background {
-                    drain_acp_with_grace(
-                        &mut acp_rx,
-                        Duration::from_millis(750),
+        loop {
+            // First turn done and no tracked bg/monitor tasks still running.
+            // Drain buffered ACP first: PromptResponse can complete while
+            // task_backgrounded is still queued on acp_rx (never reached select!).
+            if options.wait_for_background && this_result.is_some() && pending_bg.is_empty() {
+                while let Ok(msg) = acp_rx.try_recv() {
+                    handle_headless_acp_message(
+                        msg.boxed(),
                         &mut emitter,
                         t_prompt,
                         &mut ttf_logged,
                         options.yolo,
+                        options.permission_mode_flag.as_deref(),
                         options.output_format,
                         &mut pending_bg,
                         &mut completed_before_bg,
-                    )
-                    .await;
+                    );
+                }
+                if pending_bg.is_empty() {
+                    tracing::debug!("headless: no pending background tasks, exiting");
                     break;
                 }
-                // With wait_for_background: keep draining ACP for task_completed.
             }
-            _ = tokio::time::sleep(timeout_deadline), if options.wait_for_background
-                && prompt_result.is_some()
-                && !pending_bg.is_empty() =>
+
+            // Safety valve so evals don't hang on long-lived monitors or stuck tasks.
+            if options.wait_for_background
+                && let Some(done_at) = prompt_done_at
+                && done_at.elapsed() >= options.background_wait_timeout
             {
-                // Wake to re-check background_wait_timeout at the top of the loop.
+                tracing::warn!(
+                    pending_bg = pending_bg.len(),
+                    timeout_secs = options.background_wait_timeout.as_secs(),
+                    "headless: background wait timed out, exiting"
+                );
+                break;
+            }
+
+            // Only needed while waiting on tasks (timeout enforcement); otherwise
+            // the loop blocks on ACP until task_completed or PromptResponse.
+            let timeout_deadline = if options.wait_for_background
+                && this_result.is_some()
+                && !pending_bg.is_empty()
+                && let Some(done_at) = prompt_done_at
+            {
+                let remaining = options
+                    .background_wait_timeout
+                    .saturating_sub(done_at.elapsed());
+                if remaining.is_zero() {
+                    Duration::from_millis(50)
+                } else {
+                    remaining
+                }
+            } else {
+                Duration::from_secs(3600)
+            };
+
+            tokio::select! {
+                biased;
+                msg = acp_rx.recv() => {
+                    let Some(msg) = msg else {
+                        emitter.on_error("Connection closed unexpectedly");
+                        anyhow::bail!("Connection closed unexpectedly");
+                    };
+                    handle_headless_acp_message(
+                        msg.boxed(),
+                        &mut emitter,
+                        t_prompt,
+                        &mut ttf_logged,
+                        options.yolo,
+                        options.permission_mode_flag.as_deref(),
+                        options.output_format,
+                        &mut pending_bg,
+                        &mut completed_before_bg,
+                    );
+                }
+                res = &mut prompt_fut, if this_result.is_none() => {
+                    this_result = Some(res);
+                    prompt_done_at = Some(Instant::now());
+                    if !options.wait_for_background {
+                        drain_acp_with_grace(
+                            &mut acp_rx,
+                            Duration::from_millis(750),
+                            &mut emitter,
+                            t_prompt,
+                            &mut ttf_logged,
+                            options.yolo,
+                            options.permission_mode_flag.as_deref(),
+                            options.output_format,
+                            &mut pending_bg,
+                            &mut completed_before_bg,
+                        )
+                        .await;
+                        break;
+                    }
+                    // With wait_for_background: keep draining ACP for task_completed.
+                }
+                _ = tokio::time::sleep(timeout_deadline), if options.wait_for_background
+                    && this_result.is_some()
+                    && !pending_bg.is_empty() =>
+                {
+                    // Wake to re-check background_wait_timeout at the top of the loop.
+                }
             }
         }
-    }
 
-    // Track lifecycle notifications still queued at loop exit so the reaper
-    // sees them (the timeout path breaks without draining).
-    while let Ok(msg) = acp_rx.try_recv() {
-        handle_headless_acp_message(
-            msg.boxed(),
-            &mut emitter,
-            t_prompt,
-            &mut ttf_logged,
-            options.yolo,
-            options.output_format,
-            &mut pending_bg,
-            &mut completed_before_bg,
-        );
-    }
+        // Drain lifecycle notifications still queued at loop exit so the
+        // reaper sees them (the timeout path breaks without draining).
+        while let Ok(msg) = acp_rx.try_recv() {
+            handle_headless_acp_message(
+                msg.boxed(),
+                &mut emitter,
+                t_prompt,
+                &mut ttf_logged,
+                options.yolo,
+                options.permission_mode_flag.as_deref(),
+                options.output_format,
+                &mut pending_bg,
+                &mut completed_before_bg,
+            );
+        }
 
-    // Kill background tasks/subagents still pending at exit (background-wait
-    // timeout or --no-wait-for-background) so they don't outlive the process.
-    if !pending_bg.is_empty() {
-        tracing::warn!(
-            pending_bg = pending_bg.len(),
-            "headless: killing background work still pending at exit"
-        );
-        reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
+        // Kill background tasks/subagents still pending after this prompt so
+        // they don't outlive the process (or pollute the auto-continue turn).
+        if !pending_bg.is_empty() {
+            tracing::warn!(
+                pending_bg = pending_bg.len(),
+                "headless: killing background work still pending after prompt"
+            );
+            reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
+            pending_bg.clear();
+        }
+
+        prompt_result = this_result;
+
+        // HYPER-1: if the first turn was a pure question with no tools, nudge
+        // once and re-enter. Hard bound: never auto-continue a second time.
+        let Some(Ok(resp)) = prompt_result.as_ref() else {
+            break;
+        };
+        let stop_reason = format!("{:?}", resp.stop_reason);
+        if should_auto_continue_headless_question(
+            &stop_reason,
+            emitter.turn_tool_calls,
+            &emitter.turn_assistant_text,
+            options.allow_interactive_questions,
+            headless_question_continued,
+        ) {
+            headless_question_continued = true;
+            emitter.on_auto_continue("headless_question", 1);
+            tracing::info!(
+                "headless: question-ending turn with zero tool calls; auto-continuing once"
+            );
+            prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                HEADLESS_QUESTION_NUDGE,
+            ))];
+            continue;
+        }
+        // Second turn also made no tool calls after the nudge → honest
+        // AwaitingUserInput (never report a clean EndTurn for a run that
+        // only asked a question). Harnesses key completed-blind off EndTurn.
+        if headless_question_continued
+            && is_normal_end_turn(&stop_reason)
+            && emitter.turn_tool_calls == 0
+        {
+            awaiting_user_input = true;
+        }
+        break;
     }
 
     // Flush buffered unified log entries before exit.
@@ -1253,7 +1696,7 @@ pub async fn run_single_turn(
     // Agent cancel + join (SessionEnd flush) runs in AgentShutdownGuard::drop.
     match prompt_result {
         Some(Ok(resp)) => {
-            let stop_reason = format!("{:?}", resp.stop_reason);
+            let mut stop_reason = format!("{:?}", resp.stop_reason);
             emitter.set_structured_output_from_meta(resp.meta.as_ref());
             emitter.set_usage_from_meta(resp.meta.as_ref());
             let sid = resp
@@ -1274,11 +1717,23 @@ pub async fn run_single_turn(
                 .and_then(|m| m.get("cancellationCategory"))
                 .and_then(|v| v.as_str())
                 == Some("max_turns_reached");
+            // --require-changes: treat a productive stop with zero agent
+            // tool edits as NoChanges so harnesses can key on stopReason.
+            let no_changes = options.require_changes && emitter.files_changed.is_empty();
+            if awaiting_user_input {
+                // Distinct terminal signal: the run only asked a question
+                // (even after one auto-continue). filesChanged.count stays 0.
+                stop_reason = "AwaitingUserInput".to_string();
+            } else if no_changes && !is_max_turns {
+                stop_reason = "NoChanges".to_string();
+            }
             if is_max_turns {
                 match emitter.format {
                     OutputFormat::Plain => eprintln!("Max turns reached"),
                     OutputFormat::StreamingJson => {
-                        println!("{}", serde_json::json!({"type": "max_turns_reached"}))
+                        let mut ev = serde_json::json!({"type": "max_turns_reached"});
+                        emitter.attach_usage_fields(&mut ev, true);
+                        println!("{ev}");
                     }
                     OutputFormat::Json => {} // conveyed by stopReason in the final JSON
                 }
@@ -1286,6 +1741,14 @@ pub async fn run_single_turn(
                 anyhow::bail!("max turns reached");
             }
             emitter.on_end(&stop_reason, sid, rid);
+            if awaiting_user_input {
+                anyhow::bail!(
+                    "headless: run ended awaiting user input (question-only turn; no tools)"
+                );
+            }
+            if no_changes {
+                anyhow::bail!("require-changes: run finished with no agent file edits");
+            }
             Ok(())
         }
         Some(Err(err)) => {
@@ -1435,6 +1898,7 @@ async fn drain_acp_with_grace(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
+    permission_mode: Option<&str>,
     output_format: OutputFormat,
     pending_bg: &mut HashSet<String>,
     completed_before_bg: &mut HashSet<String>,
@@ -1448,6 +1912,7 @@ async fn drain_acp_with_grace(
                 t_prompt,
                 ttf_logged,
                 yolo,
+                permission_mode,
                 output_format,
                 pending_bg,
                 completed_before_bg,
@@ -1467,6 +1932,7 @@ async fn drain_acp_with_grace(
                     t_prompt,
                     ttf_logged,
                     yolo,
+                    permission_mode,
                     output_format,
                     pending_bg,
                     completed_before_bg,
@@ -1489,6 +1955,9 @@ fn handle_headless_acp_message(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
+    // CLI `--permission-mode` (e.g. `plan`, `auto`); drives headless
+    // read-class auto-allow and the denial stream event reason.
+    permission_mode: Option<&str>,
     output_format: OutputFormat,
     pending_bg: &mut HashSet<String>,
     completed_before_bg: &mut HashSet<String>,
@@ -1522,12 +1991,43 @@ fn handle_headless_acp_message(
                         emitter.on_thought_chunk(&text.text);
                     }
                 }
+                // Any tool call counts for the HYPER-1 "did work" check; Edit
+                // locations still feed filesChanged separately.
+                acp::SessionUpdate::ToolCall(tc) => {
+                    emitter.note_tool_call();
+                    if matches!(tc.kind, acp::ToolKind::Edit)
+                        && matches!(
+                            tc.status,
+                            acp::ToolCallStatus::Completed | acp::ToolCallStatus::InProgress
+                        )
+                    {
+                        // Prefer completed; still record locations when the
+                        // initial ToolCall already carries them (InProgress).
+                        emitter.note_edit_locations(&tc.locations);
+                    }
+                }
+                acp::SessionUpdate::ToolCallUpdate(tcu) => {
+                    // Updates do not re-count as new tool calls (the ToolCall
+                    // event already did). Only harvest Edit locations.
+                    if matches!(tcu.fields.kind, Some(acp::ToolKind::Edit))
+                        && matches!(tcu.fields.status, Some(acp::ToolCallStatus::Completed))
+                        && let Some(locs) = tcu.fields.locations.as_ref()
+                    {
+                        emitter.note_edit_locations(locs);
+                    }
+                }
                 _ => {}
             }
             let _ = boxed.response_tx.send(Ok(()));
         }
         AcpClientMessageBox::RequestPermission(req) => {
-            if yolo {
+            // Headless cannot prompt. Prefer Allow for YOLO / plan-mode
+            // read-class tools; otherwise RejectOnce so the shell maps the
+            // outcome to a non-empty model-facing error (never silent Cancel
+            // alone — Cancelled historically ended the turn with an empty
+            // tool body that models interpret as "no matches").
+            let allow = yolo || headless_should_auto_allow_read(&req.request, permission_mode);
+            if allow {
                 if let Some(resp) = auto_respond_to_permissions(
                     &req.request,
                     &[
@@ -1537,14 +2037,13 @@ fn handle_headless_acp_message(
                 ) {
                     let _ = req.response_tx.send(Ok(resp));
                 } else {
-                    let _ = req.response_tx.send(Ok(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    )));
+                    // No allow option offered — fall through to explicit deny.
+                    let denied = headless_deny_permission(&req.request, permission_mode, emitter);
+                    let _ = req.response_tx.send(Ok(denied));
                 }
             } else {
-                let _ = req.response_tx.send(Ok(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Cancelled,
-                )));
+                let denied = headless_deny_permission(&req.request, permission_mode, emitter);
+                let _ = req.response_tx.send(Ok(denied));
             }
         }
         AcpClientMessageBox::ExtNotification(notif) => {
@@ -1656,6 +2155,10 @@ fn handle_ext_notification(
 
     match method {
         "x.ai/session_notification" | "x.ai/session/update" => {}
+        // Announcement / CTA pushes (`x.ai/announcements/update`) are
+        // intentionally dropped here. Headless has no UI to paint them, and
+        // the shell also skips the push when `is_headless` (HYPER-1 defence).
+        // Do not stream them as text or wait for a click.
         _ => return ExtEvent::None,
     }
 
@@ -2035,6 +2538,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn files_changed_json_counts_and_lists_paths() {
+        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        emitter.files_changed.insert("src/a.rs".into());
+        emitter.files_changed.insert("src/b.rs".into());
+        let v = emitter.files_changed_json();
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["truncated"], false);
+        let paths = v["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|p| p == "src/a.rs"));
+        assert!(paths.iter().any(|p| p == "src/b.rs"));
+    }
+
+    #[test]
+    fn files_changed_json_empty_when_no_edits() {
+        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        let v = emitter.files_changed_json();
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["truncated"], false);
+        assert!(v["paths"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn files_changed_json_truncates_path_list() {
+        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        for i in 0..(FILES_CHANGED_MAX_PATHS + 5) {
+            emitter.files_changed.insert(format!("f{i}.rs"));
+        }
+        let v = emitter.files_changed_json();
+        assert_eq!(v["count"], FILES_CHANGED_MAX_PATHS + 5);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(
+            v["paths"].as_array().unwrap().len(),
+            FILES_CHANGED_MAX_PATHS
+        );
+    }
+
+    #[test]
+    fn require_changes_flag_detects_empty_set() {
+        // Mirrors the headless exit gate: require_changes && no edit paths.
+        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        assert!(emitter.files_changed.is_empty());
+        let require_changes = true;
+        assert!(require_changes && emitter.files_changed.is_empty());
+        let mut emitter2 = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        emitter2.files_changed.insert("x.rs".into());
+        assert!(!(require_changes && emitter2.files_changed.is_empty()));
+    }
+
     fn make_ext_notif(
         method: &str,
         update: serde_json::Value,
@@ -2161,5 +2714,79 @@ mod tests {
             handle_ext_notification(&notif, OutputFormat::Plain),
             ExtEvent::None
         ));
+    }
+
+    // ── HYPER-1: question shape + auto-continue bound ────────────────────
+
+    #[test]
+    fn looks_like_user_question_detects_trailing_question() {
+        assert!(looks_like_user_question("Want to try it?"));
+        assert!(looks_like_user_question(
+            "I can put together mockups.\n\nWant to try it?"
+        ));
+        assert!(looks_like_user_question("Proceed with the default?\n"));
+        // Rhetorical mid-body `?` with a real answer after — not a
+        // question-ending turn.
+        assert!(!looks_like_user_question(
+            "Is the bug in foo? Yes — I fixed it in src/main.rs and re-ran tests."
+        ));
+        assert!(!looks_like_user_question("I edited src/main.rs and ran tests."));
+        assert!(!looks_like_user_question(""));
+        assert!(!looks_like_user_question("   \n  "));
+    }
+
+    #[test]
+    fn looks_like_user_question_field_incident_shape() {
+        // The real field text: question mid-body, parenthetical after.
+        // Detector must catch this — it is the exact HYPER-1 failure.
+        let field = "Some of what we're working on might be easier to explain if I can show \
+it to you in a web browser. I can put together mockups, diagrams, comparisons, \
+and other visuals as we go. This feature is still new and can be token-intensive. \
+Want to try it? (Requires opening a local URL)";
+        assert!(
+            looks_like_user_question(field),
+            "field-incident browser opt-in must count as a user question"
+        );
+    }
+
+    #[test]
+    fn should_auto_continue_only_once_on_question_end_turn() {
+        let q = "Want to try the browser feature?";
+        assert!(should_auto_continue_headless_question(
+            "EndTurn", 0, q, false, false
+        ));
+        // Bound: already continued → never again.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 0, q, false, true
+        ));
+        // Opt-out.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 0, q, true, false
+        ));
+        // Did work.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 1, q, false, false
+        ));
+        // Not a normal end.
+        assert!(!should_auto_continue_headless_question(
+            "Cancelled", 0, q, false, false
+        ));
+        // Not a question.
+        assert!(!should_auto_continue_headless_question(
+            "EndTurn", 0, "Done.", false, false
+        ));
+    }
+
+    #[test]
+    fn build_headless_init_sets_non_interactive_and_opt_out() {
+        let req = build_headless_init_request(Some("be brief"), None, false);
+        let meta = req.meta.as_ref().expect("meta");
+        assert_eq!(meta["startupHints"]["nonInteractive"], true);
+        assert!(meta.get("allowInteractiveQuestions").is_none());
+        assert_eq!(meta["rules"], "be brief");
+
+        let req2 = build_headless_init_request(None, None, true);
+        let meta2 = req2.meta.as_ref().expect("meta");
+        assert_eq!(meta2["allowInteractiveQuestions"], true);
     }
 }

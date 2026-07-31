@@ -81,7 +81,26 @@ pub(crate) fn execute(
             tasks.spawn(async move { send_changes_action(agent_id, session_id, kind, tx).await });
         }
         Effect::SetWorkingDir { path } => {
-            if let Err(e) = std::env::set_current_dir(&path) {
+            // Under `--confine`, refuse to leave the root. apply_cwd_from only
+            // set_current_dir'd before; confinement makes that a real boundary.
+            let refused = xai_grok_tools::types::resources::process_confine_root().is_some_and(
+                |root| {
+                    if !xai_grok_tools::types::resources::path_is_under_confine_root(&path, root)
+                    {
+                        tracing::warn!(
+                            path = %path.display(),
+                            root = %root.display(),
+                            "SetWorkingDir refused: path outside confine root"
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
+            if !refused
+                && let Err(e) = std::env::set_current_dir(&path)
+            {
                 tracing::warn!(error = %e, "project picker: failed to set_current_dir");
             }
         }

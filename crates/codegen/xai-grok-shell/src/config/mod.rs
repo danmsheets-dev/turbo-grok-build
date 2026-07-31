@@ -1449,6 +1449,18 @@ pub fn apply_sandbox(
         }
     }
     if sandbox_profile != xai_grok_sandbox::ProfileName::Off {
+        // Windows (and other non-unix) builds cannot kernel-enforce sandbox
+        // profiles — apply() is a no-op stub. Say so once so operators do not
+        // treat `--sandbox read-only` as a real confinement guarantee, and so
+        // a non-enforcing profile never appears to "break" tools (e.g. Grep
+        // extracting bundled ripgrep into ~/.grok/vendor).
+        #[cfg(not(unix))]
+        {
+            eprintln!(
+                "warning: --sandbox {sandbox_profile} is advisory on this platform \
+                 (no kernel enforcement); tool behaviour is unchanged"
+            );
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let requires_protection = {
             let is_custom = matches!(sandbox_profile, xai_grok_sandbox::ProfileName::Custom(_));

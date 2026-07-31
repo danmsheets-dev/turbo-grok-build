@@ -767,7 +767,21 @@ impl ToolOutput {
             },
             ToolOutput::Bash(bash_output) => bash_output.output_for_prompt.clone(),
             ToolOutput::GrepSearch(grep_search_output) => {
-                String::from_utf8_lossy(&grep_search_output.stdout).into_owned()
+                // Prefer stdout (formatted card / "No matches found"). If a
+                // failure path left stdout empty with a populated stderr
+                // (historical spawn-failure bug), surface stderr so the model
+                // never sees a silent empty body.
+                let stdout = String::from_utf8_lossy(&grep_search_output.stdout);
+                if !stdout.is_empty() {
+                    stdout.into_owned()
+                } else if !grep_search_output.stderr.is_empty() {
+                    String::from_utf8_lossy(&grep_search_output.stderr).into_owned()
+                } else {
+                    format!(
+                        "Error calling tool: grep returned empty output (exit {})",
+                        grep_search_output.exit_code
+                    )
+                }
             }
             ToolOutput::Todo(todo_output) => match todo_output {
                 TodoWriteOutput::TodosUpdated(success) => success.summary_for_prompt.to_owned(),

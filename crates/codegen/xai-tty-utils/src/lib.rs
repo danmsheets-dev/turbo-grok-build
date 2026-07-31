@@ -40,7 +40,9 @@ use std::collections::HashMap;
 use std::io;
 
 mod process_scope;
-pub use process_scope::{ProcessScope, global_process_scope};
+pub use process_scope::{
+    ProcessScope, enter_self_job_object_if_requested, global_process_scope,
+};
 
 pub mod runtime;
 

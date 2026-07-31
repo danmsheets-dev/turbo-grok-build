@@ -548,13 +548,17 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
             let cmd = cmd.trim_start();
             cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
         }
-        AccessKind::Edit(path) => glob_matches(path, MatchContext::Path, cr.matcher),
+        // Path tools: canonicalise the operand (and the rule's path prefix)
+        // before matching so `../Main Repo/x` and `MAINRE~1\x` cannot dodge a
+        // deny keyed on the long name. Relative globs (`**/.env`) still match
+        // the raw spelling when the canonical form would become absolute.
+        AccessKind::Edit(path) => path_glob_matches(path, pattern, cr.matcher),
         AccessKind::Read(path) => match path {
-            Some(p) => glob_matches(p, MatchContext::Path, cr.matcher),
+            Some(p) => path_glob_matches(p, pattern, cr.matcher),
             None => false,
         },
         AccessKind::Grep { path, .. } => match path {
-            Some(p) => glob_matches(p, MatchContext::Path, cr.matcher),
+            Some(p) => path_glob_matches(p, pattern, cr.matcher),
             None => false,
         },
         AccessKind::MCPTool { name, .. } => glob_matches(name, MatchContext::Freeform, cr.matcher),
@@ -566,6 +570,116 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
             glob_matches(query, MatchContext::Freeform, cr.matcher) || query.starts_with(pattern)
         }
     }
+}
+
+/// Match a filesystem path against a path-mode glob after the same
+/// canonicalisation used by confine (`canonicalize_for_permission`).
+///
+/// WHY both raw and canonical forms: relative rules like `src/**` must keep
+/// matching model-relative paths; absolute deny roots must still catch
+/// short-name / `..` aliases of the same directory. Matching only one form
+/// reopens an escape on the other.
+fn path_glob_matches(path: &str, pattern: &str, matcher: Option<&glob::Pattern>) -> bool {
+    if path_glob_matches_one(path, pattern, matcher) {
+        return true;
+    }
+    let path_c = xai_grok_tools::types::resources::canonicalize_for_permission(
+        std::path::Path::new(path),
+    );
+    let path_canon = normalize_path_glob_text(&path_c.display.to_string_lossy());
+    if path_canon != normalize_path_glob_text(path)
+        && path_glob_matches_one(&path_canon, pattern, matcher)
+    {
+        return true;
+    }
+    // Also try the rule with its literal prefix canonicalised the same way
+    // (harness may have written `Edit(C:/…/Main Repo/**)` while the model
+    // supplies a short-name spelling of that directory).
+    if let Some(canon_pat) = canonicalize_path_glob_pattern(pattern) {
+        if canon_pat != pattern {
+            if let Ok(rebuilt) = glob::Pattern::new(&canon_pat) {
+                if path_glob_matches_one(path, &canon_pat, Some(&rebuilt)) {
+                    return true;
+                }
+                if path_canon != normalize_path_glob_text(path)
+                    && path_glob_matches_one(&path_canon, &canon_pat, Some(&rebuilt))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn path_glob_matches_one(path: &str, pattern: &str, matcher: Option<&glob::Pattern>) -> bool {
+    let path_n = normalize_path_glob_text(path);
+    let pattern_n = normalize_path_glob_text(pattern);
+    // Prefer a rebuilt matcher when separators/case were normalised so the
+    // compiled pattern from the rule config cannot miss solely due to `\` vs `/`.
+    if path_n != path || pattern_n != pattern {
+        if let Ok(rebuilt) = glob::Pattern::new(&pattern_n) {
+            return glob_matches(&path_n, MatchContext::Path, Some(&rebuilt));
+        }
+    }
+    if let Some(m) = matcher {
+        if pattern_n == pattern {
+            return glob_matches(&path_n, MatchContext::Path, Some(m));
+        }
+    }
+    if let Ok(rebuilt) = glob::Pattern::new(&pattern_n) {
+        return glob_matches(&path_n, MatchContext::Path, Some(&rebuilt));
+    }
+    false
+}
+
+/// Forward-slash form (and Windows case-fold) so globs written with either
+/// separator match the same on-disk path after canonicalisation.
+fn normalize_path_glob_text(s: &str) -> String {
+    let s = s.replace('\\', "/");
+    #[cfg(windows)]
+    {
+        s.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        s
+    }
+}
+
+/// Canonicalise the literal (non-meta) prefix of a path glob; leave `*`/`?`/`[`
+/// suffixes intact. Returns `None` when the pattern has no path-like prefix.
+fn canonicalize_path_glob_pattern(pattern: &str) -> Option<String> {
+    let norm = pattern.replace('\\', "/");
+    let meta = norm.find(['*', '?', '[']).unwrap_or(norm.len());
+    let (prefix, suffix) = norm.split_at(meta);
+    if prefix.is_empty() {
+        return None;
+    }
+    // Only rewrite absolute / drive-letter prefixes — relative globs stay
+    // relative so `src/**` keeps matching model-relative paths.
+    let prefix_path = std::path::Path::new(prefix);
+    let looks_absolute = prefix_path.is_absolute()
+        || (cfg!(windows)
+            && prefix.len() >= 2
+            && prefix.as_bytes()[1] == b':'
+            && prefix.as_bytes()[0].is_ascii_alphabetic());
+    if !looks_absolute {
+        return None;
+    }
+    // Drop a trailing slash from the prefix before canonicalize so we resolve
+    // the directory itself; re-attach separator if the original had one.
+    let trim = prefix.trim_end_matches('/');
+    let trailing_sep = trim.len() != prefix.len();
+    let c = xai_grok_tools::types::resources::canonicalize_for_permission(
+        std::path::Path::new(trim),
+    );
+    let mut rebuilt = normalize_path_glob_text(&c.display.to_string_lossy());
+    if trailing_sep && !rebuilt.ends_with('/') {
+        rebuilt.push('/');
+    }
+    rebuilt.push_str(suffix);
+    Some(rebuilt)
 }
 
 fn domain_matches(pattern: &str, url: &str) -> bool {
@@ -589,6 +703,9 @@ fn glob_matches(text: &str, ctx: MatchContext, pat: Option<&glob::Pattern>) -> b
         glob::MatchOptions {
             require_literal_separator: matches!(ctx, MatchContext::Path),
             require_literal_leading_dot: false,
+            // Path rules are case-insensitive on Windows only; freeform
+            // (bash/mcp/url) stays case-sensitive everywhere.
+            case_sensitive: !(cfg!(windows) && matches!(ctx, MatchContext::Path)),
             ..Default::default()
         },
     )
@@ -695,6 +812,50 @@ mod tests {
         assert!(matches(&access, &rule_for("npm*")));
         assert!(matches(&access, &rule_for("npm install")));
         assert!(!matches(&access, &rule_for("cargo*")));
+    }
+
+    /// WP-H4: deny globs must match after canonicalisation so `..` and 8.3
+    /// short names cannot dodge an absolute `Edit(…/Main Repo/**)` rule.
+    #[test]
+    fn edit_deny_matches_parent_traversal_alias() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("wt");
+        let sibling = base.path().join("Main Repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("seed.txt"), "x").unwrap();
+
+        let deny_pattern = format!(
+            "{}/**",
+            sibling.to_string_lossy().replace('\\', "/")
+        );
+        let deny = PermissionRule {
+            action: RuleAction::Deny,
+            tool: ToolFilter::Edit,
+            pattern: Some(deny_pattern),
+            pattern_mode: PatternMode::Glob,
+        };
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![deny]));
+
+        // Parent traversal into the denied sibling.
+        let traversal = root
+            .join("..")
+            .join("Main Repo")
+            .join("d.txt")
+            .to_string_lossy()
+            .into_owned();
+        let decision = policy.evaluate(&AccessKind::Edit(traversal));
+        assert!(
+            matches!(decision, Some(Decision::Reject(_))),
+            "parent-traversal edit into denied sibling must match deny: {decision:?}"
+        );
+
+        // In-root write must not match the sibling deny.
+        let inside = root.join("ok.txt").to_string_lossy().into_owned();
+        assert!(
+            policy.evaluate(&AccessKind::Edit(inside)).is_none(),
+            "in-root path must not match sibling deny"
+        );
     }
 
     #[test]

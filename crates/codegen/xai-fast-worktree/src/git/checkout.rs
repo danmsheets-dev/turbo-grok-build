@@ -480,7 +480,8 @@ fn rehydrate_worktree_from_ref_inner(
         let _ = crate::remove_worktree(dest);
         let _ = snapshot_git(source_repo, &["worktree", "prune"], &[]);
         if dest.exists() {
-            let _ = std::fs::remove_dir_all(dest);
+            // Long-path-safe on Windows (deep `.godot/` / `node_modules` trees).
+            let _ = xai_grok_paths::remove_dir_all_long(dest);
         }
     }
     snapshot_git(

@@ -11,17 +11,72 @@ const RG_BYTES: &[u8] = include_bytes!(concat!(
     ".bin"
 ));
 
+/// File name for the extracted bundled ripgrep binary.
+///
+/// On Windows the binary is a PE image and **must** carry a `.exe` suffix so
+/// `CreateProcess` / `Command::new` reliably treat it as executable. The old
+/// extensionless name (`rg-<ver>-<target>`) is still accepted if already on
+/// disk so existing installs keep working without a re-extract.
+#[cfg(bundle_rg)]
+fn bundled_rg_file_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        concat!(
+            "rg-",
+            env!("GROK_TOOLS_RG_VER"),
+            "-",
+            env!("GROK_TOOLS_RG_TARGET"),
+            ".exe"
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        concat!(
+            "rg-",
+            env!("GROK_TOOLS_RG_VER"),
+            "-",
+            env!("GROK_TOOLS_RG_TARGET")
+        )
+    }
+}
+
 #[cfg(bundle_rg)]
 fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    let p = crate::util::grok_home().join("vendor").join(concat!(
-        "rg-",
-        env!("GROK_TOOLS_RG_VER"),
-        "-",
-        env!("GROK_TOOLS_RG_TARGET")
-    ));
+    let vendor = crate::util::grok_home().join("vendor");
+    let p = vendor.join(bundled_rg_file_name());
+    // Windows: older installs left an extensionless PE (`rg-<ver>-<target>`).
+    // `CreateProcess` / `Command::new` does **not** reliably treat that as
+    // executable — spawn fails in ~2 ms with empty model-facing stdout (the
+    // error landed only in stderr). Promote the legacy file to the `.exe`
+    // name; never return the bare path as the spawn target. If promotion
+    // fails (read-only sandbox), fall through to re-extract from the bundle.
+    #[cfg(target_os = "windows")]
+    {
+        let legacy = vendor.join(concat!(
+            "rg-",
+            env!("GROK_TOOLS_RG_VER"),
+            "-",
+            env!("GROK_TOOLS_RG_TARGET")
+        ));
+        if !p.exists() && legacy.exists() {
+            if let Err(e) = fs::create_dir_all(p.parent().unwrap_or(vendor.as_path())) {
+                tracing::warn!(error = %e, "grep: could not create vendor dir for rg.exe promote");
+            } else if let Err(e) = fs::copy(&legacy, &p) {
+                tracing::warn!(
+                    error = %e,
+                    legacy = %legacy.display(),
+                    target = %p.display(),
+                    "grep: could not promote extensionless rg to .exe; will re-extract"
+                );
+            }
+            // Prefer the promoted/extracted `.exe` path below; do not return
+            // `legacy` even when copy failed — that path is known-broken for
+            // spawn on Windows.
+        }
+    }
     if !p.exists() {
         fs::create_dir_all(p.parent().unwrap())?;
         fs::write(&p, RG_BYTES)?;
@@ -35,6 +90,72 @@ fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
     Ok(p)
 }
 
+/// On Windows, if `path` is an existing extensionless PE (legacy vendor extract),
+/// copy it next to itself as `path.exe` and return that. `CreateProcess` does
+/// not reliably run extensionless PE images; returning the bare path is how
+/// grep short-circuited empty on Windows field reports.
+///
+/// **Do not use `Path::with_extension`**: for names like `rg-15.0.0-override`
+/// the "extension" is the tail after the last `.` (`0-override`), so
+/// `with_extension("exe")` would yield the wrong `rg-15.0.exe`.
+fn ensure_windows_exe_suffix(path: PathBuf) -> PathBuf {
+    #[cfg(not(windows))]
+    {
+        return path;
+    }
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".exe"))
+        {
+            return path;
+        }
+        if !path.exists() {
+            return path;
+        }
+        // Append ".exe" to the full file name (not with_extension).
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return path;
+        };
+        let exe_name = format!("{name}.exe");
+        let exe = path.with_file_name(OsStr::new(&exe_name));
+        if exe.exists() {
+            return exe;
+        }
+        if std::fs::copy(&path, &exe).is_ok() {
+            return exe;
+        }
+        // Last resort: return the original; spawn will surface a clear error.
+        path
+    }
+}
+
+/// Scan `~/.grok/vendor` for a previously extracted `rg-*` binary.
+fn find_vendor_rg() -> Option<PathBuf> {
+    let vendor = crate::util::grok_home().join("vendor");
+    let entries = std::fs::read_dir(&vendor).ok()?;
+    // Prefer an already-promoted `.exe`, then promote a bare name.
+    let mut bare: Option<PathBuf> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("rg-") {
+            continue;
+        }
+        let p = entry.path();
+        if name.ends_with(".exe") {
+            return Some(p);
+        }
+        if bare.is_none() {
+            bare = Some(p);
+        }
+    }
+    bare.map(ensure_windows_exe_suffix)
+}
+
 /// Get the path to the ripgrep executable.
 ///
 /// In release builds with bundling enabled, this extracts the bundled ripgrep
@@ -46,13 +167,25 @@ pub fn rg_path() -> PathBuf {
         .get_or_init(|| {
             #[cfg(bundle_rg)]
             {
-                resolve_bundled_rg().unwrap_or_else(|_| PathBuf::from("rg"))
+                resolve_bundled_rg()
+                    .map(ensure_windows_exe_suffix)
+                    .unwrap_or_else(|_| {
+                        find_vendor_rg().unwrap_or_else(|| PathBuf::from("rg"))
+                    })
             }
             #[cfg(not(bundle_rg))]
             {
                 // RG_BIN_PATH: explicit override (tests / packaging can set this).
                 if let Ok(p) = std::env::var("RG_BIN_PATH") {
-                    return PathBuf::from(p);
+                    return ensure_windows_exe_suffix(PathBuf::from(p));
+                }
+                // Prefer a previously-extracted vendor binary (same home as
+                // release builds). Without this, non-bundled debug builds on
+                // Windows fall through to bare `rg` which is often not on PATH
+                // — the grep tool then Early-returns in ~2 ms with an empty
+                // model body (spawn program-not-found).
+                if let Some(vendor) = find_vendor_rg() {
+                    return vendor;
                 }
                 // Some hermetic test runners set RUNFILES_DIR and ship rg as a
                 // data dependency rather than on PATH. Scan for a directory
@@ -67,7 +200,7 @@ pub fn rg_path() -> PathBuf {
                                 for sub in ["amd64/rg", "arm64/rg", "rg"] {
                                     let candidate = entry.path().join(sub);
                                     if candidate.exists() {
-                                        return candidate;
+                                        return ensure_windows_exe_suffix(candidate);
                                     }
                                 }
                             }

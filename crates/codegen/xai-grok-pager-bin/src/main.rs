@@ -29,6 +29,7 @@ use anyhow::Result;
 use std::env;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::cli::DashboardArgs;
 use xai_grok_pager::app::{
@@ -81,6 +82,13 @@ fn apply_agent_endpoint_args(
         config.endpoints.xai_api_base_url = v.clone();
     }
 }
+/// Canonicalise `--confine` / `--workspace-root` and stamp it process-wide.
+/// Fail-fast with a clear error when the path is missing or not a directory —
+/// a harness must not silently run unconfined after a typo.
+fn apply_confine_root(path: &Path) -> Result<()> {
+    xai_grok_pager::confine::apply_confine_root(path)
+}
+
 /// Resolve --agent-profile path: canonicalize and verify the file exists.
 fn resolve_agent_profile_path(path: &std::path::Path) -> std::path::PathBuf {
     match dunce::canonicalize(path) {
@@ -1860,6 +1868,10 @@ fn main() {
         std::process::exit(code);
     }
     let args = PagerArgs::parse_cli();
+    // Opt-in Windows Job Object for the whole process tree so harnesses can
+    // kill Hyper cleanly (see docs/windows-process-tree.md). Must run early —
+    // children inherit the job automatically when breakaway is not requested.
+    xai_tty_utils::enter_self_job_object_if_requested(args.job_object);
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;
     }
@@ -2009,6 +2021,12 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         sandbox_profile_arg.as_deref(),
         args.cwd.as_deref(),
     );
+    // Fail-fast confine root: harnesses hand a worktree path and need a hard
+    // guarantee that nothing is written outside it (cross-platform prefix
+    // check — not the OS sandbox, which is advisory on Windows).
+    if let Some(ref confine) = args.confine {
+        apply_confine_root(confine)?;
+    }
     // `grok codex` is a shim over the native OpenAI Codex platform: rewrite
     // the invocation into the standard pager flows (TUI / headless) pinned
     // to an `openai-codex/*` model before interactive-mode detection.
@@ -2095,14 +2113,16 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return xai_grok_pager::plugin_cmd::run(plugin_args).await;
             }
-            Command::Models => {
+            Command::Models(models_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return xai_grok_pager::models::list_available_models(&agent_config).await;
+                // Registry-only path: exits 0 on success (no agent-shell teardown abort).
+                return xai_grok_pager::models::list_available_models(&agent_config, &models_args)
+                    .await;
             }
             Command::Leader(leader_args) => {
                 init_tracing_simple("cli");
@@ -2396,6 +2416,8 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                require_changes: args.require_changes,
+                allow_interactive_questions: args.allow_interactive_questions,
             },
         )
         .await;

@@ -7,6 +7,7 @@ pub mod actions;
 pub mod app;
 pub mod client_identity;
 pub mod codex;
+pub mod confine;
 pub mod completions_cmd;
 mod config_toml_edit;
 mod scoped_models;

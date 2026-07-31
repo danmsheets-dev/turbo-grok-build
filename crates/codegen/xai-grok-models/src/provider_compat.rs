@@ -91,6 +91,20 @@ pub struct OpenAiCompletionsCompat {
     pub deferred_tools_mode: Option<DeferredToolsMode>,
     pub session_affinity_format: SessionAffinityFormat,
     pub supports_long_cache_retention: bool,
+    // HYPER-LOCAL: NVIDIA Nemotron accepts a top-level `reasoning_budget` (an
+    // integer token budget for the thinking phase). It is a Nemotron-only
+    // extension — other vendors on the same OpenAI-compatible endpoint reject
+    // it with "Unsupported parameter(s)" and return zero tokens — so it is
+    // emitted only from the ChatTemplate thinking arm, which no other vendor
+    // reaches. `None` (the default) omits the key entirely.
+    pub reasoning_budget: Option<u32>,
+    // HYPER-LOCAL: `prompt_cache_key` is an OpenAI-only Chat Completions
+    // parameter that this client stamps onto EVERY request from the session id.
+    // Every sibling OpenAI-only body field is gated by a compat flag
+    // (`supports_store`, `supports_usage_in_streaming`, `supports_strict_mode`,
+    // …) but this one shipped ungated, which 400s on strict gateways such as
+    // NVIDIA Integrate. Defaults to `true` so existing behavior is unchanged.
+    pub supports_prompt_cache_key: bool,
 }
 
 impl Default for OpenAiCompletionsCompat {
@@ -117,6 +131,9 @@ impl Default for OpenAiCompletionsCompat {
             deferred_tools_mode: None,
             session_affinity_format: SessionAffinityFormat::OpenAi,
             supports_long_cache_retention: true,
+            // HYPER-LOCAL: see field docs above.
+            reasoning_budget: None,
+            supports_prompt_cache_key: true,
         }
     }
 }

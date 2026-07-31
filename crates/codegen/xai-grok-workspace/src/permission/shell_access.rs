@@ -319,6 +319,51 @@ pub(crate) fn is_safe_write_sink(path: &str) -> bool {
     matches!(path, "/dev/null" | "/dev/stdout" | "/dev/stderr")
 }
 
+/// Write targets and `cd`/`pushd` destinations a shell command may touch,
+/// for confine checking.
+///
+/// Returns `None` when the script cannot be parsed with confidence — under
+/// `--confine` that is a fail-closed deny (a harness that asked for
+/// confinement wants the strict reading). Returns `Some(paths)` (possibly
+/// empty) when the parse is clean enough to trust the operand list.
+///
+/// Reuses the same write model as the shell file-access gate
+/// ([`command_write_paths_in_tree`]) plus `cd`/`pushd` operands so a
+/// `cd ../Main\ Repo && echo x > f` cannot leave the root by changing cwd
+/// first.
+pub(crate) fn shell_confine_operands(cmd: &str) -> Option<Vec<String>> {
+    let tree = try_parse_shell(cmd)?;
+    let root = tree.root_node();
+    // Error nodes mean tree-sitter recovered — operand extraction is incomplete.
+    // Fail closed: caller under confine must deny rather than trust a partial list.
+    if root.has_error() {
+        return None;
+    }
+    let mut out = command_write_paths_in_tree(root, cmd);
+    for invocation in shell_command_invocations(root, cmd) {
+        let words = InvocationSlice {
+            words: &invocation.words,
+        }
+        .literal_words();
+        let Some(program) = words.first().map(|w| shell_program_name(w)) else {
+            continue;
+        };
+        let program = program.to_ascii_lowercase();
+        if matches!(program.as_str(), "cd" | "pushd") {
+            // First positional operand is the destination (`cd -` / bare `cd`
+            // have no path — skip those).
+            for token in shell_file_candidates(&words) {
+                if token == "-" {
+                    continue;
+                }
+                out.push(token.to_owned());
+                break;
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Why acceptEdits must still prompt for this edit target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectedEditReason {
@@ -1321,6 +1366,32 @@ mod tests {
 
     fn cwd() -> &'static std::path::Path {
         std::path::Path::new("/work")
+    }
+
+    /// WP-H4: confine reuses write/`cd` operand extraction; unparseable → None.
+    #[test]
+    fn shell_confine_operands_extracts_redirects_and_cd() {
+        let writes = shell_confine_operands("echo hi > /tmp/out.txt")
+            .expect("plain redirect must parse");
+        assert!(
+            writes.iter().any(|p| p.contains("out.txt")),
+            "redirect target missing: {writes:?}"
+        );
+
+        let cds = shell_confine_operands("cd /outside/main && echo x > f.txt")
+            .expect("cd+redirect must parse");
+        assert!(
+            cds.iter().any(|p| p.contains("outside") || p == "/outside/main"),
+            "cd destination missing: {cds:?}"
+        );
+        assert!(
+            cds.iter().any(|p| p.contains("f.txt")),
+            "relative write after cd missing: {cds:?}"
+        );
+
+        // Known-safe non-writer with no redirects → empty operand list, not None.
+        let empty = shell_confine_operands("echo hello").expect("echo must parse");
+        assert!(empty.is_empty(), "echo should have no write/cd operands: {empty:?}");
     }
 
     #[test]

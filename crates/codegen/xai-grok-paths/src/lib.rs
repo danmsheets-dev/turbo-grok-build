@@ -50,6 +50,106 @@ pub fn from_relative_path(root: &Path, rel_path: &Path) -> PathBuf {
     }
 }
 
+/// Return a Windows long-path form suitable for filesystem APIs that choke on
+/// paths longer than ~260 characters (deep `.godot/imported/…`, nested
+/// `node_modules`, worktree cleanup).
+///
+/// Behaviour:
+/// - **Non-Windows:** returns `path` unchanged (no `\\?\` prefix exists).
+/// - **Already prefixed** (`\\?\…` or `//?/…`): returned as-is.
+/// - **UNC** (`\\server\share\…`): becomes `\\?\UNC\server\share\…`.
+/// - **Drive-letter absolute** (`C:\…`): becomes `\\?\C:\…`.
+/// - **Relative** (or containing `.` / `..`): canonicalised first via
+///   `std::fs::canonicalize` when the path exists, otherwise joined onto
+///   `std::env::current_dir` and normalised lexically. Blind `\\?\` on a
+///   relative path is unsafe — the prefix disables Win32 normalisation, so
+///   `..` would stay literal.
+///
+/// The result is for **filesystem syscalls** only (remove_dir_all, open, etc.).
+/// Do not pass it to git or display it to users without stripping the prefix.
+pub fn windows_long_path(path: &Path) -> PathBuf {
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(windows)]
+    {
+        windows_long_path_impl(path)
+    }
+}
+
+/// Recursive directory removal that tolerates Windows MAX_PATH failures.
+///
+/// On Windows, prefixes the path with `\\?\` (see [`windows_long_path`]) before
+/// calling `remove_dir_all`. On other platforms this is a thin wrapper.
+pub fn remove_dir_all_long(path: &Path) -> std::io::Result<()> {
+    let target = windows_long_path(path);
+    std::fs::remove_dir_all(&target)
+}
+
+#[cfg(windows)]
+fn windows_long_path_impl(path: &Path) -> PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    // Already long-path prefixed (either form of separator).
+    if s.starts_with(r"\\?\") || s.starts_with("//?/") {
+        return path.to_path_buf();
+    }
+
+    // Need an absolute path without `.`/`..` before prefixing.
+    let absolute = if path.is_absolute() && !path_has_dot_components(path) {
+        path.to_path_buf()
+    } else if let Ok(canon) = std::fs::canonicalize(path) {
+        // canonicalize on Windows already returns `\\?\` for long paths in
+        // some Rust versions; strip and re-apply below for a stable form.
+        strip_verbatim_prefix(canon)
+    } else {
+        let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base.join(path)
+        };
+        normalize_lexically(&joined)
+    };
+
+    let abs_s = absolute.to_string_lossy().replace('/', "\\");
+
+    if abs_s.starts_with(r"\\?\") {
+        return PathBuf::from(abs_s.as_str());
+    }
+
+    // UNC: \\server\share\… → \\?\UNC\server\share\…
+    if let Some(rest) = abs_s.strip_prefix(r"\\") {
+        // Avoid double-prefixing \\?\UNC\…
+        if rest.starts_with(r"?\UNC\") || rest.starts_with("?\\") {
+            return PathBuf::from(abs_s.as_str());
+        }
+        return PathBuf::from(format!(r"\\?\UNC\{rest}"));
+    }
+
+    // Drive-letter absolute: C:\… → \\?\C:\…
+    PathBuf::from(format!(r"\\?\{abs_s}"))
+}
+
+#[cfg(windows)]
+fn path_has_dot_components(path: &Path) -> bool {
+    use std::path::Component;
+    path.components()
+        .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+}
+
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
 /// Resolve `.` and `..` components without touching the filesystem.
 ///
 /// Use only for lexical display or containment. If `b` is a symlink,
@@ -571,5 +671,62 @@ mod tests {
         let path: String = "src/main.rs".to_string();
         let abs = path.to_abs_path(root);
         assert_eq!(abs.as_ref(), Path::new("/home/user/src/main.rs"));
+    }
+
+    // ── windows_long_path ────────────────────────────────────────────────
+
+    #[cfg(windows)]
+    #[test]
+    fn long_path_drive_letter() {
+        let p = Path::new(r"C:\Users\dan\project\file.rs");
+        let long = windows_long_path(p);
+        let s = long.to_string_lossy();
+        assert!(
+            s.starts_with(r"\\?\C:\"),
+            "drive-letter path must gain \\\\?\\ prefix: {s}"
+        );
+        assert!(!s.contains(r"\\?\C:\\"), "no double backslash after drive");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn long_path_unc() {
+        let p = Path::new(r"\\server\share\deep\path");
+        let long = windows_long_path(p);
+        let s = long.to_string_lossy();
+        assert!(
+            s.starts_with(r"\\?\UNC\server\share"),
+            "UNC must become \\\\?\\UNC\\…: {s}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn long_path_already_prefixed() {
+        let p = Path::new(r"\\?\C:\already\prefixed");
+        let long = windows_long_path(p);
+        assert_eq!(long, p, "already-prefixed input must be left alone");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn long_path_relative_is_absolutised() {
+        let long = windows_long_path(Path::new(r"src\main.rs"));
+        let s = long.to_string_lossy();
+        assert!(
+            s.starts_with(r"\\?\"),
+            "relative path must be absolutised before prefix: {s}"
+        );
+        assert!(
+            !s.contains(r"\.\") && !s.ends_with(r"\."),
+            "relative/dot components must not remain under \\\\?\\: {s}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn long_path_noop_on_unix() {
+        let p = Path::new("/tmp/foo");
+        assert_eq!(windows_long_path(p), p);
     }
 }

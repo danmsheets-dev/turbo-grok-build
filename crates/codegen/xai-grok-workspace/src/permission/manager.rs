@@ -19,8 +19,8 @@ use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome};
 use crate::permission::shell_access::{
-    command_write_paths_in_tree, edit_target_protection, is_safe_write_sink, tree_has_opaque_shell,
-    words_are_opaque_shell,
+    command_write_paths_in_tree, edit_target_protection, is_safe_write_sink, shell_confine_operands,
+    tree_has_opaque_shell, words_are_opaque_shell,
 };
 use crate::permission::state::{PermissionState, load_state_from_disk, persist_state};
 use crate::permission::types::{
@@ -1069,6 +1069,107 @@ fn grant_allow(reason: &'static str) -> Option<(Decision, &'static str)> {
     Some((Decision::Allow, reason))
 }
 
+/// One confine denial: original operand, resolved form, human reason.
+struct ConfineHit {
+    path: String,
+    resolved_path: String,
+    root: String,
+    /// When set, a more specific reason than the default outside-root text
+    /// (e.g. unparseable shell under confine).
+    detail: Option<String>,
+}
+
+impl ConfineHit {
+    fn reason(&self) -> String {
+        if let Some(detail) = &self.detail {
+            return detail.clone();
+        }
+        format!(
+            "Denied by confine root: `{}` is outside `{}` (resolved: `{}`)",
+            self.path, self.root, self.resolved_path
+        )
+    }
+}
+
+/// Path-prefix confine check for Edit and Bash, shared so the two access kinds
+/// cannot drift. Returns `Some` when the request must be PolicyDenied.
+///
+/// **Fail closed:** unparseable shell under confine, and any path whose
+/// nearest existing ancestor cannot be canonicalized, are denials.
+fn confine_access_outside_root(
+    access: &AccessKind,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    edit_path_context: Option<&EditPathContext>,
+) -> Option<ConfineHit> {
+    match access {
+        AccessKind::Edit(path) => {
+            let resolved = match edit_path_context {
+                Some(context) => resolve_model_path(
+                    &context.real_cwd,
+                    context.display_cwd.as_deref(),
+                    path,
+                ),
+                None => resolve_model_path(cwd, None, path),
+            };
+            confine_resolved_path(path, &resolved, root)
+        }
+        AccessKind::Bash(cmd) => {
+            // Fail closed: if we cannot parse write/`cd` operands with
+            // confidence, deny. A harness that set `--confine` wants the
+            // strict reading — partial operand lists are an escape hatch.
+            let Some(operands) = shell_confine_operands(cmd) else {
+                return Some(ConfineHit {
+                    path: cmd.clone(),
+                    resolved_path: cmd.clone(),
+                    root: root.display().to_string(),
+                    detail: Some(format!(
+                        "Denied by confine root: shell command could not be parsed with \
+                         confidence under confinement (fail closed): `{cmd}`"
+                    )),
+                });
+            };
+            for operand in operands {
+                if is_safe_write_sink(&operand) {
+                    continue;
+                }
+                // Absolute operands stay absolute; relatives join the session cwd.
+                // We do not track cwd across in-script `cd` — a relative write
+                // after `cd` is already covered because the `cd` destination
+                // itself is checked above, and unpinnable relative forms that
+                // escape only via the new cwd still fail closed when the cd
+                // target is outside (or when parse confidence fails).
+                let resolved = resolve_model_path(cwd, None, &operand);
+                if let Some(hit) = confine_resolved_path(&operand, &resolved, root) {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+        // Read/Grep/MCP/Web*: confine is a write-boundary for harness
+        // isolation. Managed Read deny rules still apply separately.
+        _ => None,
+    }
+}
+
+fn confine_resolved_path(
+    original: &str,
+    resolved: &std::path::Path,
+    root: &std::path::Path,
+) -> Option<ConfineHit> {
+    if xai_grok_tools::types::resources::path_is_under_confine_root(resolved, root) {
+        return None;
+    }
+    let canon =
+        xai_grok_tools::types::resources::canonicalize_for_permission(resolved);
+    Some(ConfineHit {
+        path: original.to_owned(),
+        resolved_path: canon.display.to_string_lossy().into_owned(),
+        root: root.display().to_string(),
+        detail: None,
+    })
+}
+
 fn bash_grant_pre_decision(
     cmd: &str,
     evaluation: &BashEvaluation,
@@ -1613,6 +1714,42 @@ fn spawn_permission_manager_with_pin(
                         emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
                         let _ = respond_to.send(decision);
                         continue;
+                    }
+
+                    // Confine root (`--confine` / `--workspace-root`): path-prefix
+                    // deny for Edit **and** Bash write/`cd` operands BEFORE YOLO —
+                    // same precedence as managed deny rules. Globs cannot express
+                    // "not under this root" safely on Windows; paths are reduced
+                    // via `canonicalize_for_permission` (ancestor walk for
+                    // non-existent write targets, 8.3 / symlink resolution).
+                    // Fail closed on unparseable shell under confine.
+                    if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+                        let confine_hit = confine_access_outside_root(
+                            &access,
+                            root,
+                            cwd.as_path(),
+                            edit_path_context.as_ref(),
+                        );
+                        if let Some(hit) = confine_hit {
+                            let reason = hit.reason();
+                            tracing::info!(
+                                tool = ?tool_name,
+                                path = %hit.path,
+                                resolved = %hit.resolved_path,
+                                root = %root.display(),
+                                "confine root: path outside root (enforced before YOLO)"
+                            );
+                            xai_grok_tools::types::resources::emit_confine_violation(
+                                &tool_name,
+                                &hit.path,
+                                &hit.resolved_path,
+                                &root.display().to_string(),
+                            );
+                            let decision = Decision::PolicyDeny(reason);
+                            emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                            let _ = respond_to.send(decision);
+                            continue;
+                        }
                     }
 
                     if yolo_mode && !shell_forced_prompt {

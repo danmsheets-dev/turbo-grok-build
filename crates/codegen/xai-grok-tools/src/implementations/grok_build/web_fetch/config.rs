@@ -192,6 +192,14 @@ pub static DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
     // Game development
     "docs.unity.com",
     "docs.unrealengine.com",
+    // HYPER-LOCAL: Godot + Blender reference. GDScript and bpy are both
+    // under-represented in training data relative to the languages they
+    // resemble (Python), so doc lookups are frequent and inventing an API that
+    // does not exist is the dominant failure mode. Allowlisting these removes a
+    // permission prompt from every lookup.
+    "docs.godotengine.org",
+    "docs.blender.org",
+    "developer.blender.org",
     // Other tools
     "git-scm.com",
     "nginx.org",
