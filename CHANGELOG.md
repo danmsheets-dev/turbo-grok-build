@@ -4,6 +4,28 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r7] - 2026-07-31
+
+Subagent isolation-by-default release, plus image previews on terminals without
+a graphics protocol.
+
+### Changed
+- **Subagents default to `isolation=worktree`.** Parallel writers no longer
+  share the parent tree by default. Completed worktrees are snapshotted and then
+  removed (opt out with `GROK_SUBAGENT_WORKTREE_SNAPSHOT=0`), and a worktree
+  created for a spawn that aborts early is removed rather than left behind.
+  Subagent worktrees additionally age out after 24h via auto-GC.
+- **`isolation_fallback` is surfaced in tool output**, so a harness can see that
+  a subagent did not get the isolation it asked for instead of inferring it.
+
+### Fixed
+- **Multi-model resolution.** An explicit `Task`/spawn model now wins over the
+  `fork_context` parent pin, and an empty `model_ids` on resume is ignored
+  instead of overriding the configured model.
+- **Image previews on terminals without Kitty/iTerm graphics.** On Windows
+  ConPTY and similar, chip hover and the Enter image viewer paint a truecolor
+  half-block raster instead of showing metadata only. Kitty paths are unchanged.
+
 ## [0.2.114-r6] - 2026-07-31
 
 Isolation and headless honesty release. Driven by a 4-source audit (two Grok 4.5
