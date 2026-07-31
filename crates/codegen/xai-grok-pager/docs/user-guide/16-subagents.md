@@ -184,7 +184,7 @@ When a persona applies, Grok Build resolves the effective model and reasoning ef
 4. Agent-definition default
 5. Parent session
 
-Isolation follows the same first four layers but defaults to `none` (no worktree) rather than inheriting from the parent session. Capability mode is intentionally stricter: the explicit request, role, and agent-definition modes are intersected as security ceilings. A caller can narrow access, but cannot widen an `oracle`, `explore`, or `plan` agent beyond read-only. The clamp runs after default tool assembly, and built-in read-only agents do not inherit unclassified MCP tools; `explore` and `oracle` keep their exact curated toolsets.
+Isolation follows the same first four layers but defaults to **`worktree`** (isolated git worktree) rather than sharing the parent session workspace. Pass `isolation: none` (or role/persona/definition `default_isolation = "none"`) to opt into a shared workspace. On completion, isolated worktrees are snapshotted and removed by default (`GROK_SUBAGENT_WORKTREE_SNAPSHOT=0` preserves them for review). Capability mode is intentionally stricter: the explicit request, role, and agent-definition modes are intersected as security ceilings. A caller can narrow access, but cannot widen an `oracle`, `explore`, or `plan` agent beyond read-only. The clamp runs after default tool assembly, and built-in read-only agents do not inherit unclassified MCP tools; `explore` and `oracle` keep their exact curated toolsets.
 
 If a persona is requested but cannot be resolved -- it is not found, has no instructions, or its `instructions_file` is unreadable -- the spawn fails. Reasoning-effort values are parsed into a fixed enum during configuration loading, so misspellings fail early instead of silently reaching a provider.
 
@@ -201,7 +201,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
 | `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
-| `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
+| `isolation`       | `worktree` (default, isolated git worktree) or `none` (shared workspace). |
 | `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
 | `cwd`             | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
 
@@ -273,11 +273,14 @@ Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/ses
 
 ## Isolation: Worktree Mode
 
-For tasks that modify files, run a subagent in an isolated git worktree with `isolation: worktree`. This keeps the child's edits from conflicting with the parent's:
+Subagents default to an isolated git worktree (`isolation: worktree`). This keeps the child's edits from conflicting with the parent or with sibling subagents:
 
 - The subagent works in its own copy of the working tree.
-- Its changes stay isolated from the parent until you merge them.
-- The subagent's result includes the worktree path.
+- Its changes stay isolated from the parent until you merge them (via `x.ai/git/worktree/apply`).
+- On completion, the worktree is snapshotted and removed by default so children clean up after themselves.
+- Set `isolation: none` when the child must edit the shared parent workspace.
+- Set `GROK_SUBAGENT_WORKTREE_SNAPSHOT=0` (or `[features] subagent_worktree_snapshot = false`) to keep finished worktrees on disk for review.
+- Worktree creation fails closed outside a git repo unless `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1` (that path sets `isolation_fallback` on the result — the run is **not** isolated).
 
 Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
 

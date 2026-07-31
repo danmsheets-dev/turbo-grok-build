@@ -525,6 +525,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 persona: None,
                 resume_from_hint,
                 persona_hint,
+                isolation_fallback: result.isolation_fallback,
             }))
         } else {
             Err(xai_tool_runtime::ToolError::invalid_arguments(
@@ -1437,7 +1438,8 @@ mod tests {
     // -- Isolation mode tests --
 
     #[test]
-    fn isolation_defaults_to_none() {
+    fn isolation_omitted_is_none_on_input_resolved_to_worktree_downstream() {
+        // Tool input leaves isolation unset; resolution defaults to worktree.
         let input: TaskToolInput =
             serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
         assert_eq!(input.isolation, None);

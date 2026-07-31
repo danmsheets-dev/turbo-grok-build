@@ -903,6 +903,12 @@ impl ToolOutput {
                 if let Some(ref wt) = sub.worktree_path {
                     text.push_str(&format!("\n\n<worktree_path>{wt}</worktree_path>"));
                 }
+                if sub.isolation_fallback {
+                    text.push_str(
+                        "\n\n<isolation_fallback>true</isolation_fallback> — this run was NOT \
+                         isolated; edits may have touched the parent workspace.",
+                    );
+                }
                 text.push_str("\n\n");
                 text.push_str(&sub.resume_footer());
                 text
@@ -2019,6 +2025,7 @@ mod tests {
             persona: None,
             resume_from_hint: "019e0000-0000-7000-8000-0000000000bb".into(),
             persona_hint: None,
+            isolation_fallback: false,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2059,6 +2066,7 @@ mod tests {
             persona: Some("implementer".into()),
             resume_from_hint: "abc-123".into(),
             persona_hint: Some("implementer".into()),
+            isolation_fallback: false,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2087,6 +2095,7 @@ mod tests {
             persona: None,
             resume_from_hint: "wt-agent".into(),
             persona_hint: None,
+            isolation_fallback: false,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2111,6 +2120,7 @@ mod tests {
             persona: Some("implementer".into()),
             resume_from_hint: "sub-abc-123".into(),
             persona_hint: Some("implementer".into()),
+            isolation_fallback: false,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-abc-123");
@@ -2388,6 +2398,7 @@ mod tests {
             persona: None,
             resume_from_hint: "sub-xyz".into(),
             persona_hint: None,
+            isolation_fallback: false,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-xyz");

@@ -159,7 +159,7 @@ pub struct SubagentRuntimeOverrides {
     /// Capability mode controlling tool access.
     pub capability_mode: Option<SubagentCapabilityMode>,
     /// Isolation mode for child execution environment.
-    /// `None` means "use role/persona default" (which itself defaults to `None`/shared workspace).
+    /// `None` means "use role/persona/definition default" (global default: worktree).
     pub isolation: Option<SubagentIsolationMode>,
     /// `/goal`-only harness override: the `agent_type` (e.g. `"cursor"`,
     /// `"grok-build-plan"`) whose `AgentDefinition` decides the child's harness

@@ -51,10 +51,14 @@ pub struct TaskToolInput {
     pub capability_mode: Option<SubagentCapabilityMode>,
 
     /// Isolation mode for the child's execution environment.
+    ///
+    /// Omitted values resolve to **worktree** (isolated git worktree). Pass
+    /// `"none"` only when the child must share the parent workspace.
     #[schemars(
-        description = "Isolation mode: \"none\" (default, shared workspace) or \"worktree\" \
-            (isolated git worktree). Worktree mode prevents the child's edits from \
-            affecting the parent workspace until explicitly merged."
+        description = "Isolation mode: \"worktree\" (default, isolated git worktree) or \
+            \"none\" (shared workspace). Worktree mode prevents the child's edits from \
+            affecting the parent workspace until explicitly merged. Omit to use the \
+            default worktree isolation."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<SubagentIsolationMode>,
@@ -289,6 +293,11 @@ pub struct SubagentCompletedOutput {
     /// If the subagent used a persona, the persona name to pass when resuming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona_hint: Option<String>,
+    /// True when isolation=worktree was requested but the child ran in a shared
+    /// workspace (opt-in fallback or resume of a non-isolated source). Harnesses
+    /// must not report such runs as isolated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolation_fallback: bool,
 }
 
 impl SubagentCompletedOutput {
@@ -304,7 +313,7 @@ impl SubagentCompletedOutput {
     /// Render the full model-facing completion block: the answer text, the
     /// `<subagent_meta>` line, and the `<subagent_result>` resume footer.
     pub fn to_model_text(&self) -> String {
-        format_subagent_completed(
+        let mut text = format_subagent_completed(
             &self.output,
             &self.subagent_id,
             &self.subagent_type,
@@ -312,7 +321,17 @@ impl SubagentCompletedOutput {
             self.turns,
             self.duration_ms,
             self.persona.as_deref(),
-        )
+        );
+        if let Some(ref path) = self.worktree_path {
+            text.push_str(&format!("\n\n<worktree_path>{path}</worktree_path>"));
+        }
+        if self.isolation_fallback {
+            text.push_str(
+                "\n\n<isolation_fallback>true</isolation_fallback> — this run was NOT \
+                 isolated; edits may have touched the parent workspace.",
+            );
+        }
+        text
     }
 }
 
@@ -1081,7 +1100,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - The resumed agent must use the same subagent_type as the source.\n\
          - If the user changed that agent type's model configuration or asks for a fresh restart, do not use {resume_from_param}; start a new child and hand over the needed context in its prompt.\n\n\
          Isolation mode:\n\
-         - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output."
+         - Use {isolation_param} to control the child's execution environment. Default is \"worktree\": the child runs in an isolated git worktree so its edits do not touch the parent workspace. On completion the worktree is snapshotted and removed (path may appear in output while it exists). Pass \"none\" only when the child must share the parent workspace."
     );
 
     out

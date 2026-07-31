@@ -250,9 +250,14 @@ pub(crate) async fn run_shell_child(
     let mut isolation_fallback = false;
     let worktree_path = if let Some(ref source) = resume_source {
         if isolation_requested && source.worktree_path.is_none() {
+            // Resume of a pre-isolation (shared) child cannot invent a prior
+            // worktree; stay shared and surface isolation_fallback so harnesses
+            // do not treat the run as isolated.
+            isolation_fallback = true;
             tracing::info!(
                 subagent_id = %request.id,
-                "Ignoring isolation=worktree override: resumed source had no worktree"
+                isolation_fallback = true,
+                "Resumed source had no worktree; continuing shared (isolation_fallback)"
             );
         }
         match source.worktree_path.as_deref() {
@@ -446,6 +451,13 @@ pub(crate) async fn run_shell_child(
     };
 
     let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
+    // Remove a freshly created worktree if we bail before the normal
+    // completion dispose path (model/bootstrap/spawn failures).
+    let mut fresh_worktree_guard = FreshWorktreeGuard::new(
+        worktree_freshly_created
+            .then(|| worktree_path.clone())
+            .flatten(),
+    );
     if let Some(raw_cwd) = request.cwd.as_deref() {
         match sanitize_cwd_value(raw_cwd) {
             Some(cwd_path) => {
@@ -515,7 +527,10 @@ pub(crate) async fn run_shell_child(
             )
         });
     }
-    if request.fork_context {
+    // Fork reuses parent conversation prefix and prefers the parent model for
+    // cache locality — but an *explicit* Task/spawn model override (e.g. goal
+    // planner role model) must win so multi-model orchestration works.
+    if request.fork_context && request.runtime_overrides.model.is_none() {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
     let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
@@ -550,6 +565,7 @@ pub(crate) async fn run_shell_child(
     }
     if let Some(ref source) = resume_source
         && let Some(ref source_model) = source.model_id
+        && !source_model.is_empty()
         && effective_model_id.0.as_ref() != source_model.as_str()
     {
         if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
@@ -1966,6 +1982,8 @@ pub(crate) async fn run_shell_child(
     if worktree_removed {
         result.worktree_path = None;
     }
+    // Normal completion path owns dispose/preserve; do not double-remove.
+    fresh_worktree_guard.disarm();
     let success = result.success && !result.cancelled;
     let preview = crate::util::truncate(&result.output, 200);
     let level_fn = if success {
