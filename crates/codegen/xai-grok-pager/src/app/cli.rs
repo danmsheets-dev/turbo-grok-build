@@ -653,7 +653,8 @@ pub struct PagerArgs {
         overrides_with = "reasoning_effort"
     )]
     pub reasoning_effort: Option<String>,
-    /// Extra rules to append to the system prompt.
+    /// Extra rules to append to the system prompt (capped at 64 KiB).
+    /// Applied on new sessions and re-synced on `--resume` / `--continue`.
     #[clap(long = "rules", alias = "append-system-prompt")]
     pub rules: Option<String>,
     /// Compaction mode [summary|transcript|segments]: `summary` (default) adds
@@ -828,6 +829,26 @@ pub struct PagerArgs {
     /// streaming-json `end` event. Off by default.
     #[arg(long = "require-changes")]
     pub require_changes: bool,
+    /// Exit non-zero when any subagent finishes with a non-completed status.
+    /// Sets `stopReason` to `SubagentFailure` on the streaming-json `end`
+    /// event. Off by default.
+    #[arg(long = "require-subagent-success")]
+    pub require_subagent_success: bool,
+    /// Exit non-zero when the workspace is untrusted (project MCP / hooks /
+    /// plugins / agents would be dropped). Prefer explicit `--trust` for
+    /// harness-created worktrees. Off by default.
+    #[arg(long = "require-trust")]
+    pub require_trust: bool,
+    /// How much of each tool call's raw input/output to include on
+    /// streaming-json (`none` | `truncated` | `full`). Default `truncated`
+    /// (~2 KB) keeps the stream usable without exploding on large bash logs.
+    #[arg(
+        long = "stream-tool-io",
+        value_name = "MODE",
+        default_value = "truncated",
+        value_enum
+    )]
+    pub stream_tool_io: crate::headless::StreamToolIo,
     /// Allow the model to ask interactive questions in headless mode.
     ///
     /// Default is off: headless runs (`-p` / `--prompt-file` / non-plain

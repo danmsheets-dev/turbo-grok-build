@@ -2121,7 +2121,7 @@ impl acp::Agent for MvpAgent {
                 .get()
                 .and_then(|init| init.meta.as_ref());
             if let Some(handle) = self.sessions.borrow().get(&session_id) {
-                enqueue_replace_system_prompt_override(
+                enqueue_sync_system_prompt(
                     &handle.cmd_tx,
                     request_meta.as_ref(),
                     init_meta,

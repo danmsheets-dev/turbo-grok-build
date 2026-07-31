@@ -1063,6 +1063,44 @@ fn enqueue_replace_system_prompt_override_noop_when_absent_or_empty() {
         "no command should be enqueued without a non-empty override"
     );
 }
+
+#[test]
+fn enqueue_sync_system_prompt_sends_upsert_human_rules_when_only_rules() {
+    use crate::session::SessionCommand;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let init = serde_json::json!({ "rules": "Do not touch secrets." });
+    enqueue_sync_system_prompt(&tx, None, init.as_object());
+    match rx.try_recv() {
+        Ok(SessionCommand::UpsertHumanRules { rules }) => {
+            assert_eq!(rules, "Do not touch secrets.");
+        }
+        Ok(SessionCommand::ReplaceSystemPrompt { .. }) => {
+            panic!("expected UpsertHumanRules, got ReplaceSystemPrompt")
+        }
+        Ok(_) => panic!("expected UpsertHumanRules, got another SessionCommand"),
+        Err(_) => panic!("expected UpsertHumanRules, channel empty"),
+    }
+}
+
+#[test]
+fn upsert_human_rules_block_replaces_existing() {
+    let mut prompt = "BASE\n\n<human_rules>\nold\n</human_rules>".to_string();
+    upsert_human_rules_block(&mut prompt, "new rules");
+    assert!(prompt.contains("<human_rules>\nnew rules\n</human_rules>"));
+    assert!(!prompt.contains("old"));
+    assert_eq!(prompt.matches("<human_rules>").count(), 1);
+}
+
+#[test]
+fn build_spawn_system_prompt_folds_rules_into_override() {
+    let init = serde_json::json!({
+        "systemPromptOverride": "CUSTOM",
+        "rules": "Be careful.",
+    });
+    let prompt = build_spawn_system_prompt(None, init.as_object(), "BASE_IGNORED");
+    assert!(prompt.starts_with("CUSTOM"));
+    assert!(prompt.contains("<human_rules>\nBe careful.\n</human_rules>"));
+}
 /// Regression for the web-client `_meta.agentProfile` -> `set_session_model`
 /// flow: a zero-turn switch from `grok-build` (a client profile name) to
 /// `grok-build-plan` (the default model agent_type) must be

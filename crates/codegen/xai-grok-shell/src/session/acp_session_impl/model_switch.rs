@@ -342,4 +342,49 @@ impl SessionActor {
             );
         }
     }
+
+    /// Upsert `<human_rules>` on the live system head (harness `--rules` on
+    /// resume). Reads the current head, replaces any existing block, writes
+    /// back. Skipped on `preserve_inherited_system` (same as full replace).
+    pub(super) async fn handle_upsert_human_rules(&self, rules: String) {
+        if self.startup_hints.preserve_inherited_system {
+            tracing::debug!(
+                session_id = %self.session_info.id.0,
+                "handle_upsert_human_rules: skipped (preserve_inherited_system)"
+            );
+            return;
+        }
+        let current = match self.chat_state_handle.get_system_message().await {
+            Some(xai_grok_sampling_types::conversation::ConversationItem::System(sys)) => {
+                sys.content.to_string()
+            }
+            Some(_) | None => {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    "handle_upsert_human_rules: no system head to patch; applying rules as sole head"
+                );
+                String::new()
+            }
+        };
+        let mut prompt = current;
+        // Inline the same block shape as mvp_agent::upsert_human_rules_block
+        // without coupling the session actor to mvp_agent internals.
+        while let Some(start) = prompt.find("<human_rules>") {
+            let after = &prompt[start..];
+            if let Some(rel_end) = after.find("</human_rules>") {
+                let end = start + rel_end + "</human_rules>".len();
+                let mut strip_from = start;
+                if strip_from >= 2 && prompt.as_bytes()[strip_from - 2..strip_from] == *b"\n\n" {
+                    strip_from -= 2;
+                }
+                prompt.replace_range(strip_from..end, "");
+            } else {
+                break;
+            }
+        }
+        prompt.push_str("\n\n<human_rules>\n");
+        prompt.push_str(&rules);
+        prompt.push_str("\n</human_rules>");
+        self.handle_replace_system_prompt(prompt).await;
+    }
 }

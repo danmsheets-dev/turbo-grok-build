@@ -40,6 +40,26 @@ pub enum OutputFormat {
     StreamingJson,
 }
 
+/// How much of each tool call's raw input/output to include on the stream.
+/// Default `truncated` (~2 KB) keeps NDJSON usable for harnesses without
+/// exploding on large bash logs or file bodies.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum StreamToolIo {
+    /// Omit raw input/output entirely (metadata only).
+    None,
+    /// Include up to [`STREAM_TOOL_IO_TRUNCATED_BYTES`] of JSON-serialized I/O.
+    #[default]
+    Truncated,
+    /// Include the full raw input/output values (may be large).
+    Full,
+}
+
+/// Soft cap for `--stream-tool-io=truncated` (bytes of serialized JSON).
+pub const STREAM_TOOL_IO_TRUNCATED_BYTES: usize = 2 * 1024;
+
+/// Streaming-json schema version for `start` / `end` events.
+pub const STREAMING_JSON_SCHEMA_VERSION: u32 = 2;
+
 pub fn parse_json_schema(input: &str) -> anyhow::Result<serde_json::Value> {
     let schema: serde_json::Value = serde_json::from_str(input)
         .map_err(|e| anyhow::anyhow!("--json-schema: invalid JSON: {e}"))?;
@@ -173,6 +193,9 @@ pub struct HeadlessOptions {
     /// Fork on resume/continue (`--fork-session`).
     pub fork_session: bool,
     pub worktree: Option<String>,
+    /// Branch/tag/commit base for `--worktree` (TUI path; headless rejects
+    /// `--worktree` until create is wired — field is plumbed for honesty).
+    pub worktree_ref: Option<String>,
     pub restore_code: bool,
     pub agent: Option<String>,
     pub agents_json: Option<String>,
@@ -200,6 +223,15 @@ pub struct HeadlessOptions {
     /// clause and of the question-ending auto-continue recovery (HYPER-1).
     /// Rare: only for harnesses that genuinely want the model to ask.
     pub allow_interactive_questions: bool,
+    /// How much of each tool's raw input/output to stream
+    /// (`none` | `truncated` | `full`). Default truncated (~2 KB).
+    pub stream_tool_io: StreamToolIo,
+    /// When true, any subagent that finishes with `status != "completed"`
+    /// forces `stopReason: "SubagentFailure"` and a non-zero exit.
+    pub require_subagent_success: bool,
+    /// When true, exit non-zero if the workspace is untrusted (project MCP /
+    /// hooks / plugins / agents would be dropped) rather than running degraded.
+    pub require_trust: bool,
 }
 
 // ── CLI flag helpers ─────────────────────────────────────────────────────
@@ -330,9 +362,43 @@ const FILES_CHANGED_MAX_PATHS: usize = 200;
 /// Soft cap on total path-list bytes before marking `truncated`.
 const FILES_CHANGED_MAX_BYTES: usize = 32 * 1024;
 
+/// Subagent lifecycle rollup for the `end` event.
+#[derive(Debug, Default, Clone)]
+struct SubagentRollup {
+    spawned: u32,
+    completed: u32,
+    failed: u32,
+    cancelled: u32,
+}
+
+impl SubagentRollup {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "spawned": self.spawned,
+            "completed": self.completed,
+            "failed": self.failed,
+            "cancelled": self.cancelled,
+        })
+    }
+
+    fn note_spawned(&mut self) {
+        self.spawned = self.spawned.saturating_add(1);
+    }
+
+    fn note_finished(&mut self, status: &str) {
+        match status {
+            "completed" => self.completed = self.completed.saturating_add(1),
+            "cancelled" => self.cancelled = self.cancelled.saturating_add(1),
+            // "failed" and any unknown terminal status count as failure.
+            _ => self.failed = self.failed.saturating_add(1),
+        }
+    }
+}
+
 struct HeadlessEmitter {
     format: OutputFormat,
     parse_structured_output: bool,
+    stream_tool_io: StreamToolIo,
     text_buffer: String,
     thought_buffer: String,
     /// Full assistant text for the *current* prompt turn. Always accumulated
@@ -342,6 +408,11 @@ struct HeadlessEmitter {
     /// Tool calls observed on the *current* prompt turn (any kind). Used to
     /// detect the HYPER-1 shape: EndTurn + zero tools + question text.
     turn_tool_calls: u32,
+    /// Tool calls observed across the whole run (not reset on auto-continue).
+    /// Serialized as `toolCalls` on the `end` event.
+    run_tool_calls: u32,
+    /// Wall-clock start of each in-flight tool call for `elapsedMs`.
+    tool_started_at: std::collections::HashMap<String, Instant>,
     /// Agent's schema-validated output (both backends), read from the
     /// prompt-response `_meta`.
     structured_output: Option<Result<serde_json::Value, String>>,
@@ -352,20 +423,30 @@ struct HeadlessEmitter {
     /// build products are not included because only Edit-kind tool calls
     /// contribute.
     files_changed: std::collections::BTreeSet<String>,
+    /// Subagent spawn/finish rollup for the `end` event.
+    subagents: SubagentRollup,
 }
 
 impl HeadlessEmitter {
-    fn new(format: OutputFormat, parse_structured_output: bool) -> Self {
+    fn new(
+        format: OutputFormat,
+        parse_structured_output: bool,
+        stream_tool_io: StreamToolIo,
+    ) -> Self {
         Self {
             format,
             parse_structured_output,
+            stream_tool_io,
             text_buffer: String::new(),
             thought_buffer: String::new(),
             turn_assistant_text: String::new(),
             turn_tool_calls: 0,
+            run_tool_calls: 0,
+            tool_started_at: std::collections::HashMap::new(),
             structured_output: None,
             usage: None,
             files_changed: std::collections::BTreeSet::new(),
+            subagents: SubagentRollup::default(),
         }
     }
 
@@ -378,6 +459,7 @@ impl HeadlessEmitter {
 
     fn note_tool_call(&mut self) {
         self.turn_tool_calls = self.turn_tool_calls.saturating_add(1);
+        self.run_tool_calls = self.run_tool_calls.saturating_add(1);
     }
 
     /// Record paths from a completed Edit tool call (agent tool edits only).
@@ -514,6 +596,309 @@ impl HeadlessEmitter {
         }
     }
 
+    /// Gate raw tool I/O for the stream. Returns `(value, truncated)`.
+    fn maybe_stream_tool_value(
+        &self,
+        value: Option<&serde_json::Value>,
+    ) -> (Option<serde_json::Value>, bool) {
+        let Some(value) = value else {
+            return (None, false);
+        };
+        match self.stream_tool_io {
+            StreamToolIo::None => (None, false),
+            StreamToolIo::Full => (Some(value.clone()), false),
+            StreamToolIo::Truncated => {
+                let serialized = serde_json::to_string(value).unwrap_or_default();
+                if serialized.len() <= STREAM_TOOL_IO_TRUNCATED_BYTES {
+                    (Some(value.clone()), false)
+                } else {
+                    // Prefer a compact string preview over invalid half-JSON.
+                    let mut end = STREAM_TOOL_IO_TRUNCATED_BYTES.min(serialized.len());
+                    while end > 0 && !serialized.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    let preview = format!("{}…", &serialized[..end]);
+                    (Some(serde_json::Value::String(preview)), true)
+                }
+            }
+        }
+    }
+
+    /// Derive a short tool name for stream events from title / raw_input.
+    fn tool_name_for_event(tc: &acp::ToolCall) -> String {
+        if let Some(raw) = tc.raw_input.as_ref() {
+            for key in ["name", "tool_name", "variant", "toolName"] {
+                if let Some(n) = raw.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    return n.to_string();
+                }
+            }
+        }
+        tc.title
+            .split_whitespace()
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("tool")
+            .to_string()
+    }
+
+    fn locations_json(locations: &[acp::ToolCallLocation]) -> Vec<serde_json::Value> {
+        locations
+            .iter()
+            .map(|loc| {
+                let mut o = serde_json::json!({ "path": loc.path.display().to_string() });
+                if let Some(line) = loc.line {
+                    o["line"] = serde_json::json!(line);
+                }
+                o
+            })
+            .collect()
+    }
+
+    fn kind_str(kind: acp::ToolKind) -> &'static str {
+        match kind {
+            acp::ToolKind::Read => "read",
+            acp::ToolKind::Edit => "edit",
+            acp::ToolKind::Delete => "delete",
+            acp::ToolKind::Move => "move",
+            acp::ToolKind::Search => "search",
+            acp::ToolKind::Execute => "execute",
+            acp::ToolKind::Think => "think",
+            acp::ToolKind::Fetch => "fetch",
+            acp::ToolKind::SwitchMode => "switch_mode",
+            _ => "other",
+        }
+    }
+
+    fn status_str(status: acp::ToolCallStatus) -> &'static str {
+        match status {
+            acp::ToolCallStatus::Pending => "pending",
+            acp::ToolCallStatus::InProgress => "in_progress",
+            acp::ToolCallStatus::Completed => "completed",
+            acp::ToolCallStatus::Failed => "failed",
+            _ => "unknown",
+        }
+    }
+
+    /// Emit `tool_call` when a tool invocation is first observed.
+    fn on_tool_call(&mut self, tc: &acp::ToolCall) {
+        self.note_tool_call();
+        let id = tc.tool_call_id.0.to_string();
+        self.tool_started_at.insert(id.clone(), Instant::now());
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        let (raw_input, input_truncated) = self.maybe_stream_tool_value(tc.raw_input.as_ref());
+        let mut ev = serde_json::json!({
+            "type": "tool_call",
+            "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
+            "toolCallId": id,
+            "name": Self::tool_name_for_event(tc),
+            "kind": Self::kind_str(tc.kind),
+            "status": Self::status_str(tc.status),
+            "title": tc.title,
+            "locations": Self::locations_json(&tc.locations),
+            "elapsedMs": 0u64,
+        });
+        if let Some(v) = raw_input {
+            ev["rawInput"] = v;
+            if input_truncated {
+                ev["rawInputTruncated"] = serde_json::Value::Bool(true);
+            }
+        }
+        println!("{ev}");
+    }
+
+    /// Emit `tool_call_update` / `tool_result` on progress and completion.
+    fn on_tool_call_update(&mut self, tcu: &acp::ToolCallUpdate) {
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        let id = tcu.tool_call_id.0.to_string();
+        let elapsed_ms = self
+            .tool_started_at
+            .get(&id)
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let status = tcu.fields.status.map(Self::status_str);
+        let is_terminal = matches!(
+            tcu.fields.status,
+            Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+        );
+        if is_terminal {
+            self.tool_started_at.remove(&id);
+        }
+        let (raw_input, input_truncated) =
+            self.maybe_stream_tool_value(tcu.fields.raw_input.as_ref());
+        let (raw_output, output_truncated) =
+            self.maybe_stream_tool_value(tcu.fields.raw_output.as_ref());
+        // Terminal updates use `tool_result` so harnesses that key on
+        // TOOL_INVOCATION_TYPES can count completions; in-progress stays
+        // as `tool_call_update`.
+        let type_name = if is_terminal {
+            "tool_result"
+        } else {
+            "tool_call_update"
+        };
+        let mut ev = serde_json::json!({
+            "type": type_name,
+            "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
+            "toolCallId": id,
+            "elapsedMs": elapsed_ms,
+        });
+        if let Some(s) = status {
+            ev["status"] = serde_json::Value::String(s.to_string());
+        }
+        if let Some(kind) = tcu.fields.kind {
+            ev["kind"] = serde_json::Value::String(Self::kind_str(kind).to_string());
+        }
+        if let Some(ref title) = tcu.fields.title {
+            ev["title"] = serde_json::Value::String(title.clone());
+        }
+        if let Some(ref locs) = tcu.fields.locations {
+            ev["locations"] = serde_json::Value::Array(Self::locations_json(locs));
+        }
+        if let Some(v) = raw_input {
+            ev["rawInput"] = v;
+            if input_truncated {
+                ev["rawInputTruncated"] = serde_json::Value::Bool(true);
+            }
+        }
+        if let Some(v) = raw_output {
+            ev["rawOutput"] = v;
+            if output_truncated {
+                ev["rawOutputTruncated"] = serde_json::Value::Bool(true);
+            }
+        }
+        println!("{ev}");
+    }
+
+    /// Warning / advisory event (e.g. rules re-synced on resume).
+    fn on_warning(&self, code: &str, message: &str) {
+        match self.format {
+            OutputFormat::StreamingJson => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "warning",
+                        "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
+                        "code": code,
+                        "message": message,
+                    })
+                );
+            }
+            OutputFormat::Plain | OutputFormat::Json => {
+                eprintln!("warning: {message}");
+            }
+        }
+    }
+
+    /// Headless suppressed an interactive question (`ask_user_question`).
+    fn on_question_suppressed(&self, tool_call_id: Option<&str>, reason: &str) {
+        match self.format {
+            OutputFormat::StreamingJson => {
+                let mut ev = serde_json::json!({
+                    "type": "question_suppressed",
+                    "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
+                    "reason": reason,
+                });
+                if let Some(id) = tool_call_id {
+                    ev["toolCallId"] = serde_json::Value::String(id.to_string());
+                }
+                println!("{ev}");
+            }
+            OutputFormat::Plain => {
+                eprintln!("headless: suppressed interactive question ({reason})");
+            }
+            OutputFormat::Json => {}
+        }
+    }
+
+    fn on_subagent_spawned(
+        &mut self,
+        subagent_id: &str,
+        child_session_id: Option<&str>,
+        subagent_type: Option<&str>,
+        description: Option<&str>,
+        model: Option<&str>,
+        capability_mode: Option<&str>,
+    ) {
+        self.subagents.note_spawned();
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        let mut ev = serde_json::json!({
+            "type": "subagent_spawned",
+            "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
+            "subagentId": subagent_id,
+        });
+        if let Some(v) = child_session_id {
+            ev["childSessionId"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = subagent_type {
+            ev["subagentType"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = description {
+            ev["description"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = model {
+            ev["model"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = capability_mode {
+            ev["capabilityMode"] = serde_json::Value::String(v.to_string());
+        }
+        println!("{ev}");
+    }
+
+    fn on_subagent_finished(
+        &mut self,
+        subagent_id: &str,
+        child_session_id: Option<&str>,
+        status: &str,
+        error: Option<&str>,
+        termination_reason: Option<&str>,
+        usage: Option<serde_json::Value>,
+        tool_calls: Option<u32>,
+        turns: Option<u32>,
+        duration_ms: Option<u64>,
+        tokens_used: Option<u64>,
+    ) {
+        self.subagents.note_finished(status);
+        if !matches!(self.format, OutputFormat::StreamingJson) {
+            return;
+        }
+        let mut ev = serde_json::json!({
+            "type": "subagent_finished",
+            "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
+            "subagentId": subagent_id,
+            "status": status,
+        });
+        if let Some(v) = child_session_id {
+            ev["childSessionId"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = error {
+            ev["error"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = termination_reason {
+            ev["terminationReason"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = usage {
+            ev["usage"] = v;
+        }
+        if let Some(v) = tool_calls {
+            ev["toolCalls"] = serde_json::json!(v);
+        }
+        if let Some(v) = turns {
+            ev["turns"] = serde_json::json!(v);
+        }
+        if let Some(v) = duration_ms {
+            ev["durationMs"] = serde_json::json!(v);
+        }
+        if let Some(v) = tokens_used {
+            ev["tokensUsed"] = serde_json::json!(v);
+        }
+        println!("{ev}");
+    }
+
     /// Arm process-wide emission of `confine_violation` NDJSON lines so the
     /// permission manager can report escapes on the same streaming-json
     /// channel without knowing about the headless emitter.
@@ -571,15 +956,24 @@ impl HeadlessEmitter {
 
     /// First NDJSON line of any `streaming-json` run (H6). Harnesses pin on
     /// `schemaVersion` and the confine/permission snapshot.
+    ///
+    /// `cwd` is the **process** cwd at launch; `session_cwd` is the directory
+    /// the agent will actually open (may differ on cross-dir `--resume`);
+    /// `original_cwd` is the session's recorded origin when known.
+    #[allow(clippy::too_many_arguments)]
     fn on_start(
         &self,
         session_id: &str,
         cwd: &std::path::Path,
+        session_cwd: &std::path::Path,
+        original_cwd: Option<&std::path::Path>,
         requested_model: Option<&str>,
         served_model: Option<&str>,
         permission_mode: &str,
         sandbox: Option<&str>,
         always_approve: bool,
+        rules_applied: bool,
+        folder_trust: &serde_json::Value,
     ) {
         if !matches!(self.format, OutputFormat::StreamingJson) {
             return;
@@ -596,11 +990,14 @@ impl HeadlessEmitter {
         } else {
             None
         };
-        let start = serde_json::json!({
+        let mut start = serde_json::json!({
             "type": "start",
-            "schemaVersion": 1,
+            "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
             "sessionId": session_id,
+            // Process cwd (where the binary was launched).
             "cwd": cwd.display().to_string(),
+            // Directory the ACP session actually uses for relative paths.
+            "sessionCwd": session_cwd.display().to_string(),
             "confineRoot": confine,
             "confineInherited": confine_inherited,
             "confineShellEnforcement": confine_shell,
@@ -611,7 +1008,12 @@ impl HeadlessEmitter {
             "binary": "hyper",
             "version": xai_grok_version::VERSION,
             "alwaysApprove": always_approve,
+            "rulesApplied": rules_applied,
+            "folderTrust": folder_trust,
         });
+        if let Some(orig) = original_cwd {
+            start["originalCwd"] = serde_json::Value::String(orig.display().to_string());
+        }
         println!("{start}");
     }
 
@@ -637,11 +1039,13 @@ impl HeadlessEmitter {
             OutputFormat::StreamingJson => {
                 let mut end = serde_json::json!({
                     "type": "end",
-                    "schemaVersion": 1,
+                    "schemaVersion": STREAMING_JSON_SCHEMA_VERSION,
                     "stopReason": stop_reason,
                     "sessionId": session_id,
                     "requestId": request_id,
                     "filesChanged": self.files_changed_json(),
+                    "toolCalls": self.run_tool_calls,
+                    "subagents": self.subagents.to_json(),
                 });
                 self.attach_usage_fields(&mut end, false);
                 self.attach_structured_output(&mut end);
@@ -650,6 +1054,8 @@ impl HeadlessEmitter {
             OutputFormat::Json => {
                 let mut result = self.build_json_result(stop_reason, session_id, request_id);
                 result["filesChanged"] = self.files_changed_json();
+                result["toolCalls"] = serde_json::json!(self.run_tool_calls);
+                result["subagents"] = self.subagents.to_json();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
@@ -834,7 +1240,19 @@ fn build_headless_init_request(
         "clientVersion": PAGER_CLIENT_VERSION,
     });
     if let Some(rules) = rules {
-        meta["rules"] = serde_json::json!(rules);
+        // Cap at the same bound the shell uses so a huge CLI dump cannot
+        // blow the system prompt unbounded.
+        const MAX: usize = 64 * 1024;
+        let capped = if rules.len() > MAX {
+            let mut end = MAX;
+            while end > 0 && !rules.is_char_boundary(end) {
+                end -= 1;
+            }
+            &rules[..end]
+        } else {
+            rules
+        };
+        meta["rules"] = serde_json::json!(capped);
     }
     if let Some(system_prompt_override) = system_prompt_override {
         meta["systemPromptOverride"] = serde_json::json!(system_prompt_override);
@@ -849,6 +1267,11 @@ fn build_headless_init_request(
     });
     if allow_interactive_questions {
         meta["allowInteractiveQuestions"] = serde_json::json!(true);
+    } else {
+        // Default-disable the interactive Q&A tool headlessly so the model
+        // cannot park on a oneshot for 30 minutes waiting for a response
+        // that the headless client never answers.
+        meta["askUserQuestion"] = serde_json::json!(false);
     }
 
     acp::InitializeRequest::new(acp::ProtocolVersion::V1)
@@ -858,6 +1281,102 @@ fn build_headless_init_request(
                 .terminal(false),
         )
         .meta(meta.as_object().cloned())
+}
+
+/// Snapshot folder-trust state for the `start.folderTrust` object.
+///
+/// Names project-scoped capabilities that would be dropped when untrusted so
+/// harnesses can see a silent capability loss instead of guessing.
+fn folder_trust_start_snapshot(cwd: &Path, trusted_via_flag: bool) -> serde_json::Value {
+    use xai_grok_workspace::folder_trust::{
+        TrustOutcome, decide, decide_inputs_with_interactive, feature_enabled, folder_trust_inert,
+        repo_config_kinds,
+    };
+    use xai_grok_workspace::trust::workspace_key;
+
+    let key = workspace_key(cwd);
+    let inert = folder_trust_inert();
+    let feature = feature_enabled(None);
+    // Headless never prompts for trust — force non-interactive gather.
+    let inputs = decide_inputs_with_interactive(cwd, &key, false);
+    let outcome = if trusted_via_flag {
+        TrustOutcome::Trusted
+    } else {
+        decide(feature, &inputs)
+    };
+    let trusted = matches!(outcome, TrustOutcome::Trusted) || trusted_via_flag;
+    let reason = if inert {
+        "inert-build"
+    } else if !feature {
+        "feature-off"
+    } else if trusted_via_flag || inputs.store_trusted {
+        "store"
+    } else if !inputs.key_recordable {
+        "unrecordable-root"
+    } else if !inputs.repo_configs_present {
+        "no-configs"
+    } else if trusted {
+        "store"
+    } else {
+        "untrusted-headless"
+    };
+
+    let dropped_mcp: Vec<String> = if trusted {
+        Vec::new()
+    } else {
+        xai_grok_shell::agent::folder_trust::project_scoped_mcp_names(cwd)
+            .into_iter()
+            .collect()
+    };
+    let kinds = if trusted {
+        Vec::new()
+    } else {
+        repo_config_kinds(cwd)
+    };
+    let dropped_hooks = kinds.iter().filter(|k| **k == "hooks").count();
+    let dropped_plugins = kinds
+        .iter()
+        .filter(|k| **k == "plugins" || **k == "plugins_paths")
+        .count();
+    let dropped_agents = kinds
+        .iter()
+        .filter(|k| **k == "agents" || **k == "project_agents")
+        .count();
+    // Prefer kind presence counts when the scanner reports them; fall back to
+    // a boolean-style count so harnesses still see a non-zero when configs exist.
+    let dropped_hooks_n = if dropped_hooks > 0 {
+        dropped_hooks
+    } else if kinds.iter().any(|k| k.contains("hook")) {
+        1
+    } else {
+        0
+    };
+    let dropped_plugins_n = if dropped_plugins > 0 {
+        dropped_plugins
+    } else if kinds.iter().any(|k| k.contains("plugin")) {
+        1
+    } else {
+        0
+    };
+    let dropped_agents_n = if dropped_agents > 0 {
+        dropped_agents
+    } else if kinds.iter().any(|k| k.contains("agent") || k.contains("role") || k.contains("persona"))
+    {
+        1
+    } else {
+        0
+    };
+
+    serde_json::json!({
+        "trusted": trusted,
+        "key": key.display().to_string(),
+        "reason": reason,
+        "droppedMcpServers": dropped_mcp,
+        "droppedHooks": dropped_hooks_n,
+        "droppedPlugins": dropped_plugins_n,
+        "droppedAgents": dropped_agents_n,
+        "configKinds": kinds,
+    })
 }
 
 // ── HYPER-1: headless question detection + one-shot auto-continue ────────
@@ -1207,7 +1726,23 @@ pub async fn run_single_turn(
         Some(ref p) => dunce::canonicalize(p)?,
     };
 
-    let mut emitter = HeadlessEmitter::new(options.output_format, options.json_schema.is_some());
+    // `--worktree` is a silent no-op in headless today (no git worktree is
+    // ever created). Refuse the flag loudly rather than let edits land in the
+    // main checkout while the caller believes they are isolated.
+    if options.worktree.is_some() {
+        anyhow::bail!(
+            "--worktree is not supported in headless mode; create the worktree \
+             first (e.g. `hyper worktree` or `git worktree add`) and pass \
+             --confine <path> (and optionally --cwd <path>). --worktree-ref was \
+             also dropped in this mode."
+        );
+    }
+
+    let mut emitter = HeadlessEmitter::new(
+        options.output_format,
+        options.json_schema.is_some(),
+        options.stream_tool_io,
+    );
     // Arm process-wide confine_violation NDJSON emission for streaming-json.
     emitter.enable_confine_violation_emit();
 
@@ -1282,6 +1817,29 @@ pub async fn run_single_turn(
     // Persist an explicit --trust grant before the agent starts.
     if options.trust {
         xai_grok_shell::agent::folder_trust::grant_folder_trust(&cwd);
+    }
+
+    // Snapshot trust for the start event (and optional --require-trust gate).
+    // Evaluated against process cwd first; re-evaluated against session_cwd
+    // after resume materialization if they diverge.
+    let folder_trust = folder_trust_start_snapshot(&cwd, options.trust);
+    if options.require_trust {
+        let trusted = folder_trust
+            .get("trusted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !trusted {
+            let reason = folder_trust
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("untrusted");
+            let msg = format!(
+                "--require-trust: workspace is not trusted (reason: {reason}); \
+                 pass --trust to grant, or remove --require-trust"
+            );
+            emitter.on_error(&msg);
+            anyhow::bail!("{msg}");
+        }
     }
 
     let cancel = CancellationToken::new();
@@ -1367,21 +1925,37 @@ pub async fn run_single_turn(
     )
     .await?;
 
-    // Open session
+    // Open session. Hoist the directory the agent will actually work in so
+    // the `start` event cannot advertise process cwd while resume loads
+    // against `original_cwd`.
     let restore_code = options.restore_code.then_some(true);
     let t_session = Instant::now();
-    let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,
+    let is_resume_or_fork = matches!(
+        materialized,
+        MaterializedStartup::Resume { .. } | MaterializedStartup::Fork { .. }
+    );
+    let (session_cwd, original_cwd_for_start, opened) = match materialized {
+        MaterializedStartup::NewAuto => {
+            let opened = open_session(&acp_tx, &cwd, None, None).await;
+            (cwd.clone(), None, opened)
+        }
         MaterializedStartup::NewWithId { session_id } => {
-            open_session_with_id(&acp_tx, &cwd, &session_id).await
+            let opened = open_session_with_id(&acp_tx, &cwd, &session_id).await;
+            (cwd.clone(), None, opened)
         }
         MaterializedStartup::Resume {
             session_id,
             original_cwd,
             ..
         } => {
-            let load_cwd = original_cwd.as_deref().unwrap_or(cwd.as_path());
-            open_session(&acp_tx, load_cwd, Some(session_id.as_str()), restore_code).await
+            let load_cwd = original_cwd
+                .as_deref()
+                .unwrap_or(cwd.as_path())
+                .to_path_buf();
+            let orig = original_cwd.clone();
+            let opened =
+                open_session(&acp_tx, &load_cwd, Some(session_id.as_str()), restore_code).await;
+            (load_cwd, orig, opened)
         }
         MaterializedStartup::Fork {
             parent_session_id,
@@ -1389,7 +1963,11 @@ pub async fn run_single_turn(
             new_session_id,
             ..
         } => {
-            fork_then_open(
+            let load_cwd = parent_cwd
+                .as_deref()
+                .unwrap_or(cwd.as_path())
+                .to_path_buf();
+            let opened = fork_then_open(
                 &acp_tx,
                 &cwd,
                 &parent_session_id,
@@ -1397,7 +1975,8 @@ pub async fn run_single_turn(
                 new_session_id.as_deref(),
                 restore_code,
             )
-            .await
+            .await;
+            (load_cwd, parent_cwd.clone(), opened)
         }
     };
     let OpenedSession {
@@ -1411,6 +1990,37 @@ pub async fn run_single_turn(
             anyhow::bail!("{msg}");
         }
     };
+
+    // Confine vs session cwd: refuse to resume into a directory the harness
+    // did not authorize when --confine is set.
+    if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+        let session_ok = xai_grok_tools::types::resources::path_is_under_confine_root(
+            &session_cwd,
+            root.as_path(),
+        );
+        if !session_ok {
+            let msg = format!(
+                "session cwd {} is outside --confine root {}; refuse to resume into \
+                 an unauthorized directory. Re-run from inside the confine root, or \
+                 pass a session whose original cwd is under the root.",
+                session_cwd.display(),
+                root.display()
+            );
+            emitter.on_error(&msg);
+            anyhow::bail!("{msg}");
+        }
+    }
+
+    // `--rules` on resume/fork: shell now re-syncs via UpsertHumanRules, but
+    // surface the re-sync so harnesses can see it on the wire.
+    let rules_applied = options.rules.is_some();
+    if rules_applied && is_resume_or_fork {
+        emitter.on_warning(
+            "rules_resynced_on_resume",
+            "--rules / --append-system-prompt re-applied on resume (UpsertHumanRules); \
+             prior session head keeps turns, human_rules block is replaced",
+        );
+    }
     tracing::debug!(
         elapsed_ms = t_session.elapsed().as_millis() as u64,
         session_id = %session_id.0,
@@ -1424,7 +2034,7 @@ pub async fn run_single_turn(
             xai_grok_shell::active_sessions::ActiveSession {
                 session_id: session_id.clone(),
                 pid: std::process::id(),
-                cwd: cwd.display().to_string(),
+                cwd: session_cwd.display().to_string(),
                 opened_at: chrono::Utc::now(),
             },
         );
@@ -1457,14 +2067,83 @@ pub async fn run_single_turn(
         .current
         .as_ref()
         .map(|m| m.0.to_string());
+    // Prefer the session cwd for trust reporting when it diverges (resume).
+    let folder_trust = if session_cwd != cwd {
+        folder_trust_start_snapshot(&session_cwd, options.trust)
+    } else {
+        folder_trust
+    };
+    // If --require-trust and session cwd is a different untrusted folder.
+    if options.require_trust {
+        let trusted = folder_trust
+            .get("trusted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !trusted {
+            let reason = folder_trust
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("untrusted");
+            let msg = format!(
+                "--require-trust: session workspace is not trusted (reason: {reason}); \
+                 pass --trust to grant, or remove --require-trust"
+            );
+            emitter.on_error(&msg);
+            anyhow::bail!("{msg}");
+        }
+    }
+    if !folder_trust
+        .get("trusted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
+        let dropped = folder_trust
+            .get("droppedMcpServers")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if dropped > 0
+            || folder_trust
+                .get("droppedHooks")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+            || folder_trust
+                .get("droppedPlugins")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+            || folder_trust
+                .get("droppedAgents")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+        {
+            emitter.on_warning(
+                "folder_trust_untrusted",
+                &format!(
+                    "workspace is untrusted (reason: {}); project MCP/hooks/plugins/agents \
+                     are dropped. Pass --trust to grant, or --require-trust to fail closed.",
+                    folder_trust
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("untrusted-headless")
+                ),
+            );
+        }
+    }
     emitter.on_start(
         session_id.0.as_ref(),
         &cwd,
+        &session_cwd,
+        original_cwd_for_start.as_deref(),
         options.model.as_deref(),
         served.as_deref(),
         permission_mode,
         xai_grok_sandbox::configured_profile_name(),
         options.yolo,
+        rules_applied,
+        &folder_trust,
     );
     // If served model only becomes known after SetSessionModel, announce it.
     if let (Some(requested), Some(served_s)) = (options.model.as_deref(), served.as_deref())
@@ -1732,10 +2411,14 @@ pub async fn run_single_turn(
             // --require-changes: treat a productive stop with zero agent
             // tool edits as NoChanges so harnesses can key on stopReason.
             let no_changes = options.require_changes && emitter.files_changed.is_empty();
+            let subagent_failed =
+                options.require_subagent_success && emitter.subagents.failed > 0;
             if awaiting_user_input {
                 // Distinct terminal signal: the run only asked a question
                 // (even after one auto-continue). filesChanged.count stays 0.
                 stop_reason = "AwaitingUserInput".to_string();
+            } else if subagent_failed && !is_max_turns {
+                stop_reason = "SubagentFailure".to_string();
             } else if no_changes && !is_max_turns {
                 stop_reason = "NoChanges".to_string();
             }
@@ -1756,6 +2439,12 @@ pub async fn run_single_turn(
             if awaiting_user_input {
                 anyhow::bail!(
                     "headless: run ended awaiting user input (question-only turn; no tools)"
+                );
+            }
+            if subagent_failed {
+                anyhow::bail!(
+                    "require-subagent-success: {} subagent(s) failed",
+                    emitter.subagents.failed
                 );
             }
             if no_changes {
@@ -1847,7 +2536,7 @@ async fn reap_pending_background_tasks(
 /// the exit reaper sees everything still running. `wait_for_background` only
 /// gates whether the loop waits for this set to drain.
 fn track_background_lifecycle(
-    event: ExtEvent,
+    event: &ExtEvent,
     pending_bg: &mut HashSet<String>,
     completed_before_bg: &mut HashSet<String>,
 ) {
@@ -1856,8 +2545,8 @@ fn track_background_lifecycle(
             task_id,
             is_monitor,
         } => {
-            if !completed_before_bg.remove(&task_id) {
-                pending_bg.insert(task_id);
+            if !completed_before_bg.remove(task_id) {
+                pending_bg.insert(task_id.clone());
                 tracing::debug!(
                     pending = pending_bg.len(),
                     is_monitor,
@@ -1866,16 +2555,16 @@ fn track_background_lifecycle(
             }
         }
         ExtEvent::TaskCompleted { task_id } => {
-            if pending_bg.remove(&task_id) {
+            if pending_bg.remove(task_id) {
                 tracing::debug!(
                     pending = pending_bg.len(),
                     "headless: background task completed"
                 );
             } else {
-                completed_before_bg.insert(task_id);
+                completed_before_bg.insert(task_id.clone());
             }
         }
-        ExtEvent::SubagentSpawned { subagent_id } => {
+        ExtEvent::SubagentSpawned { subagent_id, .. } => {
             let key = format!("subagent:{subagent_id}");
             if !completed_before_bg.remove(&key) {
                 pending_bg.insert(key);
@@ -1885,7 +2574,7 @@ fn track_background_lifecycle(
                 );
             }
         }
-        ExtEvent::SubagentFinished { subagent_id } => {
+        ExtEvent::SubagentFinished { subagent_id, .. } => {
             let key = format!("subagent:{subagent_id}");
             if pending_bg.remove(&key) {
                 tracing::debug!(
@@ -1897,6 +2586,55 @@ fn track_background_lifecycle(
             }
         }
         ExtEvent::MonitorEvent | ExtEvent::None => {}
+    }
+}
+
+/// Emit stream events for subagent lifecycle after tracking.
+fn emit_subagent_lifecycle(emitter: &mut HeadlessEmitter, event: &ExtEvent) {
+    match event {
+        ExtEvent::SubagentSpawned {
+            subagent_id,
+            child_session_id,
+            subagent_type,
+            description,
+            model,
+            capability_mode,
+        } => {
+            emitter.on_subagent_spawned(
+                subagent_id,
+                child_session_id.as_deref(),
+                subagent_type.as_deref(),
+                description.as_deref(),
+                model.as_deref(),
+                capability_mode.as_deref(),
+            );
+        }
+        ExtEvent::SubagentFinished {
+            subagent_id,
+            child_session_id,
+            status,
+            error,
+            termination_reason,
+            usage,
+            tool_calls,
+            turns,
+            duration_ms,
+            tokens_used,
+        } => {
+            emitter.on_subagent_finished(
+                subagent_id,
+                child_session_id.as_deref(),
+                status,
+                error.as_deref(),
+                termination_reason.as_deref(),
+                usage.clone(),
+                *tool_calls,
+                *turns,
+                *duration_ms,
+                *tokens_used,
+            );
+        }
+        _ => {}
     }
 }
 
@@ -2004,9 +2742,10 @@ fn handle_headless_acp_message(
                     }
                 }
                 // Any tool call counts for the HYPER-1 "did work" check; Edit
-                // locations still feed filesChanged separately.
+                // locations still feed filesChanged separately. Also emit
+                // tool_call / tool_result NDJSON so harnesses are not blind.
                 acp::SessionUpdate::ToolCall(tc) => {
-                    emitter.note_tool_call();
+                    emitter.on_tool_call(tc);
                     if matches!(tc.kind, acp::ToolKind::Edit)
                         && matches!(
                             tc.status,
@@ -2020,7 +2759,8 @@ fn handle_headless_acp_message(
                 }
                 acp::SessionUpdate::ToolCallUpdate(tcu) => {
                     // Updates do not re-count as new tool calls (the ToolCall
-                    // event already did). Only harvest Edit locations.
+                    // event already did). Harvest Edit locations + stream update.
+                    emitter.on_tool_call_update(tcu);
                     if matches!(tcu.fields.kind, Some(acp::ToolKind::Edit))
                         && matches!(tcu.fields.status, Some(acp::ToolCallStatus::Completed))
                         && let Some(locs) = tcu.fields.locations.as_ref()
@@ -2061,7 +2801,11 @@ fn handle_headless_acp_message(
         AcpClientMessageBox::ExtNotification(notif) => {
             let event = handle_ext_notification(&notif, output_format);
             let _ = notif.response_tx.send(Ok(()));
-            track_background_lifecycle(event, pending_bg, completed_before_bg);
+            track_background_lifecycle(&event, pending_bg, completed_before_bg);
+            emit_subagent_lifecycle(emitter, &event);
+        }
+        AcpClientMessageBox::ExtMethod(ext) => {
+            handle_headless_ext_method(ext, emitter);
         }
         AcpClientMessageBox::WaitForTerminalExit(args) => {
             args.response_tx
@@ -2074,8 +2818,54 @@ fn handle_headless_acp_message(
     }
 }
 
+/// Headless reverse-requests that must not block for 30 minutes.
+fn handle_headless_ext_method(
+    ext: xai_acp_lib::AcpArgsBox<acp::ExtRequest>,
+    emitter: &mut HeadlessEmitter,
+) {
+    let method = ext.request.method.as_ref();
+    if method == "x.ai/ask_user_question" {
+        use xai_grok_tools::implementations::grok_build::ask_user_question::{
+            AskUserQuestionExtRequest, AskUserQuestionExtResponse,
+        };
+        let tool_call_id = serde_json::from_str::<AskUserQuestionExtRequest>(
+            ext.request.params.get(),
+        )
+        .ok()
+        .map(|r| r.tool_call_id);
+        emitter.on_question_suppressed(
+            tool_call_id.as_deref(),
+            "headless: ask_user_question is disabled; no interactive user",
+        );
+        let cancelled = AskUserQuestionExtResponse::Cancelled;
+        match serde_json::value::to_raw_value(&cancelled) {
+            Ok(raw) => {
+                let _ = ext.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
+            }
+            Err(e) => {
+                let _ = ext
+                    .response_tx
+                    .send(Err(acp::Error::new(-32603, format!("serialize: {e}"))));
+            }
+        }
+        return;
+    }
+    // Other ext-methods (exit_plan_mode, etc.): cancel so they cannot hang.
+    if method == "x.ai/exit_plan_mode" {
+        emitter.on_warning(
+            "plan_approval_suppressed",
+            "headless: exit_plan_mode request cancelled (no interactive user)",
+        );
+    }
+    let _ = ext.response_tx.send(Err(acp::Error::new(
+        -32601,
+        format!("headless mode does not support ext method {method}"),
+    )));
+}
+
 // ── Extension notification handling ──────────────────────────────────────
 
+#[derive(Debug)]
 enum ExtEvent {
     None,
     TaskBackgrounded {
@@ -2087,9 +2877,23 @@ enum ExtEvent {
     },
     SubagentSpawned {
         subagent_id: String,
+        child_session_id: Option<String>,
+        subagent_type: Option<String>,
+        description: Option<String>,
+        model: Option<String>,
+        capability_mode: Option<String>,
     },
     SubagentFinished {
         subagent_id: String,
+        child_session_id: Option<String>,
+        status: String,
+        error: Option<String>,
+        termination_reason: Option<String>,
+        usage: Option<serde_json::Value>,
+        tool_calls: Option<u32>,
+        turns: Option<u32>,
+        duration_ms: Option<u64>,
+        tokens_used: Option<u64>,
     },
     /// Monitor emitted a line (or ended streaming). Does not complete the task;
     /// completion still arrives via `TaskCompleted`.
@@ -2174,9 +2978,168 @@ fn handle_ext_notification(
         _ => return ExtEvent::None,
     }
 
+    // Prefer the shell's rich SessionUpdate shape for subagent fields so we
+    // do not re-declare a lossy mirror (historical cause of dropped usage /
+    // termination_reason). Fall back to a local enum for compact/image
+    // events the shell also emits on this channel.
+    #[derive(serde::Deserialize)]
+    struct XaiNotifRaw {
+        update: serde_json::Value,
+    }
+
+    let Ok(raw) = serde_json::from_str::<XaiNotifRaw>(notif.request.params.get()) else {
+        return ExtEvent::None;
+    };
+
+    // Try the shell's typed SessionUpdate first (full subagent payload).
+    if let Ok(su) =
+        serde_json::from_value::<xai_grok_shell::extensions::notification::SessionUpdate>(
+            raw.update.clone(),
+        )
+    {
+        use xai_grok_shell::extensions::notification::SessionUpdate as ShellUpdate;
+        match su {
+            ShellUpdate::SubagentSpawned {
+                subagent_id,
+                child_session_id,
+                subagent_type,
+                description,
+                capability_mode,
+                model,
+                ..
+            } => {
+                return ExtEvent::SubagentSpawned {
+                    subagent_id,
+                    child_session_id: Some(child_session_id),
+                    subagent_type: Some(subagent_type),
+                    description: Some(description),
+                    model,
+                    capability_mode,
+                };
+            }
+            ShellUpdate::SubagentFinished {
+                subagent_id,
+                child_session_id,
+                status,
+                error,
+                termination_reason,
+                usage,
+                tool_calls,
+                turns,
+                duration_ms,
+                tokens_used,
+                ..
+            } => {
+                return ExtEvent::SubagentFinished {
+                    subagent_id,
+                    child_session_id: Some(child_session_id),
+                    status,
+                    error,
+                    termination_reason,
+                    usage: usage.and_then(|u| serde_json::to_value(u).ok()),
+                    tool_calls: Some(tool_calls),
+                    turns: Some(turns),
+                    duration_ms: Some(duration_ms),
+                    tokens_used: Some(tokens_used),
+                };
+            }
+            ShellUpdate::AutoCompactStarted { percentage, .. } => {
+                match format {
+                    OutputFormat::StreamingJson => {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "type": "auto_compact_started",
+                                "percentage": percentage
+                            })
+                        );
+                    }
+                    OutputFormat::Plain => {
+                        eprintln!("Auto-compacting conversation ({percentage}% full)...");
+                    }
+                    OutputFormat::Json => {}
+                }
+                return ExtEvent::None;
+            }
+            ShellUpdate::AutoCompactCompleted { .. } => {
+                match format {
+                    OutputFormat::StreamingJson => {
+                        println!("{}", serde_json::json!({"type": "auto_compact_completed"}));
+                    }
+                    OutputFormat::Plain => eprintln!("Conversation compacted."),
+                    OutputFormat::Json => {}
+                }
+                return ExtEvent::None;
+            }
+            ShellUpdate::AutoCompactFailed { error, .. } => {
+                match format {
+                    OutputFormat::StreamingJson => {
+                        println!(
+                            "{}",
+                            serde_json::json!({"type": "auto_compact_failed", "error": error})
+                        );
+                    }
+                    OutputFormat::Plain => {
+                        if error.trim().is_empty() {
+                            eprintln!("Auto-compact failed.");
+                        } else {
+                            eprintln!("Auto-compact failed: {error}");
+                        }
+                    }
+                    OutputFormat::Json => {}
+                }
+                return ExtEvent::None;
+            }
+            ShellUpdate::AutoCompactCancelled { .. } => {
+                match format {
+                    OutputFormat::StreamingJson => {
+                        println!("{}", serde_json::json!({"type": "auto_compact_cancelled"}));
+                    }
+                    OutputFormat::Plain => eprintln!("Auto-compact cancelled."),
+                    OutputFormat::Json => {}
+                }
+                return ExtEvent::None;
+            }
+            ShellUpdate::AutoContinueCompleted { total_tokens, .. } => {
+                match format {
+                    OutputFormat::StreamingJson => {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "type": "auto_continue_completed",
+                                "total_tokens": total_tokens
+                            })
+                        );
+                    }
+                    OutputFormat::Plain => eprintln!("Resumed after compaction."),
+                    OutputFormat::Json => {}
+                }
+                return ExtEvent::None;
+            }
+            ShellUpdate::ImageCompressed { message, .. } => {
+                match format {
+                    OutputFormat::StreamingJson => {
+                        println!(
+                            "{}",
+                            serde_json::json!({"type": "image_compressed", "message": message})
+                        );
+                    }
+                    OutputFormat::Plain => eprintln!("{message}"),
+                    OutputFormat::Json => {}
+                }
+                return ExtEvent::None;
+            }
+            _ => {
+                // Other shell updates are intentionally not streamed headlessly.
+                return ExtEvent::None;
+            }
+        }
+    }
+
+    // Fallback: minimal local mirror for wire shapes the shell type rejects.
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "snake_case", tag = "sessionUpdate")]
-    enum XaiUpdate {
+    enum XaiUpdateLite {
         AutoCompactStarted {
             percentage: u8,
         },
@@ -2193,24 +3156,48 @@ fn handle_ext_notification(
         },
         SubagentSpawned {
             subagent_id: String,
+            #[serde(default)]
+            child_session_id: Option<String>,
+            #[serde(default)]
+            subagent_type: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            capability_mode: Option<String>,
         },
         SubagentFinished {
             subagent_id: String,
+            #[serde(default)]
+            child_session_id: Option<String>,
+            #[serde(default)]
+            status: Option<String>,
+            #[serde(default)]
+            error: Option<String>,
+            #[serde(default)]
+            termination_reason: Option<String>,
+            #[serde(default)]
+            usage: Option<serde_json::Value>,
+            #[serde(default)]
+            tool_calls: Option<u32>,
+            #[serde(default)]
+            turns: Option<u32>,
+            #[serde(default)]
+            duration_ms: Option<u64>,
+            #[serde(default)]
+            tokens_used: Option<u64>,
         },
         #[serde(other)]
         Other,
     }
-    #[derive(serde::Deserialize)]
-    struct XaiNotif {
-        update: XaiUpdate,
-    }
 
-    let Ok(xai_notif) = serde_json::from_str::<XaiNotif>(notif.request.params.get()) else {
+    let Ok(lite) = serde_json::from_value::<XaiUpdateLite>(raw.update) else {
         return ExtEvent::None;
     };
 
-    match xai_notif.update {
-        XaiUpdate::AutoCompactStarted { percentage } => match format {
+    match lite {
+        XaiUpdateLite::AutoCompactStarted { percentage } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -2222,14 +3209,14 @@ fn handle_ext_notification(
             }
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoCompactCompleted {} => match format {
+        XaiUpdateLite::AutoCompactCompleted {} => match format {
             OutputFormat::StreamingJson => {
                 println!("{}", serde_json::json!({"type": "auto_compact_completed"}));
             }
             OutputFormat::Plain => eprintln!("Conversation compacted."),
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoCompactFailed { error } => match format {
+        XaiUpdateLite::AutoCompactFailed { error } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -2245,14 +3232,14 @@ fn handle_ext_notification(
             }
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoCompactCancelled {} => match format {
+        XaiUpdateLite::AutoCompactCancelled {} => match format {
             OutputFormat::StreamingJson => {
                 println!("{}", serde_json::json!({"type": "auto_compact_cancelled"}));
             }
             OutputFormat::Plain => eprintln!("Auto-compact cancelled."),
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoContinueCompleted { total_tokens } => match format {
+        XaiUpdateLite::AutoContinueCompleted { total_tokens } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -2262,7 +3249,7 @@ fn handle_ext_notification(
             OutputFormat::Plain => eprintln!("Resumed after compaction."),
             OutputFormat::Json => {}
         },
-        XaiUpdate::ImageCompressed { message } => match format {
+        XaiUpdateLite::ImageCompressed { message } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -2272,13 +3259,49 @@ fn handle_ext_notification(
             OutputFormat::Plain => eprintln!("{message}"),
             OutputFormat::Json => {}
         },
-        XaiUpdate::SubagentSpawned { subagent_id } => {
-            return ExtEvent::SubagentSpawned { subagent_id };
+        XaiUpdateLite::SubagentSpawned {
+            subagent_id,
+            child_session_id,
+            subagent_type,
+            description,
+            model,
+            capability_mode,
+        } => {
+            return ExtEvent::SubagentSpawned {
+                subagent_id,
+                child_session_id,
+                subagent_type,
+                description,
+                model,
+                capability_mode,
+            };
         }
-        XaiUpdate::SubagentFinished { subagent_id, .. } => {
-            return ExtEvent::SubagentFinished { subagent_id };
+        XaiUpdateLite::SubagentFinished {
+            subagent_id,
+            child_session_id,
+            status,
+            error,
+            termination_reason,
+            usage,
+            tool_calls,
+            turns,
+            duration_ms,
+            tokens_used,
+        } => {
+            return ExtEvent::SubagentFinished {
+                subagent_id,
+                child_session_id,
+                status: status.unwrap_or_else(|| "unknown".into()),
+                error,
+                termination_reason,
+                usage,
+                tool_calls,
+                turns,
+                duration_ms,
+                tokens_used,
+            };
         }
-        XaiUpdate::Other => {}
+        XaiUpdateLite::Other => {}
     }
     ExtEvent::None
 }
@@ -2290,7 +3313,7 @@ mod tests {
         let mut pending = std::collections::HashSet::new();
         let mut completed = std::collections::HashSet::new();
         super::track_background_lifecycle(
-            super::ExtEvent::TaskBackgrounded {
+            &super::ExtEvent::TaskBackgrounded {
                 task_id: "t1".into(),
                 is_monitor: false,
             },
@@ -2298,8 +3321,13 @@ mod tests {
             &mut completed,
         );
         super::track_background_lifecycle(
-            super::ExtEvent::SubagentSpawned {
+            &super::ExtEvent::SubagentSpawned {
                 subagent_id: "s1".into(),
+                child_session_id: None,
+                subagent_type: None,
+                description: None,
+                model: None,
+                capability_mode: None,
             },
             &mut pending,
             &mut completed,
@@ -2308,15 +3336,24 @@ mod tests {
         assert!(pending.contains("subagent:s1"));
 
         super::track_background_lifecycle(
-            super::ExtEvent::TaskCompleted {
+            &super::ExtEvent::TaskCompleted {
                 task_id: "t1".into(),
             },
             &mut pending,
             &mut completed,
         );
         super::track_background_lifecycle(
-            super::ExtEvent::SubagentFinished {
+            &super::ExtEvent::SubagentFinished {
                 subagent_id: "s1".into(),
+                child_session_id: None,
+                status: "completed".into(),
+                error: None,
+                termination_reason: None,
+                usage: None,
+                tool_calls: None,
+                turns: None,
+                duration_ms: None,
+                tokens_used: None,
             },
             &mut pending,
             &mut completed,
@@ -2329,14 +3366,14 @@ mod tests {
         let mut pending = std::collections::HashSet::new();
         let mut completed = std::collections::HashSet::new();
         super::track_background_lifecycle(
-            super::ExtEvent::TaskCompleted {
+            &super::ExtEvent::TaskCompleted {
                 task_id: "t1".into(),
             },
             &mut pending,
             &mut completed,
         );
         super::track_background_lifecycle(
-            super::ExtEvent::TaskBackgrounded {
+            &super::ExtEvent::TaskBackgrounded {
                 task_id: "t1".into(),
                 is_monitor: false,
             },
@@ -2477,7 +3514,7 @@ mod tests {
     fn structured_output_without_meta_errors_never_parses_text() {
         // No `_meta` structured output (e.g. max-turns/cancel): emit a clean
         // error, never an unvalidated parse of the raw text buffer.
-        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, true);
+        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, true, StreamToolIo::Truncated);
         emitter.text_buffer = r#"{"name":"alice","age":30}"#.into();
         emitter.set_structured_output_from_meta(serde_json::json!({}).as_object());
         let result = emitter.build_json_result("EndTurn", "sess-1", "req-1");
@@ -2492,7 +3529,7 @@ mod tests {
     fn structured_output_from_meta_wins_over_text_buffer() {
         // The agent's validated output (from `_meta`) must override accumulated
         // prose (the multi-round corruption bug).
-        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, true);
+        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, true, StreamToolIo::Truncated);
         emitter.text_buffer = "thinking out loud...".into();
         emitter.set_structured_output_from_meta(
             serde_json::json!({"structuredOutput": {"name": "carol"}}).as_object(),
@@ -2501,7 +3538,7 @@ mod tests {
         assert_eq!(result["structuredOutput"]["name"], "carol");
         assert!(result.get("structuredOutputError").is_none());
 
-        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, true);
+        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, true, StreamToolIo::Truncated);
         emitter.set_structured_output_from_meta(
             serde_json::json!({
                 "structuredOutputError": "output does not match the required schema"
@@ -2518,7 +3555,7 @@ mod tests {
 
     #[test]
     fn streaming_json_structured_output_emits_from_meta() {
-        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, true);
+        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, true, StreamToolIo::Truncated);
         emitter.on_text_chunk(r#"{"name":"#);
         emitter.on_text_chunk(r#""bob"}"#);
         assert_eq!(emitter.text_buffer, r#"{"name":"bob"}"#);
@@ -2552,7 +3589,7 @@ mod tests {
 
     #[test]
     fn files_changed_json_counts_and_lists_paths() {
-        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         emitter.files_changed.insert("src/a.rs".into());
         emitter.files_changed.insert("src/b.rs".into());
         let v = emitter.files_changed_json();
@@ -2566,7 +3603,7 @@ mod tests {
 
     #[test]
     fn files_changed_json_empty_when_no_edits() {
-        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         let v = emitter.files_changed_json();
         assert_eq!(v["count"], 0);
         assert_eq!(v["truncated"], false);
@@ -2575,7 +3612,7 @@ mod tests {
 
     #[test]
     fn files_changed_json_truncates_path_list() {
-        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         for i in 0..(FILES_CHANGED_MAX_PATHS + 5) {
             emitter.files_changed.insert(format!("f{i}.rs"));
         }
@@ -2591,11 +3628,11 @@ mod tests {
     #[test]
     fn require_changes_flag_detects_empty_set() {
         // Mirrors the headless exit gate: require_changes && no edit paths.
-        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         assert!(emitter.files_changed.is_empty());
         let require_changes = true;
         assert!(require_changes && emitter.files_changed.is_empty());
-        let mut emitter2 = HeadlessEmitter::new(OutputFormat::StreamingJson, false);
+        let mut emitter2 = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         emitter2.files_changed.insert("x.rs".into());
         assert!(!(require_changes && emitter2.files_changed.is_empty()));
     }
@@ -2684,10 +3721,21 @@ mod tests {
                 "description": "test"
             }),
         );
-        assert!(matches!(
-            handle_ext_notification(&spawned, OutputFormat::Plain),
-            ExtEvent::SubagentSpawned { subagent_id } if subagent_id == "sub-1"
-        ));
+        match handle_ext_notification(&spawned, OutputFormat::Plain) {
+            ExtEvent::SubagentSpawned {
+                subagent_id,
+                child_session_id,
+                subagent_type,
+                description,
+                ..
+            } => {
+                assert_eq!(subagent_id, "sub-1");
+                assert_eq!(child_session_id.as_deref(), Some("c"));
+                assert_eq!(subagent_type.as_deref(), Some("explore"));
+                assert_eq!(description.as_deref(), Some("test"));
+            }
+            other => panic!("expected SubagentSpawned, got {other:?}"),
+        }
         let finished = make_ext_notif(
             "x.ai/session_notification",
             serde_json::json!({
@@ -2697,13 +3745,94 @@ mod tests {
                 "status": "completed",
                 "tool_calls": 0,
                 "turns": 1,
-                "duration_ms": 5
+                "duration_ms": 5,
+                "tokens_used": 42
             }),
         );
-        assert!(matches!(
-            handle_ext_notification(&finished, OutputFormat::Plain),
-            ExtEvent::SubagentFinished { subagent_id } if subagent_id == "sub-1"
-        ));
+        match handle_ext_notification(&finished, OutputFormat::Plain) {
+            ExtEvent::SubagentFinished {
+                subagent_id,
+                status,
+                tool_calls,
+                turns,
+                duration_ms,
+                tokens_used,
+                ..
+            } => {
+                assert_eq!(subagent_id, "sub-1");
+                assert_eq!(status, "completed");
+                assert_eq!(tool_calls, Some(0));
+                assert_eq!(turns, Some(1));
+                assert_eq!(duration_ms, Some(5));
+                assert_eq!(tokens_used, Some(42));
+            }
+            other => panic!("expected SubagentFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_call_event_increments_run_and_turn_counts() {
+        let mut emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::None);
+        let tc = acp::ToolCall::new("call-1", "Bash: echo hi")
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::InProgress)
+            .raw_input(serde_json::json!({"command": "echo hi"}));
+        emitter.on_tool_call(&tc);
+        assert_eq!(emitter.turn_tool_calls, 1);
+        assert_eq!(emitter.run_tool_calls, 1);
+        emitter.reset_turn_tracking();
+        assert_eq!(emitter.turn_tool_calls, 0);
+        assert_eq!(emitter.run_tool_calls, 1, "run total must survive reset");
+    }
+
+    #[test]
+    fn stream_tool_io_none_omits_raw_input() {
+        let emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::None);
+        let (v, truncated) =
+            emitter.maybe_stream_tool_value(Some(&serde_json::json!({"a": 1})));
+        assert!(v.is_none());
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn stream_tool_io_truncated_marks_large_payload() {
+        let emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
+        let big = "x".repeat(STREAM_TOOL_IO_TRUNCATED_BYTES + 100);
+        let (v, truncated) =
+            emitter.maybe_stream_tool_value(Some(&serde_json::Value::String(big)));
+        assert!(truncated);
+        assert!(v.is_some());
+    }
+
+    #[test]
+    fn subagent_rollup_counts_failed_and_cancelled() {
+        let mut r = SubagentRollup::default();
+        r.note_spawned();
+        r.note_spawned();
+        r.note_spawned();
+        r.note_finished("completed");
+        r.note_finished("failed");
+        r.note_finished("cancelled");
+        let j = r.to_json();
+        assert_eq!(j["spawned"], 3);
+        assert_eq!(j["completed"], 1);
+        assert_eq!(j["failed"], 1);
+        assert_eq!(j["cancelled"], 1);
+    }
+
+    #[test]
+    fn end_event_includes_tool_calls_and_subagents() {
+        let mut emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::None);
+        emitter.run_tool_calls = 7;
+        emitter.subagents.spawned = 2;
+        emitter.subagents.failed = 1;
+        // on_end prints; we only assert the rollup helpers used by it.
+        assert_eq!(emitter.run_tool_calls, 7);
+        assert_eq!(emitter.subagents.to_json()["failed"], 1);
     }
 
     #[test]
@@ -2795,10 +3924,15 @@ Want to try it? (Requires opening a local URL)";
         let meta = req.meta.as_ref().expect("meta");
         assert_eq!(meta["startupHints"]["nonInteractive"], true);
         assert!(meta.get("allowInteractiveQuestions").is_none());
+        assert_eq!(meta["askUserQuestion"], false, "default-disable ask tool headlessly");
         assert_eq!(meta["rules"], "be brief");
 
         let req2 = build_headless_init_request(None, None, true);
         let meta2 = req2.meta.as_ref().expect("meta");
         assert_eq!(meta2["allowInteractiveQuestions"], true);
+        assert!(
+            meta2.get("askUserQuestion").is_none(),
+            "opt-in must not force-disable the tool"
+        );
     }
 }

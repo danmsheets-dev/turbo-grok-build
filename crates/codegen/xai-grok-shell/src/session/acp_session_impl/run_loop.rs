@@ -593,6 +593,9 @@ pub(super) async fn run_session(
                         SessionCommand::ReplaceSystemPrompt { system_prompt } => {
                             session.handle_replace_system_prompt(system_prompt).await;
                         }
+                        SessionCommand::UpsertHumanRules { rules } => {
+                            session.handle_upsert_human_rules(rules).await;
+                        }
                         SessionCommand::RestorePlanApproval => {
                             // Resume re-park: spawn the approval
                             // round-trip so the command loop is not blocked on

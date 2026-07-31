@@ -133,6 +133,14 @@ pub enum SessionCommand {
     ReplaceSystemPrompt {
         system_prompt: String,
     },
+    /// Upsert a `<human_rules>` block on the live system head (resume /
+    /// re-attach with `--rules`). Reads the current head, replaces any
+    /// existing human_rules block, and writes back via
+    /// [`Self::ReplaceSystemPrompt`]. No-op when the chat-state actor is
+    /// unavailable or the head already matches.
+    UpsertHumanRules {
+        rules: String,
+    },
     /// Resume hook: after a session is restored with
     /// `awaiting_plan_approval == true`, re-issue the `exit_plan_mode`
     /// reverse-request so the client re-shows approval chrome over a real live

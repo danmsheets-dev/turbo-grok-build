@@ -2403,6 +2403,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 continue_last_session: args.continue_last_session,
                 fork_session: args.fork_session,
                 worktree: args.worktree,
+                worktree_ref: args.worktree_ref.clone(),
                 restore_code: args.restore_code,
                 agent: args.agent.clone(),
                 agents_json: args.agents_json.clone(),
@@ -2419,6 +2420,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     args.background_wait_timeout_secs,
                 ),
                 require_changes: args.require_changes,
+                require_subagent_success: args.require_subagent_success,
+                require_trust: args.require_trust,
+                stream_tool_io: args.stream_tool_io,
                 allow_interactive_questions: args.allow_interactive_questions,
             },
         )
