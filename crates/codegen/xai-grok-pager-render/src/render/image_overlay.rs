@@ -8,6 +8,11 @@
 //! | **Pixels available** | Image + path footer       | Image only                 |
 //! | **Pixels unavailable** | Metadata + path         | Metadata only              |
 //!
+//! "Pixels available" means prepared preview bytes exist. On Kitty/Ghostty/
+//! WezTerm those become graphics-protocol escapes; on terminals without a
+//! protocol (Windows ConPTY, Apple Terminal, …) they become a truecolor
+//! half-block raster painted into the ratatui buffer.
+//!
 //! The prompt bar chip itself is always path-free (`[Image #N]`); paths
 //! appear only here.
 
@@ -23,6 +28,7 @@ use crate::terminal::overlay;
 
 mod content;
 mod geometry;
+mod halfblock;
 
 use content::{
     build_meta_line, format_bytes, format_mime, paint_path_line, truncate_path_for_overlay,
@@ -32,6 +38,7 @@ use geometry::ImagePlacement;
 use geometry::{
     MIN_BOX_WIDTH, MIN_META_BOX_HEIGHT, MIN_PIXEL_BOX_HEIGHT, overlay_geometry, plan_image_preview,
 };
+pub use halfblock::paint_halfblock_image;
 
 #[derive(Debug)]
 struct ImageOverlayRender {
@@ -151,7 +158,7 @@ fn render_image_overlay_inner(
         }
         let status = if image.preview.is_failed() {
             Some("Preview unavailable")
-        } else if image.preview.is_pending() && protocol.supports_images() {
+        } else if image.preview.is_pending() {
             Some("Preview pending")
         } else {
             None
@@ -186,32 +193,70 @@ fn render_image_overlay_inner(
         });
     }
 
-    if image_inner.width > 0 && image_inner.height > 0 {
-        use crate::render::SafeBuf;
-        let loading = "Loading...";
-        let lw = loading.len() as u16;
-        let lx = image_inner.x + image_inner.width.saturating_sub(lw) / 2;
-        let ly = image_inner.y + image_inner.height / 2;
-        buf.set_span_safe(
-            lx,
-            ly,
-            &Span::styled(loading, Style::default().fg(text_fg).bg(bg)),
-            lw,
-        );
-    }
-
-    let escapes = geometry.image_placement.and_then(|placement| {
-        let (bytes, _) = image.preview.prepared()?;
-        overlay::static_image_for_protocol(
-            protocol,
-            bytes,
-            placement.cols,
-            placement.rows,
-            placement.x,
-            placement.y,
-            image.preview.identity(),
-        )
-    });
+    // Prefer native graphics protocol escapes when the terminal supports them.
+    // Otherwise (Windows ConPTY, Apple Terminal, …) paint a truecolor half-block
+    // approximation into the buffer so the user still sees the image.
+    let escapes = if protocol.supports_images() {
+        if image_inner.width > 0 && image_inner.height > 0 {
+            use crate::render::SafeBuf;
+            let loading = "Loading...";
+            let lw = loading.len() as u16;
+            let lx = image_inner.x + image_inner.width.saturating_sub(lw) / 2;
+            let ly = image_inner.y + image_inner.height / 2;
+            buf.set_span_safe(
+                lx,
+                ly,
+                &Span::styled(loading, Style::default().fg(text_fg).bg(bg)),
+                lw,
+            );
+        }
+        geometry.image_placement.and_then(|placement| {
+            let (bytes, _) = image.preview.prepared()?;
+            overlay::static_image_for_protocol(
+                protocol,
+                bytes,
+                placement.cols,
+                placement.rows,
+                placement.x,
+                placement.y,
+                image.preview.identity(),
+            )
+        })
+    } else {
+        let mut painted = false;
+        if let Some(placement) = geometry.image_placement
+            && let Some((bytes, _)) = image.preview.prepared()
+        {
+            let rect = Rect {
+                x: placement.x,
+                y: placement.y,
+                width: placement.cols,
+                height: placement.rows,
+            };
+            painted = paint_halfblock_image(buf, rect, bytes);
+        }
+        if !painted && image_inner.width > 0 && image_inner.height > 0 {
+            // Decode failed — fall back to metadata inside the pixel-sized box.
+            let mut lines = Vec::new();
+            lines.push(Line::from(format!(
+                "Format: {}",
+                format_mime(&image.mime_type)
+            )));
+            if let Some((w, h)) = image.preview_dimensions() {
+                lines.push(Line::from(format!("Dimensions: {} x {}", w, h)));
+            }
+            lines.push(Line::from(format!(
+                "Size: {}",
+                format_bytes(image.byte_len)
+            )));
+            lines.push(Line::from("Preview unavailable"));
+            let paragraph = Paragraph::new(lines)
+                .style(Style::default().fg(text_fg).bg(bg))
+                .wrap(Wrap { trim: false });
+            paragraph.render(image_inner, buf);
+        }
+        None
+    };
     Some(ImageOverlayRender {
         #[cfg(test)]
         image_placement: geometry.image_placement,

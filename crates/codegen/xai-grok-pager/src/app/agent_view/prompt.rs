@@ -507,9 +507,9 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ElementInteraction::ImagePreview => {
-                    if !self.guard_image_support() {
-                        return InputOutcome::Changed;
-                    }
+                    // Always open the in-app viewer. Kitty/iTerm2 terminals get
+                    // protocol pixels; everyone else (Windows ConPTY, …) falls
+                    // back to truecolor half-block raster inside the modal.
                     if let Some(img) = self.prompt.image_at_cursor() {
                         if let Some(viewer) = crate::prompt_images::ImageViewerState::open(img) {
                             self.image_viewer = Some(viewer);
