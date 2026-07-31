@@ -19,8 +19,8 @@ use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome};
 use crate::permission::shell_access::{
-    command_write_paths_in_tree, edit_target_protection, is_safe_write_sink, shell_confine_operands,
-    shell_unmodelled_program_for_confine, tree_has_opaque_shell, words_are_opaque_shell,
+    ConfineShellAnalysis, analyse_shell_for_confine, command_write_paths_in_tree,
+    edit_target_protection, is_safe_write_sink, tree_has_opaque_shell, words_are_opaque_shell,
 };
 use crate::permission::state::{PermissionState, load_state_from_disk, persist_state};
 use crate::permission::types::{
@@ -1137,28 +1137,13 @@ fn confine_access_outside_root(
             None
         }
         AccessKind::Bash(cmd) => {
-            // Fail closed: if we cannot parse write/`cd` operands with
-            // confidence, deny. A harness that set `--confine` wants the
-            // strict reading — partial operand lists are an escape hatch.
-            let Some(operands) = shell_confine_operands(cmd) else {
-                return Some(ConfineHit {
-                    path: cmd.clone(),
-                    resolved_path: cmd.clone(),
-                    root: root.display().to_string(),
-                    detail: Some(format!(
-                        "Denied by confine root: shell command could not be parsed with \
-                         confidence under confinement (fail closed): `{cmd}`"
-                    )),
-                    rule: "shell-unparseable",
-                });
-            };
-
-            // Default under confine: unknown / unmodelled programs are denied
-            // (the operand allowlist is a classifier, not a boundary). Opt out
-            // via GROK_CONFINE_SHELL_MODE=operand. Key off the env flag alone —
-            // this function is only reached when a root is already active, so
-            // we must not also require the process OnceLock (unit tests pass a
-            // root without stamping PROCESS_CONFINE_ROOT).
+            // Default under confine: unknown / unmodelled programs and
+            // unparseable scripts are denied as *policy* decisions — never as
+            // path-outside-root hits with the raw command string in `path`.
+            // Opt out via GROK_CONFINE_SHELL_MODE=operand. Key off the env flag
+            // alone — this function is only reached when a root is already
+            // active, so we must not also require the process OnceLock (unit
+            // tests pass a root without stamping PROCESS_CONFINE_ROOT).
             let fail_closed = !matches!(
                 std::env::var(xai_grok_tools::types::resources::ENV_GROK_CONFINE_SHELL_MODE)
                     .unwrap_or_default()
@@ -1166,11 +1151,28 @@ fn confine_access_outside_root(
                     .as_str(),
                 "operand" | "operand-scan" | "allowlist" | "legacy"
             );
-            if fail_closed {
-                if let Some(program) = shell_unmodelled_program_for_confine(cmd) {
+
+            let analysis = analyse_shell_for_confine(cmd);
+            match &analysis {
+                ConfineShellAnalysis::Unparseable => {
                     return Some(ConfineHit {
-                        path: cmd.clone(),
-                        resolved_path: cmd.clone(),
+                        // Policy denial — do NOT put the command string in path.
+                        path: String::new(),
+                        resolved_path: String::new(),
+                        root: root.display().to_string(),
+                        detail: Some(format!(
+                            "Denied by confine root: shell command could not be parsed into \
+                             path operands with confidence under confinement (fail closed, \
+                             rule=shell-unparseable). Command: `{cmd}`"
+                        )),
+                        rule: "shell-unparseable",
+                    });
+                }
+                ConfineShellAnalysis::Unmodelled { program } if fail_closed => {
+                    return Some(ConfineHit {
+                        // Program name only — never the full compound command.
+                        path: program.clone(),
+                        resolved_path: program.clone(),
                         root: root.display().to_string(),
                         detail: Some(format!(
                             "Denied by confine root: shell program `{program}` is not on the \
@@ -1182,7 +1184,31 @@ fn confine_access_outside_root(
                         rule: "shell-unmodelled-program",
                     });
                 }
+                _ => {}
             }
+
+            // Operand-scan path (and modelled fail-closed): check real path
+            // operands only. Unmodelled under operand-scan yields empty list.
+            let operands = match analysis {
+                ConfineShellAnalysis::Modelled { operands } => operands,
+                ConfineShellAnalysis::Unmodelled { .. } => {
+                    // Legacy operand-scan: no extracted writes → allow.
+                    Vec::new()
+                }
+                ConfineShellAnalysis::Unparseable => {
+                    // Unreachable: handled above. Keep fail-closed.
+                    return Some(ConfineHit {
+                        path: String::new(),
+                        resolved_path: String::new(),
+                        root: root.display().to_string(),
+                        detail: Some(format!(
+                            "Denied by confine root: shell command could not be parsed \
+                             (fail closed): `{cmd}`"
+                        )),
+                        rule: "shell-unparseable",
+                    });
+                }
+            };
 
             for operand in operands {
                 if is_safe_write_sink(&operand) {
@@ -8378,14 +8404,58 @@ mod tests {
         );
         let hit = hit.unwrap();
         assert_eq!(hit.rule, "shell-unmodelled-program");
+        // Policy denial: path is the program name, never the full command line.
+        assert_eq!(hit.path, "python");
+        assert!(
+            !hit.path.contains("-c"),
+            "path must not hold the command string: {hit:?}"
+        );
         assert!(
             hit.detail
                 .as_deref()
                 .unwrap_or("")
-                .contains("python")
-                || hit.path.contains("python"),
-            "denial must name the program: {hit:?}"
+                .contains("python"),
+            "denial detail must name the program: {hit:?}"
         );
+    }
+
+    /// R7-7b: compound read-only commands whose every path operand is inside
+    /// the confine root must not emit a violation.
+    #[test]
+    fn confine_compound_readonly_inside_root_allows() {
+        let _guard = CONFINE_SHELL_MODE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        let inside = root_path.join("src").join("main.rs");
+        std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
+        std::fs::write(&inside, "fn main() {}\n").unwrap();
+        let prev = std::env::var("GROK_CONFINE_SHELL_MODE").ok();
+        unsafe {
+            std::env::remove_var("GROK_CONFINE_SHELL_MODE");
+        }
+
+        let rel = "src/main.rs";
+        let cmds = [
+            format!("cd \"{}\" ; git show HEAD --stat", root_path.display()),
+            format!("wc -l {rel}; (Get-Item {rel}).Length"),
+            format!("cat {rel} | wc -l"),
+            format!("git log --oneline -5 ; git status"),
+        ];
+        for cmd in &cmds {
+            let access = AccessKind::Bash(cmd.clone());
+            let hit = confine_access_outside_root(&access, &root_path, root_path.as_path(), None);
+            assert!(
+                hit.is_none(),
+                "compound read-only inside root must allow, got {hit:?} for `{cmd}`"
+            );
+        }
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GROK_CONFINE_SHELL_MODE", v) },
+            None => unsafe { std::env::remove_var("GROK_CONFINE_SHELL_MODE") },
+        }
     }
 
     /// Shell wires live sampling via `set_classifier_with_side_query(..., true)`;

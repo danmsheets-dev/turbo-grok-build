@@ -2094,6 +2094,23 @@ fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> Resum
         ResumeWorktreeAction::Shared
     }
 }
+
+/// Env opt-in for the (otherwise fail-closed) shared-workspace fallback when
+/// isolation=worktree cannot be provided. See R6-10 / WP-C3.
+pub(crate) const ENV_SUBAGENT_ALLOW_SHARED_FALLBACK: &str =
+    "GROK_SUBAGENT_ALLOW_SHARED_FALLBACK";
+
+/// Whether the operator opted into shared-workspace fallback when isolation
+/// cannot be provided. Default is **false** (fail closed).
+pub(crate) fn isolation_shared_fallback_allowed() -> bool {
+    match std::env::var(ENV_SUBAGENT_ALLOW_SHARED_FALLBACK) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
 /// The parent session's working directory — the source path for a subagent
 /// worktree. Prefers the reconstructed `SessionInfo` cwd, falling back to
 /// `parent_cwd`.

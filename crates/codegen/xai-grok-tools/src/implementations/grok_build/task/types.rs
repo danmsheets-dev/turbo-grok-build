@@ -402,6 +402,11 @@ pub struct SubagentResult {
     pub output_usage_incomplete: bool,
     /// Path to the isolated worktree if one was created.
     pub worktree_path: Option<String>,
+    /// Set when isolation was requested but the child fell back to the shared
+    /// workspace (only possible with
+    /// `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`). Harnesses must treat the run
+    /// as **not** isolated when this is true.
+    pub isolation_fallback: bool,
     /// Set when a blocking subagent exceeded its await budget and was
     /// auto-backgrounded: the child is still running (result via auto-wake /
     /// `get_command_or_subagent_output`), so the tool returns a `task_id` notice
@@ -427,6 +432,7 @@ impl Default for SubagentResult {
             total_tokens_used: 0,
             output_usage_incomplete: false,
             worktree_path: None,
+            isolation_fallback: false,
             backgrounded: false,
         }
     }

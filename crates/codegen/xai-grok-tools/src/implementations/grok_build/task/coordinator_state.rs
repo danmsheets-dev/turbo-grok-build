@@ -128,6 +128,14 @@ pub trait ChildRunner: 'static {
     }
 }
 
+/// Default max concurrent in-flight subagents (pending + active).
+///
+/// Documented default for `GROK_SUBAGENTS_MAX_CONCURRENT` /
+/// `[subagents] max_concurrent`. Bounds workstation resource use (each
+/// isolated subagent may want its own multi-GB build directory) and makes
+/// the concurrency cap real: children cannot bypass it by calling `task`.
+pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: usize = 4;
+
 /// Host-configurable lifecycle policy. The transition logic remains shared.
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfig {
@@ -142,6 +150,10 @@ pub struct CoordinatorConfig {
     /// shell needs this for toolsets with no polling tool, where the inline
     /// reminder is the model's only chance to see the output.
     pub buffered_completion_output_cap: Option<usize>,
+    /// Max concurrent in-flight subagents (pending + active). Additional
+    /// spawns **queue** until a slot frees (R6-11). Default
+    /// [`DEFAULT_MAX_CONCURRENT_SUBAGENTS`].
+    pub max_concurrent: usize,
 }
 
 impl Default for CoordinatorConfig {
@@ -150,6 +162,7 @@ impl Default for CoordinatorConfig {
             foreground_budget: std::time::Duration::from_secs(45),
             buffer_completions: false,
             buffered_completion_output_cap: None,
+            max_concurrent: DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         }
     }
 }

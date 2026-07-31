@@ -31,6 +31,11 @@ Disable subagents with an environment variable or the config file:
 
 ```bash
 export GROK_SUBAGENTS=0              # Environment variable
+export GROK_SUBAGENTS_MAX_CONCURRENT=4  # Cap in-flight subagents (default 4; extras queue)
+# Isolation=worktree fails closed if the worktree cannot be created.
+# Opt-in shared-workspace fallback only with:
+#   GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1
+# (result.isolation_fallback=true — harnesses must not report the run as isolated)
 ```
 
 ```toml

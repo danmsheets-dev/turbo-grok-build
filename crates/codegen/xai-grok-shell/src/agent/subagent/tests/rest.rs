@@ -1205,6 +1205,34 @@ fn token_estimation_accounts_for_images() {
     let multi_tokens = xai_chat_state::estimate_conversation_tokens(&multi_image);
     assert_eq!(multi_tokens, 765 * 3, "three images = 3 * 765 tokens");
 }
+/// R6-10: isolation fallback is opt-in only; default is fail-closed.
+#[test]
+fn isolation_shared_fallback_defaults_off() {
+    let prev = std::env::var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK).ok();
+    unsafe {
+        std::env::remove_var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK);
+    }
+    assert!(
+        !crate::agent::subagent::isolation_shared_fallback_allowed(),
+        "default must fail closed (no shared-workspace fallback)"
+    );
+    unsafe {
+        std::env::set_var(
+            crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK,
+            "1",
+        );
+    }
+    assert!(crate::agent::subagent::isolation_shared_fallback_allowed());
+    match prev {
+        Some(v) => unsafe {
+            std::env::set_var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK, v);
+        },
+        None => unsafe {
+            std::env::remove_var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK);
+        },
+    }
+}
+
 #[test]
 fn durable_fallback_roundtrips_child_cwd_and_worktree() {
     let dir = std::env::temp_dir()

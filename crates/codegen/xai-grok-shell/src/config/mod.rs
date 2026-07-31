@@ -227,6 +227,13 @@ pub struct SubagentsConfig {
     /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped ≥1 at resolve).
     #[serde(default)]
     pub max_depth: Option<i64>,
+    /// Max concurrent in-flight subagents (pending + active). Additional spawns
+    /// queue until a slot frees. Default
+    /// [`xai_grok_tools::implementations::grok_build::task::coordinator::DEFAULT_MAX_CONCURRENT_SUBAGENTS`]
+    /// (4). Override via `GROK_SUBAGENTS_MAX_CONCURRENT` (env wins) or
+    /// `[subagents] max_concurrent = N`.
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.
@@ -448,7 +455,11 @@ impl SubagentsConfig {
         self.discover_roles_in_dir(&roles_dir);
     }
     pub const ENV_MAX_DEPTH: &'static str = "GROK_SUBAGENTS_MAX_DEPTH";
+    pub const ENV_MAX_CONCURRENT: &'static str = "GROK_SUBAGENTS_MAX_CONCURRENT";
     pub const DEFAULT_MAX_DEPTH: u32 = 1;
+    /// Documented default; keep in lockstep with
+    /// `xai_grok_tools::…::DEFAULT_MAX_CONCURRENT_SUBAGENTS`.
+    pub const DEFAULT_MAX_CONCURRENT: usize = 4;
     /// Clamp to `1..=u32::MAX`. Values below 1 (including 0 / negatives) warn
     /// and become 1 so nesting is never accidentally disabled.
     pub fn clamp_max_depth(raw: i64, source: &str) -> u32 {
@@ -494,6 +505,35 @@ impl SubagentsConfig {
             return Self::clamp_max_depth(i64::from(v), "remote");
         }
         Self::DEFAULT_MAX_DEPTH
+    }
+
+    /// Precedence: env `GROK_SUBAGENTS_MAX_CONCURRENT` > TOML
+    /// `[subagents] max_concurrent` > [`Self::DEFAULT_MAX_CONCURRENT`].
+    /// Clamped to at least 1. Extra spawns **queue** (do not reject).
+    pub fn resolve_max_concurrent(env: Option<&str>, config: Option<u32>) -> usize {
+        if let Some(raw) = env {
+            match raw.trim().parse::<i64>() {
+                Ok(v) if v >= 1 => return v as usize,
+                Ok(v) => {
+                    tracing::warn!(
+                        source = "env",
+                        value = v,
+                        "subagents max_concurrent < 1; clamping to 1"
+                    );
+                    return 1;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        value = %raw,
+                        "invalid GROK_SUBAGENTS_MAX_CONCURRENT (expected integer); ignoring"
+                    );
+                }
+            }
+        }
+        if let Some(v) = config {
+            return (v as usize).max(1);
+        }
+        Self::DEFAULT_MAX_CONCURRENT
     }
     /// Resolve the final subagents config from all sources (in priority order):
     /// 1. CLI flag `--subagents` (absolute highest — always enables)
