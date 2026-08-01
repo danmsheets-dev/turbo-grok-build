@@ -32,8 +32,8 @@ use super::types::{
 
 pub use super::coordinator_state::{
     ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner,
-    CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES, SendBoxFuture,
-    StartedChild, SubagentProgress,
+    CompletionDisposition, CoordinatorConfig, DEFAULT_MAX_CONCURRENT_SUBAGENTS, LocalBoxFuture,
+    MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild, SubagentProgress,
 };
 
 /// Channel-owned subagent lifecycle actor.
@@ -47,6 +47,8 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     active: HashMap<String, ActiveChild<R::Control>>,
     completed: HashMap<String, CompletedChild>,
     completed_order: VecDeque<String>,
+    /// Spawns waiting for a concurrency slot (R6-11). FIFO.
+    spawn_queue: VecDeque<QueuedSpawn>,
     waiters: HashMap<String, Vec<BlockingWaiter>>,
     workflow_cancel_waiters: HashMap<String, Vec<oneshot::Sender<SubagentCancelOutcome>>>,
     usage_not_applied_prompts: HashSet<PromptScope>,
@@ -59,6 +61,12 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
+}
+
+/// A spawn held until `pending + active < max_concurrent`.
+struct QueuedSpawn {
+    request: SubagentRequest,
+    result_tx: oneshot::Sender<SubagentResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -93,6 +101,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             active: HashMap::new(),
             completed: HashMap::new(),
             completed_order: VecDeque::new(),
+            spawn_queue: VecDeque::new(),
             waiters: HashMap::new(),
             workflow_cancel_waiters: HashMap::new(),
             usage_not_applied_prompts: HashSet::new(),
@@ -104,6 +113,64 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             list_requests: HashMap::new(),
             next_list_request_id: 0,
         }
+    }
+
+    fn in_flight_count(&self) -> usize {
+        self.pending.len() + self.active.len()
+    }
+
+    fn max_concurrent(&self) -> usize {
+        self.config.max_concurrent.max(1)
+    }
+
+    /// Start queued spawns while under the concurrency cap.
+    fn drain_spawn_queue(&mut self) {
+        while self.in_flight_count() < self.max_concurrent() {
+            let Some(queued) = self.spawn_queue.pop_front() else {
+                break;
+            };
+            self.start_spawn(queued.request, queued.result_tx);
+        }
+    }
+
+    fn start_spawn(
+        &mut self,
+        request: SubagentRequest,
+        result_tx: oneshot::Sender<SubagentResult>,
+    ) {
+        let id = request.id.clone();
+        let cancellation = request.cancel_token.clone();
+        let handle_only = request.run_in_background;
+        let foreground_deadline = (!request.run_in_background && !request.await_to_completion)
+            .then(|| tokio::time::Instant::now() + self.config.foreground_budget);
+        self.pending.insert(
+            id.clone(),
+            PendingChild {
+                request: request.clone(),
+                started_at: std::time::Instant::now(),
+                cancellation: cancellation.clone(),
+                spawn_reply: Some(result_tx),
+                foreground_deadline,
+                handle_only,
+                explicitly_killed: false,
+            },
+        );
+        self.running_count_changed();
+        let reporter = ChildReporter {
+            subagent_id: id.clone(),
+            tx: self.internal_tx.clone(),
+        };
+        self.runs.push(TaggedFuture {
+            subagent_id: id,
+            future: Box::pin(
+                std::panic::AssertUnwindSafe(self.runner.run(ChildRunRequest {
+                    request,
+                    cancellation,
+                    reporter,
+                }))
+                .catch_unwind(),
+            ),
+        });
     }
 
     pub async fn run(mut self) {
@@ -199,6 +266,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 if self.pending.contains_key(&id)
                     || self.active.contains_key(&id)
                     || self.completed.contains_key(&id)
+                    || self.spawn_queue.iter().any(|q| q.request.id == id)
                 {
                     let _ = command.result_tx.send(SubagentResult {
                         success: false,
@@ -209,39 +277,22 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     });
                     return;
                 }
-                let cancellation = request.cancel_token.clone();
-                let handle_only = request.run_in_background;
-                let foreground_deadline = (!request.run_in_background
-                    && !request.await_to_completion)
-                    .then(|| tokio::time::Instant::now() + self.config.foreground_budget);
-                self.pending.insert(
-                    id.clone(),
-                    PendingChild {
-                        request: request.clone(),
-                        started_at: std::time::Instant::now(),
-                        cancellation: cancellation.clone(),
-                        spawn_reply: Some(command.result_tx),
-                        foreground_deadline,
-                        handle_only,
-                        explicitly_killed: false,
-                    },
-                );
-                self.running_count_changed();
-                let reporter = ChildReporter {
-                    subagent_id: id.clone(),
-                    tx: self.internal_tx.clone(),
-                };
-                self.runs.push(TaggedFuture {
-                    subagent_id: id,
-                    future: Box::pin(
-                        std::panic::AssertUnwindSafe(self.runner.run(ChildRunRequest {
-                            request,
-                            cancellation,
-                            reporter,
-                        }))
-                        .catch_unwind(),
-                    ),
-                });
+                // R6-11: global concurrency cap — queue rather than reject.
+                if self.in_flight_count() >= self.max_concurrent() {
+                    tracing::info!(
+                        subagent_id = %id,
+                        in_flight = self.in_flight_count(),
+                        max_concurrent = self.max_concurrent(),
+                        queue_len = self.spawn_queue.len() + 1,
+                        "Subagent spawn queued (concurrency limit)"
+                    );
+                    self.spawn_queue.push_back(QueuedSpawn {
+                        request,
+                        result_tx: command.result_tx,
+                    });
+                    return;
+                }
+                self.start_spawn(request, command.result_tx);
             }
             SubagentEvent::Query(query) => {
                 self.handle_query(
@@ -658,6 +709,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         if let Some(run_id) = workflow_run_id {
             self.resolve_workflow_cancel_waiters(&run_id);
         }
+        // Free a concurrency slot → start the next queued spawn.
+        self.drain_spawn_queue();
     }
 
     fn finish_panicked_child(&mut self, id: &str) {

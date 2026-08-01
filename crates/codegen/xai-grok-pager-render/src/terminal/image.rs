@@ -1,16 +1,18 @@
 //! Terminal inline image rendering (Kitty / iTerm2 protocols).
 //!
 //! Provides escape-sequence helpers for rendering images inside the
-//! existing preview overlay. The text-fallback path in
-//! [`crate::render::image_overlay`] remains the primary preview; this
-//! module adds pixel-level rendering for supported terminals.
+//! existing preview overlay. When no protocol is available (Windows ConPTY,
+//! Apple Terminal, …), [`crate::render::image_overlay`] paints a truecolor
+//! half-block raster instead of metadata-only text.
 //!
 //! # Supported protocols
 //!
 //! - **Kitty graphics protocol**: used by Kitty, Ghostty, WezTerm, Warp
 //! - **iTerm2 inline images**: helpers exist but are currently gated off in
-//!   [`protocol_for_brand()`] (see there for why); the text fallback is used
-//!   for iTerm2 instead.
+//!   [`protocol_for_brand()`] (see there for why); the half-block fallback is
+//!   used for iTerm2 instead.
+//! - **Half-block raster**: always available via the image overlay when
+//!   protocol is [`GraphicsProtocol::None`].
 //!
 //! # Usage
 //!

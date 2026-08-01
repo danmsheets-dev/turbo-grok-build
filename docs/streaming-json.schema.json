@@ -2,24 +2,44 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://x.ai/hyper/streaming-json.schema.json",
   "title": "Hyper streaming-json NDJSON events",
-  "description": "One event per line. schemaVersion is 1 on start/end.",
+  "description": "One event per line. schemaVersion is 2 on start/end/tool/subagent events. Consumers MUST ignore unknown type values for forward compatibility.",
   "oneOf": [
     {
       "type": "object",
-      "required": ["type", "schemaVersion", "sessionId", "cwd", "binary", "version", "alwaysApprove"],
+      "required": ["type", "schemaVersion", "sessionId", "cwd", "sessionCwd", "binary", "version", "alwaysApprove", "rulesApplied", "folderTrust"],
       "properties": {
         "type": { "const": "start" },
-        "schemaVersion": { "const": 1 },
+        "schemaVersion": { "const": 2 },
         "sessionId": { "type": "string" },
-        "cwd": { "type": "string" },
+        "cwd": { "type": "string", "description": "Process cwd at launch" },
+        "sessionCwd": { "type": "string", "description": "Directory the ACP session uses" },
+        "originalCwd": { "type": "string" },
         "confineRoot": { "type": ["string", "null"] },
+        "confineInherited": { "type": "boolean" },
+        "confineShellEnforcement": { "type": ["string", "null"] },
         "requestedModel": { "type": ["string", "null"] },
         "servedModel": { "type": ["string", "null"] },
         "permissionMode": { "type": "string" },
         "sandbox": { "type": ["string", "null"] },
         "binary": { "type": "string" },
         "version": { "type": "string" },
-        "alwaysApprove": { "type": "boolean" }
+        "alwaysApprove": { "type": "boolean" },
+        "rulesApplied": { "type": "boolean" },
+        "folderTrust": {
+          "type": "object",
+          "required": ["trusted", "key", "reason"],
+          "properties": {
+            "trusted": { "type": "boolean" },
+            "key": { "type": "string" },
+            "reason": { "type": "string" },
+            "droppedMcpServers": { "type": "array", "items": { "type": "string" } },
+            "droppedHooks": { "type": "integer", "minimum": 0 },
+            "droppedPlugins": { "type": "integer", "minimum": 0 },
+            "droppedAgents": { "type": "integer", "minimum": 0 },
+            "configKinds": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },
@@ -38,6 +58,43 @@
       "properties": {
         "type": { "const": "thought" },
         "data": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "schemaVersion", "toolCallId"],
+      "properties": {
+        "type": { "const": "tool_call" },
+        "schemaVersion": { "const": 2 },
+        "toolCallId": { "type": "string" },
+        "name": { "type": "string" },
+        "kind": { "type": "string" },
+        "status": { "type": "string" },
+        "title": { "type": "string" },
+        "locations": { "type": "array" },
+        "rawInput": {},
+        "rawInputTruncated": { "type": "boolean" },
+        "elapsedMs": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "schemaVersion", "toolCallId"],
+      "properties": {
+        "type": { "enum": ["tool_call_update", "tool_result"] },
+        "schemaVersion": { "const": 2 },
+        "toolCallId": { "type": "string" },
+        "status": { "type": "string" },
+        "kind": { "type": "string" },
+        "title": { "type": "string" },
+        "locations": { "type": "array" },
+        "rawInput": {},
+        "rawOutput": {},
+        "rawInputTruncated": { "type": "boolean" },
+        "rawOutputTruncated": { "type": "boolean" },
+        "elapsedMs": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": true
     },
@@ -66,6 +123,62 @@
     },
     {
       "type": "object",
+      "required": ["type", "schemaVersion", "subagentId"],
+      "properties": {
+        "type": { "const": "subagent_spawned" },
+        "schemaVersion": { "const": 2 },
+        "subagentId": { "type": "string" },
+        "childSessionId": { "type": "string" },
+        "subagentType": { "type": "string" },
+        "description": { "type": "string" },
+        "model": { "type": "string" },
+        "capabilityMode": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "schemaVersion", "subagentId", "status"],
+      "properties": {
+        "type": { "const": "subagent_finished" },
+        "schemaVersion": { "const": 2 },
+        "subagentId": { "type": "string" },
+        "childSessionId": { "type": "string" },
+        "status": { "type": "string" },
+        "error": { "type": "string" },
+        "terminationReason": { "type": "string" },
+        "usage": { "type": ["object", "null"] },
+        "toolCalls": { "type": "integer", "minimum": 0 },
+        "turns": { "type": "integer", "minimum": 0 },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "tokensUsed": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "schemaVersion", "reason"],
+      "properties": {
+        "type": { "const": "question_suppressed" },
+        "schemaVersion": { "const": 2 },
+        "toolCallId": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "schemaVersion", "code", "message"],
+      "properties": {
+        "type": { "const": "warning" },
+        "schemaVersion": { "const": 2 },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
       "required": ["type", "servedModel"],
       "properties": {
         "type": { "const": "model_resolved" },
@@ -85,15 +198,16 @@
     },
     {
       "type": "object",
-      "required": ["type", "schemaVersion", "stopReason", "usage"],
+      "required": ["type", "schemaVersion", "stopReason", "usage", "toolCalls", "filesChanged", "subagents"],
       "properties": {
         "type": { "const": "end" },
-        "schemaVersion": { "const": 1 },
+        "schemaVersion": { "const": 2 },
         "stopReason": { "type": "string" },
         "sessionId": { "type": "string" },
         "requestId": { "type": "string" },
         "usage": { "type": ["object", "null"] },
         "usageIsIncomplete": { "type": "boolean" },
+        "toolCalls": { "type": "integer", "minimum": 0 },
         "filesChanged": {
           "type": "object",
           "required": ["count", "paths", "truncated"],
@@ -106,6 +220,17 @@
             "truncated": { "type": "boolean" }
           },
           "additionalProperties": false
+        },
+        "subagents": {
+          "type": "object",
+          "required": ["spawned", "completed", "failed", "cancelled"],
+          "properties": {
+            "spawned": { "type": "integer", "minimum": 0 },
+            "completed": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0 },
+            "cancelled": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true

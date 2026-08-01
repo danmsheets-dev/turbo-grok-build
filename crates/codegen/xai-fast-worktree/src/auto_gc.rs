@@ -35,8 +35,13 @@ pub const MIN_INTERVAL_SECS_MIN: i64 = 60;
 pub const MIN_INTERVAL_SECS_MAX: i64 = 7 * 86400;
 
 /// Product default: Manual never age-expires unless config overrides.
+/// Subagent worktrees age out after 24h so abandoned isolation dirs do not
+/// pile up when snapshot dispose was disabled or failed.
 pub fn default_max_age_by_kind() -> BTreeMap<WorktreeKind, Option<i64>> {
-    BTreeMap::from([(WorktreeKind::Manual, None)])
+    BTreeMap::from([
+        (WorktreeKind::Manual, None),
+        (WorktreeKind::Subagent, Some(24 * 3600)),
+    ])
 }
 
 /// Compile-time CWD-scan platforms (Linux/macOS). Runtime failure fail-closes in `gc_worktrees`.
@@ -857,6 +862,11 @@ mod tests {
         assert!(!gc.force, "auto path must never set force=true");
         assert!(gc.skip_kinds.is_empty());
         assert_eq!(gc.max_age_by_kind.get(&WorktreeKind::Manual), Some(&None));
+        assert_eq!(
+            gc.max_age_by_kind.get(&WorktreeKind::Subagent),
+            Some(&Some(24 * 3600)),
+            "subagent worktrees age out after 24h by default"
+        );
     }
 
     #[test]

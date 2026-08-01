@@ -180,7 +180,7 @@ pub(super) enum PlanEditGate {
 ///   ([`PlanModeTracker::should_auto_approve_edit`]) so the gate and the
 ///   permission bypass can never disagree.
 ///
-/// `apply_patch` maps to a placeholder `AccessKind::Edit("apply_patch")` and
+/// `apply_patch` maps to `AccessKind::Edit`/`EditMany` with real hunk paths and
 /// therefore never matches the plan file: it is always rejected in plan mode
 /// (conservative — per-file targets are only known after patch parsing).
 /// Non-edit tools (bash, read, grep, MCP, web) are never gated here; they
@@ -198,6 +198,13 @@ pub(super) fn plan_mode_edit_gate(
     let _ = tool_input;
     match access_kind {
         AccessKind::Edit(path) if !tracker.should_auto_approve_edit(Path::new(path)) => {
+            PlanEditGate::RejectNonPlanFile
+        }
+        AccessKind::EditMany(paths)
+            if paths
+                .iter()
+                .any(|p| !tracker.should_auto_approve_edit(Path::new(p))) =>
+        {
             PlanEditGate::RejectNonPlanFile
         }
         _ => PlanEditGate::Allow,
@@ -1075,12 +1082,19 @@ impl SessionActor {
                     .await?));
             }
         }
-        let plan_file_auto_approve = if let AccessKind::Edit(ref path) = access_kind {
-            self.plan_mode
+        let plan_file_auto_approve = match &access_kind {
+            AccessKind::Edit(path) => self
+                .plan_mode
                 .lock()
-                .should_auto_approve_edit(std::path::Path::new(path))
-        } else {
-            false
+                .should_auto_approve_edit(std::path::Path::new(path)),
+            AccessKind::EditMany(paths) => {
+                let tracker = self.plan_mode.lock();
+                !paths.is_empty()
+                    && paths
+                        .iter()
+                        .all(|p| tracker.should_auto_approve_edit(std::path::Path::new(p)))
+            }
+            _ => false,
         };
         if plan_file_auto_approve {
             tracing::info_span!(
@@ -1114,6 +1128,10 @@ impl SessionActor {
                 xai_grok_workspace::permission::AccessKind::Edit(p) => {
                     (xai_grok_telemetry::events::AccessKind::Edit, p.clone())
                 }
+                xai_grok_workspace::permission::AccessKind::EditMany(paths) => (
+                    xai_grok_telemetry::events::AccessKind::Edit,
+                    paths.join("\n"),
+                ),
                 xai_grok_workspace::permission::AccessKind::Bash(cmd) => {
                     (xai_grok_telemetry::events::AccessKind::Bash, cmd.clone())
                 }
@@ -1173,15 +1191,16 @@ impl SessionActor {
                     self.permissions.set_classifier_transcript(turns);
                 }
             }
-            let edit_path_context = matches!(&access_kind, AccessKind::Edit(_)).then(|| {
-                xai_grok_workspace::permission::types::EditPathContext {
-                    real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
-                    display_cwd: self
-                        .display_cwd
-                        .get()
-                        .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
-                }
-            });
+            let edit_path_context =
+                matches!(&access_kind, AccessKind::Edit(_) | AccessKind::EditMany(_)).then(|| {
+                    xai_grok_workspace::permission::types::EditPathContext {
+                        real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
+                        display_cwd: self
+                            .display_cwd
+                            .get()
+                            .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
+                    }
+                });
             let decision = {
                 let _pending_guard =
                     crate::session::pending_interaction::PendingInteractionGuard::new(

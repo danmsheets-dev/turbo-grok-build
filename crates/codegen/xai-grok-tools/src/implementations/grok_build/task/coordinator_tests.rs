@@ -200,6 +200,60 @@ fn harness(wait_before_start: bool, foreground_budget: std::time::Duration) -> H
     )
 }
 
+/// R6-11: when at the concurrency limit, additional spawns queue and start
+/// only after an in-flight child finishes (never rejected for capacity).
+#[tokio::test]
+async fn spawn_queues_when_at_concurrency_limit() {
+    let mut h = harness_with_config(
+        true, // wait_before_start — hold children until start signal
+        CoordinatorConfig {
+            max_concurrent: 1,
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+    );
+    let backend = h.backend.clone();
+    let spawn1 = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("sa-1", true)).await }
+    });
+    // Let the coordinator process the first spawn into the runner.
+    let first_req = h.requests.recv().await.expect("first runner request");
+    assert_eq!(first_req.id, "sa-1");
+    let spawn2 = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("sa-2", true)).await }
+    });
+    // Give the second spawn a chance to queue (must not enter the runner yet).
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    assert!(
+        h.requests.try_recv().is_err(),
+        "second spawn must still be queued, not running"
+    );
+    // Start + finish first child so the queue drains.
+    let _ = h.start.send(());
+    let started1 = h.started.recv().await.expect("sa-1 started");
+    assert_eq!(started1, "sa-1");
+    let _ = h.finish.send(());
+    let res1 = spawn1.await.unwrap().unwrap();
+    assert_eq!(res1.subagent_id, "sa-1");
+    // Second child should now leave the queue and run.
+    let second_req = h.requests.recv().await.expect("second runner request");
+    assert_eq!(second_req.id, "sa-2");
+    let _ = h.start.send(());
+    let started2 = h.started.recv().await.expect("sa-2 started");
+    assert_eq!(started2, "sa-2");
+    let _ = h.finish.send(());
+    let res2 = spawn2.await.unwrap().unwrap();
+    assert_eq!(res2.subagent_id, "sa-2");
+    assert!(
+        res2.success,
+        "queued spawn must complete successfully, got {res2:?}"
+    );
+    h.actor.abort();
+}
+
 fn harness_with_config(wait_before_start: bool, config: CoordinatorConfig) -> Harness {
     harness_with_options(wait_before_start, false, config)
 }

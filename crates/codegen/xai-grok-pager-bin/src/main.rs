@@ -1192,6 +1192,7 @@ async fn run_agent_command(
         None | Some(AgentCmd::Stdio) | Some(AgentCmd::Headless(_))
     );
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
+    let process_confine_active = xai_grok_pager::confine::is_process_confined();
     let LeaderMode {
         use_leader,
         policy_disable_reason,
@@ -1203,6 +1204,7 @@ async fn run_agent_command(
         remote_settings.as_ref(),
         leader_eligible,
         requested_confinement,
+        process_confine_active,
     );
     tracing::info!(
         use_leader,
@@ -2401,6 +2403,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 continue_last_session: args.continue_last_session,
                 fork_session: args.fork_session,
                 worktree: args.worktree,
+                worktree_ref: args.worktree_ref.clone(),
                 restore_code: args.restore_code,
                 agent: args.agent.clone(),
                 agents_json: args.agents_json.clone(),
@@ -2417,6 +2420,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     args.background_wait_timeout_secs,
                 ),
                 require_changes: args.require_changes,
+                require_subagent_success: args.require_subagent_success,
+                require_trust: args.require_trust,
+                stream_tool_io: args.stream_tool_io,
                 allow_interactive_questions: args.allow_interactive_questions,
             },
         )

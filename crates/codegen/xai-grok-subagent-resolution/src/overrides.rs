@@ -45,7 +45,8 @@ pub fn intersect_capability_modes(
 /// 2. Role default (from `SubagentRole` in config)
 /// 3. Persona default (looked up by name from the personas map)
 /// 4. Agent-definition default
-/// 5. None (parent inheritance, handled downstream)
+/// 5. Isolation defaults to **worktree**; model falls through to parent
+///    inheritance (handled downstream in the shell)
 ///
 /// Capability modes are security ceilings rather than ordinary defaults: the
 /// explicit request, role, and agent definition are intersected so a caller can
@@ -165,6 +166,8 @@ pub fn resolve_subagent_spec(
     });
 
     // ── Isolation resolution ─────────────────────────────────────
+    // Default is worktree so parallel writers cannot collide with the parent
+    // or each other. Opt out with isolation="none" (spawn/role/persona/def).
     let isolation = overrides
         .isolation
         .or_else(|| {
@@ -177,7 +180,7 @@ pub fn resolve_subagent_spec(
                 .and_then(parse_enum_from_str::<SubagentIsolationMode>)
         })
         .or(definition_defaults.isolation)
-        .unwrap_or(SubagentIsolationMode::None);
+        .unwrap_or(SubagentIsolationMode::Worktree);
 
     EffectiveRuntimeConfig {
         model,
@@ -638,8 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn isolation_defaults_to_none() {
+    fn isolation_defaults_to_worktree() {
         let overrides = make_overrides(None, None, None, None, None);
+        let result = resolve_effective_overrides(&overrides, None, &empty_personas(), None, None);
+        assert_eq!(result.isolation, SubagentIsolationMode::Worktree);
+    }
+
+    #[test]
+    fn isolation_explicit_none_opts_out_of_worktree_default() {
+        let mut overrides = make_overrides(None, None, None, None, None);
+        overrides.isolation = Some(SubagentIsolationMode::None);
         let result = resolve_effective_overrides(&overrides, None, &empty_personas(), None, None);
         assert_eq!(result.isolation, SubagentIsolationMode::None);
     }

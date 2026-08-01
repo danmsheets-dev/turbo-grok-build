@@ -183,8 +183,18 @@ Requirements:
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch TUI (binary: hyper)
-cargo build -p xai-grok-pager-bin --profile release-dist
+# Stamp GROK_VERSION for the version banner / API client header (folder trust
+# is armed even without the stamp since WP-C3 — do not rely on an unstamped
+# build to skip trust gating).
+GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-dist
 ./target/release-dist/hyper --version
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:GROK_VERSION = (Get-Content VERSION -Raw).Trim()
+cargo build -p xai-grok-pager-bin --profile release-dist --bin hyper
 ```
 
 The composition-root package is still `xai-grok-pager-bin` (monorepo

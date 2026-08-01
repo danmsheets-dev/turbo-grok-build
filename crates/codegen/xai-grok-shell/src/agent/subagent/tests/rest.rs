@@ -555,16 +555,17 @@ fn snapshot_ref_write_promotes_nonterminal_status_to_terminal() {
         );
     assert_eq!("completed", reread.status);
 }
-/// Gate defaults OFF: no config, no remote → snapshotting disabled, so the
-/// completion path keeps the worktree preserved (no production change).
-#[test]
-fn subagent_worktree_snapshot_gate_defaults_off() {
+/// Gate defaults ON: no config, no remote → snapshot+remove so subagents
+/// clean up their worktrees after completion.
+#[tokio::test]
+async fn subagent_worktree_snapshot_gate_defaults_on() {
     let ctx = ctx_with_toggle(std::collections::HashMap::new());
-    assert!(!ctx.resolve_subagent_worktree_snapshot_enabled());
+    assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
 }
-/// Remote remote settings value enables the gate when no local override exists.
-#[test]
-fn subagent_worktree_snapshot_gate_remote_enables() {
+/// Remote remote settings value is a no-op when default is already on; still
+/// asserts the remote path does not disable the gate.
+#[tokio::test]
+async fn subagent_worktree_snapshot_gate_remote_enables() {
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
     ctx.remote_settings = Some(crate::util::config::RemoteSettings {
         subagent_worktree_snapshot_enabled: Some(true),
@@ -573,8 +574,8 @@ fn subagent_worktree_snapshot_gate_remote_enables() {
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
 }
 /// Local config wins over remote (kill-switch parity with the other gates).
-#[test]
-fn subagent_worktree_snapshot_gate_local_overrides_remote() {
+#[tokio::test]
+async fn subagent_worktree_snapshot_gate_local_overrides_remote() {
     let mut config = crate::agent::config::Config::default();
     config.features.subagent_worktree_snapshot = Some(false);
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
@@ -584,18 +585,29 @@ fn subagent_worktree_snapshot_gate_local_overrides_remote() {
         ..Default::default()
     });
     assert!(
-            !ctx.resolve_subagent_worktree_snapshot_enabled(),
-            "local [features] subagent_worktree_snapshot=false must override remote enable"
-        );
+        !ctx.resolve_subagent_worktree_snapshot_enabled(),
+        "local [features] subagent_worktree_snapshot=false must override remote enable"
+    );
 }
-/// Local config alone enables the gate (the per-deployment rollout lever).
-#[test]
-fn subagent_worktree_snapshot_gate_local_enables() {
+/// Local config alone can force the gate on (explicit rollout lever).
+#[tokio::test]
+async fn subagent_worktree_snapshot_gate_local_enables() {
     let mut config = crate::agent::config::Config::default();
     config.features.subagent_worktree_snapshot = Some(true);
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
     ctx.agent_config = Some(config);
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
+}
+
+/// Explicit local disable turns cleanup off when the operator wants preserved
+/// worktrees for review.
+#[tokio::test]
+async fn subagent_worktree_snapshot_gate_local_disables() {
+    let mut config = crate::agent::config::Config::default();
+    config.features.subagent_worktree_snapshot = Some(false);
+    let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
+    ctx.agent_config = Some(config);
+    assert!(!ctx.resolve_subagent_worktree_snapshot_enabled());
 }
 /// Subagent spawns carry concrete ask_user_question timeout params (the
 /// session-level config follows the child) while bash stays on tool
@@ -1205,6 +1217,34 @@ fn token_estimation_accounts_for_images() {
     let multi_tokens = xai_chat_state::estimate_conversation_tokens(&multi_image);
     assert_eq!(multi_tokens, 765 * 3, "three images = 3 * 765 tokens");
 }
+/// R6-10: isolation fallback is opt-in only; default is fail-closed.
+#[test]
+fn isolation_shared_fallback_defaults_off() {
+    let prev = std::env::var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK).ok();
+    unsafe {
+        std::env::remove_var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK);
+    }
+    assert!(
+        !crate::agent::subagent::isolation_shared_fallback_allowed(),
+        "default must fail closed (no shared-workspace fallback)"
+    );
+    unsafe {
+        std::env::set_var(
+            crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK,
+            "1",
+        );
+    }
+    assert!(crate::agent::subagent::isolation_shared_fallback_allowed());
+    match prev {
+        Some(v) => unsafe {
+            std::env::set_var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK, v);
+        },
+        None => unsafe {
+            std::env::remove_var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK);
+        },
+    }
+}
+
 #[test]
 fn durable_fallback_roundtrips_child_cwd_and_worktree() {
     let dir = std::env::temp_dir()

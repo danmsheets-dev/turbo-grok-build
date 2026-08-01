@@ -137,8 +137,7 @@ pub async fn run_command_hook(
     // See the `runner_injected_vars_override_extra_env_at_spawn`
     // regression test in `tests/integration.rs` and the rustdoc on
     // `HookSpec::extra_env`.
-    let mut child = match cmd
-        .stdin(std::process::Stdio::piped())
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .current_dir(ctx.workspace_root)
@@ -153,9 +152,11 @@ pub async fn run_command_hook(
         // Same value as `GROK_WORKSPACE_ROOT`; native `.grok` hooks should use
         // `GROK_WORKSPACE_ROOT`.
         .env("CLAUDE_PROJECT_DIR", ctx.workspace_root)
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    // Pin GROK_CONFINE after all other env so hooks inherit the same
+    // worktree boundary and cannot unset it via extra_env.
+    xai_grok_tools::types::resources::pin_confine_env_on_tokio_command(&mut cmd);
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let elapsed = start.elapsed();

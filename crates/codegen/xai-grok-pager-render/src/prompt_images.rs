@@ -651,9 +651,6 @@ enum PromptImagePreviewResult {
         dimensions: (u32, u32),
     },
     Failed,
-    Unsupported {
-        dimensions: (u32, u32),
-    },
 }
 
 impl Default for PromptImagePreview {
@@ -683,14 +680,13 @@ impl PromptImagePreview {
             PromptImagePreviewResult::Ready { bytes, dimensions } => {
                 Some((bytes.as_ref(), *dimensions))
             }
-            PromptImagePreviewResult::Failed | PromptImagePreviewResult::Unsupported { .. } => None,
+            PromptImagePreviewResult::Failed => None,
         }
     }
 
     pub fn dimensions(&self) -> Option<(u32, u32)> {
         match self.result.get()? {
-            PromptImagePreviewResult::Ready { dimensions, .. }
-            | PromptImagePreviewResult::Unsupported { dimensions } => Some(*dimensions),
+            PromptImagePreviewResult::Ready { dimensions, .. } => Some(*dimensions),
             PromptImagePreviewResult::Failed => None,
         }
     }
@@ -756,9 +752,13 @@ impl PromptImagePreviewPreparation {
                 bytes: self.source,
                 dimensions,
             },
-            crate::terminal::image::GraphicsProtocol::None => {
-                PromptImagePreviewResult::Unsupported { dimensions }
-            }
+            // No Kitty/iTerm2 (Windows ConPTY, Apple Terminal, …): keep the
+            // source bytes ready so the half-block raster path can paint a
+            // truecolor approximation into the ratatui buffer without escapes.
+            crate::terminal::image::GraphicsProtocol::None => PromptImagePreviewResult::Ready {
+                bytes: self.source,
+                dimensions,
+            },
         };
         self.preview.finish(result);
     }

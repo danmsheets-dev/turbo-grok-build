@@ -3729,18 +3729,30 @@ impl AgentView {
                             inner_rows,
                         );
                         if !rendered_pixel {
-                            let meta_lines = vec![
-                                ratatui::text::Line::from(""),
-                                ratatui::text::Line::from(format!(
-                                    "  {}x{} {}",
-                                    viewer.image_width, viewer.image_height, viewer.mime_type,
-                                )),
-                                ratatui::text::Line::from(""),
-                                ratatui::text::Line::from("  Press Esc to close"),
-                            ];
-                            ratatui::widgets::Paragraph::new(meta_lines)
-                                .style(Style::default().fg(theme.gray_dim).bg(theme.bg_base))
-                                .render(inner_rect, buf);
+                            // No graphics protocol (or placement failed): paint a
+                            // truecolor half-block approximation so Windows /
+                            // ConPTY users still see the image.
+                            let painted = crate::render::image_overlay::paint_halfblock_image(
+                                buf,
+                                inner_rect,
+                                &viewer.display_bytes,
+                            );
+                            if !painted {
+                                let meta_lines = vec![
+                                    ratatui::text::Line::from(""),
+                                    ratatui::text::Line::from(format!(
+                                        "  {}x{} {}",
+                                        viewer.image_width,
+                                        viewer.image_height,
+                                        viewer.mime_type,
+                                    )),
+                                    ratatui::text::Line::from(""),
+                                    ratatui::text::Line::from("  Press Esc to close"),
+                                ];
+                                ratatui::widgets::Paragraph::new(meta_lines)
+                                    .style(Style::default().fg(theme.gray_dim).bg(theme.bg_base))
+                                    .render(inner_rect, buf);
+                            }
                         } else {
                             let loading = "Loading...";
                             let lw = loading.len() as u16;

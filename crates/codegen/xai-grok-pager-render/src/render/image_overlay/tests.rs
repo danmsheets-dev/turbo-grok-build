@@ -58,6 +58,8 @@ fn render_to_string(image: &PastedImage, area: Rect) -> (Option<ImageOverlayRend
 
 #[test]
 fn plan_covers_pixels_by_path_matrix() {
+    // Prepared bytes always enable the pixel box; protocol only changes how
+    // those pixels are drawn (Kitty escapes vs half-block raster).
     for (protocol, path, pixels, expected_pixels, expected_path) in [
         (
             GraphicsProtocol::Kitty,
@@ -71,10 +73,17 @@ fn plan_covers_pixels_by_path_matrix() {
             GraphicsProtocol::None,
             Some("/tmp/logo.png"),
             true,
+            true,
+            Some(Path::new("/tmp/logo.png")),
+        ),
+        (GraphicsProtocol::None, None, true, true, None),
+        (
+            GraphicsProtocol::None,
+            Some("/tmp/logo.png"),
+            false,
             false,
             Some(Path::new("/tmp/logo.png")),
         ),
-        (GraphicsProtocol::None, None, true, false, None),
     ] {
         let image = sample_image(path, pixels);
         let plan = plan_image_preview(&image, protocol);
@@ -137,8 +146,9 @@ fn paint_pixels_without_path_has_no_footer() {
 #[test]
 fn paint_metadata_with_path_shows_all_fields() {
     let _guard = set_protocol_for_test(GraphicsProtocol::None);
+    // Unprepared preview stays on the compact metadata path.
     let (render, text) = render_to_string(
-        &sample_image(Some("/tmp/logo.png"), true),
+        &sample_image(Some("/tmp/logo.png"), false),
         Rect::new(0, 0, 60, 20),
     );
     assert!(render.unwrap().image_placement.is_none());
@@ -146,6 +156,68 @@ fn paint_metadata_with_path_shows_all_fields() {
     assert!(text.contains("Dimensions: 640 x 480"));
     assert!(text.contains("Path:"));
     assert!(text.contains("logo.png"));
+}
+
+fn solid_test_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+    use image::{ImageBuffer, Rgba};
+    let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(width, height, Rgba(rgba));
+    let mut buf = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut buf),
+        image::ImageFormat::Png,
+    )
+    .expect("encode png");
+    buf
+}
+
+#[test]
+fn paint_halfblock_on_protocol_none_with_prepared_bytes() {
+    let _guard = set_protocol_for_test(GraphicsProtocol::None);
+    crate::terminal::overlay::reset_owner();
+    let png = solid_test_png(16, 12, [10, 200, 40, 255]);
+    let preview =
+        crate::prompt_images::PromptImagePreview::ready_for_test(png.clone(), (16, 12));
+    let image = PastedImage {
+        element_id: xai_ratatui_textarea::ElementId::from_raw(1),
+        display_number: 1,
+        mime_type: "image/png".into(),
+        dimensions: Some((16, 12)),
+        byte_len: png.len(),
+        encoded_bytes: Some(png.into()),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview,
+    };
+    let (render, text) = render_to_string(&image, Rect::new(0, 0, 60, 20));
+    let render = render.expect("overlay");
+    assert!(
+        render.image_placement.is_some(),
+        "half-block path should use the pixel-sized box"
+    );
+    assert!(render.escapes.is_none(), "no protocol escapes on None");
+    assert!(text.contains("Image #1"));
+    // Half-block cells use ▀ — at least one should appear in the buffer dump.
+    assert!(
+        text.contains('\u{2580}'),
+        "expected half-block glyph in overlay, got: {text:?}"
+    );
+}
+
+#[test]
+fn preparation_none_protocol_marks_ready_with_source_bytes() {
+    let _guard = set_protocol_for_test(GraphicsProtocol::None);
+    let png = solid_test_png(8, 6, [1, 2, 3, 255]);
+    let data = crate::clipboard::ImageData {
+        data: png.clone(),
+        mime_type: "image/png".into(),
+    };
+    let img = crate::prompt_images::from_clipboard_data(&data);
+    img.preview_preparation().unwrap().run();
+    let (bytes, dims) = img.preview.prepared().expect("None protocol keeps source ready");
+    assert_eq!(dims, (8, 6));
+    assert_eq!(bytes, png.as_slice());
 }
 
 #[test]

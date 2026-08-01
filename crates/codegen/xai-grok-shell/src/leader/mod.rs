@@ -795,6 +795,13 @@ pub enum ConnectionError {
          requirement)"
     )]
     SandboxConfinement(&'static str),
+    #[error(
+        "leader mode is unavailable under --confine (`{0}`): the leader is a \
+         separate, shared process that does not inherit this process's confine \
+         root, so tools would run unconfined. Use --no-leader (the default under \
+         confine) or omit --confine"
+    )]
+    ProcessConfinement(String),
 }
 /// Handle for a connection to the leader process.
 ///
@@ -1382,7 +1389,10 @@ fn is_connect_level_failure(error: &ConnectionError) -> bool {
 }
 /// Policy refusals that can never succeed on reconnect retry (not zombie-evictable).
 fn is_terminal_refusal(error: &ConnectionError) -> bool {
-    matches!(error, ConnectionError::SandboxConfinement(_))
+    matches!(
+        error,
+        ConnectionError::SandboxConfinement(_) | ConnectionError::ProcessConfinement(_)
+    )
 }
 /// Evict a suspected zombie leader (holds the flock but is not connectable).
 /// SIGTERM, wait, then escalate to SIGKILL if it overran the grace window.
@@ -1447,6 +1457,11 @@ pub async fn connect_or_spawn(
 ) -> Result<LeaderConnection, ConnectionError> {
     if let Some(profile) = xai_grok_sandbox::requested_confinement_profile() {
         return Err(ConnectionError::SandboxConfinement(profile));
+    }
+    if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+        return Err(ConnectionError::ProcessConfinement(
+            root.display().to_string(),
+        ));
     }
     let start = std::time::Instant::now();
     let mut lock = LeaderLock::new(&env_urls.grok_ws_url);

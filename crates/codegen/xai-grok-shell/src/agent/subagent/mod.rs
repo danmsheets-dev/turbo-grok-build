@@ -384,9 +384,11 @@ impl SubagentSpawnContext {
     }
     /// Whether a completed subagent's worktree is snapshotted into a durable ref
     /// and its directory deleted. Resolution mirrors the other subagent gates
-    /// (env > config > remote settings > default). Default `false` so it ships dark;
-    /// `managed_config.toml` `[features] subagent_worktree_snapshot` is the
-    /// per-deployment rollout lever.
+    /// (env > config > remote settings > default).
+    ///
+    /// Default **true** so isolated subagents clean up after themselves. Set
+    /// `GROK_SUBAGENT_WORKTREE_SNAPSHOT=0` or `[features] subagent_worktree_snapshot = false`
+    /// to keep worktrees on disk for review.
     pub fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
         crate::agent::config::BoolFlag::env("GROK_SUBAGENT_WORKTREE_SNAPSHOT")
             .config(
@@ -399,7 +401,7 @@ impl SubagentSpawnContext {
                     .as_ref()
                     .and_then(|r| r.subagent_worktree_snapshot_enabled),
             )
-            .default(false)
+            .default(true)
             .resolve()
             .value
     }
@@ -2092,6 +2094,62 @@ fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> Resum
         ResumeWorktreeAction::Reuse
     } else {
         ResumeWorktreeAction::Shared
+    }
+}
+
+/// RAII guard that removes a **freshly created** subagent worktree if the
+/// spawn aborts before the normal completion dispose path runs.
+pub(crate) struct FreshWorktreeGuard {
+    path: Option<PathBuf>,
+}
+
+impl FreshWorktreeGuard {
+    pub(crate) fn new(path: Option<PathBuf>) -> Self {
+        Self { path }
+    }
+
+    /// Keep the worktree (success path handles snapshot/remove/preserve).
+    pub(crate) fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for FreshWorktreeGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            match xai_fast_worktree::remove_worktree(&path) {
+                Ok(_) => {
+                    tracing::info!(
+                        worktree_path = %path.display(),
+                        "Removed freshly created subagent worktree after aborted spawn"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        worktree_path = %path.display(),
+                        error = %e,
+                        "Failed to remove aborted subagent worktree"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Env opt-in for the (otherwise fail-closed) shared-workspace fallback when
+/// isolation=worktree cannot be provided. See R6-10 / WP-C3.
+pub(crate) const ENV_SUBAGENT_ALLOW_SHARED_FALLBACK: &str =
+    "GROK_SUBAGENT_ALLOW_SHARED_FALLBACK";
+
+/// Whether the operator opted into shared-workspace fallback when isolation
+/// cannot be provided. Default is **false** (fail closed).
+pub(crate) fn isolation_shared_fallback_allowed() -> bool {
+    match std::env::var(ENV_SUBAGENT_ALLOW_SHARED_FALLBACK) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
 /// The parent session's working directory — the source path for a subagent

@@ -403,6 +403,10 @@ pub(crate) struct ExitSummary {
 /// `leader_mode` fetched as `false`). Unknown remote state (`None` / prefetch
 /// timeout), the default, `--no-leader`, and ineligibility are `None` — never
 /// reclaim a leader on an unknown signal.
+///
+/// `process_confine_active` is true when `--confine` / `GROK_CONFINE` is active;
+/// it forces leader off. Passed explicitly so unit tests do not depend on the
+/// process OnceLock.
 pub fn resolve_leader_mode<'p>(
     leader_flag: bool,
     no_leader_flag: bool,
@@ -410,6 +414,7 @@ pub fn resolve_leader_mode<'p>(
     _remote_settings: Option<&xai_grok_shell::util::config::RemoteSettings>,
     eligible: bool,
     requested_confinement: Option<&'p str>,
+    process_confine_active: bool,
 ) -> LeaderMode<'p> {
     let (use_leader, policy_disable_reason) = 'policy: {
         if no_leader_flag {
@@ -435,6 +440,17 @@ pub fn resolve_leader_mode<'p>(
             use_leader: false,
             policy_disable_reason,
             disabled_by_confinement: use_leader.then_some(profile),
+        };
+    }
+    // `--confine` is process-local and is not carried in the client→leader
+    // session protocol. A shared leader would enforce nothing while the client
+    // still advertises confineRoot — refuse leader mode the same way sandbox
+    // confinement does.
+    if process_confine_active {
+        return LeaderMode {
+            use_leader: false,
+            policy_disable_reason,
+            disabled_by_confinement: use_leader.then_some("process-confine"),
         };
     }
     LeaderMode {
@@ -466,6 +482,8 @@ pub fn resolve_use_leader(
     eligible: bool,
     requested_confinement: Option<&str>,
 ) -> (bool, Option<&'static str>) {
+    let process_confine_active =
+        xai_grok_tools::types::resources::process_confine_root().is_some();
     let resolved = resolve_leader_mode(
         leader_flag,
         no_leader_flag,
@@ -473,6 +491,7 @@ pub fn resolve_use_leader(
         remote_settings,
         eligible,
         requested_confinement,
+        process_confine_active,
     );
     (resolved.use_leader, resolved.policy_disable_reason)
 }
@@ -610,6 +629,8 @@ pub async fn run(
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let prefetch_elapsed = startup_start.elapsed();
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
+    let process_confine_active =
+        xai_grok_tools::types::resources::process_confine_root().is_some();
     let LeaderMode {
         use_leader,
         policy_disable_reason,
@@ -621,6 +642,7 @@ pub async fn run(
         remote_settings.as_ref(),
         true,
         requested_confinement,
+        process_confine_active,
     );
     tracing::info!(
         use_leader,
@@ -1769,6 +1791,21 @@ mod tests {
         assert!(!use_leader);
         assert_eq!(reason, None);
     }
+
+    #[test]
+    fn process_confine_refuses_leader_even_with_leader_flag_and_config_on() {
+        let cfg = config_with_leader(true);
+        let resolved = resolve_leader_mode(true, false, &cfg, None, true, None, true);
+        assert!(
+            !resolved.use_leader,
+            "process confine must veto leader mode"
+        );
+        assert_eq!(
+            resolved.disabled_by_confinement,
+            Some("process-confine"),
+            "must name process-confine as the veto reason"
+        );
+    }
     /// `disabled_by_confinement` for the four leader × sandbox cells, driven by
     /// every input that can decide leader mode — not just `[cli] use_leader`.
     #[test]
@@ -1781,7 +1818,8 @@ mod tests {
             ("--leader", true, &empty_config()),
             ("--leader over config off", true, &off),
         ] {
-            let resolved = resolve_leader_mode(leader_flag, false, cfg, None, true, sandbox);
+            let resolved =
+                resolve_leader_mode(leader_flag, false, cfg, None, true, sandbox, false);
             assert!(!resolved.use_leader, "{label}: leader must be vetoed");
             assert_eq!(
                 resolved.disabled_by_confinement,
@@ -1790,7 +1828,7 @@ mod tests {
             );
         }
         for (label, cfg, expect_leader) in [("leader on", &on, true), ("leader off", &off, false)] {
-            let resolved = resolve_leader_mode(false, false, cfg, None, true, None);
+            let resolved = resolve_leader_mode(false, false, cfg, None, true, None, false);
             assert_eq!(resolved.use_leader, expect_leader, "{label}");
             assert_eq!(resolved.disabled_by_confinement, None, "{label}");
         }
@@ -1800,8 +1838,15 @@ mod tests {
             ("default", false, false, &empty_config(), true),
             ("ineligible mode with config on", false, false, &on, false),
         ] {
-            let resolved =
-                resolve_leader_mode(leader_flag, no_leader_flag, cfg, None, eligible, sandbox);
+            let resolved = resolve_leader_mode(
+                leader_flag,
+                no_leader_flag,
+                cfg,
+                None,
+                eligible,
+                sandbox,
+                false,
+            );
             assert!(!resolved.use_leader, "{label}");
             assert_eq!(
                 resolved.disabled_by_confinement, None,

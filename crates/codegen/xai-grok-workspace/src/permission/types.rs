@@ -167,10 +167,14 @@ pub enum AccessKind {
         glob: Option<String>,
     },
     Edit(String),
+    /// Multi-path edit (e.g. `apply_patch` with one path per hunk). Confine
+    /// checks every element; a single outside path is a denial.
+    EditMany(Vec<String>),
     Bash(String),
     /// An MCP tool call: the tool name plus its raw JSON args. The args are
     /// carried so the auto-mode classifier (and telemetry) can judge what the
-    /// call actually does, not just its name.
+    /// call actually does, not just its name. Under `--confine`, path-shaped
+    /// string args are also scanned for outside-root writes.
     MCPTool {
         name: String,
         input: serde_json::Value,
@@ -284,7 +288,7 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }
-            ToolInput::ApplyPatch(_) => AccessKind::Edit("apply_patch".to_string()),
+            ToolInput::ApplyPatch(ap) => apply_patch_access_kind(&ap.patch),
             ToolInput::HashlineEdit(he) => AccessKind::Edit(he.file_path.to_string()),
             ToolInput::Write(w) => AccessKind::Edit(w.file_path.clone()),
             ToolInput::Bash(bash) => AccessKind::Bash(bash.command.to_string()),
@@ -302,6 +306,41 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             #[allow(unreachable_patterns)]
             _ => AccessKind::Read(None),
         }
+    }
+}
+
+/// Map an apply_patch body onto real edit targets for the permission / confine
+/// gate. Never use the placeholder `"apply_patch"` — that path always lies
+/// inside cwd and was a complete escape for absolute hunk paths.
+fn apply_patch_access_kind(patch: &str) -> AccessKind {
+    use xai_grok_tools::implementations::codex::apply_patch::parser::{self, Hunk};
+    match parser::parse_patch(patch) {
+        Ok(parsed) if !parsed.hunks.is_empty() => {
+            let mut paths = Vec::new();
+            for hunk in &parsed.hunks {
+                match hunk {
+                    Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => {
+                        paths.push(path.to_string_lossy().into_owned());
+                    }
+                    Hunk::UpdateFile {
+                        path, move_path, ..
+                    } => {
+                        paths.push(path.to_string_lossy().into_owned());
+                        if let Some(dest) = move_path {
+                            paths.push(dest.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+            if paths.len() == 1 {
+                AccessKind::Edit(paths.into_iter().next().unwrap())
+            } else {
+                AccessKind::EditMany(paths)
+            }
+        }
+        // Unparseable / empty: still gate on a distinctive name so YOLO cannot
+        // skip confine entirely, but never the inert literal "apply_patch".
+        _ => AccessKind::EditMany(vec!["<unparseable-apply_patch>".to_owned()]),
     }
 }
 /// Permission policy configuration (duplicated from util/config.rs for Phase 1 move independence; identical).
@@ -546,6 +585,86 @@ mod tests {
             "HashlineEdit should produce AccessKind::Edit with the file path, got {access:?}"
         );
     }
+
+    /// iso-apply-patch-placeholder-path: never gate on the literal "apply_patch".
+    /// Add/Delete/Update/Move destinations must all appear as real Edit targets.
+    #[test]
+    fn apply_patch_maps_to_real_hunk_paths_not_placeholder() {
+        use xai_grok_tools::implementations::codex::apply_patch::ApplyPatchInput;
+        use xai_grok_tools::types::ToolInput;
+
+        // Single Add → Edit(path)
+        let add = ToolInput::ApplyPatch(ApplyPatchInput {
+            patch: "*** Begin Patch\n*** Add File: src/new.rs\n+fn x() {}\n*** End Patch\n"
+                .into(),
+        });
+        match AccessKind::from(&add) {
+            AccessKind::Edit(p) => assert_eq!(p, "src/new.rs"),
+            other => panic!("single Add must be Edit, got {other:?}"),
+        }
+
+        // Absolute escape path must surface (permission/confine sees it)
+        #[cfg(windows)]
+        let abs = "C:/Users/dan_m/.grok/hooks/pwn.ps1";
+        #[cfg(not(windows))]
+        let abs = "/tmp/outside-pwn.txt";
+        let abs_add = ToolInput::ApplyPatch(ApplyPatchInput {
+            patch: format!("*** Begin Patch\n*** Add File: {abs}\n+pwned\n*** End Patch\n"),
+        });
+        match AccessKind::from(&abs_add) {
+            AccessKind::Edit(p) => {
+                assert_eq!(p, abs);
+                assert_ne!(p, "apply_patch");
+            }
+            other => panic!("absolute Add must be Edit(real path), got {other:?}"),
+        }
+
+        // Multi-hunk including move destination
+        let multi = ToolInput::ApplyPatch(ApplyPatchInput {
+            patch: "*** Begin Patch\n\
+                    *** Delete File: old.txt\n\
+                    *** Update File: a.rs\n\
+                    *** Move to: b.rs\n\
+                    @@\n\
+                    -old\n\
+                    +new\n\
+                    *** End Patch\n"
+                .into(),
+        });
+        match AccessKind::from(&multi) {
+            AccessKind::EditMany(paths) => {
+                assert!(
+                    paths.iter().any(|p| p == "old.txt"),
+                    "delete path missing: {paths:?}"
+                );
+                assert!(
+                    paths.iter().any(|p| p == "a.rs"),
+                    "update source missing: {paths:?}"
+                );
+                assert!(
+                    paths.iter().any(|p| p == "b.rs"),
+                    "move dest missing: {paths:?}"
+                );
+                assert!(!paths.iter().any(|p| p == "apply_patch"));
+            }
+            other => panic!("multi-hunk must be EditMany, got {other:?}"),
+        }
+
+        // Unparseable must not use the inert "apply_patch" placeholder
+        let bad = ToolInput::ApplyPatch(ApplyPatchInput {
+            patch: "not a valid patch".into(),
+        });
+        match AccessKind::from(&bad) {
+            AccessKind::EditMany(paths) => {
+                assert!(
+                    paths.iter().any(|p| p.contains("unparseable")),
+                    "expected unparseable sentinel, got {paths:?}"
+                );
+                assert!(!paths.iter().any(|p| p == "apply_patch"));
+            }
+            other => panic!("unparseable must be EditMany sentinel, got {other:?}"),
+        }
+    }
     #[test]
     fn bash_maps_to_bash_access() {
         use xai_grok_tools::implementations::grok_build::bash::BashToolInput;
@@ -648,9 +767,37 @@ mod tests {
         });
         let access = AccessKind::from(&input);
         assert!(
-            matches!(access, AccessKind::Edit(_)),
-            "ApplyPatch should produce AccessKind::Edit, got {access:?}"
+            matches!(access, AccessKind::EditMany(_) | AccessKind::Edit(_)),
+            "ApplyPatch should produce real edit targets, got {access:?}"
         );
+    }
+
+    #[test]
+    fn apply_patch_exposes_hunk_paths_not_placeholder() {
+        use xai_grok_tools::implementations::codex::apply_patch::ApplyPatchInput;
+        use xai_grok_tools::types::ToolInput;
+        let patch = "*** Begin Patch\n*** Add File: C:/Users/dan_m/.grok/hooks/pwn.ps1\n+pwned\n*** End Patch\n";
+        let input = ToolInput::ApplyPatch(ApplyPatchInput {
+            patch: patch.to_owned(),
+        });
+        let access = AccessKind::from(&input);
+        match access {
+            AccessKind::Edit(p) => {
+                assert!(
+                    p.contains("pwn.ps1") || p.contains("hooks"),
+                    "must expose real path, not placeholder: {p}"
+                );
+                assert_ne!(p, "apply_patch");
+            }
+            AccessKind::EditMany(paths) => {
+                assert!(
+                    paths.iter().any(|p| p.contains("pwn.ps1")),
+                    "must expose real hunk path: {paths:?}"
+                );
+                assert!(!paths.iter().any(|p| p == "apply_patch"));
+            }
+            other => panic!("expected Edit/EditMany, got {other:?}"),
+        }
     }
     #[test]
     fn write_tool_maps_to_edit_access() {

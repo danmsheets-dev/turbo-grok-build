@@ -4,6 +4,79 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r7] - 2026-07-31
+
+Subagent isolation-by-default release, plus image previews on terminals without
+a graphics protocol.
+
+### Changed
+- **Subagents default to `isolation=worktree`.** Parallel writers no longer
+  share the parent tree by default. Completed worktrees are snapshotted and then
+  removed (opt out with `GROK_SUBAGENT_WORKTREE_SNAPSHOT=0`), and a worktree
+  created for a spawn that aborts early is removed rather than left behind.
+  Subagent worktrees additionally age out after 24h via auto-GC.
+- **`isolation_fallback` is surfaced in tool output**, so a harness can see that
+  a subagent did not get the isolation it asked for instead of inferring it.
+
+### Fixed
+- **Multi-model resolution.** An explicit `Task`/spawn model now wins over the
+  `fork_context` parent pin, and an empty `model_ids` on resume is ignored
+  instead of overriding the configured model.
+- **Image previews on terminals without Kitty/iTerm graphics.** On Windows
+  ConPTY and similar, chip hover and the Enter image viewer paint a truecolor
+  half-block raster instead of showing metadata only. Kitty paths are unchanged.
+
+## [0.2.114-r6] - 2026-07-31
+
+Isolation and headless honesty release. Driven by a 4-source audit (two Grok 4.5
+passes, a 20-agent multi-lens audit, and defects found by running the tool) plus
+two field reports from operators running real Godot and Blender work.
+
+### Fixed
+- **Confinement is a boundary, not a set of heuristics.** `--confine` is now
+  inherited by child processes (a nested `hyper`, an MCP server, or a hook
+  previously ran completely unconfined). `apply_patch` presented the literal
+  placeholder `AccessKind::Edit("apply_patch")` to the permission gate instead of
+  the hunk's real target, then joined an absolute path that replaced the base —
+  real hunk paths now reach the gate, absolute and parent components are
+  rejected, covering Add/Delete/Update/Move-destination. MCP tool calls are
+  confine-checked. Leader mode is vetoed under confine. A `ConfinedFs` choke
+  point closes the gap where enforcement lived only in the permission actor.
+- **A subagent that could not create its worktree silently ran in the shared
+  workspace** — the user's live checkout — signalled only by a `tracing::warn!`
+  no harness can see. Isolation now fails closed; the fallback is opt-in and
+  reports `isolation_fallback`.
+- **The shell confine check false-positived on ordinary compound commands**,
+  reporting an entire command string in the `path` field while every operand was
+  inside the root. It now recovers operands from `;`-separated, piped and
+  PowerShell forms, and reports an unparseable command as a policy decision
+  rather than a path violation.
+- **Folder trust was inert on locally built binaries**, so every cloned
+  repository's `.mcp.json`, `.grok/plugins`, `.grok/hooks` and `[permission]`
+  rules auto-loaded with no prompt. Armed by default.
+- `ask_user_question` could block a headless run for up to 30 minutes.
+- `--rules` / `--append-system-prompt` was silently dropped on `--resume`.
+- `--worktree` was a silent no-op in headless mode; it now fails loudly.
+- A cross-directory `--resume` reported the process cwd while working elsewhere.
+
+### Added
+- **streaming-json `schemaVersion` 2**, documented in
+  `docs/streaming-json-schema.md` with a JSON Schema. Emits `tool_call`,
+  `tool_call_update`, `tool_result`, subagent lifecycle events, and
+  `end.toolCalls` / `end.subagents` rollups. Previously no tool events existed
+  at all, so a harness could not distinguish a thinking model from a long tool
+  call — measured cost: a run appeared hung for 34 minutes during a `cargo test`.
+- `--require-trust`, `--stream-tool-io`, `--require-subagent-success`.
+- `start` reports `sessionCwd`, `originalCwd` and `folderTrust`.
+- A global concurrency cap on native `task` subagent spawns, default 4.
+- `confine_violation` on every denial.
+
+### Known limitations
+- A real OS sandbox (AppContainer / Landlock / bwrap) is **not** implemented.
+  The shell path fails closed on unknown writers and reports the enforcement
+  level actually in force. See `docs/KNOWN_ISSUES.md`.
+
+
 ### Added
 - **`api_backend = "codex_responses"`** (alias `codex-responses`) — OpenAI Responses wire with ChatGPT Codex dialect for custom models and third-party Codex reverse proxies (中转站). Enables system→`instructions`, strips temperature/top_p/max_output_tokens, and uses the OpenAiCodex adapter without requiring `openai-codex/*` OAuth catalog IDs.
 

@@ -3,7 +3,7 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-07-23 (v0.2.110 release).
+Last reviewed: 2026-07-31 (WP-C3 isolation/security package).
 
 ## Fixed in v0.2.109
 
@@ -53,6 +53,8 @@ Last reviewed: 2026-07-23 (v0.2.110 release).
 
 | Topic | Behavior |
 |--------|----------|
+| Shell confine is not an OS sandbox | `--confine` is path-prefix + fail-closed program classifier (`confineShellEnforcement: fail-closed`). Windows AppContainer / Linux Landlock / bwrap are **out of scope** for this package; set `GROK_CONFINE_SHELL_MODE=operand` only for the legacy write-operand scan. |
+| Ecosystem / MCP verify plan trust | Clone-and-delegate baseline verify RCE and `delegate_run.verify` live in the **bridge plugin**, not this Hyper tree — tracked separately. |
 | Shared `~/.grok` | Config, auth, sessions, and leader IPC live under the upstream home. Binary install root is `~/.hyper`. |
 | Shared Kimi + Codex proxy | Catalog id (`kimi-code/*` vs `openai-codex/*`) selects credentials; ambiguous URL alone does not guess a family. |
 | Hyper Modes | **Deferred** — Amp four-tier modes will not ship as designed; see [design-modes.md](./design-modes.md) §0. |

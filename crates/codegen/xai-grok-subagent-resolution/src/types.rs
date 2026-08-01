@@ -28,9 +28,10 @@ pub struct DefinitionRuntimeDefaults {
 /// Resolved effective runtime configuration for a child agent.
 ///
 /// Model, effort, and isolation use explicit > role > persona > definition >
-/// parent inheritance. Capability mode is the safe intersection of the
-/// explicit request, role ceiling, and definition ceiling.
-#[derive(Debug, Clone, Default)]
+/// parent inheritance (isolation falls back to worktree). Capability mode is
+/// the safe intersection of the explicit request, role ceiling, and definition
+/// ceiling.
+#[derive(Debug, Clone)]
 pub struct EffectiveRuntimeConfig {
     /// Resolved model ID override (if any).
     pub model: Option<String>,
@@ -52,7 +53,25 @@ pub struct EffectiveRuntimeConfig {
     /// Unlike role prompts, persona errors are fatal: spawn is aborted.
     pub persona_error: Option<String>,
     /// Isolation mode for the child execution environment.
+    /// Defaults to worktree so children do not share the parent workspace.
     pub isolation: xai_tool_types::SubagentIsolationMode,
+}
+
+impl Default for EffectiveRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            reasoning_effort: None,
+            capability_mode: None,
+            persona: None,
+            persona_instructions: None,
+            role_prompt: None,
+            role_prompt_warning: None,
+            role_name: None,
+            persona_error: None,
+            isolation: xai_tool_types::SubagentIsolationMode::Worktree,
+        }
+    }
 }
 
 /// Data about a completed source subagent, needed for resume validation
@@ -136,7 +155,7 @@ mod tests {
         assert!(config.role_prompt_warning.is_none());
         assert!(config.role_name.is_none());
         assert!(config.persona_error.is_none());
-        assert_eq!(config.isolation, SubagentIsolationMode::None);
+        assert_eq!(config.isolation, SubagentIsolationMode::Worktree);
     }
 
     #[test]

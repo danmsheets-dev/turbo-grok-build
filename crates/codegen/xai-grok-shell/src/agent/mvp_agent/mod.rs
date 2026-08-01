@@ -1108,11 +1108,52 @@ fn system_prompt_override_from_meta<'a>(
     read_session_or_init_meta_str(session_meta, init_meta, "systemPromptOverride")
         .filter(|s| !s.trim().is_empty())
 }
+/// Hard cap on `--rules` / `_meta.rules` bytes. Harnesses that ship large
+/// convention dumps still fit; unbounded rules would blow the system prompt.
+pub(crate) const MAX_RULES_BYTES: usize = 64 * 1024;
+
+/// Cap `rules` text to [`MAX_RULES_BYTES`] (UTF-8 safe).
+fn cap_rules_text(rules: &str) -> &str {
+    if rules.len() <= MAX_RULES_BYTES {
+        return rules;
+    }
+    let mut end = MAX_RULES_BYTES;
+    while end > 0 && !rules.is_char_boundary(end) {
+        end -= 1;
+    }
+    &rules[..end]
+}
+
+/// Replace or append a single `<human_rules>…</human_rules>` block on `prompt`.
+/// Idempotent for a given `rules` string (re-attach re-sync is a no-op once
+/// the head already matches).
+fn upsert_human_rules_block(prompt: &mut String, rules: &str) {
+    let rules = cap_rules_text(rules);
+    let block = format!("\n\n<human_rules>\n{rules}\n</human_rules>");
+    // Strip any existing human_rules block(s) so re-attach with new rules
+    // replaces rather than stacks.
+    while let Some(start) = prompt.find("<human_rules>") {
+        let after = &prompt[start..];
+        if let Some(rel_end) = after.find("</human_rules>") {
+            let end = start + rel_end + "</human_rules>".len();
+            // Also drop a preceding blank line pair when present.
+            let mut strip_from = start;
+            if strip_from >= 2 && prompt.as_bytes()[strip_from - 2..strip_from] == *b"\n\n" {
+                strip_from -= 2;
+            }
+            prompt.replace_range(strip_from..end, "");
+        } else {
+            // Malformed open tag — stop rather than infinite-loop.
+            break;
+        }
+    }
+    prompt.push_str(&block);
+}
+
 /// Compose the system prompt for a *fresh* session: a full `systemPromptOverride`
 /// verbatim, else the agent template with `_meta.rules` folded into
-/// `<human_rules>`. Note: `rules` is applied at creation only — resumed sessions
-/// sync `systemPromptOverride` (see `enqueue_replace_system_prompt_override`) but
-/// not `rules`, by design.
+/// `<human_rules>`. Resumed sessions re-sync both override and rules via
+/// [`enqueue_sync_system_prompt`].
 ///
 /// Headless / non-interactive runs always get [`HEADLESS_NO_QUESTIONS_CLAUSE`]
 /// **before** user-supplied `--rules` (so harness rules cannot "override" the
@@ -1132,6 +1173,9 @@ fn build_spawn_system_prompt(
         // Override replaces the agent template, but the headless contract is
         // non-negotiable: still append unless the harness opted out.
         append_headless_no_questions_if_needed(&mut prompt, session_meta, init_meta);
+        if let Some(rules) = read_session_or_init_meta_str(session_meta, init_meta, "rules") {
+            upsert_human_rules_block(&mut prompt, rules);
+        }
         prompt
     } else {
         let mut prompt = agent_system_prompt.to_owned();
@@ -1144,38 +1188,56 @@ fn build_spawn_system_prompt(
             init_meta,
             "rules",
         ) {
-            prompt.push_str("\n\n<human_rules>\n");
-            prompt.push_str(rules);
-            prompt.push_str("\n</human_rules>");
+            upsert_human_rules_block(&mut prompt, rules);
         }
         prompt
     }
 }
-/// Enqueue a `ReplaceSystemPrompt` for a resident session actor. No-op when
-/// the client sent no (non-empty) `systemPromptOverride`, or when the head
-/// already matches (e.g. a cold load that pre-applied the override).
+
+/// Enqueue a system-prompt sync for a resident session actor on attach/resume.
 ///
-/// Note: only `systemPromptOverride` is synced on attach. `_meta.rules` is
-/// folded into the prompt at session creation only (see
-/// `build_spawn_system_prompt`); resumed sessions keep their original prompt
-/// unless a full override is supplied. Updating `rules` mid-session is out of
-/// scope by design. The headless no-questions clause is re-appended here so a
-/// mid-session override cannot silently re-enable interactive questions.
+/// - When a non-empty `systemPromptOverride` is present, replace the system
+///   head with override + headless clause + (optional) `<human_rules>`.
+/// - When only `_meta.rules` is present, upsert the human_rules block on the
+///   live head so harness re-attach with `--rules` is not silently dropped.
+/// - No-op when neither is present, or when the head already matches.
+///
+/// The headless no-questions clause is re-appended on override so a mid-session
+/// override cannot silently re-enable interactive questions.
+fn enqueue_sync_system_prompt(
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+    session_meta: Option<&acp::Meta>,
+    init_meta: Option<&acp::Meta>,
+) {
+    let rules = read_session_or_init_meta_str(session_meta, init_meta, "rules")
+        .filter(|s| !s.trim().is_empty())
+        .map(cap_rules_text);
+    if let Some(override_prompt) = system_prompt_override_from_meta(session_meta, init_meta) {
+        let mut system_prompt = override_prompt.to_owned();
+        append_headless_no_questions_if_needed(&mut system_prompt, session_meta, init_meta);
+        if let Some(rules) = rules {
+            upsert_human_rules_block(&mut system_prompt, rules);
+        }
+        let _ = cmd_tx.send(crate::session::SessionCommand::ReplaceSystemPrompt {
+            system_prompt,
+        });
+        return;
+    }
+    if let Some(rules) = rules {
+        let _ = cmd_tx.send(crate::session::SessionCommand::UpsertHumanRules {
+            rules: rules.to_owned(),
+        });
+    }
+}
+
+/// Backward-compatible name for call sites / tests that only care about the
+/// override path. Prefer [`enqueue_sync_system_prompt`].
 fn enqueue_replace_system_prompt_override(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
     session_meta: Option<&acp::Meta>,
     init_meta: Option<&acp::Meta>,
 ) {
-    let Some(override_prompt) = system_prompt_override_from_meta(session_meta, init_meta)
-    else {
-        return;
-    };
-    let mut system_prompt = override_prompt.to_owned();
-    append_headless_no_questions_if_needed(&mut system_prompt, session_meta, init_meta);
-    let _ = cmd_tx
-        .send(crate::session::SessionCommand::ReplaceSystemPrompt {
-            system_prompt,
-        });
+    enqueue_sync_system_prompt(cmd_tx, session_meta, init_meta);
 }
 /// Warn that a `ValidateType` arrived for an evicted/unknown parent session,
 /// so ops can diagnose "Unknown subagent type" errors for project agents.

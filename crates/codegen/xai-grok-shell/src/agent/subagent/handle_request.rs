@@ -239,13 +239,25 @@ pub(crate) async fn run_shell_child(
     ) {
         return child_run_output(failure_result(&request, &error), completion_data, None);
     }
+    // R6-10: isolation is fail-closed. When isolation=worktree was requested and
+    // the worktree cannot be created/rehydrated, the subagent does NOT start in
+    // the shared workspace unless the operator explicitly opts in via
+    // GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 (which also sets isolation_fallback
+    // on the result so harnesses refuse to report the run as isolated).
+    let isolation_requested =
+        effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None;
+    let allow_shared_fallback = isolation_shared_fallback_allowed();
+    let mut isolation_fallback = false;
     let worktree_path = if let Some(ref source) = resume_source {
-        if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
-            && source.worktree_path.is_none()
-        {
+        if isolation_requested && source.worktree_path.is_none() {
+            // Resume of a pre-isolation (shared) child cannot invent a prior
+            // worktree; stay shared and surface isolation_fallback so harnesses
+            // do not treat the run as isolated.
+            isolation_fallback = true;
             tracing::info!(
                 subagent_id = %request.id,
-                "Ignoring isolation=worktree override: resumed source had no worktree"
+                isolation_fallback = true,
+                "Resumed source had no worktree; continuing shared (isolation_fallback)"
             );
         }
         match source.worktree_path.as_deref() {
@@ -274,27 +286,69 @@ pub(crate) async fn run_shell_child(
                                 Some(path)
                             }
                             Err(e) => {
+                                if isolation_requested && !allow_shared_fallback {
+                                    let msg = format!(
+                                        "Failed to rehydrate isolated worktree for subagent \
+                                         (isolation required): {e}. Set \
+                                         GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 to opt into \
+                                         shared-workspace fallback (emits isolation_fallback; \
+                                         the run is NOT isolated)."
+                                    );
+                                    tracing::error!(
+                                        subagent_id = %request.id,
+                                        error = %e,
+                                        "Worktree rehydrate failed; refusing shared-workspace fallback"
+                                    );
+                                    return child_run_output(
+                                        failure_result(&request, &msg),
+                                        completion_data,
+                                        None,
+                                    );
+                                }
+                                isolation_fallback = isolation_requested;
                                 tracing::warn!(
                                     subagent_id = %request.id,
                                     error = %e,
-                                    "Failed to rehydrate subagent worktree, falling back to shared workspace"
+                                    isolation_fallback,
+                                    "Failed to rehydrate subagent worktree; shared-workspace fallback (opt-in)"
                                 );
                                 None
                             }
                         }
                     }
                     ResumeWorktreeAction::Shared => {
+                        if isolation_requested && !allow_shared_fallback {
+                            let msg = format!(
+                                "Resumed subagent worktree dir missing with no snapshot \
+                                 (isolation required): {}. Set \
+                                 GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 to opt into \
+                                 shared-workspace fallback.",
+                                dest.display()
+                            );
+                            tracing::error!(
+                                subagent_id = %request.id,
+                                worktree = %dest.display(),
+                                "Worktree missing; refusing shared-workspace fallback"
+                            );
+                            return child_run_output(
+                                failure_result(&request, &msg),
+                                completion_data,
+                                None,
+                            );
+                        }
+                        isolation_fallback = isolation_requested;
                         tracing::warn!(
                             subagent_id = %request.id,
                             worktree = %dest.display(),
-                            "Resumed subagent worktree dir missing with no snapshot; using shared workspace"
+                            isolation_fallback,
+                            "Resumed subagent worktree dir missing with no snapshot; shared-workspace fallback (opt-in)"
                         );
                         None
                     }
                 }
             }
         }
-    } else if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None {
+    } else if isolation_requested {
         let source_cwd = parent_source_cwd(&ctx);
         let dest = match crate::session::worktree::worktree_base_dir_for_source(&source_cwd) {
             Ok(base) => base.join(format!("subagent-{}", request.id)),
@@ -336,18 +390,58 @@ pub(crate) async fn run_shell_child(
                 Some(report.worktree_path)
             }
             Ok(Err(e)) => {
+                if !allow_shared_fallback {
+                    let msg = format!(
+                        "Failed to create isolated worktree for subagent \
+                         (isolation required): {e}. Set \
+                         GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 to opt into \
+                         shared-workspace fallback (emits isolation_fallback; \
+                         the run is NOT isolated)."
+                    );
+                    tracing::error!(
+                        subagent_id = %request.id,
+                        error = %e,
+                        "Worktree creation failed; refusing shared-workspace fallback"
+                    );
+                    return child_run_output(
+                        failure_result(&request, &msg),
+                        completion_data,
+                        None,
+                    );
+                }
+                isolation_fallback = true;
                 tracing::warn!(
                     subagent_id = %request.id,
                     error = %e,
-                    "Failed to create worktree, falling back to shared workspace"
+                    isolation_fallback,
+                    "Failed to create worktree; shared-workspace fallback (opt-in)"
                 );
                 None
             }
             Err(e) => {
+                if !allow_shared_fallback {
+                    let msg = format!(
+                        "Worktree creation task panicked (isolation required): {e}. Set \
+                         GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 to opt into \
+                         shared-workspace fallback."
+                    );
+                    tracing::error!(
+                        subagent_id = %request.id,
+                        error = %e,
+                        "Worktree creation panicked; refusing shared-workspace fallback"
+                    );
+                    return child_run_output(
+                        failure_result(&request, &msg),
+                        completion_data,
+                        None,
+                    );
+                }
+                isolation_fallback = true;
                 tracing::warn!(
                     subagent_id = %request.id,
                     error = %e,
-                    "Worktree creation task panicked, falling back to shared workspace"
+                    isolation_fallback,
+                    "Worktree creation task panicked; shared-workspace fallback (opt-in)"
                 );
                 None
             }
@@ -355,7 +449,15 @@ pub(crate) async fn run_shell_child(
     } else {
         None
     };
+
     let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
+    // Remove a freshly created worktree if we bail before the normal
+    // completion dispose path (model/bootstrap/spawn failures).
+    let mut fresh_worktree_guard = FreshWorktreeGuard::new(
+        worktree_freshly_created
+            .then(|| worktree_path.clone())
+            .flatten(),
+    );
     if let Some(raw_cwd) = request.cwd.as_deref() {
         match sanitize_cwd_value(raw_cwd) {
             Some(cwd_path) => {
@@ -425,7 +527,10 @@ pub(crate) async fn run_shell_child(
             )
         });
     }
-    if request.fork_context {
+    // Fork reuses parent conversation prefix and prefers the parent model for
+    // cache locality — but an *explicit* Task/spawn model override (e.g. goal
+    // planner role model) must win so multi-model orchestration works.
+    if request.fork_context && request.runtime_overrides.model.is_none() {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
     let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
@@ -460,6 +565,7 @@ pub(crate) async fn run_shell_child(
     }
     if let Some(ref source) = resume_source
         && let Some(ref source_model) = source.model_id
+        && !source_model.is_empty()
         && effective_model_id.0.as_ref() != source_model.as_str()
     {
         if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
@@ -1286,6 +1392,7 @@ pub(crate) async fn run_shell_child(
                 worktree_path: worktree_path
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
+                isolation_fallback,
                 ..Default::default()
             }
         }
@@ -1346,6 +1453,7 @@ pub(crate) async fn run_shell_child(
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
+                        isolation_fallback,
                         backgrounded: false,
                     }
                 }
@@ -1377,6 +1485,7 @@ pub(crate) async fn run_shell_child(
                     worktree_path: worktree_path
                         .as_ref()
                         .map(|p| p.to_string_lossy().to_string()),
+                    isolation_fallback,
                     backgrounded: false,
                 },
                 Ok(Ok(crate::session::commands::PromptTurnOk {
@@ -1426,6 +1535,7 @@ pub(crate) async fn run_shell_child(
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
+                        isolation_fallback,
                         ..Default::default()
                     }
                 }
@@ -1447,6 +1557,7 @@ pub(crate) async fn run_shell_child(
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
+                        isolation_fallback,
                         ..Default::default()
                     }
                 }
@@ -1468,6 +1579,7 @@ pub(crate) async fn run_shell_child(
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
+                        isolation_fallback,
                         ..Default::default()
                     }
                 }
@@ -1870,6 +1982,8 @@ pub(crate) async fn run_shell_child(
     if worktree_removed {
         result.worktree_path = None;
     }
+    // Normal completion path owns dispose/preserve; do not double-remove.
+    fresh_worktree_guard.disarm();
     let success = result.success && !result.cancelled;
     let preview = crate::util::truncate(&result.output, 200);
     let level_fn = if success {

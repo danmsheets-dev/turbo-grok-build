@@ -319,6 +319,141 @@ pub(crate) fn is_safe_write_sink(path: &str) -> bool {
     matches!(path, "/dev/null" | "/dev/stdout" | "/dev/stderr")
 }
 
+/// Outcome of analysing a shell command for confine enforcement.
+///
+/// Path operands are **real path strings only** — never the raw command line.
+/// Unparseable / unmodelled commands are explicit policy decisions, not
+/// path-outside-root hits with a command stuffed into the `path` field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfineShellAnalysis {
+    /// Parse trusted; `operands` are write/`cd` path targets (possibly empty).
+    Modelled { operands: Vec<String> },
+    /// A program whose write side-effects we do not model — fail closed.
+    Unmodelled { program: String },
+    /// Could not parse into operands with confidence — fail closed.
+    Unparseable,
+}
+
+/// Analyse `cmd` for confine: real path operands, or an explicit policy denial.
+///
+/// Handles `;` / `|` / `&&` / `||` compound sequences and peels PowerShell
+/// parenthesised expressions like `(Get-Item path).Length` so ordinary
+/// read-only compounds are not false-positive path violations.
+pub(crate) fn analyse_shell_for_confine(cmd: &str) -> ConfineShellAnalysis {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return ConfineShellAnalysis::Modelled {
+            operands: Vec::new(),
+        };
+    }
+
+    // Fast path: clean bash parse of the whole script.
+    if let Some(tree) = try_parse_shell(trimmed) {
+        let root = tree.root_node();
+        if !root.has_error() {
+            return analyse_shell_tree(root, trimmed);
+        }
+    }
+
+    // Recovery for compound / PowerShell-shaped lines the bash grammar rejects
+    // as a unit: split on top-level sequencing/pipe operators, peel PS
+    // parenthesised expressions, analyse each segment. Every segment must be
+    // modelled for the whole command to allow; any unmodelled/unparseable
+    // segment fails closed as a policy decision (not a path hit).
+    let segments = split_compound_shell_segments(trimmed);
+    if segments.len() <= 1 {
+        // Single segment still broken — try PS peel alone.
+        let peeled = peel_powershell_expression(trimmed);
+        if peeled != trimmed {
+            if let Some(tree) = try_parse_shell(peeled) {
+                let root = tree.root_node();
+                if !root.has_error() {
+                    return analyse_shell_tree(root, peeled);
+                }
+            }
+        }
+        return ConfineShellAnalysis::Unparseable;
+    }
+
+    let mut operands = Vec::new();
+    for seg in segments {
+        let seg = peel_powershell_expression(seg.trim());
+        if seg.is_empty() {
+            continue;
+        }
+        match analyse_shell_for_confine(seg) {
+            ConfineShellAnalysis::Modelled { operands: mut ops } => {
+                operands.append(&mut ops);
+            }
+            other => return other,
+        }
+    }
+    ConfineShellAnalysis::Modelled { operands }
+}
+
+fn analyse_shell_tree(root: Node<'_>, src: &str) -> ConfineShellAnalysis {
+    if tree_has_opaque_shell(root, src) {
+        return ConfineShellAnalysis::Unmodelled {
+            program: "opaque-shell".to_owned(),
+        };
+    }
+    for invocation in shell_command_invocations(root, src) {
+        let words = InvocationSlice {
+            words: &invocation.words,
+        }
+        .literal_words();
+        let Some(raw) = words.first() else {
+            continue;
+        };
+        let program = normalize_program_name(raw);
+        if !shell_program_is_modelled_for_confine(&program, &words) {
+            return ConfineShellAnalysis::Unmodelled { program };
+        }
+    }
+    ConfineShellAnalysis::Modelled {
+        operands: shell_confine_operands_from_tree(root, src),
+    }
+}
+
+fn normalize_program_name(raw: &str) -> String {
+    let program = shell_program_name(raw).to_ascii_lowercase();
+    program
+        .strip_suffix(".exe")
+        .or_else(|| program.strip_suffix(".cmd"))
+        .or_else(|| program.strip_suffix(".bat"))
+        .or_else(|| program.strip_suffix(".ps1"))
+        .unwrap_or(program.as_str())
+        .to_owned()
+}
+
+/// Write targets and `cd`/`pushd` destinations from a clean (no-error) tree.
+fn shell_confine_operands_from_tree(root: Node<'_>, src: &str) -> Vec<String> {
+    let mut out = command_write_paths_in_tree(root, src);
+    for invocation in shell_command_invocations(root, src) {
+        let words = InvocationSlice {
+            words: &invocation.words,
+        }
+        .literal_words();
+        let Some(program) = words.first().map(|w| normalize_program_name(w)) else {
+            continue;
+        };
+        if matches!(program.as_str(), "cd" | "pushd" | "set-location" | "sl") {
+            for token in shell_file_candidates(&words) {
+                if token == "-" {
+                    continue;
+                }
+                out.push(token.to_owned());
+                break;
+            }
+        }
+        // git write destinations (clone target, worktree add path, …).
+        if program == "git" {
+            out.extend(git_write_path_operands(&words));
+        }
+    }
+    out
+}
+
 /// Write targets and `cd`/`pushd` destinations a shell command may touch,
 /// for confine checking.
 ///
@@ -331,37 +466,531 @@ pub(crate) fn is_safe_write_sink(path: &str) -> bool {
 /// ([`command_write_paths_in_tree`]) plus `cd`/`pushd` operands so a
 /// `cd ../Main\ Repo && echo x > f` cannot leave the root by changing cwd
 /// first.
+///
+/// **Important:** `None` means *unparseable policy*, not "treat the whole
+/// command string as a path". Callers must surface `shell-unparseable` /
+/// `shell-unmodelled-program` rather than stuffing `cmd` into a path field.
 pub(crate) fn shell_confine_operands(cmd: &str) -> Option<Vec<String>> {
-    let tree = try_parse_shell(cmd)?;
-    let root = tree.root_node();
-    // Error nodes mean tree-sitter recovered — operand extraction is incomplete.
-    // Fail closed: caller under confine must deny rather than trust a partial list.
-    if root.has_error() {
-        return None;
+    match analyse_shell_for_confine(cmd) {
+        ConfineShellAnalysis::Modelled { operands } => Some(operands),
+        ConfineShellAnalysis::Unmodelled { .. } | ConfineShellAnalysis::Unparseable => None,
     }
-    let mut out = command_write_paths_in_tree(root, cmd);
-    for invocation in shell_command_invocations(root, cmd) {
-        let words = InvocationSlice {
-            words: &invocation.words,
-        }
-        .literal_words();
-        let Some(program) = words.first().map(|w| shell_program_name(w)) else {
+}
+
+/// First program in `cmd` whose write behaviour is **not** modelled by the
+/// shell confine classifier (interpreters, build tools, opaque `bash -c`, …).
+///
+/// Under `--confine` with fail-closed shell enforcement, any unmodelled
+/// program is a deny — the operand allowlist alone is not a boundary.
+/// Returns `None` when every program is modelled (or the script is empty).
+///
+/// Returns `Some("unparseable")` when the script cannot be parsed with
+/// confidence (same fail-closed posture as [`shell_confine_operands`]).
+pub(crate) fn shell_unmodelled_program_for_confine(cmd: &str) -> Option<String> {
+    match analyse_shell_for_confine(cmd) {
+        ConfineShellAnalysis::Modelled { .. } => None,
+        ConfineShellAnalysis::Unmodelled { program } => Some(program),
+        ConfineShellAnalysis::Unparseable => Some("unparseable".to_owned()),
+    }
+}
+
+/// Quote-aware split on top-level `;`, `|`, `&&`, `||` (not inside quotes or
+/// parentheses). Used to recover compound command lines the bash grammar
+/// rejects as a unit (PowerShell parenthesised expressions, etc.).
+fn split_compound_shell_segments(cmd: &str) -> Vec<&str> {
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut depth = 0i32;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            } else if b == b'\\' && q == b'"' && i + 1 < bytes.len() {
+                i += 1; // skip escaped char inside double quotes
+            }
+            i += 1;
             continue;
-        };
-        let program = program.to_ascii_lowercase();
-        if matches!(program.as_str(), "cd" | "pushd") {
-            // First positional operand is the destination (`cd -` / bare `cd`
-            // have no path — skip those).
-            for token in shell_file_candidates(&words) {
-                if token == "-" {
-                    continue;
+        }
+        match b {
+            b'\'' | b'"' => {
+                quote = Some(b);
+                i += 1;
+            }
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' | b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b';' if depth == 0 => {
+                out.push(&cmd[start..i]);
+                start = i + 1;
+                i += 1;
+            }
+            b'|' if depth == 0 => {
+                // Don't split `||` mid-operator twice; treat `||` as one op.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+                    out.push(&cmd[start..i]);
+                    start = i + 2;
+                    i += 2;
+                } else {
+                    out.push(&cmd[start..i]);
+                    start = i + 1;
+                    i += 1;
                 }
-                out.push(token.to_owned());
-                break;
+            }
+            b'&' if depth == 0 && i + 1 < bytes.len() && bytes[i + 1] == b'&' => {
+                out.push(&cmd[start..i]);
+                start = i + 2;
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    if start <= cmd.len() {
+        out.push(&cmd[start..]);
+    }
+    out
+}
+
+/// Peel PowerShell parenthesised expressions used for property/method access:
+/// `(Get-Item path).Length` → `Get-Item path`, `(gi foo).FullName` → `gi foo`.
+/// Leaves non-matching text unchanged.
+fn peel_powershell_expression(seg: &str) -> &str {
+    let s = seg.trim();
+    let bytes = s.as_bytes();
+    if !bytes.first().is_some_and(|b| *b == b'(') {
+        return s;
+    }
+    let mut depth = 0i32;
+    let mut close = None;
+    for (idx, b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return s;
+    };
+    let rest = s[close + 1..].trim_start();
+    // Property/method chain after the close paren, or bare subexpression.
+    if rest.is_empty() || rest.starts_with('.') {
+        let inner = s[1..close].trim();
+        if !inner.is_empty() {
+            return inner;
+        }
+    }
+    s
+}
+
+/// Whether we understand this program's write side-effects well enough to
+/// trust the operand extractor under confine.
+///
+/// Modelled = known readers, known writers (operand-checked), pure builtins,
+/// path commands (`cp`/`mv`/…), special flag writers (`dd`/`rustc`/…),
+/// read-only / path-extracted `git`, and nested hyper (inherits
+/// `GROK_CONFINE`). Everything else is fail-closed.
+fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> bool {
+    // Nested hyper/grok re-applies GROK_CONFINE on startup — allow under pin.
+    if matches!(
+        program,
+        "hyper" | "grok" | "xai-grok" | "xai-grok-pager"
+    ) {
+        return true;
+    }
+    // Pure non-writing shell builtins / trivial utilities (no file args that
+    // write). Redirects on these are still caught by command_write_paths_in_tree.
+    if matches!(
+        program,
+        ":"
+            | "true"
+            | "false"
+            | "echo"
+            | "printf"
+            | "pwd"
+            | "cd"
+            | "pushd"
+            | "popd"
+            | "dirs"
+            | "export"
+            | "unset"
+            | "set"
+            | "shift"
+            | "break"
+            | "continue"
+            | "return"
+            | "exit"
+            | "logout"
+            | "hash"
+            | "help"
+            | "history"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "wait"
+            | "ulimit"
+            | "umask"
+            | "alias"
+            | "unalias"
+            | "type"
+            | "which"
+            | "where.exe"
+            | "command"
+            | "builtin"
+            | "enable"
+            | "bind"
+            | "complete"
+            | "compgen"
+            | "declare"
+            | "typeset"
+            | "local"
+            | "readonly"
+            | "getopts"
+            | "read" // reads stdin / vars, not arbitrary write paths
+            | "test"
+            | "["
+            | "[["
+            | "basename"
+            | "dirname"
+            | "realpath"
+            | "readlink"
+            | "ls"
+            | "dir"
+            | "clear"
+            | "sleep"
+            | "date"
+            | "whoami"
+            | "id"
+            | "uname"
+            | "hostname"
+            | "nproc"
+            | "arch"
+            | "printenv"
+            | "env" // env alone is ok; `env -u GROK_CONFINE` is pinned at spawn
+            | "times"
+            // PowerShell pure readers / formatters (no arbitrary write path).
+            | "get-psdrive"
+            | "get-location"
+            | "gl"
+            | "get-host"
+            | "get-command"
+            | "gcm"
+            | "get-help"
+            | "get-member"
+            | "gm"
+            | "get-variable"
+            | "gv"
+            | "get-process"
+            | "gps"
+            | "get-service"
+            | "gsv"
+            | "measure-object"
+            | "measure"
+            | "select-object"
+            | "select"
+            | "where-object"
+            | "where"
+            | "?"
+            | "for-each-object"
+            | "foreach-object"
+            | "foreach"
+            | "%"
+            | "write-output"
+            | "write-host"
+            | "write-verbose"
+            | "write-debug"
+            | "write-information"
+            | "out-string"
+            | "out-null"
+            | "out-host"
+            | "out-default"
+            | "format-list"
+            | "fl"
+            | "format-table"
+            | "ft"
+            | "format-wide"
+            | "fw"
+            | "format-custom"
+            | "convertto-json"
+            | "convertfrom-json"
+            | "convertto-csv"
+            | "convertfrom-csv"
+            | "sort-object"
+            | "group-object"
+            | "compare-object"
+            | "tee-object" // writer via shell_file_mode
+            | "test-path"
+            | "resolve-path"
+            | "split-path"
+            | "join-path"
+            | "set-location"
+            | "sl"
+            | "push-location"
+            | "pop-location"
+    ) {
+        return true;
+    }
+    // git: read-only subcommands + write subcommands with path extraction.
+    if program == "git" {
+        return git_is_modelled_for_confine(words);
+    }
+    // Known readers (ShellFileMode::Read).
+    if matches!(shell_file_mode(program), Some(ShellFileMode::Read)) {
+        // sed -i is a writer; still modelled (operands extracted).
+        return true;
+    }
+    // Known writers with operand extraction.
+    if matches!(shell_file_mode(program), Some(ShellFileMode::Write)) {
+        return true;
+    }
+    // Path-moving / mutating commands with explicit operand tables.
+    if shell_path_command_operands(program, words).is_some() {
+        return true;
+    }
+    // Flag-named writers (dd of=, sort -o, rustc -o, …).
+    if !special_file_operands(program, words).is_empty() {
+        return true;
+    }
+    // sed without -i is a reader; with -i a modelled writer.
+    if program == "sed" {
+        return true;
+    }
+    // Common no-side-effect wrappers that peel in the access gate.
+    if matches!(
+        program,
+        "timeout" | "time" | "nice" | "nohup" | "stdbuf" | "ionice" | "chrt"
+    ) {
+        // Wrapper itself is fine; the next program is checked as its own
+        // invocation when tree-sitter splits it. If not split, fail closed
+        // only if we cannot see an inner program — treat wrapper alone as ok
+        // when it is the sole word (harmless).
+        return words.len() <= 1
+            || words
+                .get(1)
+                .map(|w| {
+                    let inner = normalize_program_name(w);
+                    shell_program_is_modelled_for_confine(&inner, &words[1..])
+                })
+                .unwrap_or(false);
+    }
+    false
+}
+
+/// First non-flag git argument after `git` (skipping `-C`, `-c`, global flags).
+fn git_subcommand(words: &[String]) -> Option<&str> {
+    let mut i = 1usize;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            return words.get(i + 1).map(|s| s.as_str());
+        }
+        if w.starts_with('-') {
+            // Flags that take a value: -C <path>, -c <name=value>, --git-dir=, …
+            if matches!(
+                w,
+                "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+            ) {
+                i += 2;
+                continue;
+            }
+            if w.starts_with("--git-dir=")
+                || w.starts_with("--work-tree=")
+                || w.starts_with("--namespace=")
+                || w.starts_with("--config-env=")
+            {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        return Some(w);
+    }
+    None
+}
+
+/// git is modelled when its subcommand is a known reader, or a known writer
+/// whose destinations we extract. Unknown / dangerous subcommands (e.g.
+/// `config --global`, arbitrary plumbing) fail closed.
+fn git_is_modelled_for_confine(words: &[String]) -> bool {
+    // Always extract -C / --git-dir / --work-tree / --output as path operands
+    // via git_write_path_operands; here we only decide modelled-ness.
+    let Some(sub) = git_subcommand(words) else {
+        return true; // bare `git` / flags-only
+    };
+    let sub = sub.to_ascii_lowercase();
+    matches!(
+        sub.as_str(),
+        // Read-only (and non-writing diagnostics).
+        "show"
+            | "log"
+            | "status"
+            | "diff"
+            | "blame"
+            | "grep"
+            | "shortlog"
+            | "describe"
+            | "rev-parse"
+            | "rev-list"
+            | "cat-file"
+            | "ls-files"
+            | "ls-tree"
+            | "ls-remote"
+            | "name-rev"
+            | "symbolic-ref"
+            | "for-each-ref"
+            | "branch" // listing; create/delete still no arbitrary outside write
+            | "tag" // listing
+            | "remote" // listing
+            | "stash" // list/show
+            | "version"
+            | "help"
+            | "config" // still fails closed if --global (checked below)
+            // Modelled writers with path extraction.
+            | "clone"
+            | "worktree"
+            | "init"
+            | "checkout"
+            | "switch"
+            | "restore"
+            | "add"
+            | "rm"
+            | "mv"
+            | "commit"
+            | "reset"
+            | "clean"
+            | "apply"
+            | "am"
+            | "rebase"
+            | "merge"
+            | "cherry-pick"
+            | "revert"
+            | "fetch"
+            | "pull"
+            | "push"
+            | "archive"
+    ) && !git_config_is_global(words)
+}
+
+fn git_config_is_global(words: &[String]) -> bool {
+    git_subcommand(words).is_some_and(|s| s.eq_ignore_ascii_case("config"))
+        && words.iter().any(|w| {
+            matches!(
+                w.as_str(),
+                "--global" | "--system" | "--file" | "--blob"
+            ) || w.starts_with("--file=")
+        })
+}
+
+/// Path operands for git that may write outside the confine root.
+fn git_write_path_operands(words: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    // -C <path>, --git-dir, --work-tree always change where git operates.
+    let mut i = 1usize;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "-C" {
+            if let Some(p) = words.get(i + 1) {
+                out.push(p.clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(p) = w.strip_prefix("--git-dir=") {
+            out.push(p.to_owned());
+            i += 1;
+            continue;
+        }
+        if w == "--git-dir" {
+            if let Some(p) = words.get(i + 1) {
+                out.push(p.clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(p) = w.strip_prefix("--work-tree=") {
+            out.push(p.to_owned());
+            i += 1;
+            continue;
+        }
+        if w == "--work-tree" {
+            if let Some(p) = words.get(i + 1) {
+                out.push(p.clone());
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    // Flag-named outputs (`--output`, `-o`).
+    for (path, mode) in special_file_operands("git", words) {
+        if matches!(mode, ShellFileMode::Write) {
+            out.push(path);
+        }
+    }
+    let Some(sub) = git_subcommand(words) else {
+        return out;
+    };
+    let sub = sub.to_ascii_lowercase();
+    match sub.as_str() {
+        // `git clone [opts] <repo> [<dir>]` — last positional is dest when two+.
+        "clone" => {
+            let positionals: Vec<&str> = shell_file_candidates(words);
+            // shell_file_candidates skips flags; first is repo, second (if any) dest.
+            // When only one positional, dest defaults to repo basename (cwd-relative).
+            if let Some(dest) = positionals.get(1) {
+                out.push((*dest).to_owned());
             }
         }
+        // `git worktree add <path> …`
+        "worktree" => {
+            // Locate the "worktree" token then the action.
+            let mut idx = 1usize;
+            while idx < words.len() && !words[idx].eq_ignore_ascii_case("worktree") {
+                idx += 1;
+            }
+            idx += 1; // past "worktree"
+            if words
+                .get(idx)
+                .is_some_and(|a| a.eq_ignore_ascii_case("add"))
+            {
+                idx += 1;
+                while idx < words.len() {
+                    let a = words[idx].as_str();
+                    if a == "--" {
+                        idx += 1;
+                        continue;
+                    }
+                    if a.starts_with('-') {
+                        if matches!(a, "-b" | "-B" | "--reason" | "--lock") {
+                            idx += 2;
+                        } else {
+                            idx += 1;
+                        }
+                        continue;
+                    }
+                    out.push(words[idx].clone());
+                    break;
+                }
+            }
+        }
+        _ => {}
     }
-    Some(out)
+    out
 }
 
 /// Why acceptEdits must still prompt for this edit target.
@@ -577,8 +1206,14 @@ fn shell_file_mode(program: &str) -> Option<ShellFileMode> {
         | "base32" | "cut" | "sort" | "uniq" | "wc" | "type" | "get-content" | "gc" | "diff"
         | "comm" | "rev" | "jq" | "yq" | "select-string" | "sls" | "ag" | "ack" | "zcat"
         | "zless" | "zmore" | "zgrep" | "zegrep" | "zfgrep" | "bzcat" | "bzgrep" | "xzcat"
-        | "xzgrep" | "zstdcat" | "lz4cat" => Some(ShellFileMode::Read),
-        "tee" | "set-content" | "out-file" | "add-content" | "tee-object" | "truncate" => {
+        | "xzgrep" | "zstdcat" | "lz4cat"
+        // PowerShell filesystem readers (operands are read paths, not writes).
+        | "get-item" | "gi" | "get-childitem" | "gci" | "get-acl" | "get-filehash"
+        | "get-itemproperty" | "get-itempropertyvalue" => Some(ShellFileMode::Read),
+        "tee" | "set-content" | "out-file" | "add-content" | "tee-object" | "truncate"
+        | "set-item" | "si" | "new-item" | "ni" | "remove-item" | "ri" | "del" | "erase"
+        | "rd" | "rmdir" | "move-item" | "mi" | "move" | "copy-item" | "cpi" | "copy"
+        | "rename-item" | "rni" | "ren" | "clear-content" | "clc" => {
             Some(ShellFileMode::Write)
         }
         _ => None,
@@ -1369,6 +2004,132 @@ mod tests {
     }
 
     /// WP-H4: confine reuses write/`cd` operand extraction; unparseable → None.
+    /// Interpreters / build tools with empty operand lists must fail closed.
+    #[test]
+    fn shell_unmodelled_denies_python_and_interpreters() {
+        // Critical escape: empty operand list for interpreters.
+        for cmd in [
+            r#"python -c "open(r'C:\Users\x\.ssh\authorized_keys','a').write('k')""#,
+            r#"python3 -c "print(1)""#,
+            r#"node -e "require('fs').writeFileSync('C:/x','p')""#,
+            r#"perl -e 'print 1'"#,
+            "cargo build",
+            "blender -b scene.blend",
+            "godot --export-release Windows out.exe",
+        ] {
+            let hit = shell_unmodelled_program_for_confine(cmd);
+            assert!(
+                hit.is_some(),
+                "expected unmodelled program for `{cmd}`, got None"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_modelled_allows_readers_and_known_writers() {
+        for cmd in [
+            "echo hello",
+            "cat src/main.rs",
+            "ls -la",
+            "rg pattern src",
+            "cp a.txt b.txt",
+            "mkdir -p out",
+            "rm -f tmp.txt",
+            "tee out.txt",
+            "cd src",
+            "true",
+            "hyper -p 'hi'",
+            "git show HEAD",
+            "git log --oneline -5",
+            "wc -l src/main.rs",
+            "Get-Item src/main.rs",
+            "Get-PSDrive",
+        ] {
+            assert_eq!(
+                shell_unmodelled_program_for_confine(cmd),
+                None,
+                "expected modelled for `{cmd}`"
+            );
+        }
+    }
+
+    /// R7-7b: compound `;` / `|` / PowerShell parenthesised expressions with
+    /// every operand inside the root must not emit a confine violation, and
+    /// must never treat the raw command string as a path operand.
+    #[test]
+    fn compound_readonly_commands_are_modelled_with_real_operands_only() {
+        // Observed false-positive shape #1: cd to root + git show.
+        let root = r#"H:\gb-work\gb\w\d52412a3"#;
+        let cmd = format!(
+            r#"cd "{root}" ; git show 835f16d --stat ; git log --oneline -3"#
+        );
+        match analyse_shell_for_confine(&cmd) {
+            ConfineShellAnalysis::Modelled { operands } => {
+                // cd target is a path operand; no write outside.
+                assert!(
+                    operands.iter().any(|p| p.contains("d52412a3") || p == root),
+                    "cd destination should be extracted: {operands:?}"
+                );
+                // The raw command must never appear as an "operand".
+                assert!(
+                    !operands.iter().any(|p| p.contains("git show")),
+                    "command string must not be a path operand: {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled for compound git, got {other:?}"),
+        }
+
+        // Observed false-positive shape #2: wc + PowerShell parenthesised Get-Item.
+        let cmd2 = "wc -l crates/codegen/xai-grok-pager/src/headless.rs; (Get-Item crates/codegen/xai-grok-pager/src/headless.rs).Length";
+        match analyse_shell_for_confine(cmd2) {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.is_empty()
+                        || operands
+                            .iter()
+                            .all(|p| p.contains("headless.rs") || p.contains("crates")),
+                    "only real path operands, got {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled for PS compound, got {other:?}"),
+        }
+
+        // POSIX pipe of pure readers.
+        let cmd3 = "cat src/a.rs | wc -l";
+        assert!(
+            matches!(
+                analyse_shell_for_confine(cmd3),
+                ConfineShellAnalysis::Modelled { .. }
+            ),
+            "POSIX pipe of readers must be modelled"
+        );
+    }
+
+    #[test]
+    fn unparseable_is_policy_not_path_operand() {
+        // A script we truly cannot model must report Unparseable / Unmodelled,
+        // never produce the raw command as a path operand.
+        let cmd = "<<<definitely not a shell command>>>";
+        match analyse_shell_for_confine(cmd) {
+            ConfineShellAnalysis::Unparseable | ConfineShellAnalysis::Unmodelled { .. } => {}
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    !operands.iter().any(|p| p.contains("definitely")),
+                    "raw command must not appear as path operand: {operands:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shell_opaque_bash_c_is_unmodelled() {
+        let hit = shell_unmodelled_program_for_confine("bash -c 'echo x > /outside/f'");
+        assert!(
+            hit.is_some(),
+            "bash -c must fail closed (opaque shell), got None"
+        );
+    }
+
     #[test]
     fn shell_confine_operands_extracts_redirects_and_cd() {
         let writes = shell_confine_operands("echo hi > /tmp/out.txt")

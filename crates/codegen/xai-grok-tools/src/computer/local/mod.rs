@@ -1,4 +1,5 @@
 pub mod cgroup;
+pub mod confined_fs;
 #[cfg(unix)]
 pub mod embedded_search_tools;
 pub mod file_system;
@@ -10,6 +11,7 @@ pub mod static_shell;
 pub mod terminal;
 
 pub use cgroup::{CgroupMemoryConfig, PROCESS_OOM_EXIT_CODE};
+pub use confined_fs::ConfinedFs;
 pub use file_system::LocalFs;
 pub use mock_fs::MockFs;
 pub use terminal::{ExitStatus, LocalTerminalBackend};

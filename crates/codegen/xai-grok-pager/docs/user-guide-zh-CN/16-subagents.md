@@ -168,7 +168,7 @@ description = "Path to write review notes"
 4. 智能体定义默认值
 5. 父会话
 
-隔离遵循相同的前四层，但默认是 `none`（无 worktree），而不是从父会话继承。能力模式刻意更严格：显式请求、角色与智能体定义的模式作为安全上限取交集。调用方可收窄访问权限，但不能将 `oracle`、`explore` 或 `plan` 智能体扩大到只读之外。该限制在默认工具组装之后运行；内置只读智能体不会继承未分类的 MCP 工具；`explore` 与 `oracle` 保持其精确的策展工具集。
+隔离遵循相同的前四层，但默认是 **`worktree`**（隔离的 git worktree），而不是共享父会话工作区。传入 `isolation: none`（或 role/persona/definition 的 `default_isolation = "none"`）可选择共享工作区。完成后，隔离 worktree 默认会被快照并删除（`GROK_SUBAGENT_WORKTREE_SNAPSHOT=0` 可保留以便复查）。能力模式刻意更严格：显式请求、角色与智能体定义的模式作为安全上限取交集。调用方可收窄访问权限，但不能将 `oracle`、`explore` 或 `plan` 智能体扩大到只读之外。该限制在默认工具组装之后运行；内置只读智能体不会继承未分类的 MCP 工具；`explore` 与 `oracle` 保持其精确的策展工具集。
 
 若请求了角色但无法解析——未找到、没有说明，或其 `instructions_file` 不可读——则生成失败。推理强度值在配置加载期间解析为固定枚举，因此拼写错误会尽早失败，而不是静默传到提供方。
 
@@ -185,7 +185,7 @@ description = "Path to write review notes"
 | `subagent_type`   | 要启动的智能体类型。默认为 `general-purpose`。         |
 | `background`       | 在后台运行子智能体，并立即返回子智能体 ID。默认为 `true`。 |
 | `capability_mode` | 限制子智能体的工具：`read-only`、`read-write`、`execute` 或 `all`。 |
-| `isolation`       | `none`（共享工作区，默认）或 `worktree`（隔离的 git worktree）。 |
+| `isolation`       | `worktree`（默认，隔离的 git worktree）或 `none`（共享工作区）。 |
 | `resume_from`     | 继续已完成子智能体的对话。传入其 subagent ID。 |
 | `cwd`             | 子智能体的工作目录。与 `isolation: worktree` 互斥；在设置了 `resume_from` 时忽略（恢复的子会话继承其来源的目录）。 |
 
@@ -223,11 +223,14 @@ description = "Path to write review notes"
 
 ## 隔离：Worktree 模式
 
-对于会修改文件的任务，使用 `isolation: worktree` 在隔离的 git worktree 中运行子智能体。这样可避免子会话的编辑与父会话冲突：
+子智能体默认使用隔离的 git worktree（`isolation: worktree`）。这样可避免子会话的编辑与父会话或其它子智能体冲突：
 
 - 子智能体在自己的工作树副本中工作。
-- 其变更与父会话隔离，直到你合并它们。
-- 子智能体的结果包含 worktree 路径。
+- 其变更与父会话隔离，直到你合并它们（通过 `x.ai/git/worktree/apply`）。
+- 完成后，worktree 默认会被快照并删除，以便子智能体自行清理。
+- 当子会话必须编辑共享的父工作区时，设置 `isolation: none`。
+- 设置 `GROK_SUBAGENT_WORKTREE_SNAPSHOT=0`（或 `[features] subagent_worktree_snapshot = false`）可保留已完成的 worktree 以便复查。
+- 在非 git 仓库中创建 worktree 会失败（fail-closed），除非设置 `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`（结果会带上 `isolation_fallback`，**并非**真正隔离）。
 
 Grok Build 通过 `x.ai/git/worktree/*` 扩展方法管理工作树，包括将变更合并回主工作目录的 apply 操作。
 

@@ -1097,6 +1097,14 @@ pub enum McpError {
     )]
     AuthRequired { server: String },
 
+    /// HTTP/SSE MCP servers run off-box and cannot be bound by `--confine`.
+    #[error(
+        "MCP server '{server}': HTTP/SSE transports are refused under --confine \
+         (writes are entirely off-box and cannot inherit GROK_CONFINE). Use a \
+         stdio MCP server, or run without --confine"
+    )]
+    ConfineHttpRefused { server: String },
+
     #[error("MCP service error: {0}")]
     ServiceError(#[from] ServiceError),
 }
@@ -1120,6 +1128,7 @@ impl McpError {
             Self::Timeout { .. } => McpErrorCategory::Timeout,
             Self::HandshakeFailed { .. } => McpErrorCategory::HandshakeFailed,
             Self::AuthRequired { .. } => McpErrorCategory::AuthRequired,
+            Self::ConfineHttpRefused { .. } => McpErrorCategory::ClientError,
             Self::ClientError(_) | Self::ServiceError(_) => McpErrorCategory::ClientError,
         }
     }
@@ -1129,7 +1138,8 @@ impl McpError {
             Self::SpawnFailed { server, .. }
             | Self::Timeout { server, .. }
             | Self::HandshakeFailed { server, .. }
-            | Self::AuthRequired { server } => Some(server),
+            | Self::AuthRequired { server }
+            | Self::ConfineHttpRefused { server } => Some(server),
             Self::ClientError(_) | Self::ServiceError(_) => None,
         }
     }
@@ -1143,7 +1153,9 @@ impl McpError {
             Self::HandshakeFailed { source, .. } => is_auth_rejection_message(&source.to_string()),
             Self::ServiceError(e) => is_auth_rejection_message(&e.to_string()),
             Self::ClientError(s) => is_auth_rejection_message(s),
-            Self::Timeout { .. } | Self::SpawnFailed { .. } => false,
+            Self::Timeout { .. }
+            | Self::SpawnFailed { .. }
+            | Self::ConfineHttpRefused { .. } => false,
         }
     }
 }
@@ -4142,6 +4154,12 @@ pub async fn start_mcp_server(
             for env_variable in &env {
                 cmd.env(&env_variable.name, &env_variable.value);
             }
+            // When process confinement is active, pin cwd + GROK_CONFINE so
+            // MCP servers inherit the same worktree boundary as the parent.
+            if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+                cmd.current_dir(root.as_path());
+                xai_grok_tools::types::resources::pin_confine_env_on_tokio_command(&mut cmd);
+            }
             xai_grok_tools::util::detach_command(&mut cmd);
 
             let (transport, stderr_handle) = SafeTokioChildProcess::spawn(
@@ -4185,6 +4203,19 @@ pub async fn start_mcp_server(
         | acp::McpServer::Sse(acp::McpServerSse {
             name, url, headers, ..
         }) => {
+            // Under --confine, HTTP/SSE MCP servers cannot be process-bounded:
+            // their writes are entirely off-box. Refuse so harnesses get a hard
+            // failure rather than a silent unbounded side channel.
+            if xai_grok_tools::types::resources::process_confine_root().is_some() {
+                tracing::error!(
+                    server = %name,
+                    %url,
+                    "refusing HTTP/SSE MCP under process confine"
+                );
+                return Err(McpError::ConfineHttpRefused {
+                    server: name.clone(),
+                });
+            }
             if let Some(mc) = meta_config {
                 tracing::info!(server = %name, %url, ?mc, "MCP http: meta config override");
             }

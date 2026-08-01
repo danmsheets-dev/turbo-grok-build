@@ -130,7 +130,10 @@ impl PermissionHookTransport for ToolServerPermissionTransport {
 }
 fn scope_for_access(access: &AccessKind) -> &'static str {
     match access {
-        AccessKind::Bash(_) | AccessKind::Edit(_) | AccessKind::MCPTool { .. } => "write",
+        AccessKind::Bash(_)
+        | AccessKind::Edit(_)
+        | AccessKind::EditMany(_)
+        | AccessKind::MCPTool { .. } => "write",
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
         | AccessKind::WebFetch(_)
@@ -141,6 +144,7 @@ fn describe_access(access: &AccessKind) -> String {
     match access {
         AccessKind::Bash(_) => "Run a terminal command".to_owned(),
         AccessKind::Edit(path) => format!("Edit {path}"),
+        AccessKind::EditMany(paths) => format!("Edit {} files", paths.len()),
         AccessKind::MCPTool { name, .. } => format!("Run MCP tool {name}"),
         AccessKind::WebFetch(url) => format!("Fetch {url}"),
         AccessKind::WebSearch(query) => format!("Search the web for {query}"),
@@ -168,6 +172,9 @@ pub(crate) fn build_permission_payload(access: &AccessKind, tool_call_id: &str) 
                     "edit_file_paths".to_owned(),
                     Value::from(vec![path.clone()]),
                 );
+            }
+            AccessKind::EditMany(paths) => {
+                map.insert("edit_file_paths".to_owned(), Value::from(paths.clone()));
             }
             _ => {}
         }
@@ -256,7 +263,21 @@ pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessK
                 .to_owned();
             Some(AccessKind::Edit(path))
         }
-        "apply_patch" => Some(AccessKind::Edit("apply_patch".to_owned())),
+        "apply_patch" => {
+            let patch = args
+                .get("patch")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            // Reuse the same real-path extraction as ToolInput::ApplyPatch so
+            // hub and native paths cannot drift on the placeholder escape.
+            Some(AccessKind::from(
+                &xai_grok_tools::types::ToolInput::ApplyPatch(
+                    xai_grok_tools::implementations::codex::apply_patch::ApplyPatchInput {
+                        patch: patch.to_owned(),
+                    },
+                ),
+            ))
+        }
         "web_fetch" => {
             let url = args
                 .get("url")
@@ -297,7 +318,9 @@ pub async fn request_permission_via_hub(
     let payload = build_permission_payload(access, tool_call_id);
     match transport.request_permission(payload).await {
         Ok(reply) => match reply_to_outcome(&reply) {
-            PromptOutcome::AllowAlways if matches!(access, AccessKind::Edit(_)) => {
+            PromptOutcome::AllowAlways
+                if matches!(access, AccessKind::Edit(_) | AccessKind::EditMany(_)) =>
+            {
                 PromptOutcome::AllowEditsForSession
             }
             other => other,

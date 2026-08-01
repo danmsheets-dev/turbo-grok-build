@@ -35,10 +35,14 @@ pub(super) struct ImagePlacement {
 
 pub(super) fn plan_image_preview(
     image: &PastedImage,
-    protocol: GraphicsProtocol,
+    _protocol: GraphicsProtocol,
 ) -> ImagePreviewPlan<'_> {
+    // Show the large pixel box once prepared bytes exist:
+    // - Kitty/iTerm2: protocol-ready payload for escape-sequence placement
+    // - Protocol None (Windows ConPTY, …): source bytes for half-block raster
+    // Pending / failed previews stay on the compact metadata path.
     ImagePreviewPlan {
-        show_pixels: protocol.supports_images() && image.preview.prepared().is_some(),
+        show_pixels: image.preview.prepared().is_some(),
         display_path: image.source_path.as_deref(),
     }
 }

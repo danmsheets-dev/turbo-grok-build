@@ -179,7 +179,9 @@ OpenAI Codex 等)。
 
 ```sh
 cargo run -p xai-grok-pager-bin              # 构建并启动 TUI(二进制名:hyper)
-cargo build -p xai-grok-pager-bin --profile release-dist
+# 用 VERSION 文件戳 GROK_VERSION（版本横幅 / API 客户端头）。
+# 自 WP-C3 起，未戳版本的本地构建也会启用 folder-trust 门禁。
+GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-dist
 ./target/release-dist/hyper --version
 ```
 

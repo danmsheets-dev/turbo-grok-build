@@ -3,7 +3,7 @@ use crate::config::{SubagentPersona, SubagentRole};
 use crate::types::{EffectiveRuntimeConfig, ResolutionError};
 use std::collections::HashMap;
 use std::path::Path;
-use xai_grok_agent::config::{AgentDefinition, IsolationMode};
+use xai_grok_agent::config::AgentDefinition;
 use xai_grok_agent::plugins::PluginRegistry;
 use xai_grok_agent::prompt::context::{PromptAudience, PromptContext};
 use xai_grok_tools::implementations::grok_build::task::types::{
@@ -13,7 +13,7 @@ use xai_grok_tools::registry::types::ToolConfig;
 use xai_grok_tools::types::compat::CompatConfig;
 use xai_grok_tools::types::template_renderer::TemplateRenderer;
 use xai_grok_tools::types::tool::ToolKind;
-use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
+use xai_tool_types::SubagentCapabilityMode;
 /// Inputs that affect definition discovery and spawn permission.
 pub struct DefinitionResolutionContext<'a> {
     pub cwd: &'a Path,
@@ -200,7 +200,12 @@ pub fn select_role<'a>(
         None => (None, None),
     }
 }
-/// Fill runtime values whose defaults live on the resolved agent definition.
+/// Fill residual runtime values from the agent definition.
+///
+/// Isolation is applied via [`DefinitionRuntimeDefaults`] inside
+/// `resolve_subagent_spec` / [`resolve_runtime_config`] so it participates in
+/// the full cascade (explicit > role > persona > definition > worktree).
+/// This helper only fills capability mode and effort when still unset.
 pub fn apply_definition_runtime_defaults(
     runtime: &mut EffectiveRuntimeConfig,
     definition: &AgentDefinition,
@@ -210,11 +215,6 @@ pub fn apply_definition_runtime_defaults(
     }
     if runtime.reasoning_effort.is_none() {
         runtime.reasoning_effort = definition.effort.map(Into::into);
-    }
-    if runtime.isolation == SubagentIsolationMode::None
-        && definition.isolation == Some(IsolationMode::Worktree)
-    {
-        runtime.isolation = SubagentIsolationMode::Worktree;
     }
 }
 /// Apply capability filtering and recursion depth to the exact production
@@ -247,6 +247,14 @@ pub fn resolve_runtime_config(
     config_effort_pin: Option<xai_tool_types::SubagentReasoningEffort>,
 ) -> EffectiveRuntimeConfig {
     let (role, role_name) = select_role(subagent_type, overrides, roles);
+    let definition_defaults = crate::DefinitionRuntimeDefaults {
+        reasoning_effort: definition.effort.map(Into::into),
+        capability_mode: definition.capability_mode,
+        isolation: definition.isolation.map(Into::into),
+    };
+    // Full cascade including definition isolation; residual helper fills any
+    // capability/effort edge cases and is a no-op for isolation when defaults
+    // already applied.
     let mut runtime = crate::resolve_subagent_spec(
         overrides,
         role,
@@ -254,7 +262,7 @@ pub fn resolve_runtime_config(
         cwd,
         role_name,
         config_effort_pin,
-        crate::DefinitionRuntimeDefaults::default(),
+        definition_defaults,
     );
     apply_definition_runtime_defaults(&mut runtime, definition);
     runtime
@@ -313,6 +321,8 @@ pub async fn render_subagent_initial_user_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_agent::config::IsolationMode;
+    use xai_tool_types::SubagentIsolationMode;
     fn context<'a>(
         cwd: &'a Path,
         toggles: &'a HashMap<String, bool>,
@@ -364,15 +374,49 @@ mod tests {
         ));
     }
     #[test]
-    fn definition_defaults_fill_runtime_without_overwriting_explicit_values() {
+    fn definition_isolation_participates_in_runtime_cascade() {
         let cwd = tempfile::tempdir().unwrap();
         let toggles = HashMap::new();
         let mut definition =
             resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
+        // Definition opt-out of the global worktree default.
+        definition.isolation = Some(IsolationMode::None);
+        let runtime = resolve_runtime_config(
+            "explore",
+            &SubagentRuntimeOverrides::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &definition,
+            None,
+        );
+        assert_eq!(runtime.isolation, SubagentIsolationMode::None);
+
         definition.isolation = Some(IsolationMode::Worktree);
-        let mut runtime = EffectiveRuntimeConfig::default();
-        apply_definition_runtime_defaults(&mut runtime, &definition);
+        let runtime = resolve_runtime_config(
+            "explore",
+            &SubagentRuntimeOverrides::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &definition,
+            None,
+        );
         assert_eq!(runtime.isolation, SubagentIsolationMode::Worktree);
+
+        // Explicit spawn override still wins over definition.
+        let mut overrides = SubagentRuntimeOverrides::default();
+        overrides.isolation = Some(SubagentIsolationMode::None);
+        let runtime = resolve_runtime_config(
+            "explore",
+            &overrides,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &definition,
+            None,
+        );
+        assert_eq!(runtime.isolation, SubagentIsolationMode::None);
     }
     #[test]
     fn full_prompt_uses_production_subagent_template_and_body() {

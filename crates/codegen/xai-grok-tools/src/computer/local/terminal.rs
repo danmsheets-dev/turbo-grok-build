@@ -3067,6 +3067,8 @@ fn apply_child_env(
     cmd.envs(crate::util::pager_env());
     layer_login_path(cmd, login_env, active_policy);
     crate::util::apply_grok_agent_marker(cmd);
+    // Pin after request env so the model cannot unset GROK_CONFINE via env -u.
+    crate::types::resources::pin_confine_env_on_tokio_command(cmd);
 }
 
 /// Spawn the shell command and attach the child to a [`ProcessGroup`] for
@@ -3132,7 +3134,7 @@ fn spawn_shell_command(
     };
 
     #[cfg(not(unix))]
-    let mut build_cmd = |with_breakaway: bool| {
+    let build_cmd = |with_breakaway: bool| {
         use windows::Win32::System::Threading::{
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
         };
@@ -3156,6 +3158,8 @@ fn spawn_shell_command(
         layer_request_env(&mut cmd, env, active_policy);
         cmd.envs(crate::util::pager_env());
         crate::util::apply_grok_agent_marker(&mut cmd);
+        // Pin after request env so the model cannot unset GROK_CONFINE via env -u.
+        crate::types::resources::pin_confine_env_on_tokio_command(&mut cmd);
 
         // Set creation flags inline rather than via crate::util::detach_command
         // + new_process_group: tokio's creation_flags is a SET, not OR, so

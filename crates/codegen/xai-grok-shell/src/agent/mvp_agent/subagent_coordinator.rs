@@ -3,6 +3,24 @@
 //! its `!Send` local-session runner into `spawn_local`.
 use super::*;
 use crate::session::repo_changes::UploadMethod;
+
+/// Resolve the global subagent concurrency cap (R6-11).
+///
+/// Precedence: `GROK_SUBAGENTS_MAX_CONCURRENT` env > `[subagents] max_concurrent`
+/// in config.toml > default 4. Spawns above the cap queue rather than reject.
+fn resolve_max_concurrent_subagents() -> usize {
+    let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_CONCURRENT).ok();
+    // Best-effort TOML read; coordinator start must not fail if config is missing.
+    let config_val = xai_grok_config::load_from_disk()
+        .ok()
+        .and_then(|v| {
+            v.get("subagents")
+                .and_then(|s| s.get("max_concurrent"))
+                .and_then(|n| n.as_integer())
+                .and_then(|n| u32::try_from(n).ok())
+        });
+    crate::config::SubagentsConfig::resolve_max_concurrent(env.as_deref(), config_val)
+}
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
 }
@@ -164,6 +182,7 @@ impl MvpAgent {
         let runner = ShellChildRunner {
             agent_ref: agent_ref.clone(),
         };
+        let max_concurrent = resolve_max_concurrent_subagents();
         let config =
             xai_grok_tools::implementations::grok_build::task::coordinator::CoordinatorConfig {
                 foreground_budget:
@@ -173,6 +192,7 @@ impl MvpAgent {
                     ),
                 buffer_completions: true,
                 buffered_completion_output_cap: None,
+                max_concurrent,
             };
         tokio::task::spawn_local(
             xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinator::new(
