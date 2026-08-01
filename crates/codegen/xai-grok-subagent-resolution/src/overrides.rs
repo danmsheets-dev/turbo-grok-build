@@ -294,6 +294,9 @@ mod tests {
             output_schema: None,
             loop_task_id: None,
             timeout_ms: None,
+            stall_timeout_ms: None,
+            retain_worktree: None,
+            stall_timeout_ms: None,
         }
     }
 

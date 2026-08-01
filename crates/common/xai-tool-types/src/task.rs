@@ -122,6 +122,21 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 
+    /// When true with `isolation=worktree`, snapshot the worktree on completion
+    /// but leave the directory on disk (`worktree_state=preserved`) instead of
+    /// deleting it. Default (omit/false) still snapshots then cleans.
+    #[schemars(
+        description = "When true with isolation=worktree, snapshot the worktree on completion \
+            but keep the directory on disk (worktree_state=preserved) instead of deleting it. \
+            Default is false: snapshot then remove (worktree_state=cleaned)."
+    )]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_lenient::deserialize_lenient_option_bool"
+    )]
+    pub retain_worktree: Option<bool>,
+
     /// Server-injected before execution. Becomes the subagent's session ID.
     #[schemars(skip)]
     #[serde(default)]
@@ -319,6 +334,13 @@ pub struct SubagentCompletedOutput {
     /// Worktree lifecycle state for supervisors: `live`, `cleaned`, or `preserved`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_state: Option<String>,
+    /// Path to the exported `changes.patch` under the session subagent dir
+    /// (written before worktree cleanup so recovery survives deletion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_path: Option<String>,
+    /// Optional short diffstat vs the snapshot base, e.g. `2 files, +40/-12`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diffstat: Option<String>,
 }
 
 impl SubagentCompletedOutput {
@@ -354,6 +376,12 @@ impl SubagentCompletedOutput {
                 "\n\n<snapshot_ref>{snap}</snapshot_ref>\n\
                  Recover files with: git show {snap}:<path>  or  git diff HEAD {snap}"
             ));
+        }
+        if let Some(ref patch) = self.patch_path {
+            text.push_str(&format!("\n\n<patch_path>{patch}</patch_path>"));
+        }
+        if let Some(ref stat) = self.diffstat {
+            text.push_str(&format!("\n\n<diffstat>{stat}</diffstat>"));
         }
         if self.isolation_fallback {
             text.push_str(
@@ -1434,6 +1462,7 @@ mod tests {
             cwd: None,
             model: None,
             timeout_ms: None,
+            retain_worktree: None,
             task_id: None,
         };
         let value = serde_json::to_value(&input).unwrap();

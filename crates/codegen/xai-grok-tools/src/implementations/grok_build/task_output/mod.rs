@@ -1156,6 +1156,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-1".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1184,6 +1186,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-2".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1211,6 +1215,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-3".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1236,6 +1242,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-x".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1313,6 +1321,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-unknown".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1386,6 +1396,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["nonexistent".into()],
                 timeout_ms: Some(1000),
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1411,6 +1423,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-x".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await;
@@ -1444,6 +1458,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-4".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1474,6 +1490,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-5".into()],
                 timeout_ms: Some(5000),
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1562,6 +1580,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-6".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1605,6 +1625,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-xyz".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1632,6 +1654,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-xyz".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1804,6 +1828,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec![String::new()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await;
@@ -1930,6 +1956,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-done".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -1981,6 +2009,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-run".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await
@@ -2014,6 +2044,8 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-nope".into()],
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
             },
         )
         .await

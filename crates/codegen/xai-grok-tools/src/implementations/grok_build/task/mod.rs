@@ -400,6 +400,8 @@ impl xai_tool_runtime::Tool for TaskTool {
                 output_schema: None,
                 loop_task_id: None,
                 timeout_ms: input.timeout_ms,
+                retain_worktree: input.retain_worktree,
+                stall_timeout_ms: None,
             },
             run_in_background: input.run_in_background,
             // Model-spawned subagents must still appear in the idle reminder.
@@ -512,13 +514,15 @@ impl xai_tool_runtime::Tool for TaskTool {
         if result.success {
             let resume_from_hint = result.subagent_id.clone();
             let persona_hint: Option<String> = None;
-            let worktree_state = if result.worktree_path.is_some() {
-                Some("live".to_string())
-            } else if result.snapshot_ref.is_some() {
-                Some("cleaned".to_string())
-            } else {
-                None
-            };
+            let worktree_state = result.worktree_state.or_else(|| {
+                if result.worktree_path.is_some() {
+                    Some("live".to_string())
+                } else if result.snapshot_ref.is_some() {
+                    Some("cleaned".to_string())
+                } else {
+                    None
+                }
+            });
             Ok(ToolOutput::SubagentCompleted(SubagentCompletedOutput {
                 // SubagentCompletedOutput.output is `String` (serde-visible
                 // boundary). One allocation per completion; cheaper paths
@@ -536,6 +540,8 @@ impl xai_tool_runtime::Tool for TaskTool {
                 isolation_fallback: result.isolation_fallback,
                 snapshot_ref: result.snapshot_ref,
                 worktree_state,
+                patch_path: result.patch_path,
+                diffstat: result.diffstat,
             }))
         } else {
             Err(xai_tool_runtime::ToolError::invalid_arguments(
@@ -640,6 +646,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -674,6 +681,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -709,6 +717,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -741,6 +750,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -800,6 +810,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -857,6 +868,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -901,6 +913,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -1001,6 +1014,7 @@ mod tests {
             cwd: None,
             model: None,
             timeout_ms: None,
+            retain_worktree: None,
             task_id: None,
         }
     }
@@ -1376,6 +1390,8 @@ mod tests {
             cwd: None,
             model: Some("test-model".into()),
             timeout_ms: None,
+            stall_timeout_ms: None,
+            retain_worktree: None,
             task_id: Some("task-123".into()),
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1648,6 +1664,7 @@ mod tests {
             cwd: None,
             model: None,
             timeout_ms: None,
+            retain_worktree: None,
             task_id: None,
         })
         .unwrap();
@@ -1698,6 +1715,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -1735,6 +1753,7 @@ mod tests {
             cwd: None,
             model: None,
             timeout_ms: None,
+            retain_worktree: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1782,6 +1801,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -1849,6 +1869,7 @@ mod tests {
                     cwd: None,
                     model: None,
                     timeout_ms: None,
+                    retain_worktree: None,
                     task_id: None,
                 },
             )
@@ -1896,6 +1917,7 @@ mod tests {
             cwd: None,
             model: None,
             timeout_ms: None,
+            retain_worktree: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1925,6 +1947,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -1980,6 +2003,7 @@ mod tests {
                 cwd: Some("".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2031,6 +2055,7 @@ mod tests {
                 cwd: Some("null".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2082,6 +2107,7 @@ mod tests {
                 cwd: Some("  ".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2136,6 +2162,7 @@ mod tests {
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2171,6 +2198,7 @@ mod tests {
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2227,6 +2255,7 @@ mod tests {
                     cwd: Some(sentinel.into()),
                     model: None,
                     timeout_ms: None,
+                    retain_worktree: None,
                     task_id: None,
                 },
             )
@@ -2281,6 +2310,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2339,6 +2369,7 @@ mod tests {
                 cwd: Some("\"/tmp".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2392,6 +2423,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )
@@ -2441,6 +2473,7 @@ mod tests {
                 cwd: Some("/tmp/some-dir".into()),
                 model: None,
                 timeout_ms: None,
+                retain_worktree: None,
                 task_id: None,
             },
         )

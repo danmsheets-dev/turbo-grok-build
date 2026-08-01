@@ -178,6 +178,11 @@ pub struct SubagentRuntimeOverrides {
     /// Hard wall-clock limit for the child (milliseconds). When set, overrides
     /// the agent-definition `timeout_secs` in the shell budget monitor.
     pub timeout_ms: Option<u64>,
+    /// When `Some(true)`, snapshot the worktree on completion but keep the
+    /// directory (`worktree_state=preserved`) instead of removing it.
+    pub retain_worktree: Option<bool>,
+    /// No tool/token/turn progress for this long → stall fail (milliseconds).
+    pub stall_timeout_ms: Option<u64>,
 }
 
 /// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.
@@ -407,6 +412,12 @@ pub struct SubagentResult {
     pub worktree_path: Option<String>,
     /// Durable git ref for the child's worktree snapshot after dispose.
     pub snapshot_ref: Option<String>,
+    /// Lifecycle state after dispose: `live`, `cleaned`, or `preserved`.
+    pub worktree_state: Option<String>,
+    /// Session-local path to the exported `changes.patch` (if written).
+    pub patch_path: Option<String>,
+    /// Optional short diffstat summary (e.g. `2 files, +40/-12`).
+    pub diffstat: Option<String>,
     /// Set when isolation was requested but the child fell back to the shared
     /// workspace (only possible with
     /// `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`). Harnesses must treat the run
@@ -438,6 +449,9 @@ impl Default for SubagentResult {
             output_usage_incomplete: false,
             worktree_path: None,
             snapshot_ref: None,
+            worktree_state: None,
+            patch_path: None,
+            diffstat: None,
             isolation_fallback: false,
             backgrounded: false,
         }

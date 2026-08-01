@@ -430,6 +430,8 @@ impl HostService {
                         isolation,
                         output_schema: None,
                         timeout_ms: opts.timeout_ms,
+                        retain_worktree: None,
+                        stall_timeout_ms: None,
                         ..Default::default()
                     },
                     run_in_background: false,

@@ -1762,6 +1762,8 @@ struct SubagentExecutionBudget {
     max_tool_calls: Option<u32>,
     timeout_secs: Option<u64>,
     finalize_grace_secs: Option<u64>,
+    /// No tool/token/turn progress for this long → stall (milliseconds).
+    stall_timeout_ms: Option<u64>,
 }
 
 impl SubagentExecutionBudget {
@@ -1779,6 +1781,15 @@ impl SubagentExecutionBudget {
         parent_max_turns: Option<usize>,
         timeout_ms_override: Option<u64>,
     ) -> Self {
+        Self::resolve_with_overrides(definition, parent_max_turns, timeout_ms_override, None)
+    }
+
+    fn resolve_with_overrides(
+        definition: &xai_grok_agent::config::AgentDefinition,
+        parent_max_turns: Option<usize>,
+        timeout_ms_override: Option<u64>,
+        stall_timeout_ms: Option<u64>,
+    ) -> Self {
         // explicit timeout_ms > AgentDefinition.timeout_secs > None
         let timeout_secs = match timeout_ms_override {
             Some(ms) if ms > 0 => Some(ms.div_ceil(1000).max(1)),
@@ -1790,16 +1801,26 @@ impl SubagentExecutionBudget {
                 .unwrap_or(30)
                 .min(timeout.saturating_sub(1).max(1))
         });
+        // Default stall: 10 minutes when any hard budget is set; else optional override only.
+        let stall_timeout_ms = match stall_timeout_ms {
+            Some(ms) if ms > 0 => Some(ms),
+            _ if timeout_secs.is_some() || definition.max_tool_calls.is_some() => Some(600_000),
+            _ => None,
+        };
         Self {
             max_turns: resolve_subagent_max_turns(definition.max_turns, parent_max_turns),
             max_tool_calls: definition.max_tool_calls,
             timeout_secs,
             finalize_grace_secs,
+            stall_timeout_ms,
         }
     }
 
     fn is_unbounded(self) -> bool {
-        self.max_turns.is_none() && self.max_tool_calls.is_none() && self.timeout_secs.is_none()
+        self.max_turns.is_none()
+            && self.max_tool_calls.is_none()
+            && self.timeout_secs.is_none()
+            && self.stall_timeout_ms.is_none()
     }
 
     fn wire(self) -> Option<crate::extensions::notification::SubagentBudgetInfo> {
@@ -1879,6 +1900,7 @@ enum SubagentBudgetTrigger {
     FinalizingTimeout,
     MaxToolCalls,
     Timeout,
+    Stall,
 }
 
 impl SubagentBudgetTrigger {
@@ -1889,6 +1911,7 @@ impl SubagentBudgetTrigger {
             Self::FinalizingTimeout => 3,
             Self::MaxToolCalls => 4,
             Self::Timeout => 5,
+            Self::Stall => 6,
         }
     }
 
@@ -1899,6 +1922,7 @@ impl SubagentBudgetTrigger {
             3 => Some(Self::FinalizingTimeout),
             4 => Some(Self::MaxToolCalls),
             5 => Some(Self::Timeout),
+            6 => Some(Self::Stall),
             _ => None,
         }
     }
@@ -1910,11 +1934,12 @@ impl SubagentBudgetTrigger {
             Self::FinalizingTimeout => "timeout_finalize",
             Self::MaxToolCalls => "max_tool_calls",
             Self::Timeout => "timeout",
+            Self::Stall => "stall",
         }
     }
 
     fn is_hard(self) -> bool {
-        matches!(self, Self::MaxToolCalls | Self::Timeout)
+        matches!(self, Self::MaxToolCalls | Self::Timeout | Self::Stall)
     }
 }
 
@@ -1942,6 +1967,10 @@ fn budget_exhausted_message(
         SubagentBudgetTrigger::Timeout => format!(
             "subagent wall-clock budget exhausted (limit: {}s)",
             budget.timeout_secs.unwrap_or_default()
+        ),
+        SubagentBudgetTrigger::Stall => format!(
+            "subagent stalled (no tool/token/turn progress for {}ms)",
+            budget.stall_timeout_ms.unwrap_or_default()
         ),
         _ => "subagent execution budget requested finalization".to_string(),
     }
@@ -1973,9 +2002,9 @@ fn budget_finalization_message(
             "the wall-clock budget is nearly exhausted ({} seconds remain)",
             budget.finalize_grace_secs.unwrap_or_default()
         ),
-        SubagentBudgetTrigger::MaxToolCalls | SubagentBudgetTrigger::Timeout => {
-            "the execution budget is exhausted".to_string()
-        }
+        SubagentBudgetTrigger::MaxToolCalls
+        | SubagentBudgetTrigger::Timeout
+        | SubagentBudgetTrigger::Stall => "the execution budget is exhausted".to_string(),
     };
     format!(
         "<system-reminder>\n{reason}. Stop investigating now. Do not call any more tools. Return the best answer supported by the evidence already collected, follow the required output headings, state unknowns honestly, and include exact verification steps for the working agent.\n</system-reminder>"
@@ -2007,6 +2036,8 @@ fn spawn_subagent_budget_monitor(
     tokio::task::spawn_local(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_progress = started_at;
+        let mut last_sig = (0u32, 0u64, 0u64);
         loop {
             tokio::select! {
                 _ = stop.cancelled() => break,
@@ -2020,6 +2051,12 @@ fn spawn_subagent_budget_monitor(
                 .await
                 .map(|usage| usage.totals.model_calls)
                 .unwrap_or_default();
+            let tokens = chat_state_handle.get_total_tokens().await;
+            let sig = (signals.tool_call_count, tokens, model_calls);
+            if sig != last_sig {
+                last_sig = sig;
+                last_progress = std::time::Instant::now();
+            }
 
             let hard = if budget
                 .timeout_secs
@@ -2031,6 +2068,10 @@ fn spawn_subagent_budget_monitor(
                 .is_some_and(|limit| signals.tool_call_count >= limit)
             {
                 Some(SubagentBudgetTrigger::MaxToolCalls)
+            } else if budget.stall_timeout_ms.is_some_and(|limit| {
+                last_progress.elapsed() >= std::time::Duration::from_millis(limit)
+            }) {
+                Some(SubagentBudgetTrigger::Stall)
             } else {
                 None
             };

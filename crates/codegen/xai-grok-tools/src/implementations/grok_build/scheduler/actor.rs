@@ -669,6 +669,8 @@ impl SchedulerActor {
                 spawn_depth: Some(0),
                 loop_task_id: Some(task_id.to_string()),
                 timeout_ms: None,
+                retain_worktree: None,
+                stall_timeout_ms: None,
                 ..Default::default()
             },
             run_in_background: true,
