@@ -4699,7 +4699,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -4744,7 +4745,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -4789,7 +4791,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -4834,7 +4837,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -4879,7 +4883,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -4924,7 +4929,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -4969,7 +4975,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -4979,7 +4986,7 @@
         "query_params": {}
       },
       "source": "earendil-works/pi packages/ai providers/data",
-      "supported_in_api": true,
+      "supported_in_api": false,
       "supports_reasoning_effort": false
     },
     {
@@ -5012,7 +5019,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5024,7 +5032,7 @@
         "query_params": {}
       },
       "source": "earendil-works/pi packages/ai providers/data",
-      "supported_in_api": true,
+      "supported_in_api": false,
       "supports_reasoning_effort": true
     },
     {
@@ -5057,7 +5065,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5069,7 +5078,7 @@
         "query_params": {}
       },
       "source": "earendil-works/pi packages/ai providers/data",
-      "supported_in_api": true,
+      "supported_in_api": false,
       "supports_reasoning_effort": true
     },
     {
@@ -5102,7 +5111,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5147,7 +5157,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5192,7 +5203,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5237,7 +5249,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5254,9 +5267,9 @@
     },
     {
       "api_backend": "chat_completions",
-      "context_window": 131072,
+      "context_window": 128000,
       "description": "Official Pi catalog (nvidia)",
-      "max_completion_tokens": 131072,
+      "max_completion_tokens": 8192,
       "model": "nvidia/nvidia-nemotron-nano-9b-v2",
       "name": "nvidia-nemotron-nano-9b-v2",
       "platform": "nvidia",
@@ -5282,7 +5295,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5327,7 +5341,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5372,7 +5387,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5417,7 +5433,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5429,7 +5446,7 @@
         "query_params": {}
       },
       "source": "earendil-works/pi packages/ai providers/data",
-      "supported_in_api": true,
+      "supported_in_api": false,
       "supports_reasoning_effort": true
     },
     {
@@ -5462,7 +5479,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {
@@ -5507,7 +5525,8 @@
           "supports_usage_in_streaming": true,
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
-          "zai_tool_stream": false
+          "zai_tool_stream": false,
+          "supports_prompt_cache_key": false
         }
       },
       "route": {

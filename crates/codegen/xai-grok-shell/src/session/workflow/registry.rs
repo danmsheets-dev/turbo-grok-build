@@ -21,6 +21,10 @@ pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[
         name: "deep-audit",
         script: include_str!("../workflows/deep_audit.rhai"),
     },
+    BuiltinWorkflow {
+        name: "continuous-improve",
+        script: include_str!("../workflows/continuous_improve.rhai"),
+    },
 ];
 
 pub(crate) struct ResolvedWorkflow {

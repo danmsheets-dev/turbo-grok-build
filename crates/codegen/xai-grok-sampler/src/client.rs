@@ -1806,9 +1806,15 @@ impl SamplingClient {
             request.top_p = self.defaults.top_p;
         }
 
-        // OpenAI Chat Completions: sticky prompt_cache_key for automatic
-        // prefix-cache affinity when the provider supports it.
-        if request.prompt_cache_key.is_none() {
+        // OpenAI Chat Completions: sticky prompt_cache_key only when the
+        // provider supports it. Stamping always and stripping later fails when
+        // request_compat is missing (fail-open stamp → 400 on NVIDIA).
+        let supports_cache_key = self
+            .defaults
+            .chat_compat()
+            .map(|c| c.supports_prompt_cache_key)
+            .unwrap_or(false);
+        if supports_cache_key && request.prompt_cache_key.is_none() {
             let key = request
                 .x_grok_session_id
                 .as_deref()
@@ -1817,6 +1823,18 @@ impl SamplingClient {
             if let Some(key) = key {
                 request.prompt_cache_key =
                     Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
+            }
+        } else if !supports_cache_key {
+            request.prompt_cache_key = None;
+        }
+
+        // Clamp max tokens to configured model limit when present.
+        if let (Some(cap), Some(requested)) = (
+            self.defaults.max_completion_tokens,
+            request.max_tokens,
+        ) {
+            if requested > cap {
+                request.max_tokens = Some(cap);
             }
         }
 

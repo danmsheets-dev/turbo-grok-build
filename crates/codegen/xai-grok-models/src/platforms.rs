@@ -2241,6 +2241,17 @@ fn fallback_request_compat(
                 compat.requires_reasoning_content_on_assistant_messages = true;
                 compat.thinking_format = ThinkingFormat::DeepSeek;
             }
+            // NVIDIA Integrate rejects OpenAI-only body fields (prompt_cache_key,
+            // store, developer role, strict tools). Apply platform-wide defaults
+            // so per-model TOML is not required for every catalog id.
+            if platform == PlatformId::Nvidia {
+                compat.supports_store = false;
+                compat.supports_developer_role = false;
+                compat.supports_prompt_cache_key = false;
+                compat.supports_strict_mode = false;
+                compat.max_tokens_field = MaxTokensField::MaxTokens;
+                compat.supports_long_cache_retention = false;
+            }
             RequestCompat::ChatCompletions(compat)
         }
         PlatformApiBackend::Responses => {
