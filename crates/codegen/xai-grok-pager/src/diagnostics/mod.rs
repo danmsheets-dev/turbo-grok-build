@@ -163,6 +163,29 @@ pub(crate) fn oracle_model_pin_findings(
             ),
         });
     }
+    // NVIDIA Ultra (and other chat-only pins) cannot run the tool-using oracle path
+    // until agent_ready + deser are proven for that model.
+    let pin_l = pin.to_ascii_lowercase();
+    if pin_l.contains("nemotron-3-ultra")
+        || pin_l.contains("nemotron-3-super")
+        || pin_l.contains("550b-a55b")
+    {
+        findings.push(DiagnosticFinding {
+            id: DiagnosticId::new("oracle", "model-not-agent-ready"),
+            disposition: FindingDisposition::Recommendation,
+            message: format!(
+                "Oracle is pinned to `{pin}`, which is chat/planning-oriented on NVIDIA Integrate \
+                 and is not agent-ready for tool-using code investigation."
+            ),
+            remediation: None,
+            automatic_remediation: None,
+            note: Some(
+                "Pin oracle to a proven agent model (e.g. Grok 4.5 or Codex Terra) until NVIDIA \
+                 tool loops are certified agent_ready. See docs/design-oracle.md and RC8 notes."
+                    .to_owned(),
+            ),
+        });
+    }
     findings
 }
 

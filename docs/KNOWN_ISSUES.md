@@ -3,7 +3,29 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-07-31 (WP-C3 isolation/security package).
+Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
+
+## Fixed in v0.2.114-r8 (RC8)
+
+| Topic | Fix |
+|-------|-----|
+| NVIDIA stream deser `null` vs `u32` | Null-tolerant Chat Completions usage/index/tool_calls |
+| Subagent hang without timeout | `timeout_ms` + budget monitor; stall on no progress |
+| Worktree “disappeared” | `changes.patch` + `snapshot_ref` + `worktree_state` on completion; `retain_worktree` |
+| Parent cannot merge child work | `diff_subagent` / `land_subagent` tools |
+| NVIDIA `prompt_cache_key` 400s | Platform defaults + opt-in stamp only |
+| Catalog EOL / Nano token overflow | Hide EOL; clamp Nano 9B; `agent_ready` / max_parallel on compat |
+| Deep multi-agent audit | `/deepaudit` + `continuous-improve` workflows |
+
+## Open after RC8
+
+| ID | Severity | Topic | Notes |
+|----|----------|--------|--------|
+| Worktree naming | low | Not always `git worktree list` | Implementation may still use clone/linked sandbox; recovery is via snapshot ref / patch |
+| Path allowlists | deferred | `allowed_paths` for parallel land | RC9 |
+| Ultracode keyword | deferred | Auto-workflow on keyword | RC9; use `/deepaudit` or `/workflow` |
+| Fan-out `spawn_many` | deferred | Single-call matrix spawn | Coordinator queue already max 4 |
+| Nightly NVIDIA matrix CI | deferred | Live conformance | Unit fixtures shipped |
 
 ## Fixed in v0.2.109
 

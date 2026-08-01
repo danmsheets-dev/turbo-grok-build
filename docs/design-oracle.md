@@ -79,6 +79,8 @@ oracle = "openai/gpt-5.6"   # 示例 slug；以用户 catalog 为准
 # explore = "…"             # 可选：探路用更便宜的
 ```
 
+**Anti-pattern (RC8):** do **not** pin oracle to NVIDIA Ultra/Super (`nemotron-3-ultra` / Super) until the model is `agent_ready` for multi-tool loops. Prefer Grok 4.5 / Codex Terra for tool-using investigation. `/doctor` warns on Ultra-class pins.
+
 TUI：`/agents` → 选 `oracle` → `m` 钉模型（已有）。
 
 ### 4.2 行为建议（实现切片）

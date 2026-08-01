@@ -293,7 +293,8 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::WebFetch,
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
-                ToolKind::Task,
+                // Task intentionally omitted: RO children (explore/oracle/deepaudit)
+                // must not spawn nested write-capable general-purpose agents.
                 ToolKind::EnterPlan,
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
