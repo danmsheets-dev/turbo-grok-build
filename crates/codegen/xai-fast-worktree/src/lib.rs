@@ -61,6 +61,7 @@ pub use db::{
 #[cfg(feature = "metadata")]
 pub use discovery::{RebuildReport, discover_worktrees, rebuild_worktree_db};
 pub use git::checkout::{
+    WorktreeDiffstat, WorktreePatchExport, export_worktree_patch_against_ref,
     rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
 };
 pub use sync::{SourceDirtyState, SyncReport, WorktreeSync, collect_source_dirty_state};

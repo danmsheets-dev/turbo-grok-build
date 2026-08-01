@@ -534,6 +534,15 @@ def resolve_chat_compat(provider: str, model_id: str, base_url: str, model: dict
         "supports_long_cache_retention": not (
             is_together or is_cloudflare_workers or is_cloudflare_gateway or is_nvidia or is_ant_ling
         ),
+        # HYPER-LOCAL: OpenAI-only sticky cache key 400s on NVIDIA Integrate.
+        "supports_prompt_cache_key": not is_nvidia,
+        # HYPER-LOCAL: tool-agent readiness; NVIDIA stays false until live smoke.
+        "agent_ready": not is_nvidia,
+        "max_parallel_tool_calls": (
+            1
+            if is_nvidia and ("llama-3.1-70b" in model_id or "llama3-1-70b" in model_id)
+            else None
+        ),
     }
     mapping = {
         "supports_store": "supportsStore",
@@ -557,8 +566,26 @@ def resolve_chat_compat(provider: str, model_id: str, base_url: str, model: dict
         "deferred_tools_mode": "deferredToolsMode",
         "session_affinity_format": "sessionAffinityFormat",
         "supports_long_cache_retention": "supportsLongCacheRetention",
+        "supports_prompt_cache_key": "supportsPromptCacheKey",
+        "agent_ready": "agentReady",
+        "max_parallel_tool_calls": "maxParallelToolCalls",
     }
-    return {field: raw.get(source, default) for field, source in mapping.items() for default in [detected[field]]}
+    resolved = {field: raw.get(source, default) for field, source in mapping.items() for default in [detected[field]]}
+    # Always force HYPER-LOCAL NVIDIA gates even if Pi raw compat disagrees.
+    if is_nvidia:
+        resolved["supports_prompt_cache_key"] = False
+        resolved["agent_ready"] = False
+        resolved["supports_store"] = False
+        resolved["supports_developer_role"] = False
+        resolved["supports_strict_mode"] = False
+        resolved["supports_long_cache_retention"] = False
+        resolved["max_tokens_field"] = "max_tokens"
+        if "llama-3.1-70b" in model_id or "llama3-1-70b" in model_id:
+            resolved["max_parallel_tool_calls"] = 1
+    # Drop null optional max_parallel_tool_calls for cleaner catalog rows.
+    if resolved.get("max_parallel_tool_calls") is None:
+        resolved.pop("max_parallel_tool_calls", None)
+    return resolved
 
 
 def resolve_responses_compat(provider: str, base_url: str, model_id: str, model: dict[str, Any] | None) -> dict[str, Any]:

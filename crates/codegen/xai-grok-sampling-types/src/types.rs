@@ -126,6 +126,11 @@ pub struct ChatCompletionRequest {
     pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
+    /// When `false`, the model must emit at most one tool call per turn.
+    /// Set by the sampler when catalog `max_parallel_tool_calls == 1`
+    /// (e.g. NVIDIA Llama 3.1 70B).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +187,7 @@ impl ChatCompletionRequest {
             user: None,
             prompt_cache_key: None,
             tools: None,
+            parallel_tool_calls: None,
             tool_choice: None,
             search_parameters: None,
             response_format: None,
@@ -210,6 +216,7 @@ impl ChatCompletionRequest {
             user: None,
             prompt_cache_key: None,
             tools: None,
+            parallel_tool_calls: None,
             tool_choice: None,
             search_parameters: None,
             response_format: None,

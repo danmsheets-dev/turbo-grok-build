@@ -2473,6 +2473,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             user: None,
             prompt_cache_key,
             tools,
+            parallel_tool_calls: None,
             tool_choice,
             search_parameters: None,
             response_format,

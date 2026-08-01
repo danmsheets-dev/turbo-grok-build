@@ -345,6 +345,100 @@ fn snapshot_worktree_to_ref_inner(
     Ok(snap)
 }
 
+/// Diffstat summary for a worktree snapshot export.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorktreeDiffstat {
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+impl WorktreeDiffstat {
+    /// Compact human-readable form, e.g. `2 files, +40/-12`.
+    pub fn summary(&self) -> String {
+        format!(
+            "{} files, +{}/-{}",
+            self.files_changed, self.insertions, self.deletions
+        )
+    }
+
+    /// True when nothing changed.
+    pub fn is_empty(&self) -> bool {
+        self.files_changed == 0 && self.insertions == 0 && self.deletions == 0
+    }
+}
+
+/// Result of exporting a subagent worktree patch against its snapshot ref.
+#[derive(Debug, Clone)]
+pub struct WorktreePatchExport {
+    pub patch: String,
+    pub diffstat: WorktreeDiffstat,
+}
+
+/// Export a unified diff of `snapshot_ref` against `HEAD` in `repo_path`.
+///
+/// Prefer calling this from the live worktree (or the durable source repo after
+/// transfer) while the snapshot ref is resolvable. Empty patches are valid
+/// (clean tree → empty string + zero diffstat).
+pub fn export_worktree_patch_against_ref(
+    repo_path: &Path,
+    snapshot_ref: &str,
+) -> Result<WorktreePatchExport> {
+    export_worktree_patch_against_ref_inner(repo_path, snapshot_ref).with_context(|| {
+        format!(
+            "failed to export patch for {snapshot_ref} in {}",
+            repo_path.display()
+        )
+    })
+}
+
+fn export_worktree_patch_against_ref_inner(
+    repo_path: &Path,
+    snapshot_ref: &str,
+) -> Result<WorktreePatchExport> {
+    // Snapshot commits are `commit-tree -p HEAD` of the full working state, so
+    // `git diff HEAD <snapshot>` is the agent-authored change set (including
+    // previously-untracked non-ignored files captured into the snapshot).
+    let patch = snapshot_git(repo_path, &["diff", "--binary", "HEAD", snapshot_ref], &[])?;
+    let numstat = snapshot_git(
+        repo_path,
+        &["diff", "--numstat", "HEAD", snapshot_ref],
+        &[],
+    )?;
+    let mut files_changed = 0u32;
+    let mut insertions = 0u32;
+    let mut deletions = 0u32;
+    for line in numstat.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let add = parts.next().unwrap_or("0");
+        let del = parts.next().unwrap_or("0");
+        // Binary files show "-" for both columns.
+        if add != "-" {
+            if let Ok(n) = add.parse::<u32>() {
+                insertions = insertions.saturating_add(n);
+            }
+        }
+        if del != "-" {
+            if let Ok(n) = del.parse::<u32>() {
+                deletions = deletions.saturating_add(n);
+            }
+        }
+        files_changed = files_changed.saturating_add(1);
+    }
+    Ok(WorktreePatchExport {
+        patch,
+        diffstat: WorktreeDiffstat {
+            files_changed,
+            insertions,
+            deletions,
+        },
+    })
+}
+
 /// Make a snapshot `ref_name` (created by [`snapshot_worktree_to_ref`] in
 /// `worktree_path`'s git) durable in `source_repo`, then verify it resolves
 /// there. This is required for STANDALONE subagent worktrees, whose `.git` (and

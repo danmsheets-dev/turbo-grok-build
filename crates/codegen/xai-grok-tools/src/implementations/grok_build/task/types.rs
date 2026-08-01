@@ -178,11 +178,10 @@ pub struct SubagentRuntimeOverrides {
     /// Hard wall-clock limit for the child (milliseconds). When set, overrides
     /// the agent-definition `timeout_secs` in the shell budget monitor.
     pub timeout_ms: Option<u64>,
+    pub stall_timeout_ms: Option<u64>,
     /// When `Some(true)`, snapshot the worktree on completion but keep the
     /// directory (`worktree_state=preserved`) instead of removing it.
     pub retain_worktree: Option<bool>,
-    /// No tool/token/turn progress for this long → stall fail (milliseconds).
-    pub stall_timeout_ms: Option<u64>,
 }
 
 /// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.

@@ -25,6 +25,7 @@ pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
 pub(crate) mod storage;
+pub mod subagent_worktree;
 pub mod task;
 pub mod task_output;
 pub mod todo;
@@ -56,6 +57,8 @@ pub use scheduler::create::{
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
+pub use subagent_worktree::diff::{DIFF_SUBAGENT_TOOL_NAME, DiffSubagentTool};
+pub use subagent_worktree::land::{LAND_SUBAGENT_TOOL_NAME, LandSubagentTool};
 pub use task::TaskTool;
 pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool, WaitTasksTool};
 pub use todo::TodoWriteTool;

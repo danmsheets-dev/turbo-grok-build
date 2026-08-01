@@ -923,6 +923,9 @@ impl std::fmt::Debug for SamplingClient {
 struct ClientDefaults {
     model: String,
     max_completion_tokens: Option<u32>,
+    /// Informational context window from the catalog; used to clamp
+    /// `max_tokens` so strict gateways never see budgets above max_model_len.
+    context_window: u64,
     temperature: Option<f32>,
     top_p: Option<f32>,
     adapter: BackendAdapter,
@@ -1244,6 +1247,7 @@ impl SamplingClient {
         let defaults = ClientDefaults {
             model: config.model,
             max_completion_tokens: config.max_completion_tokens,
+            context_window: config.context_window,
             temperature: config.temperature,
             top_p: config.top_p,
             adapter,
@@ -1797,6 +1801,13 @@ impl SamplingClient {
         if request.max_tokens.is_none() {
             request.max_tokens = self.defaults.max_completion_tokens;
         }
+        // Clamp to catalog max and context window so strict gateways (NVIDIA)
+        // never see max_tokens > max_model_len.
+        request.max_tokens = xai_grok_sampling_types::clamp_max_completion_tokens(
+            request.max_tokens,
+            self.defaults.max_completion_tokens,
+            self.defaults.context_window,
+        );
 
         if request.temperature.is_none() {
             request.temperature = self.defaults.temperature;
@@ -1806,36 +1817,37 @@ impl SamplingClient {
             request.top_p = self.defaults.top_p;
         }
 
+        let chat_compat = self.defaults.chat_compat();
+
         // OpenAI Chat Completions: sticky prompt_cache_key only when the
-        // provider supports it. Stamping always and stripping later fails when
-        // request_compat is missing (fail-open stamp → 400 on NVIDIA).
-        let supports_cache_key = self
-            .defaults
-            .chat_compat()
+        // route explicitly supports it (opt-in stamp). Strict gateways such
+        // as NVIDIA Integrate 400 on unknown top-level params.
+        let supports_prompt_cache_key = chat_compat
             .map(|c| c.supports_prompt_cache_key)
-            .unwrap_or(false);
-        if supports_cache_key && request.prompt_cache_key.is_none() {
-            let key = request
-                .x_grok_session_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .or_else(|| request.x_grok_conv_id.as_deref().filter(|s| !s.is_empty()));
-            if let Some(key) = key {
-                request.prompt_cache_key =
-                    Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
+            .unwrap_or(true);
+        if supports_prompt_cache_key {
+            if request.prompt_cache_key.is_none() {
+                let key = request
+                    .x_grok_session_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| request.x_grok_conv_id.as_deref().filter(|s| !s.is_empty()));
+                if let Some(key) = key {
+                    request.prompt_cache_key =
+                        Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
+                }
             }
-        } else if !supports_cache_key {
+        } else {
+            // Never leave a key on the request when the platform rejects it
+            // (conversation conversion may have already stamped one).
             request.prompt_cache_key = None;
         }
 
-        // Clamp max tokens to configured model limit when present.
-        if let (Some(cap), Some(requested)) = (
-            self.defaults.max_completion_tokens,
-            request.max_tokens,
-        ) {
-            if requested > cap {
-                request.max_tokens = Some(cap);
-            }
+        // Force serial tool calls when the catalog caps parallel calls at 1.
+        if request.parallel_tool_calls.is_none()
+            && chat_compat.is_some_and(|c| c.max_parallel_tool_calls == Some(1))
+        {
+            request.parallel_tool_calls = Some(false);
         }
 
         Ok(request)
@@ -3529,6 +3541,7 @@ mod tests {
             user: None,
             prompt_cache_key: None,
             tools: None,
+            parallel_tool_calls: None,
             tool_choice: None,
             search_parameters: None,
             response_format: None,
@@ -3884,6 +3897,89 @@ mod tests {
 
         assert!(body.get("max_tokens").is_none());
         assert_eq!(body["max_completion_tokens"], 321);
+    }
+
+    #[test]
+    fn chat_compat_strips_prompt_cache_key_when_unsupported() {
+        let mut cfg = minimal_config();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                supports_prompt_cache_key: false,
+                supports_store: false,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut body = serde_json::json!({
+            "prompt_cache_key": "session-abc",
+            "store": true,
+        });
+
+        client.patch_chat_request_body(&mut body, false);
+
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("store").is_none());
+    }
+
+    #[test]
+    fn chat_defaults_opt_in_prompt_cache_key_stamp() {
+        // Unsupported: never stamp, and clear a pre-set key.
+        let mut cfg = minimal_config();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                supports_prompt_cache_key: false,
+                supports_store: false,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut req = ChatCompletionRequest::new("m", vec![ChatRequestMessage::user("hi")]);
+        req.x_grok_session_id = Some("sess-1".into());
+        req.prompt_cache_key = Some("pre-set".into());
+        let out = client.apply_defaults(req).expect("defaults");
+        assert!(out.prompt_cache_key.is_none());
+
+        // Supported: stamp from session id when unset.
+        let mut cfg = minimal_config();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                supports_prompt_cache_key: true,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut req = ChatCompletionRequest::new("m", vec![ChatRequestMessage::user("hi")]);
+        req.x_grok_session_id = Some("sess-2".into());
+        let out = client.apply_defaults(req).expect("defaults");
+        assert_eq!(out.prompt_cache_key.as_deref(), Some("sess-2"));
+    }
+
+    #[test]
+    fn chat_defaults_set_parallel_tool_calls_false_when_max_is_one() {
+        let mut cfg = minimal_config();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                max_parallel_tool_calls: Some(1),
+                supports_store: false,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let req = ChatCompletionRequest::new("m", vec![ChatRequestMessage::user("hi")]);
+        let out = client.apply_defaults(req).expect("defaults");
+        assert_eq!(out.parallel_tool_calls, Some(false));
+    }
+
+    #[test]
+    fn chat_defaults_clamp_max_tokens_to_catalog_and_context() {
+        let mut cfg = minimal_config();
+        cfg.max_completion_tokens = Some(131_072);
+        cfg.context_window = 128_000;
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut req = ChatCompletionRequest::new("m", vec![ChatRequestMessage::user("hi")]);
+        req.max_tokens = Some(200_000);
+        let out = client.apply_defaults(req).expect("defaults");
+        assert_eq!(out.max_tokens, Some(128_000));
     }
 
     #[test]

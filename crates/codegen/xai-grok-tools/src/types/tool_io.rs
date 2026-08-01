@@ -96,6 +96,8 @@ pub enum ToolInput {
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListInput),
     UpdateGoal(UpdateGoalInput),
     Workflow(crate::implementations::grok_build::workflow::WorkflowToolInput),
+    DiffSubagent(crate::implementations::grok_build::subagent_worktree::diff::DiffSubagentInput),
+    LandSubagent(crate::implementations::grok_build::subagent_worktree::land::LandSubagentInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
 }

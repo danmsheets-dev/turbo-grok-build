@@ -1470,6 +1470,54 @@ mod tests {
     }
 
     #[test]
+    fn task_tool_input_retain_worktree_deserializes() {
+        let omitted: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        assert_eq!(omitted.retain_worktree, None);
+
+        let explicit: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "retain_worktree": true}"#,
+        )
+        .unwrap();
+        assert_eq!(explicit.retain_worktree, Some(true));
+
+        let as_string: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "retain_worktree": "true"}"#,
+        )
+        .unwrap();
+        assert_eq!(as_string.retain_worktree, Some(true));
+    }
+
+    #[test]
+    fn subagent_completed_to_model_text_includes_patch_and_state() {
+        let output = SubagentCompletedOutput {
+            output: "done".into(),
+            subagent_id: "sa-1".into(),
+            subagent_type: "general-purpose".into(),
+            tool_calls: 1,
+            turns: 1,
+            duration_ms: 10,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "sa-1".into(),
+            persona_hint: None,
+            isolation_fallback: false,
+            snapshot_ref: Some("refs/grok/subagents/sa-1".into()),
+            worktree_state: Some("cleaned".into()),
+            patch_path: Some("/tmp/sessions/s/subagents/sa-1/changes.patch".into()),
+            diffstat: Some("1 files, +3/-0".into()),
+        };
+        let text = output.to_model_text();
+        assert!(text.contains("<worktree_state>cleaned</worktree_state>"));
+        assert!(text.contains("<snapshot_ref>refs/grok/subagents/sa-1</snapshot_ref>"));
+        assert!(text.contains(
+            "<patch_path>/tmp/sessions/s/subagents/sa-1/changes.patch</patch_path>"
+        ));
+        assert!(text.contains("<diffstat>1 files, +3/-0</diffstat>"));
+        assert!(text.contains("resume_from=\"sa-1\""));
+    }
+
+    #[test]
     fn task_output_input_accepts_singular_task_id_alias() {
         // Canonical plural form (unchanged).
         let input: TaskOutputToolInput =

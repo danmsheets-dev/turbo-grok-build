@@ -1771,7 +1771,7 @@ impl SubagentExecutionBudget {
         definition: &xai_grok_agent::config::AgentDefinition,
         parent_max_turns: Option<usize>,
     ) -> Self {
-        Self::resolve_with_override(definition, parent_max_turns, None)
+        Self::resolve_with_overrides(definition, parent_max_turns, None, None)
     }
 
     /// Resolve budget. `timeout_ms_override` (from Task spawn / runtime overrides)
@@ -1801,7 +1801,6 @@ impl SubagentExecutionBudget {
                 .unwrap_or(30)
                 .min(timeout.saturating_sub(1).max(1))
         });
-        // Default stall: 10 minutes when any hard budget is set; else optional override only.
         let stall_timeout_ms = match stall_timeout_ms {
             Some(ms) if ms > 0 => Some(ms),
             _ if timeout_secs.is_some() || definition.max_tool_calls.is_some() => Some(600_000),
@@ -2720,6 +2719,15 @@ pub(crate) struct SubagentMeta {
     /// state. Persisted so a deleted worktree can be rehydrated on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_ref: Option<String>,
+    /// Worktree lifecycle after dispose: `live`, `cleaned`, or `preserved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_state: Option<String>,
+    /// Session-local path to exported `changes.patch` (survives cleanup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_path: Option<String>,
+    /// Compact diffstat summary vs snapshot base (e.g. `2 files, +40/-12`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diffstat: Option<String>,
     /// Effective model ID used by the child session. Persisted for
     /// durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2919,6 +2927,18 @@ struct GcsUploadContext {
     depth: u32,
     auth_manager: std::sync::Arc<crate::auth::AuthManager>,
 }
+/// Fields written into `meta.json` after a worktree snapshot/dispose step.
+#[derive(Debug, Clone, Default)]
+struct SubagentMetaDisposeUpdate {
+    snapshot_ref: Option<String>,
+    status: Option<String>,
+    worktree_state: Option<String>,
+    patch_path: Option<String>,
+    diffstat: Option<String>,
+    /// When true, clear `worktree_path` so a deleted tree is not presented as live.
+    clear_worktree_path: bool,
+}
+
 /// Persist the durable worktree `snapshot_ref` into the on-disk `meta.json`
 /// after completion, so `resumable_source_for` can rehydrate the disposed
 /// worktree on resume. Returns `true` only when the ref is persisted to disk;
@@ -2928,22 +2948,51 @@ struct GcsUploadContext {
 /// `persist_subagent_completion` write can't leave a non-terminal record that
 /// `resumable_source_for` rejects after the worktree is removed.
 fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &str) -> bool {
+    update_subagent_meta_dispose(
+        dir,
+        &SubagentMetaDisposeUpdate {
+            snapshot_ref: Some(snapshot_ref.to_string()),
+            status: Some(status.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// Persist dispose-time worktree fields (`snapshot_ref`, `worktree_state`,
+/// `patch_path`, `diffstat`, optional path clear) into `meta.json`.
+fn update_subagent_meta_dispose(dir: &Path, update: &SubagentMetaDisposeUpdate) -> bool {
     let meta_path = dir.join("meta.json");
     let mut meta = match std::fs::read_to_string(&meta_path) {
         Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
             Ok(meta) => meta,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
+                tracing::warn!(error = %e, "failed to parse subagent meta; dispose fields not persisted (resume pointer lost)");
                 return false;
             }
         },
         Err(e) => {
-            tracing::warn!(error = %e, "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)");
+            tracing::warn!(error = %e, "failed to read subagent meta; dispose fields not persisted (resume pointer lost)");
             return false;
         }
     };
-    meta.snapshot_ref = Some(snapshot_ref.to_string());
-    meta.status = status.to_string();
+    if let Some(ref snapshot_ref) = update.snapshot_ref {
+        meta.snapshot_ref = Some(snapshot_ref.clone());
+    }
+    if let Some(ref status) = update.status {
+        meta.status = status.clone();
+    }
+    if let Some(ref state) = update.worktree_state {
+        meta.worktree_state = Some(state.clone());
+    }
+    if let Some(ref patch_path) = update.patch_path {
+        meta.patch_path = Some(patch_path.clone());
+    }
+    if let Some(ref diffstat) = update.diffstat {
+        meta.diffstat = Some(diffstat.clone());
+    }
+    if update.clear_worktree_path {
+        meta.worktree_path = None;
+    }
     write_subagent_meta(dir, &meta)
 }
 #[must_use]

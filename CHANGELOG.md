@@ -6,28 +6,33 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [0.2.114-r8] - 2026-08-01
 
-RC8 reliability + deep-audit release: NVIDIA stream deser, subagent timeouts,
-snapshot recovery on completion, and `/deepaudit`.
+RC8 reliability + deep-audit release (full plan): NVIDIA agent path, worktree
+recovery, land/diff tools, stall detection, and multi-agent workflows.
 
 ### Added
-- **`/deepaudit`** (alias `/deep-audit`): bundled Ultracode-style codebase audit
-  workflow — Scope → Investigate → Verify → Report. Size flags
-  `small|medium|large`. Read-only agents; progress in `/workflows`.
-- **`timeout_ms` on `task` / spawn**: hard wall-clock child limit (distinct from
-  wait timeout). Overrides agent-definition `timeout_secs` when set; budget
-  monitor enforces Cancel on expiry.
-- **Subagent completion `snapshot_ref` + `worktree_state`**: after worktree
-  dispose, parent tool text surfaces the durable ref and recovery hint so
-  supervisors are not left with a dead `WORKTREE_CWD` path only.
+- **`/deepaudit`** (alias `/deep-audit`): Ultracode-style codebase audit —
+  Scope → Investigate → Verify → Report. Size `small|medium|large`.
+- **`continuous-improve`** builtin workflow: research → plan → implement
+  (worktree) → verify → report.
+- **`timeout_ms` / `stall_timeout_ms` / `retain_worktree` on spawn**: hard
+  wall-clock, progress stall (default 10m when budgets set), optional keep path.
+- **`diff_subagent` + `land_subagent` tools**: parent merges child work from live
+  worktree, snapshot ref, or `changes.patch` (merge fails closed on conflict).
+- **Worktree dispose**: always export `changes.patch` + diffstat before delete;
+  completion surfaces `snapshot_ref`, `worktree_state`, `patch_path`.
+- **NVIDIA platform defaults**: no `prompt_cache_key` stamp without compat;
+  catalog EOL hide; Nano 9B token clamp; `agent_ready` / `max_parallel_tool_calls`
+  on compat; Llama 70B single tool-call wire.
 
 ### Fixed
-- **NVIDIA / OpenAI-compatible Chat Completions deser**: JSON `null` in `u32`
-  usage counters, choice index, and tool-call delta index no longer fails the
-  client with `invalid type: null, expected u32` (Ultra/Super/Nano/GLM patterns).
+- **NVIDIA Chat Completions deser**: `null` usage/index/tool_calls no longer
+  crash the client (`invalid type: null, expected u32`).
+- **Stall detector**: no tool/token/turn progress → cancel with
+  `termination_reason=stall`.
 
 ### Docs
-- RC8 plan and Hyper developer feedback under `docs/`.
-- User guide slash commands: `/deepaudit`.
+- `docs/RC8_IMPLEMENTATION_PLAN.md`, `docs/RC8_BUILD_INSTALL.md`, feedback.
+- User guide: `/deepaudit`.
 
 ## [0.2.114-r7] - 2026-07-31
 

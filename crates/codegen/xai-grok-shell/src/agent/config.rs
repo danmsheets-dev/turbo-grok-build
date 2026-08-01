@@ -4248,7 +4248,11 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             // to non-default values — leave unset and let the API defaults apply.
             temperature: None,
             top_p: None,
-            max_completion_tokens: builtin.max_completion_tokens,
+            max_completion_tokens: xai_grok_models::clamp_max_completion_tokens(
+                builtin.max_completion_tokens,
+                builtin.max_completion_tokens,
+                builtin.context_window,
+            ),
             api_backend,
             request_compat: uses_catalog_route.then(|| builtin.request_compat.clone()),
             endpoint_path: uses_catalog_route.then(|| builtin.route.path.clone()),
@@ -4269,7 +4273,8 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 IndexMap::new()
             },
             use_concise: false,
-            hidden: false,
+            // EOL / withdrawn catalog rows stay hidden even after credentials.
+            hidden: !builtin.catalog_available,
             supported_in_api: builtin.supported_in_api,
             reasoning_effort,
             supports_reasoning_effort,
@@ -6128,7 +6133,13 @@ pub fn sampling_config_for_model(
 ) -> SamplerConfig {
     let info = model.info();
     let model_name = info.model.clone();
-    let max_completion_tokens = info.max_completion_tokens;
+    // Runtime clamp: min(catalog, context_window). Request-level clamp in the
+    // sampler also mins against the per-request budget.
+    let max_completion_tokens = xai_grok_models::clamp_max_completion_tokens(
+        info.max_completion_tokens,
+        info.max_completion_tokens,
+        info.context_window.get(),
+    );
     let temperature = info.temperature;
     let top_p = info.top_p;
     let mut extra_headers = info.extra_headers.clone();

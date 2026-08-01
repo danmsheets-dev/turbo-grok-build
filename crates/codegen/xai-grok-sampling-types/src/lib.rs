@@ -31,7 +31,7 @@ pub use self::types::*;
 pub use xai_grok_models::{
     AdapterKind, AnthropicMessagesCompat, BedrockConverseStreamCompat, GoogleGenerateContentCompat,
     MaxTokensField, OpenAiCompletionsCompat, OpenAiResponsesCompat, PiMessagesCompat,
-    RequestCompat, SessionAffinityFormat, ThinkingFormat,
+    RequestCompat, SessionAffinityFormat, ThinkingFormat, clamp_max_completion_tokens,
 };
 
 // Re-export async-openai crate Responses API types under `rs` namespace

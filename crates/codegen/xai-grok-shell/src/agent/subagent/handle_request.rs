@@ -700,6 +700,9 @@ pub(crate) async fn run_shell_child(
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);
@@ -1979,35 +1982,80 @@ pub(crate) async fn run_shell_child(
             .await
             {
                 Ok(snapshot_ref) => {
-                    let persisted = update_subagent_meta_snapshot_ref(
-                        &subagent_meta_dir,
+                    // Export changes.patch + diffstat before optional removal so
+                    // recovery artifacts survive cleanup.
+                    let mut patch_path: Option<String> = None;
+                    let mut diffstat_summary: Option<String> = None;
+                    match crate::session::worktree::export_subagent_changes_patch(
+                        Some(wt_path.as_path()),
+                        &source_repo,
                         &snapshot_ref,
-                        &final_status,
+                        &subagent_meta_dir,
+                    )
+                    .await
+                    {
+                        Ok(exported) => {
+                            patch_path =
+                                Some(exported.patch_path.to_string_lossy().into_owned());
+                            diffstat_summary = Some(exported.diffstat_summary);
+                            tracing::info!(
+                                subagent_id = %request.id,
+                                patch_path = ?patch_path,
+                                files_changed = exported.files_changed,
+                                insertions = exported.insertions,
+                                deletions = exported.deletions,
+                                "exported subagent changes.patch"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                subagent_id = %request.id,
+                                worktree_path = %wt_path.display(),
+                                error = %e,
+                                "failed to export subagent changes.patch; continuing dispose"
+                            );
+                        }
+                    }
+
+                    // Persist snapshot_ref + patch first (resume-critical). Path
+                    // cleanup and final worktree_state happen after.
+                    let persisted = update_subagent_meta_dispose(
+                        &subagent_meta_dir,
+                        &SubagentMetaDisposeUpdate {
+                            snapshot_ref: Some(snapshot_ref.clone()),
+                            status: Some(final_status.clone()),
+                            worktree_state: Some("preserved".to_string()),
+                            patch_path: patch_path.clone(),
+                            diffstat: diffstat_summary.clone(),
+                            clear_worktree_path: false,
+                        },
                     );
                     if persisted {
-                        disposed_snapshot_ref = Some(snapshot_ref.clone());
-                        // Always export changes.patch + diffstat before optional delete
-                        // so recovery survives worktree removal.
-                        if let Some((patch_path, diffstat)) = export_subagent_changes_patch(
-                            &source_repo,
-                            &snapshot_ref,
-                            &subagent_meta_dir,
-                        ) {
-                            result.patch_path = Some(patch_path);
-                            result.diffstat = Some(diffstat);
-                        }
+                        disposed_snapshot_ref = Some(snapshot_ref);
+                        result.patch_path = patch_path;
+                        result.diffstat = diffstat_summary;
                         if retain_worktree {
                             result.worktree_state = Some("preserved".to_string());
                             tracing::info!(
                                 subagent_id = %request.id,
                                 worktree_path = %wt_path.display(),
-                                "snapshotted subagent worktree; retained on disk (retain_worktree)"
+                                "snapshotted subagent worktree; retained (retain_worktree=true)"
                             );
                         } else {
-                            match crate::session::worktree::remove_subagent_worktree(wt_path).await {
+                            match crate::session::worktree::remove_subagent_worktree(wt_path)
+                                .await
+                            {
                                 Ok(()) => {
                                     worktree_removed = true;
                                     result.worktree_state = Some("cleaned".to_string());
+                                    let _ = update_subagent_meta_dispose(
+                                        &subagent_meta_dir,
+                                        &SubagentMetaDisposeUpdate {
+                                            worktree_state: Some("cleaned".to_string()),
+                                            clear_worktree_path: true,
+                                            ..Default::default()
+                                        },
+                                    );
                                     tracing::info!(
                                         subagent_id = %request.id,
                                         worktree_path = %wt_path.display(),
@@ -2026,7 +2074,6 @@ pub(crate) async fn run_shell_child(
                             }
                         }
                     } else {
-                        result.worktree_state = Some("preserved".to_string());
                         tracing::warn!(
                             subagent_id = %request.id,
                             worktree_path = %wt_path.display(),
@@ -2035,7 +2082,6 @@ pub(crate) async fn run_shell_child(
                     }
                 }
                 Err(e) => {
-                    result.worktree_state = Some("live".to_string());
                     tracing::warn!(
                         subagent_id = %request.id,
                         worktree_path = %wt_path.display(),
@@ -2086,82 +2132,4 @@ pub(crate) async fn run_shell_child(
         })),
     );
     child_run_output(result, completion_data, disposed_snapshot_ref)
-}
-
-/// Export `changes.patch` + a short diffstat for a snapshotted subagent worktree.
-///
-/// Diffs `HEAD` in `source_repo` against the durable `snapshot_ref` so the
-/// artifact remains after the live worktree directory is deleted. Returns
-/// `(patch_path, diffstat)` on success.
-fn export_subagent_changes_patch(
-    source_repo: &std::path::Path,
-    snapshot_ref: &str,
-    subagent_meta_dir: &std::path::Path,
-) -> Option<(String, String)> {
-    use std::process::Command;
-
-    let _ = std::fs::create_dir_all(subagent_meta_dir);
-    let patch_file = subagent_meta_dir.join("changes.patch");
-
-    let diff_output = Command::new("git")
-        .args(["diff", "HEAD", snapshot_ref])
-        .current_dir(source_repo)
-        .output();
-    let Ok(diff_output) = diff_output else {
-        tracing::warn!(
-            source_repo = %source_repo.display(),
-            snapshot_ref,
-            "failed to spawn git diff for subagent changes.patch"
-        );
-        return None;
-    };
-    if !diff_output.status.success() {
-        let stderr = String::from_utf8_lossy(&diff_output.stderr);
-        tracing::warn!(
-            source_repo = %source_repo.display(),
-            snapshot_ref,
-            status = ?diff_output.status,
-            stderr = %stderr.trim(),
-            "git diff for subagent changes.patch failed"
-        );
-        return None;
-    }
-    if let Err(e) = std::fs::write(&patch_file, &diff_output.stdout) {
-        tracing::warn!(
-            path = %patch_file.display(),
-            error = %e,
-            "failed to write subagent changes.patch"
-        );
-        return None;
-    }
-
-    let stat_output = Command::new("git")
-        .args(["diff", "--stat", "HEAD", snapshot_ref])
-        .current_dir(source_repo)
-        .output();
-    let diffstat = match stat_output {
-        Ok(out) if out.status.success() => {
-            let raw = String::from_utf8_lossy(&out.stdout);
-            let summary = raw
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("0 files changed")
-                .trim()
-                .to_string();
-            if summary.is_empty() {
-                "0 files changed".to_string()
-            } else {
-                summary
-            }
-        }
-        _ => {
-            // Fall back to a minimal summary from the patch body.
-            let patch = String::from_utf8_lossy(&diff_output.stdout);
-            let files = patch.lines().filter(|l| l.starts_with("diff --git ")).count();
-            format!("{files} files changed")
-        }
-    };
-
-    Some((patch_file.display().to_string(), diffstat))
 }

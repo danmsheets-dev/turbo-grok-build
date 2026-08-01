@@ -105,6 +105,21 @@ pub struct OpenAiCompletionsCompat {
     // …) but this one shipped ungated, which 400s on strict gateways such as
     // NVIDIA Integrate. Defaults to `true` so existing behavior is unchanged.
     pub supports_prompt_cache_key: bool,
+    /// Cap on concurrent tool calls the provider accepts in one turn.
+    /// `Some(1)` forces `parallel_tool_calls: false` on Chat Completions (e.g.
+    /// NVIDIA Llama 3.1 70B). `None` leaves the field unset (provider default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel_tool_calls: Option<u32>,
+    /// Whether this model is safe for tool-using agent loops (subagents,
+    /// oracle, deepaudit). Chat/planning-only models stay `false` until live
+    /// tool streams are proven stable. Defaults to `true` for OpenAI-class
+    /// routes; NVIDIA platform fallback forces `false`.
+    #[serde(default = "default_agent_ready")]
+    pub agent_ready: bool,
+}
+
+fn default_agent_ready() -> bool {
+    true
 }
 
 impl Default for OpenAiCompletionsCompat {
@@ -134,6 +149,8 @@ impl Default for OpenAiCompletionsCompat {
             // HYPER-LOCAL: see field docs above.
             reasoning_budget: None,
             supports_prompt_cache_key: true,
+            max_parallel_tool_calls: None,
+            agent_ready: true,
         }
     }
 }

@@ -360,6 +360,29 @@ impl AgentRebuildSpec {
                     Arc::clone(blocking_wait_depth),
                 ))
                 .await;
+            // Land live worktrees via workspace.apply_worktree (Merge/Overwrite).
+            {
+                use std::sync::Arc as StdArc;
+                use xai_grok_tools::implementations::grok_build::subagent_worktree::LiveWorktreeApplyBackend;
+                use crate::session::worktree::{ApplyMode, ApplyWorktreeRequest};
+                let backend = LiveWorktreeApplyBackend(StdArc::new(
+                    |worktree_path: String, mode: ApplyMode| {
+                        Box::pin(async move {
+                            let req = ApplyWorktreeRequest {
+                                // apply_worktree only needs the worktree path; session_id
+                                // is wire metadata for hub-proxied RPC.
+                                session_id: String::new(),
+                                worktree_path,
+                                mode,
+                            };
+                            crate::session::worktree::apply_worktree(&req)
+                                .await
+                                .map_err(|e| e.to_string())
+                        })
+                    },
+                ));
+                agent.tool_bridge().update_resource(backend).await;
+            }
             if let Some(buffer) = monitor_event_buffer.clone() {
                 agent.tool_bridge().update_resource(buffer).await;
             }

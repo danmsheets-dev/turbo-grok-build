@@ -11,10 +11,10 @@
 //! the worktree/git parts.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use git2::{DiffOptions, Oid, Repository};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
@@ -1312,6 +1312,87 @@ pub async fn snapshot_subagent_worktree(
     })
     .await
     .map_err(|e| anyhow::anyhow!("snapshot_subagent_worktree task failed: {e}"))?
+}
+
+/// Written under the session `subagents/<id>/` directory before worktree cleanup.
+#[derive(Debug, Clone)]
+pub struct SubagentPatchExportResult {
+    /// Absolute path to `changes.patch`.
+    pub patch_path: PathBuf,
+    /// Compact summary, e.g. `2 files, +40/-12`.
+    pub diffstat_summary: String,
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+/// Export `changes.patch` (+ optional `diffstat.txt`) for a snapshotted
+/// subagent worktree into `dest_dir`.
+///
+/// Prefer `worktree_path` when the live tree still exists; fall back to
+/// `source_repo` (where the snapshot ref was transferred) so export still
+/// works after cleanup or if the worktree git store is already gone.
+pub async fn export_subagent_changes_patch(
+    worktree_path: Option<&Path>,
+    source_repo: &Path,
+    snapshot_ref: &str,
+    dest_dir: &Path,
+) -> Result<SubagentPatchExportResult> {
+    let worktree_path = worktree_path.map(|p| p.to_path_buf());
+    let source_repo = source_repo.to_path_buf();
+    let snapshot_ref = snapshot_ref.to_string();
+    let dest_dir = dest_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<SubagentPatchExportResult> {
+        std::fs::create_dir_all(&dest_dir).with_context(|| {
+            format!("failed to create subagent export dir {}", dest_dir.display())
+        })?;
+        // Prefer the live worktree (exact index/HEAD), else the durable source
+        // repo that holds the transferred snapshot ref.
+        let repo = worktree_path
+            .as_deref()
+            .filter(|p| p.is_dir())
+            .unwrap_or(source_repo.as_path());
+        let exported =
+            xai_fast_worktree::export_worktree_patch_against_ref(repo, &snapshot_ref).or_else(
+                |primary| {
+                    if repo == source_repo.as_path() {
+                        return Err(primary);
+                    }
+                    // Worktree path may be a standalone store that already
+                    // lost the ref; try the durable source repo.
+                    xai_fast_worktree::export_worktree_patch_against_ref(
+                        source_repo.as_path(),
+                        &snapshot_ref,
+                    )
+                    .map_err(|fallback| {
+                        primary.context(format!("source_repo fallback also failed: {fallback:#}"))
+                    })
+                },
+            )?;
+        let patch_path = dest_dir.join("changes.patch");
+        std::fs::write(&patch_path, exported.patch.as_bytes())
+            .with_context(|| format!("failed to write {}", patch_path.display()))?;
+        let diffstat_summary = exported.diffstat.summary();
+        let diffstat_path = dest_dir.join("diffstat.txt");
+        let _ = std::fs::write(
+            &diffstat_path,
+            format!(
+                "files_changed={}\ninsertions={}\ndeletions={}\nsummary={diffstat_summary}\n",
+                exported.diffstat.files_changed,
+                exported.diffstat.insertions,
+                exported.diffstat.deletions
+            ),
+        );
+        Ok(SubagentPatchExportResult {
+            patch_path,
+            diffstat_summary,
+            files_changed: exported.diffstat.files_changed,
+            insertions: exported.diffstat.insertions,
+            deletions: exported.diffstat.deletions,
+        })
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("export_subagent_changes_patch task failed: {e}"))?
 }
 
 /// Remove a subagent worktree directory. Call only AFTER

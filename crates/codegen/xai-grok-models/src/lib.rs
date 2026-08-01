@@ -28,8 +28,8 @@ pub use platforms::{
     kimi_request_profile, kimi_sampling_is_fixed, moonshot_builtin_models, nexus_chat_base,
     nexus_messages_base, nexus_normalize_root, nexus_responses_base,
     normalize_azure_openai_base_url, normalize_kimi_code_base_url, normalize_messages_sdk_base_url,
-    parse_managed_model_key, platform_builtin_models, provider_registry, provider_spec,
-    validate_provider_assets,
+    clamp_max_completion_tokens, parse_managed_model_key, platform_builtin_models,
+    provider_registry, provider_spec, validate_provider_assets,
 };
 pub use provider_compat::{
     AnthropicMessagesCompat, BedrockConverseStreamCompat, CacheControlFormat, DeferredToolsMode,

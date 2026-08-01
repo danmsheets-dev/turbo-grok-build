@@ -1254,8 +1254,14 @@ pub struct BuiltinPlatformModel {
     pub description: String,
     pub context_window: u64,
     pub supports_reasoning_effort: bool,
-    /// When false, only OAuth session users see this in the picker.
+    /// When false, only OAuth session / credential-stamped users see this in
+    /// the picker. Catalog rows always start `false` at parse time; the shell
+    /// flips this on when keys resolve.
     pub supported_in_api: bool,
+    /// Catalog-declared availability. `false` means permanently unavailable
+    /// (EOL / 404 / withdrawn) and must stay hidden even after credentials
+    /// stamp. Offline OAuth seeds set this `true` so login can unlock them.
+    pub catalog_available: bool,
     /// Recommended `max_tokens` / max_completion_tokens (Kimi docs: 32k for
     /// coding thinking models).
     pub max_completion_tokens: Option<u32>,
@@ -1375,10 +1381,9 @@ struct CatalogModelRow {
     base_url_override: Option<String>,
     request_compat: RequestCompat,
     route: ProviderRouteSpec,
-    // Catalog availability is intentionally ignored at runtime: all built-in
-    // entries start hidden until the shell stamps credentials.
-    #[serde(rename = "supported_in_api")]
-    _supported_in_api: bool,
+    /// Catalog row availability. `false` = permanently unavailable (EOL).
+    /// `true` still starts runtime-hidden until the shell stamps credentials.
+    supported_in_api: bool,
     source: String,
 }
 
@@ -2111,6 +2116,11 @@ fn parse_platform_catalog(
         }
 
         if let (Some(provider), Some(api_backend)) = (provider, api_backend) {
+            let request_compat = apply_catalog_compat_overrides(
+                provider.id.as_str(),
+                &row.model,
+                row.request_compat,
+            );
             models.push(BuiltinPlatformModel {
                 provider: provider.id.clone(),
                 model: row.model,
@@ -2122,12 +2132,13 @@ fn parse_platform_catalog(
                 // but we must not show models in the picker until credentials
                 // (env/config OAuth) are actually available. The shell's
                 // `apply_platform_credentials` re-enables visibility when keys
-                // resolve.
+                // resolve — unless `catalog_available` is false (EOL).
                 supported_in_api: false,
+                catalog_available: row.supported_in_api,
                 max_completion_tokens: row.max_completion_tokens,
                 api_backend,
                 base_url_override: row.base_url_override,
-                request_compat: row.request_compat,
+                request_compat,
                 route: row.route,
             });
         }
@@ -2219,6 +2230,59 @@ fn fallback_route(platform: PlatformId, backend: PlatformApiBackend) -> Provider
     }
 }
 
+/// Apply platform-wide request_compat fixes that older catalog rows may omit
+/// (e.g. HYPER-LOCAL `supports_prompt_cache_key` / `agent_ready` for NVIDIA).
+fn apply_catalog_compat_overrides(
+    provider_id: &str,
+    model_id: &str,
+    mut compat: RequestCompat,
+) -> RequestCompat {
+    if provider_id == "nvidia"
+        && let RequestCompat::ChatCompletions(ref mut chat) = compat
+    {
+        chat.supports_prompt_cache_key = false;
+        chat.supports_store = false;
+        chat.supports_developer_role = false;
+        chat.supports_strict_mode = false;
+        chat.supports_long_cache_retention = false;
+        chat.max_tokens_field = MaxTokensField::MaxTokens;
+        chat.agent_ready = false;
+        if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
+            chat.max_parallel_tool_calls = Some(1);
+        }
+    }
+    compat
+}
+
+/// Clamp a requested max-completion budget to catalog and context limits.
+///
+/// Used when building sampler config and applying chat defaults so clients
+/// never send `max_tokens` / `max_completion_tokens` above what the model
+/// window allows (NVIDIA Nano 9B rejects values > `max_model_len`).
+///
+/// Returns `None` only when `requested` is `None` and there is no catalog
+/// default to fill from. Context alone never invents a budget.
+pub fn clamp_max_completion_tokens(
+    requested: Option<u32>,
+    catalog_max: Option<u32>,
+    context_window: u64,
+) -> Option<u32> {
+    let ctx_cap = match u32::try_from(context_window) {
+        Ok(v) if v > 0 => Some(v),
+        _ => None,
+    };
+    let Some(mut value) = requested.or(catalog_max) else {
+        return None;
+    };
+    if let Some(c) = catalog_max {
+        value = value.min(c);
+    }
+    if let Some(ctx) = ctx_cap {
+        value = value.min(ctx);
+    }
+    Some(value)
+}
+
 fn fallback_request_compat(
     platform: PlatformId,
     backend: PlatformApiBackend,
@@ -2241,16 +2305,21 @@ fn fallback_request_compat(
                 compat.requires_reasoning_content_on_assistant_messages = true;
                 compat.thinking_format = ThinkingFormat::DeepSeek;
             }
-            // NVIDIA Integrate rejects OpenAI-only body fields (prompt_cache_key,
-            // store, developer role, strict tools). Apply platform-wide defaults
-            // so per-model TOML is not required for every catalog id.
+            // NVIDIA Integrate is a strict OpenAI-compatible gateway: unknown
+            // body fields 400, max tokens must use `max_tokens`, and tool
+            // loops are not yet agent-ready by default (see RC8 WP6).
             if platform == PlatformId::Nvidia {
+                compat.supports_prompt_cache_key = false;
                 compat.supports_store = false;
                 compat.supports_developer_role = false;
-                compat.supports_prompt_cache_key = false;
                 compat.supports_strict_mode = false;
-                compat.max_tokens_field = MaxTokensField::MaxTokens;
                 compat.supports_long_cache_retention = false;
+                compat.max_tokens_field = MaxTokensField::MaxTokens;
+                compat.agent_ready = false;
+                // Llama 3.1 70B on Integrate rejects multi tool-calls.
+                if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
+                    compat.max_parallel_tool_calls = Some(1);
+                }
             }
             RequestCompat::ChatCompletions(compat)
         }
@@ -2318,6 +2387,7 @@ fn anthropic_claude_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 context_window: $ctx,
                 supports_reasoning_effort: true,
                 supported_in_api: false,
+                catalog_available: true,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
@@ -2373,6 +2443,7 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 context_window: CTX_400K,
                 supports_reasoning_effort: true,
                 supported_in_api: false,
+                catalog_available: true,
                 max_completion_tokens: None,
                 api_backend: PlatformApiBackend::Responses,
                 base_url_override: None,
@@ -2439,6 +2510,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 context_window: $ctx,
                 supports_reasoning_effort: $effort,
                 supported_in_api: false,
+                catalog_available: true,
                 max_completion_tokens: $max_tok,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
@@ -2500,6 +2572,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 context_window: $ctx,
                 supports_reasoning_effort: $effort,
                 supported_in_api: false,
+                catalog_available: true,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::ChatCompletions,
                 base_url_override: None,
@@ -4040,5 +4113,91 @@ mod tests {
         assert!(!kimi_allow_empty_thinking_signature(
             KimiRequestProfile::K27Code
         ));
+    }
+
+    #[test]
+    fn nvidia_fallback_request_compat_disables_openai_only_fields() {
+        let compat = fallback_request_compat(
+            PlatformId::Nvidia,
+            PlatformApiBackend::ChatCompletions,
+            "nvidia/nemotron-3-super-120b-a12b",
+        );
+        let RequestCompat::ChatCompletions(chat) = compat else {
+            panic!("NVIDIA uses chat completions");
+        };
+        assert!(!chat.supports_prompt_cache_key);
+        assert!(!chat.supports_store);
+        assert!(!chat.supports_developer_role);
+        assert!(!chat.supports_strict_mode);
+        assert!(!chat.supports_long_cache_retention);
+        assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
+        assert!(!chat.agent_ready);
+        assert!(chat.max_parallel_tool_calls.is_none());
+    }
+
+    #[test]
+    fn nvidia_fallback_marks_llama_70b_single_tool_call() {
+        let compat = fallback_request_compat(
+            PlatformId::Nvidia,
+            PlatformApiBackend::ChatCompletions,
+            "meta/llama-3.1-70b-instruct",
+        );
+        let RequestCompat::ChatCompletions(chat) = compat else {
+            panic!("expected chat completions");
+        };
+        assert_eq!(chat.max_parallel_tool_calls, Some(1));
+        assert!(!chat.supports_prompt_cache_key);
+        assert!(!chat.agent_ready);
+    }
+
+    #[test]
+    fn nvidia_catalog_rows_get_platform_compat_overrides() {
+        let nano = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/nvidia/nvidia-nemotron-nano-9b-v2")
+            .expect("nvidia nano 9b");
+        let RequestCompat::ChatCompletions(chat) = &nano.request_compat else {
+            panic!("nano 9b is chat completions");
+        };
+        assert!(!chat.supports_prompt_cache_key);
+        assert!(!chat.supports_store);
+        assert!(!chat.supports_developer_role);
+        assert!(!chat.supports_strict_mode);
+        assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
+        assert!(!chat.agent_ready);
+        // Catalog max must not exceed NVIDIA max_model_len (128000).
+        if let Some(max_tok) = nano.max_completion_tokens {
+            assert!(
+                max_tok <= 128_000,
+                "nano 9b max_completion_tokens={max_tok} exceeds 128000"
+            );
+        }
+
+        let llama = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/meta/llama-3.1-70b-instruct")
+            .expect("nvidia llama 3.1 70b");
+        let RequestCompat::ChatCompletions(llama_chat) = &llama.request_compat else {
+            panic!("llama is chat completions");
+        };
+        assert_eq!(llama_chat.max_parallel_tool_calls, Some(1));
+    }
+
+    #[test]
+    fn clamp_max_completion_tokens_takes_min_of_requested_catalog_context() {
+        assert_eq!(
+            clamp_max_completion_tokens(Some(200_000), Some(131_072), 128_000),
+            Some(128_000)
+        );
+        assert_eq!(
+            clamp_max_completion_tokens(Some(4_096), Some(131_072), 128_000),
+            Some(4_096)
+        );
+        assert_eq!(
+            clamp_max_completion_tokens(None, Some(8_192), 128_000),
+            Some(8_192)
+        );
+        assert_eq!(clamp_max_completion_tokens(Some(100), None, 0), Some(100));
+        assert_eq!(clamp_max_completion_tokens(None, None, 128_000), None);
     }
 }

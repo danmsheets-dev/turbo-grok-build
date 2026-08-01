@@ -650,6 +650,12 @@ pub enum ToolOutput {
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListOutput),
     UpdateGoal(crate::implementations::grok_build::update_goal::UpdateGoalOutput),
     Workflow(crate::implementations::grok_build::workflow::WorkflowToolOutput),
+    DiffSubagent(
+        crate::implementations::grok_build::subagent_worktree::diff::DiffSubagentOutput,
+    ),
+    LandSubagent(
+        crate::implementations::grok_build::subagent_worktree::land::LandSubagentOutput,
+    ),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
     /// Generic text output for tools that produce simple formatted text
@@ -695,6 +701,7 @@ impl ToolOutput {
                 TodoWriteOutput::DuplicateId(_) | TodoWriteOutput::InvalidArgument(_),
             ) => true,
             ToolOutput::GrepSearch(g) => g.exit_code > 1,
+            ToolOutput::LandSubagent(o) => !o.success,
             _ => false,
         }
     }
@@ -1018,6 +1025,46 @@ impl ToolOutput {
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
             ToolOutput::Workflow(o) => o.message.clone(),
+            ToolOutput::DiffSubagent(o) => {
+                let mut text = o.message.clone();
+                if !o.files.is_empty() {
+                    text.push_str("\n\n## Files\n");
+                    for f in &o.files {
+                        text.push_str("- ");
+                        text.push_str(f);
+                        text.push('\n');
+                    }
+                }
+                if !o.diff.trim().is_empty() {
+                    text.push_str("\n## Diff\n```diff\n");
+                    text.push_str(&o.diff);
+                    if !o.diff.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str("```\n");
+                }
+                text
+            }
+            ToolOutput::LandSubagent(o) => {
+                let mut text = o.message.clone();
+                if !o.files_landed.is_empty() {
+                    text.push_str("\n\n## Files landed\n");
+                    for f in &o.files_landed {
+                        text.push_str("- ");
+                        text.push_str(f);
+                        text.push('\n');
+                    }
+                }
+                if !o.conflicts.is_empty() {
+                    text.push_str("\n## Conflicts\n");
+                    for f in &o.conflicts {
+                        text.push_str("- ");
+                        text.push_str(f);
+                        text.push('\n');
+                    }
+                }
+                text
+            }
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
             ToolOutput::ImageGen(m) => m.prompt_text("Image generated"),

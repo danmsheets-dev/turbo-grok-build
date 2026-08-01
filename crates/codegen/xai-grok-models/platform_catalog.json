@@ -4700,7 +4700,9 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false,
+          "max_parallel_tool_calls": 1
         }
       },
       "route": {
@@ -4746,7 +4748,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -4792,7 +4795,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -4838,7 +4842,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -4884,7 +4889,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -4930,7 +4936,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -4948,7 +4955,7 @@
     {
       "api_backend": "chat_completions",
       "context_window": 262144,
-      "description": "Official Pi catalog (nvidia)",
+      "description": "Official Pi catalog (nvidia) [EOL/unavailable on NVIDIA Integrate]",
       "max_completion_tokens": 262144,
       "model": "mistralai/mistral-large-3-675b-instruct-2512",
       "name": "Mistral Large 3 675B Instruct 2512",
@@ -4976,7 +4983,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -4992,7 +5000,7 @@
     {
       "api_backend": "chat_completions",
       "context_window": 128000,
-      "description": "Official Pi catalog (nvidia)",
+      "description": "Official Pi catalog (nvidia) [EOL/unavailable on NVIDIA Integrate]",
       "max_completion_tokens": 8192,
       "model": "mistralai/mistral-small-4-119b-2603",
       "name": "mistral-small-4-119b-2603",
@@ -5020,7 +5028,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5038,7 +5047,7 @@
     {
       "api_backend": "chat_completions",
       "context_window": 262144,
-      "description": "Official Pi catalog (nvidia)",
+      "description": "Official Pi catalog (nvidia) [EOL/unavailable on NVIDIA Integrate]",
       "max_completion_tokens": 262144,
       "model": "moonshotai/kimi-k2.6",
       "name": "Kimi K2.6",
@@ -5066,7 +5075,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5112,7 +5122,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5158,7 +5169,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5204,7 +5216,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5250,7 +5263,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5296,7 +5310,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5342,7 +5357,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5388,7 +5404,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5406,7 +5423,7 @@
     {
       "api_backend": "chat_completions",
       "context_window": 256000,
-      "description": "Official Pi catalog (nvidia)",
+      "description": "Official Pi catalog (nvidia) [EOL/unavailable on NVIDIA Integrate]",
       "max_completion_tokens": 16384,
       "model": "stepfun-ai/step-3.5-flash",
       "name": "Step 3.5 Flash",
@@ -5434,7 +5451,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5480,7 +5498,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
@@ -5526,7 +5545,8 @@
           "thinking_format": "openai",
           "vercel_gateway_routing": {},
           "zai_tool_stream": false,
-          "supports_prompt_cache_key": false
+          "supports_prompt_cache_key": false,
+          "agent_ready": false
         }
       },
       "route": {
