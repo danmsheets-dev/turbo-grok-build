@@ -247,6 +247,17 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         },
     },
     BuiltinCommand {
+        name: "deepaudit",
+        description: "Deep codebase audit: investigate → verify → report (read-only, verified findings only)",
+        argument_hint: Some("<scope or topic> [--size small|medium|large]"),
+        aliases: &["deep-audit"],
+        gate: BuiltinGate::WorkflowLaunches,
+        resolve: |args| {
+            let (query, size) = parse_deepaudit_args(args);
+            BuiltinAction::DeepAudit { query, size }
+        },
+    },
+    BuiltinCommand {
         name: "workflow",
         description: "Launch a saved workflow, or manage a run (pause, resume, stop, save)",
         argument_hint: Some("<name> [args] | pause|resume|stop|save [name]"),
@@ -305,6 +316,40 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         },
     },
 ];
+
+/// Parse `/deepaudit` free text plus an optional `--size small|medium|large`
+/// flag in any position. Unknown size values are ignored (default medium).
+fn parse_deepaudit_args(args: &str) -> (String, String) {
+    let mut size = "medium".to_string();
+    let mut out: Vec<&str> = Vec::new();
+    let mut parts = args.split_whitespace().peekable();
+    while let Some(tok) = parts.next() {
+        if tok.eq_ignore_ascii_case("--size") {
+            if let Some(val) = parts.peek().copied() {
+                let lower = val.to_ascii_lowercase();
+                if matches!(lower.as_str(), "small" | "medium" | "large") {
+                    size = lower;
+                    parts.next();
+                    continue;
+                }
+            }
+            // Bare or invalid `--size`: drop the flag only; keep other tokens.
+            continue;
+        }
+        if let Some(rest) = tok
+            .strip_prefix("--size=")
+            .or_else(|| tok.strip_prefix("--size:"))
+        {
+            let lower = rest.to_ascii_lowercase();
+            if matches!(lower.as_str(), "small" | "medium" | "large") {
+                size = lower;
+                continue;
+            }
+        }
+        out.push(tok);
+    }
+    (out.join(" "), size)
+}
 
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
 ///
@@ -866,6 +911,10 @@ pub(super) enum BuiltinAction {
     DeepResearch {
         query: String,
     },
+    DeepAudit {
+        query: String,
+        size: String,
+    },
     WorkflowManage {
         run_id: String,
         op: String,
@@ -907,6 +956,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => "goal",
             BuiltinAction::DeepResearch { .. } => "deep-research",
+            BuiltinAction::DeepAudit { .. } => "deepaudit",
             BuiltinAction::WorkflowManage { .. } => "workflow",
             BuiltinAction::WorkflowLaunch { .. } => "workflow",
         }
@@ -942,6 +992,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => false,
             BuiltinAction::DeepResearch { .. } => true,
+            BuiltinAction::DeepAudit { .. } => true,
             BuiltinAction::WorkflowManage { .. } => true,
             BuiltinAction::WorkflowLaunch { input, .. } => !input.is_empty(),
         }
@@ -1746,6 +1797,7 @@ mod tests {
                 "session-info",
                 "feedback",
                 "deep-research",
+                "deepaudit",
                 "workflow",
                 "goal",
                 "loop",
@@ -2741,6 +2793,7 @@ mod tests {
         assert!(names.iter().any(|name| name == "workflow"));
         assert!(!names.iter().any(|name| name == "review"));
         assert!(!names.iter().any(|name| name == "deep-research"));
+        assert!(!names.iter().any(|name| name == "deepaudit"));
         assert!(matches!(
             resolve(
                 vec![text_block("/workflow stop old-run")],
@@ -2962,6 +3015,40 @@ mod tests {
         assert!(!BuiltinAction::GoalPause.args_provided());
         assert!(!BuiltinAction::GoalResume.args_provided());
         assert!(!BuiltinAction::GoalClear.args_provided());
+    }
+
+    #[test]
+    fn deepaudit_parses_size_flag_and_scope() {
+        assert_eq!(
+            parse_deepaudit_args("nvidia subagent tool path"),
+            ("nvidia subagent tool path".into(), "medium".into())
+        );
+        assert_eq!(
+            parse_deepaudit_args("--size large src/agent/subagent"),
+            ("src/agent/subagent".into(), "large".into())
+        );
+        assert_eq!(
+            parse_deepaudit_args("auth module --size small"),
+            ("auth module".into(), "small".into())
+        );
+        assert_eq!(
+            parse_deepaudit_args("--size=large security"),
+            ("security".into(), "large".into())
+        );
+        assert_eq!(parse_deepaudit_args(""), ("".into(), "medium".into()));
+        // Invalid size values are left in the free-text scope; default size stays medium.
+        assert_eq!(
+            parse_deepaudit_args("--size huge topic"),
+            ("huge topic".into(), "medium".into())
+        );
+        assert_eq!(
+            BuiltinAction::DeepAudit {
+                query: "x".into(),
+                size: "medium".into(),
+            }
+            .command_name(),
+            "deepaudit"
+        );
     }
 
     // ── GoalTracker handler-level interaction tests ──────────────

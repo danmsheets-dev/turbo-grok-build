@@ -429,6 +429,7 @@ impl HostService {
                         capability_mode,
                         isolation,
                         output_schema: None,
+                        timeout_ms: opts.timeout_ms,
                         ..Default::default()
                     },
                     run_in_background: false,

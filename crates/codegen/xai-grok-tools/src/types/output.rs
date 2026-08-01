@@ -2026,6 +2026,8 @@ mod tests {
             resume_from_hint: "019e0000-0000-7000-8000-0000000000bb".into(),
             persona_hint: None,
             isolation_fallback: false,
+            snapshot_ref: None,
+            worktree_state: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2067,6 +2069,8 @@ mod tests {
             resume_from_hint: "abc-123".into(),
             persona_hint: Some("implementer".into()),
             isolation_fallback: false,
+            snapshot_ref: None,
+            worktree_state: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2096,6 +2100,8 @@ mod tests {
             resume_from_hint: "wt-agent".into(),
             persona_hint: None,
             isolation_fallback: false,
+            snapshot_ref: None,
+            worktree_state: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2121,6 +2127,8 @@ mod tests {
             resume_from_hint: "sub-abc-123".into(),
             persona_hint: Some("implementer".into()),
             isolation_fallback: false,
+            snapshot_ref: None,
+            worktree_state: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-abc-123");
@@ -2399,6 +2407,8 @@ mod tests {
             resume_from_hint: "sub-xyz".into(),
             persona_hint: None,
             isolation_fallback: false,
+            snapshot_ref: None,
+            worktree_state: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-xyz");

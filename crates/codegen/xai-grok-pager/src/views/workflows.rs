@@ -586,7 +586,7 @@ fn render_list(
             buf,
             inner.x + 1,
             y + 3,
-            "Start one with /deep-research <query> or ask for a workflow.",
+            "Start one with /deep-research <query>, /deepaudit, or ask for a workflow.",
             Style::default().fg(theme.gray),
             inner.right(),
         );

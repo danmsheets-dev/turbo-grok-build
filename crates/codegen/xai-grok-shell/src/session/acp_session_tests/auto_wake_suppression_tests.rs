@@ -1009,6 +1009,8 @@ async fn subagent_completed_drops_matching_pending_input() {
                 resume_from_hint: "sub-target".into(),
                 persona_hint: None,
                 isolation_fallback: false,
+                snapshot_ref: None,
+                worktree_state: None,
             });
             let consumed = consumed_completion_ids(&output);
             assert_eq!(consumed, vec!["sub-target"]);

@@ -864,6 +864,92 @@ impl SessionActor {
                 }
                 ok_end_turn(0, None)
             }
+            BuiltinAction::DeepAudit { query, size } => {
+                let size = match size.to_ascii_lowercase().as_str() {
+                    "small" | "medium" | "large" => size.to_ascii_lowercase(),
+                    _ => "medium".to_string(),
+                };
+                let objective = if query.is_empty() {
+                    "Audit the current workspace for defects, security issues, and reliability risks"
+                        .to_string()
+                } else {
+                    query.clone()
+                };
+                // Size guidelines from RC8 WP10: small=16, medium=48, large=128.
+                let agent_budget = match size.as_str() {
+                    "small" => Some(16),
+                    "large" => Some(128),
+                    _ => Some(48),
+                };
+                let resolved = match crate::session::workflow::registry::resolve_by_name(
+                    "deep-audit",
+                    None,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.send_host_turn_slash_command_output(&format!(
+                            "deep-audit workflow unavailable: {e}"
+                        ))
+                        .await;
+                        return ok_end_turn(0, None);
+                    }
+                };
+                let spec = crate::session::workflow::manager::LaunchSpec {
+                    objective: objective.clone(),
+                    args: serde_json::json!({
+                        "scope": objective,
+                        "objective": objective,
+                        "query": objective,
+                        "size": size,
+                        "focus": "all",
+                    }),
+                    agent_budget,
+                    resume_run_id: None,
+                };
+                let launched = self.workflow_manager.lock().await.launch(resolved, spec);
+                match launched {
+                    Ok((run_id, outcome_rx)) => {
+                        let (display, run_objective) = self
+                            .workflow_tracker()
+                            .await
+                            .lock()
+                            .get(&run_id)
+                            .map(|r| (r.name.clone(), r.objective.clone()))
+                            .unwrap_or_else(|| ("deep-audit".to_string(), objective.clone()));
+                        let slash_line = if query.is_empty() {
+                            format!("/deepaudit --size {size}")
+                        } else {
+                            format!("/deepaudit --size {size} {run_objective}")
+                        };
+                        self.push_workflow_launch_reminder(
+                            &display,
+                            &run_id,
+                            &run_objective,
+                            &slash_line,
+                            false,
+                        );
+                        self.send_host_turn_slash_command_output(&format!(
+                            "Deep audit '{display}' started in the background (size={size}). \
+                             It will investigate with parallel find agents, independently verify \
+                             claims, and return only confirmed findings here. \
+                             Use /workflows to follow progress."
+                        ))
+                        .await;
+                        tokio::spawn(async move {
+                            if let Ok(outcome) = outcome_rx.await {
+                                tracing::info!(run_id, ?outcome, "deep-audit finished");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        self.send_host_turn_slash_command_output(&format!(
+                            "Could not start deep audit: {e}"
+                        ))
+                        .await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
             BuiltinAction::WorkflowManage { run_id, op } => {
                 let msg = self.manage_workflow_run(&run_id, &op).await;
                 self.send_host_turn_slash_command_output(&msg).await;

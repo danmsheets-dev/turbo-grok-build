@@ -1769,7 +1769,21 @@ impl SubagentExecutionBudget {
         definition: &xai_grok_agent::config::AgentDefinition,
         parent_max_turns: Option<usize>,
     ) -> Self {
-        let timeout_secs = definition.timeout_secs;
+        Self::resolve_with_override(definition, parent_max_turns, None)
+    }
+
+    /// Resolve budget. `timeout_ms_override` (from Task spawn / runtime overrides)
+    /// wins over agent-definition `timeout_secs` when present and > 0.
+    fn resolve_with_override(
+        definition: &xai_grok_agent::config::AgentDefinition,
+        parent_max_turns: Option<usize>,
+        timeout_ms_override: Option<u64>,
+    ) -> Self {
+        // explicit timeout_ms > AgentDefinition.timeout_secs > None
+        let timeout_secs = match timeout_ms_override {
+            Some(ms) if ms > 0 => Some(ms.div_ceil(1000).max(1)),
+            _ => definition.timeout_secs,
+        };
         let finalize_grace_secs = timeout_secs.map(|timeout| {
             definition
                 .finalize_grace_secs
@@ -2375,10 +2389,15 @@ fn cancelled_result(request: &SubagentRequest, error: &str) -> SubagentResult {
     }
 }
 fn child_run_output(
-    result: SubagentResult,
+    mut result: SubagentResult,
     completion_data: ShellCompletionData,
     snapshot_ref: Option<String>,
 ) -> ChildRunOutput<ShellCompletionData> {
+    // Surface the durable ref on the parent-facing result so task tool
+    // completion text can show recovery instructions after dispose.
+    if result.snapshot_ref.is_none() {
+        result.snapshot_ref = snapshot_ref.clone();
+    }
     ChildRunOutput {
         result,
         completion_data,

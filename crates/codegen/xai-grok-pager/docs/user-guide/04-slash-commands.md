@@ -300,6 +300,24 @@ Kick off a background research workflow. It plans a bounded set of questions, ga
 
 The command returns right away — follow progress in `/workflows`, and the final report appears in the conversation on its own.
 
+### `/deepaudit [scope] [--size small|medium|large]`
+
+Kick off a **codebase deep audit** workflow (Ultracode-style): investigate in parallel, adversarially verify each claim, then report only findings that survive verification. Agents run **read-only**. Alias: `/deep-audit`.
+
+```
+/deepaudit
+/deepaudit nvidia subagent tool path
+/deepaudit --size large src/agent/subagent
+```
+
+| Size | Intent |
+|------|--------|
+| `small` | Narrow module / smoke (few agents) |
+| `medium` (default) | Subsystem audit |
+| `large` | Broad multi-crate audit (higher token cost) |
+
+The command returns right away — follow progress in `/workflows`. The final report lands in the conversation with verified findings in the main body and unverified claims in an appendix.
+
 Model-launched workflows may set `agent_budget` on the `workflow` tool. It's an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`. Named slash launches use the default budget.
 
 ### `/workflow`

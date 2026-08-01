@@ -25,6 +25,9 @@ pub struct AgentOpts {
     pub output_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub phase: Option<String>,
+    /// Hard wall-clock limit for this workflow child agent (milliseconds).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

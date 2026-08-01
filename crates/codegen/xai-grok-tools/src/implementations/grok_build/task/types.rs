@@ -175,6 +175,9 @@ pub struct SubagentRuntimeOverrides {
     pub output_token_budget: Option<u64>,
     pub output_schema: Option<serde_json::Value>,
     pub loop_task_id: Option<String>,
+    /// Hard wall-clock limit for the child (milliseconds). When set, overrides
+    /// the agent-definition `timeout_secs` in the shell budget monitor.
+    pub timeout_ms: Option<u64>,
 }
 
 /// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.
@@ -400,8 +403,10 @@ pub struct SubagentResult {
     pub output_tokens_used: u64,
     pub total_tokens_used: u64,
     pub output_usage_incomplete: bool,
-    /// Path to the isolated worktree if one was created.
+    /// Path to the isolated worktree if one was created (and still live).
     pub worktree_path: Option<String>,
+    /// Durable git ref for the child's worktree snapshot after dispose.
+    pub snapshot_ref: Option<String>,
     /// Set when isolation was requested but the child fell back to the shared
     /// workspace (only possible with
     /// `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`). Harnesses must treat the run
@@ -432,6 +437,7 @@ impl Default for SubagentResult {
             total_tokens_used: 0,
             output_usage_incomplete: false,
             worktree_path: None,
+            snapshot_ref: None,
             isolation_fallback: false,
             backgrounded: false,
         }

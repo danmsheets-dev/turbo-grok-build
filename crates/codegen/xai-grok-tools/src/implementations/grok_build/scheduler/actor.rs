@@ -668,6 +668,7 @@ impl SchedulerActor {
                 completion_output_cap: Some(LOOP_COMPLETION_OUTPUT_CAP),
                 spawn_depth: Some(0),
                 loop_task_id: Some(task_id.to_string()),
+                timeout_ms: None,
                 ..Default::default()
             },
             run_in_background: true,

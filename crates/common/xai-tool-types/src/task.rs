@@ -109,6 +109,19 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Hard wall-clock limit for this child in milliseconds.
+    ///
+    /// Distinct from `get_task_output` / wait `timeout_ms`, which only bound how
+    /// long the parent blocks waiting — this field kills the child when exceeded.
+    /// When set, overrides the agent-definition `timeout_secs` budget.
+    #[schemars(
+        description = "Hard wall-clock limit for this child in milliseconds. Distinct from \
+            get_task_output wait timeout: this cancels the child when exceeded. Overrides the \
+            agent-definition timeout when set."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+
     /// Server-injected before execution. Becomes the subagent's session ID.
     #[schemars(skip)]
     #[serde(default)]
@@ -298,6 +311,14 @@ pub struct SubagentCompletedOutput {
     /// must not report such runs as isolated.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub isolation_fallback: bool,
+    /// Durable git ref for the child's worktree snapshot after dispose
+    /// (e.g. `refs/grok/subagents/<id>`). Present when the live path was
+    /// cleaned or when a snapshot was taken for resume/recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ref: Option<String>,
+    /// Worktree lifecycle state for supervisors: `live`, `cleaned`, or `preserved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_state: Option<String>,
 }
 
 impl SubagentCompletedOutput {
@@ -324,6 +345,15 @@ impl SubagentCompletedOutput {
         );
         if let Some(ref path) = self.worktree_path {
             text.push_str(&format!("\n\n<worktree_path>{path}</worktree_path>"));
+        }
+        if let Some(ref state) = self.worktree_state {
+            text.push_str(&format!("\n\n<worktree_state>{state}</worktree_state>"));
+        }
+        if let Some(ref snap) = self.snapshot_ref {
+            text.push_str(&format!(
+                "\n\n<snapshot_ref>{snap}</snapshot_ref>\n\
+                 Recover files with: git show {snap}:<path>  or  git diff HEAD {snap}"
+            ));
         }
         if self.isolation_fallback {
             text.push_str(
@@ -1403,6 +1433,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            timeout_ms: None,
             task_id: None,
         };
         let value = serde_json::to_value(&input).unwrap();

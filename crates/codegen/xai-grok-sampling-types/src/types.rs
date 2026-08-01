@@ -533,6 +533,8 @@ pub struct ChatCompletionResponse {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatChoice {
+    /// Some providers (e.g. NVIDIA) may send `null`; treat as 0.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub index: u32,
     pub message: ChatResponseMessage,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -556,7 +558,12 @@ pub struct ChatResponseMessage {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Handles JSON `null` as empty vec (same as streaming deltas).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_null_default"
+    )]
     pub tool_calls: Vec<ToolCallResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -596,8 +603,12 @@ impl ToolCallFunction {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Usage {
+    /// Some providers (e.g. NVIDIA) may send `null`; treat as 0.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub prompt_tokens: u32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub completion_tokens: u32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
@@ -612,21 +623,21 @@ pub struct Usage {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PromptTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub cached_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub audio_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CompletionTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub reasoning_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub audio_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub accepted_prediction_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub rejected_prediction_tokens: u32,
 }
 // ============ Streaming types ============
@@ -654,6 +665,8 @@ pub struct ChatCompletionChunk {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatChunkChoice {
+    /// Some providers (e.g. NVIDIA) may send `null`; treat as 0.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub index: u32,
     pub delta: ChatChunkDelta,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -671,7 +684,8 @@ pub struct ChatChunkChoice {
 pub struct ToolCallDelta {
     /// The positional index of the tool call being streamed.
     /// Used to correlate delta chunks belonging to the same tool call.
-    #[serde(default)]
+    /// Some providers may send `null`; treat as 0.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub index: u32,
     /// Only present in the first chunk for this tool call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1748,6 +1762,138 @@ mod tests {
         assert_eq!(delta.role, Some(Role::Assistant));
         assert_eq!(delta.content, Some("".to_string()));
         assert!(delta.tool_calls.is_empty());
+    }
+
+    /// NVIDIA / OpenAI-compatible gateways may emit `null` for token counts.
+    /// Treat null as 0 so `Usage` stays `u32` for From conversions.
+    #[test]
+    fn test_usage_deserialize_null_token_counts() {
+        let json = r#"{
+            "prompt_tokens": null,
+            "completion_tokens": null,
+            "total_tokens": null
+        }"#;
+        let usage: Usage =
+            serde_json::from_str(json).expect("usage with null token fields should deserialize");
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+    }
+
+    /// Nested token detail fields may also be null from some providers.
+    #[test]
+    fn test_usage_details_deserialize_null_u32_fields() {
+        let json = r#"{
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {
+                "cached_tokens": null,
+                "audio_tokens": null
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": null,
+                "audio_tokens": null,
+                "accepted_prediction_tokens": null,
+                "rejected_prediction_tokens": null
+            }
+        }"#;
+        let usage: Usage =
+            serde_json::from_str(json).expect("usage details with null u32s should deserialize");
+        let ptd = usage.prompt_tokens_details.expect("prompt details present");
+        assert_eq!(ptd.cached_tokens, 0);
+        assert_eq!(ptd.audio_tokens, 0);
+        let ctd = usage
+            .completion_tokens_details
+            .expect("completion details present");
+        assert_eq!(ctd.reasoning_tokens, 0);
+        assert_eq!(ctd.audio_tokens, 0);
+        assert_eq!(ctd.accepted_prediction_tokens, 0);
+        assert_eq!(ctd.rejected_prediction_tokens, 0);
+    }
+
+    /// NVIDIA may send `"index": null` on chat choices.
+    #[test]
+    fn test_chat_choice_deserialize_null_index() {
+        let json = r#"{
+            "index": null,
+            "message": {
+                "role": "assistant",
+                "content": "hi"
+            },
+            "finish_reason": "stop"
+        }"#;
+        let choice: ChatChoice =
+            serde_json::from_str(json).expect("ChatChoice with null index should deserialize");
+        assert_eq!(choice.index, 0);
+        assert_eq!(choice.message.content.as_deref(), Some("hi"));
+    }
+
+    /// Streaming choice index may be null from some gateways.
+    #[test]
+    fn test_chat_chunk_choice_deserialize_null_index() {
+        let json = r#"{
+            "index": null,
+            "delta": {
+                "content": "x"
+            },
+            "finish_reason": null
+        }"#;
+        let choice: ChatChunkChoice = serde_json::from_str(json)
+            .expect("ChatChunkChoice with null index should deserialize");
+        assert_eq!(choice.index, 0);
+        assert_eq!(choice.delta.content.as_deref(), Some("x"));
+    }
+
+    /// Tool call delta index may be null; `default` alone does not accept null.
+    #[test]
+    fn test_tool_call_delta_deserialize_null_index() {
+        let json = r#"{
+            "index": null,
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "arguments": "{"
+            }
+        }"#;
+        let delta: ToolCallDelta =
+            serde_json::from_str(json).expect("ToolCallDelta with null index should deserialize");
+        assert_eq!(delta.index, 0);
+        assert_eq!(delta.id.as_deref(), Some("call_1"));
+    }
+
+    /// End-to-end NVIDIA-shaped chat completion payload with null usage/index/tool_calls.
+    #[test]
+    fn test_chat_completion_response_nvidia_null_fields() {
+        let json = r#"{
+            "id": "chatcmpl-nvidia-1",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "meta/llama-3.1-8b-instruct",
+            "choices": [{
+                "index": null,
+                "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "tool_calls": null
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": null,
+                "completion_tokens": null,
+                "total_tokens": null
+            }
+        }"#;
+        let resp: ChatCompletionResponse = serde_json::from_str(json)
+            .expect("NVIDIA-shaped response with null fields should deserialize");
+        assert_eq!(resp.choices[0].index, 0);
+        assert!(resp.choices[0].message.tool_calls.is_empty());
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
     }
 
     /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse.

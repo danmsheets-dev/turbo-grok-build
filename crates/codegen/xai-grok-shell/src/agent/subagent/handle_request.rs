@@ -527,6 +527,13 @@ pub(crate) async fn run_shell_child(
             )
         });
     }
+    // Wall-clock / tool budget: spawn timeout_ms overrides definition.timeout_secs.
+    let execution_budget = SubagentExecutionBudget::resolve_with_override(
+        &definition,
+        ctx.parent_max_turns,
+        request.runtime_overrides.timeout_ms,
+    );
+    append_execution_budget_prompt(&mut definition, execution_budget);
     // Fork reuses parent conversation prefix and prefers the parent model for
     // cache locality — but an *explicit* Task/spawn model override (e.g. goal
     // planner role model) must win so multi-model orchestration works.
@@ -756,7 +763,7 @@ pub(crate) async fn run_shell_child(
             role: effective_runtime.role_name.clone(),
             model: Some(effective_model_id.0.to_string()),
             resumed_from: request.resume_from.clone(),
-            budget: SubagentExecutionBudget::resolve(&definition, ctx.parent_max_turns).wire(),
+            budget: execution_budget.wire(),
             workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
         },
         ctx.parent_cmd_tx.as_ref(),
@@ -1327,6 +1334,12 @@ pub(crate) async fn run_shell_child(
         cancel_token.clone(),
         goal_tick_cmd_tx(ctx.goal_enabled, ctx.parent_cmd_tx.as_ref()),
     );
+    let budget_monitor = spawn_subagent_budget_monitor(
+        execution_budget,
+        &child_handle,
+        start,
+        cancel_token.clone(),
+    );
     let (before_copy_tx, before_copy_rx) = tokio::sync::oneshot::channel();
     let _ = child_handle.cmd_tx.send(SessionCommand::CopyFile {
         respond_to: before_copy_tx,
@@ -1373,6 +1386,7 @@ pub(crate) async fn run_shell_child(
         parsed_prompt_tx: None,
     });
     let wait_outcome = await_subagent_turn_or_cancellation(prompt_rx, cancel_token.clone()).await;
+    let budget_trigger = budget_monitor.and_then(|m| m.finish());
     let duration_ms = start.elapsed().as_millis() as u64;
     let mut turn_token_totals: Option<(u64, u64, u64)> = None;
     let mut cancellation_may_hide_usage = false;
@@ -1453,6 +1467,7 @@ pub(crate) async fn run_shell_child(
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
+                        snapshot_ref: None,
                         isolation_fallback,
                         backgrounded: false,
                     }
@@ -1485,6 +1500,7 @@ pub(crate) async fn run_shell_child(
                     worktree_path: worktree_path
                         .as_ref()
                         .map(|p| p.to_string_lossy().to_string()),
+                    snapshot_ref: None,
                     isolation_fallback,
                     backgrounded: false,
                 },
@@ -1586,6 +1602,30 @@ pub(crate) async fn run_shell_child(
             }
         }
     };
+    // If the budget monitor hard-killed the child, classify the cancellation.
+    // Keep usable partial text when no structured output was required.
+    if let Some(trigger) = budget_trigger {
+        if matches!(
+            trigger,
+            SubagentBudgetTrigger::Timeout | SubagentBudgetTrigger::MaxToolCalls
+        ) {
+            let partial_ok = can_use_partial_budget_result(
+                true,
+                result.output.as_ref(),
+                request.runtime_overrides.output_schema.is_some(),
+            );
+            result.termination_reason = Some(trigger.termination_reason().to_string());
+            if partial_ok {
+                result.success = true;
+                result.cancelled = false;
+                result.error = None;
+            } else {
+                result.cancelled = true;
+                result.success = false;
+                result.error = Some(budget_exhausted_message(trigger, execution_budget));
+            }
+        }
+    }
     if let Some(trace_gcs_config) = gcs_upload_ctx.upload_method.as_ref().map(|method| {
         crate::session::repo_changes::TraceExportConfig {
             bucket_url: gcs_upload_ctx.bucket_url.clone(),
