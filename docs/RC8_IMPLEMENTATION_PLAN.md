@@ -659,15 +659,24 @@ Four Grok 4.5 passes (explore×3 + oracle) converged:
 - [x] **WP10b: size small/medium/large + agent_budget mapping + large cost caution**  
 - [x] Oracle doctor warning for non-agent-ready pins  
 
-### Later (RC9+)
-- [ ] spawn_many + barrier  
-- [ ] Path allowlists; RO skip-sandbox by default for explore  
+### Pre-r8 residual batch (pull-forward; hold release until done)
+Ship these before packaging r8. Supervisors may parallelize with worktree agents.
+
+- [ ] **R1** WP7 residual: `last_tool` + `last_progress_age_ms` on `SubagentProgress` ACP ticks; ensure completion meta `land_status=pending` when worktree artifacts exist  
+- [ ] **R2** Path allowlists: `allowed_paths` on spawn + land/diff filter (refuse out-of-allowlist)  
+- [ ] **R3** RO / explore|plan|oracle default `isolation=none` when spawn omits isolation (explicit worktree still honored)  
+- [ ] **R4** `spawn_many` tool (or Task multi-spawn) + barrier wait respecting max concurrency  
+- [ ] **R5** `/ultracode` slash alias → deep-audit (full `/effort ultracode` mode can follow)  
+- [ ] **R6** Durable LoopCheckpoint under session `loops/<id>/` (cross-process readable) when continuous-improve runs  
+- [ ] **R7** NVIDIA conformance unit fixtures expanded + optional CI job (live key optional)  
+
+### Later (true RC9 / post-r8)
 - [ ] Real git worktree preference + sparse filters  
 - [ ] Pre-land test hooks; required final schema  
 - [ ] Subagent panel UI; session export report  
-- [ ] Cross-process workflow journal  
-- [ ] Nightly NVIDIA conformance CI  
-- [ ] **`ultracode` keyword trigger + `/effort ultracode` session mode**  
+- [ ] Full cross-process workflow journal (beyond LoopCheckpoint)  
+- [ ] Nightly live NVIDIA matrix (key-gated)  
+- [ ] `/effort ultracode` session mode + free-text keyword auto-trigger  
 - [ ] Model-authored dynamic workflows for arbitrary tasks (beyond bundled audit)  
 
 ---
