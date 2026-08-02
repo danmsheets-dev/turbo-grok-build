@@ -341,6 +341,10 @@ pub struct SubagentCompletedOutput {
     /// Optional short diffstat vs the snapshot base, e.g. `2 files, +40/-12`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diffstat: Option<String>,
+    /// Stable snake_case failure class for orchestrators when the run failed
+    /// (`timeout`, `stall`, `serialize`, `provider_400`, `cancelled`, `budget`, `unknown`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
 }
 
 impl SubagentCompletedOutput {
@@ -365,6 +369,9 @@ impl SubagentCompletedOutput {
             self.duration_ms,
             self.persona.as_deref(),
         );
+        if let Some(ref class) = self.error_class {
+            text.push_str(&format!("\n\n<error_class>{class}</error_class>"));
+        }
         if let Some(ref path) = self.worktree_path {
             text.push_str(&format!("\n\n<worktree_path>{path}</worktree_path>"));
         }
@@ -1506,6 +1513,7 @@ mod tests {
             worktree_state: Some("cleaned".into()),
             patch_path: Some("/tmp/sessions/s/subagents/sa-1/changes.patch".into()),
             diffstat: Some("1 files, +3/-0".into()),
+            error_class: None,
         };
         let text = output.to_model_text();
         assert!(text.contains("<worktree_state>cleaned</worktree_state>"));

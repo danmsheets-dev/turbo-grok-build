@@ -542,13 +542,25 @@ impl xai_tool_runtime::Tool for TaskTool {
                 worktree_state,
                 patch_path: result.patch_path,
                 diffstat: result.diffstat,
+                error_class: result.error_class,
             }))
         } else {
-            Err(xai_tool_runtime::ToolError::invalid_arguments(
-                result
-                    .error
-                    .unwrap_or_else(|| "Unknown subagent error".to_string()),
-            ))
+            let class = result.error_class.clone().or_else(|| {
+                types::classify_subagent_error_class(
+                    false,
+                    result.cancelled,
+                    result.termination_reason.as_deref(),
+                    result.error.as_deref(),
+                )
+            });
+            let msg = result
+                .error
+                .unwrap_or_else(|| "Unknown subagent error".to_string());
+            let msg = match class {
+                Some(c) => format!("[{c}] {msg}"),
+                None => msg,
+            };
+            Err(xai_tool_runtime::ToolError::invalid_arguments(msg))
         }
     }
 }

@@ -2438,6 +2438,14 @@ fn child_run_output(
     if result.snapshot_ref.is_none() {
         result.snapshot_ref = snapshot_ref.clone();
     }
+    if result.error_class.is_none() {
+        result.error_class = xai_grok_tools::implementations::grok_build::task::types::classify_subagent_error_class(
+            result.success,
+            result.cancelled,
+            result.termination_reason.as_deref(),
+            result.error.as_deref(),
+        );
+    }
     ChildRunOutput {
         result,
         completion_data,

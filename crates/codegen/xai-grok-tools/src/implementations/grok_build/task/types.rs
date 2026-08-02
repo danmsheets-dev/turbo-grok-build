@@ -428,6 +428,9 @@ pub struct SubagentResult {
     /// `get_command_or_subagent_output`), so the tool returns a `task_id` notice
     /// instead of a completion. Never set for natively backgrounded subagents.
     pub backgrounded: bool,
+    /// Stable snake_case error class for orchestrators (`timeout`, `stall`,
+    /// `serialize`, `provider_400`, `cancelled`, `budget`, `unknown`).
+    pub error_class: Option<String>,
 }
 
 impl Default for SubagentResult {
@@ -454,8 +457,88 @@ impl Default for SubagentResult {
             diffstat: None,
             isolation_fallback: false,
             backgrounded: false,
+            error_class: None,
         }
     }
+}
+
+/// Snake_case error classes returned on [`SubagentResult::error_class`].
+pub mod error_class {
+    pub const TIMEOUT: &str = "timeout";
+    pub const STALL: &str = "stall";
+    pub const SERIALIZE: &str = "serialize";
+    pub const PROVIDER_400: &str = "provider_400";
+    pub const CANCELLED: &str = "cancelled";
+    pub const BUDGET: &str = "budget";
+    pub const UNKNOWN: &str = "unknown";
+}
+
+/// Classify a finished subagent into a stable `error_class` string.
+pub fn classify_subagent_error_class(
+    success: bool,
+    cancelled: bool,
+    termination_reason: Option<&str>,
+    error: Option<&str>,
+) -> Option<String> {
+    if let Some(class) = termination_reason.and_then(error_class_from_termination_reason) {
+        return Some(class.to_string());
+    }
+    if cancelled {
+        return Some(error_class::CANCELLED.to_string());
+    }
+    if let Some(err) = error
+        && let Some(class) = error_class_from_message(err)
+    {
+        return Some(class.to_string());
+    }
+    if !success {
+        return Some(error_class::UNKNOWN.to_string());
+    }
+    None
+}
+
+/// Map budget/runtime termination reasons to error classes.
+pub fn error_class_from_termination_reason(reason: &str) -> Option<&'static str> {
+    match reason {
+        "timeout" | "timeout_finalize" => Some(error_class::TIMEOUT),
+        "stall" => Some(error_class::STALL),
+        "cancelled" => Some(error_class::CANCELLED),
+        "max_tool_calls" | "max_tool_calls_finalize" | "max_turns" | "max_turns_finalize" => {
+            Some(error_class::BUDGET)
+        }
+        _ => None,
+    }
+}
+
+/// Pattern-match common provider/client error strings.
+pub fn error_class_from_message(error: &str) -> Option<&'static str> {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("serialize")
+        || lower.contains("deserializ")
+        || lower.contains("expected u32")
+        || lower.contains("invalid type: null")
+        || lower.contains("null, expected")
+    {
+        return Some(error_class::SERIALIZE);
+    }
+    if lower.contains("provider_400")
+        || lower.contains("status code 400")
+        || lower.contains("status: 400")
+        || lower.contains("http 400")
+        || lower.contains("bad request")
+    {
+        return Some(error_class::PROVIDER_400);
+    }
+    if lower.contains("stall") || lower.contains("stalled") {
+        return Some(error_class::STALL);
+    }
+    if lower.contains("wall-clock budget exhausted") || lower.contains("timed out") {
+        return Some(error_class::TIMEOUT);
+    }
+    if lower.contains("tool-call budget exhausted") || lower.contains("budget exhausted") {
+        return Some(error_class::BUDGET);
+    }
+    None
 }
 
 impl SubagentResult {

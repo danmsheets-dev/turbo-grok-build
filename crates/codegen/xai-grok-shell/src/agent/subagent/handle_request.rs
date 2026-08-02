@@ -1477,6 +1477,7 @@ pub(crate) async fn run_shell_child(
                         diffstat: None,
                         isolation_fallback,
                         backgrounded: false,
+                        error_class: None,
                     }
                 }
                 Ok(Ok(crate::session::commands::PromptTurnOk {
@@ -1513,6 +1514,7 @@ pub(crate) async fn run_shell_child(
                     diffstat: None,
                     isolation_fallback,
                     backgrounded: false,
+                    error_class: None,
                 },
                 Ok(Ok(crate::session::commands::PromptTurnOk {
                     structured_output, ..
