@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/hyper-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/hyper-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.114--r10%20RC10-blue" alt="RC10">
+  <img src="https://img.shields.io/badge/version-0.2.114--r11%20RC11-blue" alt="RC11">
   <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 subagent worktrees, recovery tooling, field logging, and agent orientation that
 the upstream product does not ship.
 
-Current release line: **RC10** · wire version **`0.2.114-r10`**.
+Current release line: **RC11** · wire version **`0.2.114-r11`**.
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
 
@@ -51,22 +51,22 @@ is a multi-agent development runtime** built on that foundation.
 | Agent orientation | System prompt + project rules | **Agent Boot Card** (ops brief, recovery, required field logging) |
 | Product field signal | `/feedback`, crashes | **Auto Developer Log** (`developer_log` tool + `turbo issues`) |
 | Providers | xAI-centric | Multi-provider (Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, …) |
-| Reliability track | Upstream cadence | RC7→RC8→RC9→**RC10** community reliability + deep-audit workflows |
+| Reliability track | Upstream cadence | RC7→RC10→**RC11** community reliability + Game Mode + deep-audit |
 | Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
-### Highlights (RC10)
+### Highlights (RC11)
 
-RC10 ships the RC9 multi-agent platform plus harness/ship blockers from the
-RC9 Q&A pass (see [`CHANGELOG.md`](./CHANGELOG.md) and
-[`docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`](docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md)):
+RC11 builds on the RC10 multi-agent harness with Game Mode, Feature Request Log,
+and round-2 land/resume safety (see [`CHANGELOG.md`](./CHANGELOG.md) and
+[`docs/RC11_RELEASE_NOTES.md`](docs/RC11_RELEASE_NOTES.md)):
 
-- **Isolated worktrees that stay recoverable** — soft-preserve by default, `turbo subagent open|diff|land|discard`, `open --restore`, agent-only baselines
-- **Agent Boot Card** — ops briefing on new sessions; resume injects when missing (`GROK_BOOT_CARD_ON_RESUME=0` to disable)
-- **Auto Developer Log** — agents must file structured product issues; `turbo issues file` for humans; honest export counts
-- **Land safety** — agent-only `baseline..snapshot` diffs; refuse mega-patches unless `force=true`
-- **`/deepaudit`** — multi-model finders, headless wait-for-completion, fixed Rhai `trimmed()`, longer stall budget
-- **Read-only spawn hardening** — `capability_mode=read-only` no longer re-injects write tools
-- **Copy affordance** on completed messages (selection copy icon on by default)
+- **Game Mode** — `Ctrl+G` pixel office for Supervisor + subagent desks
+- **Feature Request Log** — `feature_request_log` tool + `turbo features …`
+- **Land/resume hardening** — allowlist-filtered land/diff; fresh baseline on resume
+- **Isolated worktrees that stay recoverable** — soft-preserve, `turbo subagent open|diff|land|discard`, agent-only baselines
+- **Agent Boot Card** — ops briefing; bugs → ADL, missing capability → Feature Request Log
+- **Auto Developer Log** — structured product issues; `turbo issues file` for humans
+- **`/deepaudit`** — multi-model finders, headless wait, fixed Rhai models/trimmed helpers
 
 Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 
@@ -88,7 +88,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **RC10** · `0.2.114-r10` |
+| Release line | upstream cadence | **RC11** · `0.2.114-r11` |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 Repo folder/history may still say `hyper-grok-build`. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -119,21 +119,21 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r10
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r11
 ```
 
 ```powershell
-# Windows — pin RC10
+# Windows — pin RC11
 irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex
 # or from a clone after a release tag exists:
-# .\install.ps1 -Version v0.2.114-r10
+# .\install.ps1 -Version v0.2.114-r11
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
 (`%USERPROFILE%\.turbo\bin\turbo.exe` on Windows).
 
 > **Note:** Prebuilt install requires a published GitHub Release for
-> `v0.2.114-r10`. Until then, [build from source](#building-from-source) and copy
+> `v0.2.114-r11`. Until then, [build from source](#building-from-source) and copy
 > `target/release-dist/turbo` into `~/.turbo/bin`.
 
 ### Install with Nix
@@ -269,7 +269,8 @@ Community branding / updater: `--features community-build` (default on this tree
 
 ## Changelog & known issues
 
-- [`CHANGELOG.md`](./CHANGELOG.md) — **RC10** (`0.2.114-r10`) is current
+- [`CHANGELOG.md`](./CHANGELOG.md) — **RC11** (`0.2.114-r11`) is current
+- [`docs/RC11_RELEASE_NOTES.md`](docs/RC11_RELEASE_NOTES.md) — Game Mode + harness disposition
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
 - [`docs/RC9_FEATURES.md`](./docs/RC9_FEATURES.md) — worktrees, Boot Card, ADL (RC9 base)
 - [`docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`](docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md) — RC10 harness matrix

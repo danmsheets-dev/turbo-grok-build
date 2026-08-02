@@ -6,7 +6,7 @@
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.114-r10
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.114-r11
 #
 # Environment:
 #   TURBO_SHARE_DIR        install root (default: %USERPROFILE%\.turbo)

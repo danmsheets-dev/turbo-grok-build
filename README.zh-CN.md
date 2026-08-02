@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/hyper-grok-build?display_name=tag" alt="发布版本"></a>
   <a href="https://github.com/danmsheets-dev/hyper-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="发布 CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="许可证"></a>
-  <img src="https://img.shields.io/badge/version-0.2.114--r10%20RC10-blue" alt="RC10">
+  <img src="https://img.shields.io/badge/version-0.2.114--r11%20RC11-blue" alt="RC11">
   <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="平台:macOS、Linux、Windows">
   <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n:10 种语言">
@@ -18,7 +18,7 @@
 一个用 Rust 编写的终端 AI 编码代理,对多家 LLM 供应商提供一流支持:
 xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenCode Go、OpenAI、Anthropic、Z.AI、Ollama Cloud 等。
 
-当前版本线：**RC10** · 线版本 **`0.2.114-r10`**。
+当前版本线：**RC11** · 线版本 **`0.2.114-r11`**。
 
 它以全屏 TUI 的形式运行,能够理解你的代码库、编辑文件、
 执行 shell 命令、搜索网页,并管理长时间运行的任务 ——
@@ -65,7 +65,7 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 | 二进制文件 | `grok` | **`turbo`** |
 | 安装目录 | `~/.grok` | **`~/.turbo`**(仅二进制) |
 | 配置 / 认证 | `~/.grok` | **`~/.grok`**(共享;同一运行时) |
-| 版本线 | 上游节奏 | **RC10** · `0.2.114-r10` |
+| 版本线 | 上游节奏 | **RC11** · `0.2.114-r11` |
 | 上游 | [xai-org/grok-build](https://github.com/xai-org/grok-build) | 多供应商 / 多智能体社区补丁 |
 
 简短的 CLI 名称,不与 `grok` 冲突,也为超越单一供应商留出了发展空间
@@ -97,10 +97,10 @@ turbo login          # xAI / Grok 会话(浏览器 OAuth)
 turbo                # 启动 TUI
 ```
 
-安装指定版本（RC10）:
+安装指定版本（RC11）:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r10
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r11
 ```
 
 安装程序会根据发布版的 `SHA256SUMS` 校验每一次下载,
@@ -204,7 +204,7 @@ GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-
 
 1. 将根目录的 [`VERSION`](VERSION) 文件设置为 **monorepo 锁步客户端版本**
    (与 `crates/codegen/xai-grok-pager/Cargo.toml` /
-   `xai-grok-version` 保持一致,当前为 `0.2.114-r10`)。CI 会把它编译进
+   `xai-grok-version` 保持一致,当前为 `0.2.114-r11`)。CI 会把它编译进
    `x-grok-client-version`;xAI 会拒绝低于 **0.1.202** 的客户端(HTTP 426)。
    **不要**自己编造一个较低的营销版本号(例如 `0.1.0`)。
 2. 在 `dev`(或你的发布分支)上提交;更新 `CHANGELOG.md`。
@@ -222,14 +222,14 @@ git push origin "v${VERSION}"
 
 | 产物 | 示例 |
 | ----- | ------- |
-| macOS arm64 | `turbo-0.2.114-r10-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `turbo-0.2.114-r10-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64(glibc ≥2.17) | `turbo-0.2.114-r10-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64(glibc ≥2.17) | `turbo-0.2.114-r10-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `turbo-0.2.114-r10-x86_64-pc-windows-msvc.zip` |
+| macOS arm64 | `turbo-0.2.114-r11-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 | `turbo-0.2.114-r11-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64(glibc ≥2.17) | `turbo-0.2.114-r11-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64(glibc ≥2.17) | `turbo-0.2.114-r11-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `turbo-0.2.114-r11-x86_64-pc-windows-msvc.zip` |
 | 校验和 | `SHA256SUMS` |
 
-标签必须与 `VERSION` 完全一致(`v0.2.114-r10` ↔ `0.2.114-r10`),否则构建会失败。
+标签必须与 `VERSION` 完全一致(`v0.2.114-r11` ↔ `0.2.114-r11`),否则构建会失败。
 
 ---
 

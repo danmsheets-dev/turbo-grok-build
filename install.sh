@@ -9,7 +9,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | sh
-#   sh install.sh --version v0.2.114-r10  # pin a specific release
+#   sh install.sh --version v0.2.114-r11  # pin a specific release
 #
 # Environment:
 #   TURBO_SHARE_DIR        install root (default: ~/.turbo)

@@ -1,6 +1,6 @@
-# Turbo RC11 — Release notes (in progress)
+# Turbo RC11 — Release notes (0.2.114-r11)
 
-**Base:** 0.2.114-r10  
+**Base:** 0.2.114-r10 ? **ship:** 0.2.114-r11  
 **Focus:** Game Mode pixel office + RC10/RC11 harness incident fixes (2026-08-02)
 
 ---
@@ -78,6 +78,7 @@ Enterprise twin of Auto Developer Log for **missing product surface**:
 | Shift+G steals vim GotoBottom | feature_gap P2 | **Ctrl+G** (tasks: Ctrl+Shift+G). |
 | tick_demand for animated views | docs_gap P3 | Game Mode registers `TickDemand::Slow`. |
 | capability_mode RO strips write | verified | No further code (r10). |
+| **feature_request_log not in registry** | **FAIL** (session create) | **Fixed** | Tool was on toolsets/boot card but missing `b.register::<FeatureRequestLogTool>()` in `ToolRegistry::new()`. |
 | open/diff/land agent-only baseline | verified | Extended by resume + allowlist land above. |
 
 ### Deferred / out of scope for RC11 core

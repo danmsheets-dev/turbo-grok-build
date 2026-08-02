@@ -4,25 +4,45 @@ All notable changes to **Turbo** (`turbo` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r11] - 2026-08-02
+
+**Turbo Grok Build RC11** — Game Mode pixel office, Feature Request Log, and
+harness safety fixes from RC10 round-2 Q&A (see `docs/RC11_RELEASE_NOTES.md`).
+
 ### Added
-- **Game Mode (RC11)** — `Shift+G` toggles a pixel office view of the Supervisor
-  (main agent) and up to six subagent desks. Mockup background + procedural
-  8-bit Rust sprites; halfblock paint; composer stays open for chat. Compact
-  terminals fall back to a card grid / Unicode office. Playground:
+- **Game Mode** — `Ctrl+G` toggles a pixel office view of the Supervisor
+  (main agent) and up to six subagent desks (`Ctrl+Shift+G` from tasks pane).
+  Mockup + badge/walk overlays at cell resolution; halfblock paint; composer
+  stays open for chat. Compact terminals fall back to a card grid / Unicode
+  office. Animation via `TickDemand::Slow`. Playground:
   `cargo run -p xai-grok-pager --bin game-mode-playground`.
+- **Feature Request Log** — enterprise twin of Auto Developer Log for missing
+  product surface: `feature_request_log` tool on default/explore toolsets;
+  `turbo features list|show|export|ack|plan|ship|decline|set-dir|file`; store
+  under `$GROK_HOME/feature-request-log/` (`GROK_FEATURE_REQUEST_LOG_DIR`).
+  Boot card routes bugs → `developer_log`, missing capability →
+  `feature_request_log`. Docs: `docs/FEATURE_REQUEST_LOG.md`.
 
 ### Fixed
+- **Session start / `feature_request_log` registry** — tool was listed on default
+  toolsets and boot card but never registered in `ToolRegistry::new()`, causing
+  `Session creation failed: … GrokBuild:feature_request_log … not found in registry`.
 - **`/deepaudit` empty models** — Rhai `model_for_index` no longer fails with
   `Variable not found: models` when nested (Rhai does not capture outer locals).
-  Passes `models` explicitly; empty list still inherits session model. (RC10 Q&A
-  P1 / developer_log.)
+  Passes `models` explicitly; empty list still inherits session model.
+- **allowed_paths at land/diff** — CLI `turbo subagent land|diff` filters by
+  `meta.allowed_paths`; patch land refuses paths outside the allowlist.
+- **resume_from baseline loss** — on resume Reuse/Rehydrate, capture a fresh
+  `refs/grok/subagent-baselines/<new-id>` before the agent runs; inherit source
+  `allowed_paths` when omitted (stops 554-file dirty-parent inflate).
+- **Worktree `.git` missing HEAD object** — standalone isolation worktrees write
+  `.git/objects/info/alternates` → parent objects after create.
+- **LocalFs write verify** — post-write exist+size check with one retry; land
+  prints `files_landed` (mitigates empty-snapshot races under concurrency).
 
-### Changed
-- **Full Hyper → Turbo rebrand** — product name is **Turbo Grok Build**;
-  CLI binary **`turbo`** (was `hyper`); install root **`~/.turbo`** (was `~/.hyper`);
-  env vars **`TURBO_*`** (legacy `HYPER_*` still accepted where noted). Release assets
-  and archives use the `turbo-` prefix. GitHub repository remains
-  `danmsheets-dev/hyper-grok-build` (folder/history may still say Hyper).
+### Notes
+- Product: **Turbo Grok Build**. CLI: **`turbo`**. Wire version `0.2.114-r11`.
+- Spec: `docs/design-game-mode-rc11.md`. Process: `docs/RC11_RELEASE_NOTES.md`.
 
 ## [0.2.114-r10] - 2026-08-02
 
