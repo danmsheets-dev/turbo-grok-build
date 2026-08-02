@@ -4,6 +4,10 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r9] - 2026-08-02
+
+**Grok Build Turbo** RC9 — worktree trust, boot card, Auto Developer Log, copy buttons.
+
 ### Added
 - **RC9 worktree trust:** spawn **baseline** refs
   (`refs/grok/subagent-baselines/<id>`) so diff/land are **agent-only**
@@ -41,6 +45,10 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 - **Durable LoopCheckpoint**: `continuous-improve` still writes workflow scratch
   `loop_checkpoint.json`; host also mirrors to session
   `loops/<workflow_run_id>/checkpoint.json` for cross-process resume.
+
+### Notes
+- Product name: **Grok Build Turbo**. CLI binary remains **`hyper`**
+  (local installs may also expose a `turbo` shim). Wire version `0.2.114-r9`.
 
 ## [0.2.114-r8] - 2026-08-01
 

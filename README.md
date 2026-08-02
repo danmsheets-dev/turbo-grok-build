@@ -110,7 +110,7 @@ hyper                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r8
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r9
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.hyper/bin/hyper`
