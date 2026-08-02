@@ -245,6 +245,7 @@ impl WorkflowManager {
             WorkflowHostParams {
                 run_id: run_id.clone(),
                 cwd: self.cwd.clone(),
+                session_dir: self.session_dir.clone(),
                 scratch_dir,
                 tracker: self.tracker.clone(),
                 store: self.store.clone(),

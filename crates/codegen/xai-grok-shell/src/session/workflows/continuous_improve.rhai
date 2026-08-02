@@ -33,8 +33,15 @@ if args.timeout_ms != () && args.timeout_ms > 0 {
     timeout_ms = args.timeout_ms;
 }
 
-// Durable LoopCheckpoint (RC8 WP8): single-component scratch name
-// (host rejects nested paths). Same-process journal still applies for replay.
+// Durable LoopCheckpoint (RC8 WP8 + R6):
+// - Workflow scratch: write_scratch_file("loop_checkpoint.json") under
+//   session `workflows/<run_id>/scratch/loop_checkpoint.json`
+//   (host rejects nested scratch names — single path component only).
+// - Cross-process durable mirror (host side): when session_dir is available,
+//   the host also persists the same body to
+//   `session/loops/<workflow_run_id>/checkpoint.json` so a new process can
+//   read the last successful phase without the scratch tree.
+// Same-process Rhai journal still applies for replay.
 fn save_checkpoint(phase_name, payload) {
     let body = json_encode(#{
         phase: phase_name,
@@ -180,7 +187,7 @@ let report = "# Continuous improve report\n\n"
     + "\n\n## Next steps\n\n"
     + "- Review with `diff_subagent` then merge with `land_subagent` (merge mode fails closed on conflict).\n"
     + "- Recover via `<snapshot_ref>` / `<patch_path>` if the worktree was cleaned; implement phase uses retain_worktree when possible.\n"
-    + "- LoopCheckpoint: workflow scratch `loop_checkpoint.json` holds the last successful phase payload.\n"
+    + "- LoopCheckpoint: workflow scratch `loop_checkpoint.json` and durable `loops/<run_id>/checkpoint.json` hold the last successful phase payload.\n"
     + "- Re-run `/workflow continuous-improve` with a tighter objective for the next iteration.\n";
 
 save_checkpoint("complete", #{

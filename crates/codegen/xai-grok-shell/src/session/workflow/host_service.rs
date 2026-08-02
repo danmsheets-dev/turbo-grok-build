@@ -37,6 +37,9 @@ pub(crate) type TelemetryHook = Arc<dyn Fn(&str, &serde_json::Value, bool) + Sen
 pub(crate) struct WorkflowHostParams {
     pub run_id: String,
     pub cwd: PathBuf,
+    /// Parent session directory (when available). Used for durable
+    /// LoopCheckpoint mirror at `loops/<run_id>/checkpoint.json`.
+    pub session_dir: Option<PathBuf>,
     pub scratch_dir: PathBuf,
     pub tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
     pub store: super::store::WorkflowRunStore,
@@ -754,6 +757,18 @@ impl HostService {
 
         let scratch_dir = self.params.scratch_dir.clone();
         let body = content.as_bytes().to_vec();
+        // RC8 R6: durable LoopCheckpoint under session `loops/<run_id>/checkpoint.json`
+        // so a new process can read the last phase without the workflow scratch tree.
+        let durable_loop_path = if name == "loop_checkpoint.json" {
+            self.params.session_dir.as_ref().map(|session_dir| {
+                session_dir
+                    .join("loops")
+                    .join(&self.params.run_id)
+                    .join("checkpoint.json")
+            })
+        } else {
+            None
+        };
         tokio::task::spawn_blocking(move || {
             use std::io::Write as _;
             let mut tmp = tempfile::NamedTempFile::new_in(&scratch_dir)
@@ -764,6 +779,34 @@ impl HostService {
                 .map_err(|e| HostError::Failed(format!("scratch write: {e}")))?;
             tmp.persist(&path)
                 .map_err(|e| HostError::Failed(format!("scratch atomic persist: {}", e.error)))?;
+
+            if let Some(durable) = durable_loop_path {
+                if let Some(parent) = durable.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        HostError::Failed(format!(
+                            "durable loop checkpoint dir {}: {e}",
+                            parent.display()
+                        ))
+                    })?;
+                }
+                // Best-effort atomic write next to the durable path.
+                let durable_parent = durable
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let mut durable_tmp = tempfile::NamedTempFile::new_in(&durable_parent)
+                    .map_err(|e| HostError::Failed(format!("durable loop temp file: {e}")))?;
+                durable_tmp
+                    .write_all(&body)
+                    .map_err(|e| HostError::Failed(format!("durable loop write: {e}")))?;
+                durable_tmp.persist(&durable).map_err(|e| {
+                    HostError::Failed(format!(
+                        "durable loop atomic persist {}: {}",
+                        durable.display(),
+                        e.error
+                    ))
+                })?;
+            }
             Ok::<(), HostError>(())
         })
         .await
@@ -884,6 +927,7 @@ mod tests {
         let params = WorkflowHostParams {
             run_id: run_id.clone(),
             cwd: std::env::temp_dir(),
+            session_dir: None,
             scratch_dir: std::env::temp_dir().join("wf-scratch-reserve-rollback"),
             tracker: tracker.clone(),
             store,
@@ -956,6 +1000,7 @@ mod tests {
         let params = WorkflowHostParams {
             run_id: run_id.clone(),
             cwd: std::env::temp_dir(),
+            session_dir: None,
             scratch_dir: std::env::temp_dir().join("wf-scratch-release-persist"),
             tracker: tracker.clone(),
             store,
