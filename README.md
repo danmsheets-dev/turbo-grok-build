@@ -1,93 +1,104 @@
 <div align="center">
 
-<h1>Hyper (<code>hyper</code>)</h1>
+<h1>Grok Build Turbo</h1>
 
-<img src="docs/assets/hyper-banner.jpg" alt="Hyper — terminal AI coding agent" width="720">
+<img src="docs/assets/turbo-banner.jpg" alt="Grok Build Turbo — multi-agent terminal coding" width="720">
 
 <p>
-  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/DaviRain-Su/hyper-grok-build?display_name=tag" alt="Release"></a>
-  <a href="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml"><img src="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml/badge.svg" alt="Release CI"></a>
+  <a href="https://github.com/danmsheets-dev/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/hyper-grok-build?display_name=tag" alt="Release"></a>
+  <a href="https://github.com/danmsheets-dev/hyper-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
-  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms: macOS, Linux, Windows">
-  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/downloads/DaviRain-Su/hyper-grok-build/total?label=downloads" alt="Downloads"></a>
-  <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n: 10 locales">
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
+  <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n">
 </p>
 
-**Hyper** is an unofficial multi-provider community build of
-[Grok Build](https://github.com/xai-org/grok-build) — a terminal-based AI
-coding agent written in Rust, with first-class multi-provider LLM support:
-xAI Grok, Kimi Code / Moonshot, ChatGPT Codex, OpenCode Go, OpenAI,
-Anthropic, Z.AI, Ollama Cloud, and more.
+**Grok Build Turbo** is a heavily extended multi-agent coding CLI forked from
+[xAI Grok Build](https://github.com/xai-org/grok-build). It keeps the Rust TUI
+core and multi-provider stack, then layers production-grade subagent worktrees,
+recovery tooling, field logging, and agent orientation that the upstream
+product does not ship.
 
-It runs as a full-screen TUI that understands your codebase, edits files,
-executes shell commands, searches the web, and manages long-running tasks —
-interactively, headlessly for scripting/CI, or embedded in editors via the
-Agent Client Protocol (ACP). The UI is localized in 10 languages
-(English, 中文, 日本語, 한국어, Español, Português, Français, Deutsch,
-Русский) and switchable live from Settings. A local, read-only Rust web
-dashboard is available with `hyper dashboard --web` for session metrics,
-timelines, charts, logs, and live event streaming.
+CLI binary today: **`hyper`** (installs to `~/.hyper/bin`). Product name: **Turbo**.
 
-[Installation](#installation) ·
+[What changed](#what-makes-turbo-different) ·
+[Install](#installation) ·
 [Providers](#providers) ·
-[Building from source](#building-from-source) ·
-[Releasing](#releasing) ·
-[Coexistence with official <code>grok</code>](#coexistence-with-official-grok) ·
+[Subagents & worktrees](#subagents--worktrees) ·
+[Auto Developer Log](#auto-developer-log) ·
+[Build](#building-from-source) ·
+[Docs](#documentation) ·
 [License](#license)
-
-**中文文档: [README.zh-CN.md](README.zh-CN.md)** ·
-**中文用户指南: [docs/user-guide-zh-CN/](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)**
 
 </div>
 
 ---
 
-## Screenshots
+## What makes Turbo different
 
-The real TUI (captured in a PTY with the in-repo
-[`tui_shot`](crates/codegen/xai-grok-pager-pty-harness/examples/tui_shot.rs)
-harness), in two of the ten UI locales:
+Upstream Grok Build is a strong single-session coding agent. **Turbo is a
+multi-agent development runtime** built on that foundation.
 
-| English | 简体中文 |
-| ------- | -------- |
-| ![Hyper TUI in English](docs/assets/screenshot-welcome-en.png) | ![中文界面的 Hyper TUI](docs/assets/screenshot-welcome-zh.png) |
+| Area | Upstream Grok Build | **Grok Build Turbo** |
+|------|---------------------|----------------------|
+| Product focus | Official agent CLI | Community multi-agent platform |
+| Subagents | Present | Isolation by default, land/diff/discard, soft-preserve, restore |
+| Worktree recovery | Ephemeral / hard to find | Snapshot + baseline agent-only diffs + `hyper subagent …` CLI |
+| Dirty-parent pollution | Diff vs HEAD can explode | Spawn **baseline** refs → agent-only patches; land fails closed if huge |
+| Agent orientation | System prompt + project rules | **Agent Boot Card** (ops brief, recovery, required field logging) |
+| Product field signal | `/feedback`, crashes | **Auto Developer Log** (`developer_log` tool + `hyper issues`) |
+| Providers | xAI-centric | Multi-provider (Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, …) |
+| Reliability track | Upstream cadence | RC7→RC8→RC9 community reliability + deep-audit workflows |
+| Branding / binary | `grok` · `~/.grok` | Product **Turbo** · CLI **`hyper`** · binary under `~/.hyper` |
+
+### Highlights (RC8–RC9)
+
+- **Isolated worktrees that stay recoverable** — soft-preserve by default, `hyper subagent open|diff|land|discard`, `open --restore`, agent-only baselines
+- **Agent Boot Card** — every new session gets a short ops briefing (recovery CLI, land safety, required logging)
+- **Auto Developer Log** — agents must file structured product issues; configurable log directory
+- **Land safety** — refuse mega-patches from dirty-tree pollution unless `force=true`
+- **`/deepaudit` / continuous-improve** — multi-phase audit workflows
+- **Copy affordance** on completed messages (selection copy icon on by default)
+
+Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 
 ---
 
-## Why “Hyper”?
+## Screenshots
 
-The fork repo is already named `hyper-grok-build`. **Hyper** keeps that brand:
+| English | 简体中文 |
+| ------- | -------- |
+| ![Turbo TUI (English)](docs/assets/screenshot-welcome-en.png) | ![Turbo TUI (中文)](docs/assets/screenshot-welcome-zh.png) |
 
-| | Official | This fork |
+---
+
+## Names at a glance
+
+| | Official | This project |
 |---|---|---|
-| Product | Grok Build | **Hyper** |
-| Binary | `grok` | **`hyper`** |
+| Product | Grok Build | **Grok Build Turbo** |
+| CLI binary | `grok` | **`hyper`** (Turbo CLI) |
 | Install root | `~/.grok` | **`~/.hyper`** (binary only) |
-| Config / auth | `~/.grok` | **`~/.grok`** (shared; same runtime) |
-| Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | multi-provider community patches |
+| Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
+| Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
-Short CLI, no clash with `grok`, and room to grow beyond a single provider
-(unlike Kimi-only forks such as [Kigi](https://github.com/ZacharyZhang-NY/Kigi-CLI)).
+Repo folder/history may still say `hyper-grok-build`. **Turbo** is the product name.
 
 ---
 
 ## Installation
 
-Prebuilt single-file binaries for macOS (arm64/x86_64), Linux (arm64/x86_64,
-glibc / `linux-gnu` — linked against **glibc 2.17+** so they run on Ubuntu
-16.04 / RHEL 7 and newer, not only Ubuntu 24.04), and Windows (x86_64) are
-published on
-[GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases):
+Prebuilt binaries (macOS arm64/x86_64, Linux arm64/x86_64 glibc 2.17+, Windows x86_64) on
+[GitHub Releases](https://github.com/danmsheets-dev/hyper-grok-build/releases):
 
 ```sh
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
+irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex
 ```
 
 ```sh
@@ -99,125 +110,157 @@ hyper                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r5
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r8
 ```
 
-The installer verifies every download against the release’s `SHA256SUMS`,
-installs into `~/.hyper/bin/hyper` (`%USERPROFILE%\.hyper\bin\hyper.exe` on
-Windows), and prints the PATH line to add when needed.
-
-> Need unreleased changes? Build from source below; otherwise install the latest release above.
+Installer verifies `SHA256SUMS`, installs to `~/.hyper/bin/hyper`
+(`%USERPROFILE%\.hyper\bin\hyper.exe` on Windows).
 
 ### Install with Nix
 
-A [Nix](https://nixos.org) flake is provided (`flake.nix`), so on any
-Nix-enabled machine you can skip the installer and build/run directly.
-The flake builds the same `hyper` binary as the release artifacts
-(statically links Opus and jemalloc; `ldd` shows only glibc).
-
 ```sh
-# Run directly from the repo (no clone, no install):
-nix run github:DaviRain-Su/hyper-grok-build#hyper-grok-build -- --version
-
-# Or install into your Nix profile (puts `hyper` on PATH):
-nix profile install github:DaviRain-Su/hyper-grok-build#hyper-grok-build
+nix run github:danmsheets-dev/hyper-grok-build#hyper-grok-build -- --version
+nix profile install github:danmsheets-dev/hyper-grok-build#hyper-grok-build
 ```
 
-From a clone (e.g. for unreleased changes or to hack on it):
+From a clone:
 
 ```sh
-git clone https://github.com/DaviRain-Su/hyper-grok-build
+git clone https://github.com/danmsheets-dev/hyper-grok-build
 cd hyper-grok-build
-nix run .#hyper-grok-build -- --version      # run
-nix build .#hyper-grok-build                 # build to ./result
-nix develop                                   # shell with rust + protoc + cmake + git
+nix run .#hyper-grok-build -- --version
+nix develop
 ```
-
-> First run compiles from source (~14 min on a modern machine). There is
-> no binary cache yet, so every Nix user builds locally for now. Linux
-> (`x86_64`/`aarch64`) is supported; macOS/Windows are not wired up in
-> the flake (use the prebuilt binaries above for those).
 
 ---
 
 ## Providers
 
-Hyper keeps the multi-provider registry from this tree (see the pager
-[user guide](crates/codegen/xai-grok-pager/docs/user-guide/)):
-
 | Platform | Auth | Notes |
 | -------- | ---- | ----- |
-| xAI / Grok | `hyper login` (OIDC) or `XAI_API_KEY` | First-party models |
-| Kimi Code | device OAuth / subscription | `kimi-code/*` catalog |
-| Moonshot CN / AI | API key | open platform |
-| ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning plus experimental full-duplex `/live` voice |
-| OpenCode Go | subscription API key | `opencode-go/*` models over Chat Completions + Messages |
-| OpenAI / Anthropic / DeepSeek-style | API keys | BYOK catalog |
-| Z.AI Coding Plan | platform key | international plan |
-| Ollama Cloud | API key | live roster sync |
+| xAI / Grok | `hyper login` or `XAI_API_KEY` | First-party models |
+| NVIDIA Integrate | platform key | Large catalog; Turbo adds agent-ready hardening |
+| Kimi Code / Moonshot | OAuth / API key | `kimi-code/*`, open platform |
+| ChatGPT Codex | ChatGPT OAuth | GPT-5.x + experimental live voice |
+| OpenCode Go | subscription key | Chat Completions + Messages |
+| OpenAI / Anthropic / DeepSeek-style | BYOK | Catalog platforms |
+| Z.AI Coding Plan | platform key | International plan |
+| Ollama Cloud | API key | Live roster sync |
 
-Model ids in the picker look like `{platform}/{model}` (e.g.
-`kimi-code/k3`, `opencode-go/kimi-k3`, `openai-codex/gpt-5.6-sol`). Platform docs live under
-`crates/codegen/xai-grok-pager/docs/user-guide/` (Moonshot, Kimi Code,
-OpenAI Codex, …).
+Model ids look like `{platform}/{model}`. Config and credentials stay under
+**`~/.grok`** (shared with upstream Grok Build).
 
-Config and credentials still live under **`~/.grok`** (same paths as
-upstream Grok Build), so existing sessions, API keys, and `auth.json`
-keep working.
+---
+
+## Subagents & worktrees
+
+Turbo treats subagents as first-class workers with isolation and recovery:
+
+```text
+spawn (isolation=worktree)
+  → spawn baseline  refs/grok/subagent-baselines/<id>
+  → agent works in ~/.grok/worktrees/<slug>/subagent-<id>
+  → complete snapshot refs/grok/subagents/<id>
+  → soft-preserve live tree (or clean if GROK_SUBAGENT_SOFT_PRESERVE=0)
+  → agent-only patch: baseline..snapshot
+```
+
+```bash
+hyper subagent list
+hyper subagent open <id>
+hyper subagent open <id> --restore          # materialize snapshot
+hyper subagent diff <id>
+hyper subagent land <id>                    # refuses huge dirty-tree patches
+hyper subagent discard <id>
+```
+
+Optional:
+
+| Env | Effect |
+|-----|--------|
+| `GROK_SUBAGENT_SOFT_PRESERVE=0` | Delete live tree immediately after snapshot |
+| `GROK_SUBAGENT_WORKTREE_SEED=clean` | HEAD-only sandbox (no parent dirty copy) |
+| `retain_worktree=true` on spawn | Keep path until land/discard |
+
+Details: [`docs/RC9_FEATURES.md`](docs/RC9_FEATURES.md),
+[`docs/HYPER_DEVELOPER_FEEDBACK.md`](docs/HYPER_DEVELOPER_FEEDBACK.md).
+
+---
+
+## Auto Developer Log
+
+Agents are instructed (Boot Card) to **always** file product friction with the
+`developer_log` tool. Humans triage with:
+
+```bash
+hyper issues list
+hyper issues show <id>
+hyper issues export --severity p0 --out ./turbo-issues-pack
+hyper issues path
+hyper issues set-dir D:/TurboLogs/developer-log   # persist custom root
+hyper issues clear-dir
+```
+
+| Precedence | Log directory source |
+|------------|----------------------|
+| 1 | `hyper issues set-dir` (session + `~/.grok/developer-log.toml`) |
+| 2 | `GROK_DEVELOPER_LOG_DIR` |
+| 3 | `~/.grok/developer-log.toml` |
+| 4 | Default `~/.grok/developer-log` |
+
+Disable: `GROK_DEVELOPER_LOG=0`. Full writeup: [`docs/AUTO_DEVELOPER_LOG.md`](docs/AUTO_DEVELOPER_LOG.md).
+
+---
+
+## Agent Boot Card
+
+On each **new** session, Turbo injects a short system briefing
+(`<hyper_boot_card>`) covering tools, subagent lifecycle, recovery commands,
+land safety, and **required** `developer_log` usage. Subagents get a tiny child
+stub only.
+
+```text
+GROK_BOOT_CARD=off|short|full    # default short
+```
 
 ---
 
 ## Building from source
 
-Requirements:
-
-- **Rust** — pinned by [`rust-toolchain.toml`](rust-toolchain.toml)
-  (`rustup` installs it on first build)
-- **[DotSlash](https://dotslash-cli.com)** — hermetic `bin/protoc`
-  ```sh
-  cargo install dotslash
-  # or: brew install dotslash
-  ```
-- **CMake 3.5+** — builds the bundled static Opus library used by experimental
-  `/live` voice (the workspace pins `CMAKE_POLICY_VERSION_MINIMUM=3.5`)
+Requirements: Rust (`rust-toolchain.toml`), [DotSlash](https://dotslash-cli.com)
+for `bin/protoc`, CMake 3.5+.
 
 ```sh
-cargo run -p xai-grok-pager-bin              # build + launch TUI (binary: hyper)
-# Stamp GROK_VERSION for the version banner / API client header (folder trust
-# is armed even without the stamp since WP-C3 — do not rely on an unstamped
-# build to skip trust gating).
+cargo run -p xai-grok-pager-bin              # TUI (binary name: hyper)
 GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-dist
 ./target/release-dist/hyper --version
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 $env:GROK_VERSION = (Get-Content VERSION -Raw).Trim()
 cargo build -p xai-grok-pager-bin --profile release-dist --bin hyper
 ```
 
-The composition-root package is still `xai-grok-pager-bin` (monorepo
-layout); the **shipped binary name** is `hyper`.
+Community branding / updater: `--features community-build` (default on this tree).
 
 ---
 
-## Changelog
+## Changelog & known issues
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for release notes. Known limitations:
-[`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md).
+- [`CHANGELOG.md`](./CHANGELOG.md)
+- [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
+- [`docs/RC9_FEATURES.md`](./docs/RC9_FEATURES.md)
 
 ---
 
 ## Releasing
 
-1. Set the root [`VERSION`](VERSION) file to the **monorepo lockstep client
-   version** (same as `crates/codegen/xai-grok-pager/Cargo.toml` /
-   `xai-grok-version`, currently `0.2.114-r5`). CI compiles this into
-   `x-grok-client-version`; xAI rejects clients below **0.1.202** (HTTP 426).
-   Do **not** invent a separate low marketing version (e.g. `0.1.0`).
-2. Commit on `dev` (or your release branch); update `CHANGELOG.md`.
-3. Tag and push — CI builds five targets and publishes a GitHub Release:
+1. Set root [`VERSION`](VERSION) to the monorepo lockstep client version (stamp
+   `x-grok-client-version`; xAI rejects clients below **0.1.202**).
+2. Update `CHANGELOG.md`, commit on `dev`.
+3. Tag and push:
 
 ```sh
 VERSION=$(tr -d '[:space:]' < VERSION)
@@ -225,75 +268,39 @@ git tag "v${VERSION}"
 git push origin "v${VERSION}"
 ```
 
-Workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml)
-
-Artifacts:
-
-| Asset | Example |
-| ----- | ------- |
-| macOS arm64 | `hyper-0.2.114-r5-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `hyper-0.2.114-r5-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64 (glibc ≥2.17) | `hyper-0.2.114-r5-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 (glibc ≥2.17) | `hyper-0.2.114-r5-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `hyper-0.2.114-r5-x86_64-pc-windows-msvc.zip` |
-| Checksums | `SHA256SUMS` |
-
-The tag must match `VERSION` exactly (`v0.2.114-r5` ↔ `0.2.114-r5`) or the build fails.
+Workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Artifacts ship as `hyper-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 
 ---
 
 ## Coexistence with official `grok`
 
-Hyper is **not** affiliated with xAI / SpaceXAI. On the same machine:
-
-| Surface | Official `grok` | Hyper |
-|---------|-----------------|-------|
+| Surface | Official | Turbo (`hyper`) |
+|---------|----------|-----------------|
 | Binary | `grok` | `hyper` |
-| Managed install root | `~/.grok/bin` | `~/.hyper/bin` |
-| Config / auth / sessions | `~/.grok` | **same** `~/.grok` |
-| Leader IPC (`leader*.sock` / `.lock`) | under `~/.grok` | **same** namespace |
+| Install root | `~/.grok/bin` | `~/.hyper/bin` |
+| Config / auth / sessions | `~/.grok` | **same** |
+| Leader IPC | under `~/.grok` | **same namespace** |
 
-Implications:
-
-- Sessions, API keys, and OAuth scopes are shared — log in once, both CLIs can see them.
-- Leader list/kill can see both products’ leaders. Prefer killing only leaders you started.
-- Community builds use an isolated updater: `hyper update` and startup auto-update read only this repository's GitHub Releases, while Hyper binaries and update state stay under `~/.hyper` (the managed executable is `~/.hyper/bin/hyper`). They never overwrite `~/.grok/bin/grok`. The auto-update preference remains part of Hyper's shared `~/.grok` configuration. Re-running `install.sh` / `install.ps1` remains a supported recovery path.
-
-Nothing in the official installer is rewritten by Hyper’s install script.
-
----
-
-## Building notes (this fork)
-
-```sh
-# Defaults enable community-build (Hyper branding + isolated community updater).
-cargo run -p xai-grok-pager-bin
-
-# Explicit release-style local binary
-cargo build -p xai-grok-pager-bin --profile release-dist --features community-build
-```
-
-Amp-style **agent modes** (low / medium / high / ultra slots) are **design-only** —
-see [`docs/design-modes.md`](docs/design-modes.md). They are not shipped yet.
-
-Known issues and remaining work: [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
+- Sessions and OAuth are shared — log in once for both.
+- Updater is isolated: Turbo never overwrites `~/.grok/bin/grok`.
+- Not affiliated with xAI / SpaceXAI.
 
 ---
 
 ## Documentation
 
-In-tree user guide (examples may still say `grok`; the Hyper binary name is
-`hyper`, paths remain under `~/.grok`):
+| Doc | Content |
+|-----|---------|
+| [User guide (EN)](crates/codegen/xai-grok-pager/docs/user-guide/) | Product how-to (examples may say `grok`; CLI is `hyper`) |
+| [用户指南 (中文)](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/) | Chinese guide |
+| [RC9 features](docs/RC9_FEATURES.md) | Worktrees, Boot Card, copy UI, ADL |
+| [Auto Developer Log](docs/AUTO_DEVELOPER_LOG.md) | Field logging for maintainers |
+| Upstream | [docs.x.ai/build](https://docs.x.ai/build/overview) |
 
-- English: [`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
-- 中文: [`crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/`](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)
+`SOURCE_REV` records the last monorepo sync point.
 
-Related extension docs also have Chinese translations (`*.zh-CN.md`) under
-`crates/codegen/xai-grok-pager/docs/`.
-
-Upstream product docs: [docs.x.ai/build](https://docs.x.ai/build/overview)
-
-`SOURCE_REV` records the monorepo commit this tree was last synced from.
+中文 README (may lag brand update): [README.zh-CN.md](README.zh-CN.md)
 
 ---
 
@@ -301,16 +308,17 @@ Upstream product docs: [docs.x.ai/build](https://docs.x.ai/build/overview)
 
 | Path | Contents |
 |------|----------|
-| `crates/codegen/xai-grok-pager-bin` | Composition root; builds the `hyper` binary |
+| `crates/codegen/xai-grok-pager-bin` | Composition root → `hyper` binary |
 | `crates/codegen/xai-grok-pager` | TUI |
-| `crates/codegen/xai-grok-shell` | Agent runtime |
+| `crates/codegen/xai-grok-shell` | Agent runtime / subagents |
+| `crates/codegen/xai-grok-developer-log` | Auto Developer Log store |
+| `crates/codegen/xai-grok-agent` | Prompt assembly / Boot Card |
 | `install.sh` / `install.ps1` | Release installers |
 | `.github/workflows/release.yml` | Multi-target release CI |
 
 > [!IMPORTANT]
-> The root `Cargo.toml` (workspace members / dependency versions) is
-> **generated** from the monorepo — treat it as read-only. Prefer editing
-> per-crate `Cargo.toml` files for local changes that should survive syncs.
+> Root `Cargo.toml` is often treated as monorepo-generated — prefer editing
+> per-crate manifests for durable local changes.
 
 ---
 
@@ -319,5 +327,5 @@ Upstream product docs: [docs.x.ai/build](https://docs.x.ai/build/overview)
 Apache-2.0. See [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), and
 [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES).
 
-Based on Grok Build open source
-([xai-org/grok-build](https://github.com/xai-org/grok-build)).
+Based on [xai-org/grok-build](https://github.com/xai-org/grok-build).
+**Grok Build Turbo** is an independent community fork — not an official xAI product.
