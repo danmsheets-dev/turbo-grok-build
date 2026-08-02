@@ -12,7 +12,7 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 | NVIDIA stream deser `null` vs `u32` | Null-tolerant Chat Completions usage/index/tool_calls |
 | Subagent hang without timeout | `timeout_ms` + budget monitor; stall on no progress |
 | Worktree “disappeared” | `changes.patch` + `snapshot_ref` + `worktree_state` on completion; `retain_worktree` |
-| Parent cannot merge child work | `diff_subagent` / `land_subagent` tools |
+| Parent cannot merge child work | `diff_subagent` / `land_subagent` tools or `hyper subagent land` |
 | NVIDIA `prompt_cache_key` 400s | Platform defaults + opt-in stamp only |
 | Catalog EOL / Nano token overflow | Hide EOL; clamp Nano 9B; `agent_ready` / max_parallel on compat |
 | Deep multi-agent audit | `/deepaudit` + `continuous-improve` workflows |

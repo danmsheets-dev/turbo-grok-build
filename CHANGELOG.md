@@ -19,6 +19,8 @@ recovery, land/diff tools, stall detection, and multi-agent workflows.
 - **`diff_subagent` + `land_subagent` + `discard_subagent` tools**: parent merges
   or drops child work from live worktree, snapshot ref, or `changes.patch`
   (merge fails closed on conflict; discard keeps snapshot by default).
+- **`hyper subagent` CLI**: `list` / `open` / `diff` / `land` / `discard` /
+  `prune --older-than 24h` over session `subagents/<id>/` metadata (tool parity).
 - **Worktree dispose**: always export `changes.patch` + diffstat before delete;
   completion surfaces `snapshot_ref`, `worktree_state`, `patch_path`.
 - **NVIDIA platform defaults**: no `prompt_cache_key` stamp without compat;

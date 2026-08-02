@@ -2179,6 +2179,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Memory(memory_args) => {
                 return xai_grok_pager::memory_cmd::run(memory_args);
             }
+            Command::Subagent(subagent_args) => {
+                return xai_grok_pager::subagent_cmd::run(subagent_args);
+            }
             Command::Update {
                 check,
                 json,
