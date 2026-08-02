@@ -1,22 +1,24 @@
 <div align="center">
 
-<h1>Hyper(<code>hyper</code>)</h1>
+<h1>Turbo Grok Build (<code>turbo</code>)</h1>
 
-<img src="docs/assets/hyper-banner.jpg" alt="Hyper —— 终端 AI 编码代理" width="720">
+<img src="docs/assets/turbo-banner.jpg" alt="Turbo Grok Build —— 终端 AI 编码代理" width="720">
 
 <p>
-  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/DaviRain-Su/hyper-grok-build?display_name=tag" alt="发布版本"></a>
-  <a href="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml"><img src="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml/badge.svg" alt="发布 CI"></a>
+  <a href="https://github.com/danmsheets-dev/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/hyper-grok-build?display_name=tag" alt="发布版本"></a>
+  <a href="https://github.com/danmsheets-dev/hyper-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="发布 CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="许可证"></a>
+  <img src="https://img.shields.io/badge/version-0.2.114--r10%20RC10-blue" alt="RC10">
   <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="平台:macOS、Linux、Windows">
-  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/downloads/DaviRain-Su/hyper-grok-build/total?label=downloads" alt="下载量"></a>
   <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n:10 种语言">
 </p>
 
-**Turbo** 是 [Grok Build](https://github.com/xai-org/grok-build) 的非官方多供应商社区构建版本 ——
+**Turbo Grok Build**（CLI：`turbo`）是 [Grok Build](https://github.com/xai-org/grok-build) 的非官方多供应商社区构建版本 ——
 一个用 Rust 编写的终端 AI 编码代理,对多家 LLM 供应商提供一流支持:
 xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenCode Go、OpenAI、Anthropic、Z.AI、Ollama Cloud 等。
+
+当前版本线：**RC10** · 线版本 **`0.2.114-r10`**。
 
 它以全屏 TUI 的形式运行,能够理解你的代码库、编辑文件、
 执行 shell 命令、搜索网页,并管理长时间运行的任务 ——
@@ -24,7 +26,7 @@ xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenCode Go、OpenAI、Anthrop
 还能通过 Agent Client Protocol(ACP)嵌入到编辑器中。
 UI 已本地化为 10 种语言(English、中文、日本語、한국어、Español、
 Português、Français、Deutsch、Русский),并可在设置中实时切换。运行
-`hyper dashboard --web` 可以打开本地只读的纯 Rust Web 仪表盘，查看会话指标、
+`turbo dashboard --web` 可以打开本地只读的纯 Rust Web 仪表盘，查看会话指标、
 事件时间线、图表、日志和实时事件流。
 
 [安装](#安装) ·
@@ -49,21 +51,22 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 
 | English | 简体中文 |
 | ------- | -------- |
-| ![Hyper TUI in English](docs/assets/screenshot-welcome-en.png) | ![中文界面的 Hyper TUI](docs/assets/screenshot-welcome-zh.png) |
+| ![Turbo TUI in English](docs/assets/screenshot-welcome-en.png) | ![中文界面的 Turbo TUI](docs/assets/screenshot-welcome-zh.png) |
 
 ---
 
-## 为什么叫 "Hyper"?
+## 名称一览
 
-本 fork 仓库已经命名为 `hyper-grok-build`,**Turbo** 沿用了这个品牌:
+仓库目录/历史可能仍写作 `hyper-grok-build`。产品名是 **Turbo Grok Build**，CLI 是 **`turbo`**。
 
 | | 官方版本 | 本 fork |
 |---|---|---|
-| 产品 | Grok Build | **Turbo** |
+| 产品 | Grok Build | **Turbo Grok Build** |
 | 二进制文件 | `grok` | **`turbo`** |
 | 安装目录 | `~/.grok` | **`~/.turbo`**(仅二进制) |
 | 配置 / 认证 | `~/.grok` | **`~/.grok`**(共享;同一运行时) |
-| 上游 | [xai-org/grok-build](https://github.com/xai-org/grok-build) | 多供应商社区补丁 |
+| 版本线 | 上游节奏 | **RC10** · `0.2.114-r10` |
+| 上游 | [xai-org/grok-build](https://github.com/xai-org/grok-build) | 多供应商 / 多智能体社区补丁 |
 
 简短的 CLI 名称,不与 `grok` 冲突,也为超越单一供应商留出了发展空间
 (不像 [Kigi](https://github.com/ZacharyZhang-NY/Kigi-CLI) 这样只支持 Kimi 的 fork)。
@@ -76,28 +79,28 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 glibc / `linux-gnu` —— 按 **glibc 2.17+** 链接，可在 Ubuntu 16.04 / RHEL 7
 及更新系统上运行，不要求 Ubuntu 24.04)以及 Windows
 (x86_64)的预编译单文件二进制已发布在
-[GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases):
+[GitHub Releases](https://github.com/danmsheets-dev/hyper-grok-build/releases):
 
 ```sh
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
+irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex
 ```
 
 ```sh
-hyper --version
-hyper login          # xAI / Grok 会话(浏览器 OAuth)
-hyper                # 启动 TUI
+turbo --version
+turbo login          # xAI / Grok 会话(浏览器 OAuth)
+turbo                # 启动 TUI
 ```
 
-安装指定版本:
+安装指定版本（RC10）:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r5
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r10
 ```
 
 安装程序会根据发布版的 `SHA256SUMS` 校验每一次下载,
@@ -115,19 +118,19 @@ glibc)。
 
 ```sh
 # 直接从仓库运行(无需 clone、无需安装):
-nix run github:DaviRain-Su/hyper-grok-build#hyper-grok-build -- --version
+nix run github:danmsheets-dev/hyper-grok-build#turbo-grok-build -- --version
 
 # 或安装到你的 Nix profile(把 `turbo` 加入 PATH):
-nix profile install github:DaviRain-Su/hyper-grok-build#hyper-grok-build
+nix profile install github:danmsheets-dev/hyper-grok-build#turbo-grok-build
 ```
 
 从 clone 出来的仓库(例如要用未发布的改动或参与开发):
 
 ```sh
-git clone https://github.com/DaviRain-Su/hyper-grok-build
+git clone https://github.com/danmsheets-dev/hyper-grok-build
 cd hyper-grok-build
-nix run .#hyper-grok-build -- --version      # 运行
-nix build .#hyper-grok-build                 # 构建到 ./result
+nix run .#turbo-grok-build -- --version      # 运行
+nix build .#turbo-grok-build                 # 构建到 ./result
 nix develop                                   # 提供 rust + protoc + cmake + git 的 shell
 ```
 
@@ -139,12 +142,12 @@ nix develop                                   # 提供 rust + protoc + cmake + g
 
 ## 供应商
 
-Hyper 保留了本代码树中的多供应商注册表(见 pager
+Turbo Grok Build 保留了本代码树中的多供应商注册表(见 pager
 [用户指南（中文）](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)):
 
 | 平台 | 认证方式 | 备注 |
 | -------- | ---- | ----- |
-| xAI / Grok | `hyper login`(OIDC)或 `XAI_API_KEY` | 第一方模型 |
+| xAI / Grok | `	urbo login`(OIDC)或 `XAI_API_KEY` | 第一方模型 |
 | Kimi Code | 设备 OAuth / 订阅 | `kimi-code/*` 目录 |
 | Moonshot CN / AI | API key | 开放平台 |
 | ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning，并支持实验性全双工 `/live` 语音 |
@@ -178,11 +181,11 @@ OpenAI Codex 等)。
   `CMAKE_POLICY_VERSION_MINIMUM=3.5`
 
 ```sh
-cargo run -p xai-grok-pager-bin              # 构建并启动 TUI(二进制名:hyper)
+cargo run -p xai-grok-pager-bin              # 构建并启动 TUI(二进制名:turbo)
 # 用 VERSION 文件戳 GROK_VERSION（版本横幅 / API 客户端头）。
 # 自 WP-C3 起，未戳版本的本地构建也会启用 folder-trust 门禁。
 GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-dist
-./target/release-dist/hyper --version
+./target/release-dist/	urbo --version
 ```
 
 组合根包仍然是 `xai-grok-pager-bin`(monorepo 布局);
@@ -201,7 +204,7 @@ GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-
 
 1. 将根目录的 [`VERSION`](VERSION) 文件设置为 **monorepo 锁步客户端版本**
    (与 `crates/codegen/xai-grok-pager/Cargo.toml` /
-   `xai-grok-version` 保持一致,当前为 `0.2.114-r5`)。CI 会把它编译进
+   `xai-grok-version` 保持一致,当前为 `0.2.114-r10`)。CI 会把它编译进
    `x-grok-client-version`;xAI 会拒绝低于 **0.1.202** 的客户端(HTTP 426)。
    **不要**自己编造一个较低的营销版本号(例如 `0.1.0`)。
 2. 在 `dev`(或你的发布分支)上提交;更新 `CHANGELOG.md`。
@@ -219,14 +222,14 @@ git push origin "v${VERSION}"
 
 | 产物 | 示例 |
 | ----- | ------- |
-| macOS arm64 | `hyper-0.2.114-r5-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `hyper-0.2.114-r5-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64(glibc ≥2.17) | `hyper-0.2.114-r5-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64(glibc ≥2.17) | `hyper-0.2.114-r5-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `hyper-0.2.114-r5-x86_64-pc-windows-msvc.zip` |
+| macOS arm64 | `turbo-0.2.114-r10-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 | `turbo-0.2.114-r10-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64(glibc ≥2.17) | `turbo-0.2.114-r10-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64(glibc ≥2.17) | `turbo-0.2.114-r10-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `turbo-0.2.114-r10-x86_64-pc-windows-msvc.zip` |
 | 校验和 | `SHA256SUMS` |
 
-标签必须与 `VERSION` 完全一致(`v0.2.114-r5` ↔ `0.2.114-r5`),否则构建会失败。
+标签必须与 `VERSION` 完全一致(`v0.2.114-r10` ↔ `0.2.114-r10`),否则构建会失败。
 
 ---
 
@@ -245,7 +248,7 @@ Hyper 与 xAI / SpaceXAI **没有隶属关系**。在同一台机器上:
 
 - 会话、API key 和 OAuth 权限是共享的 —— 登录一次,两个 CLI 都能看到。
 - Leader 的 list/kill 可以同时看到两个产品的 leader。请只 kill 你自己启动的 leader。
-- 社区构建版使用完全隔离的更新器：`hyper update` 和启动时自动更新只读取本仓库的 GitHub Releases，Hyper 二进制及更新状态都保存在 `~/.turbo`（托管可执行文件为 `~/.turbo/bin/turbo`），绝不会覆盖 `~/.grok/bin/grok`。自动更新偏好仍属于 Hyper 与官方版共享的 `~/.grok` 配置。重新运行 `install.sh` / `install.ps1` 仍可用于修复安装。
+- 社区构建版使用完全隔离的更新器：`	urbo update` 和启动时自动更新只读取本仓库的 GitHub Releases，Hyper 二进制及更新状态都保存在 `~/.turbo`（托管可执行文件为 `~/.turbo/bin/turbo`），绝不会覆盖 `~/.grok/bin/grok`。自动更新偏好仍属于 Hyper 与官方版共享的 `~/.grok` 配置。重新运行 `install.sh` / `install.ps1` 仍可用于修复安装。
 
 Hyper 的安装脚本不会改写官方安装程序的任何内容。
 

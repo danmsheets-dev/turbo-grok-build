@@ -3,7 +3,7 @@ name = "xai-grok-dashboard"
 version = "0.2.110"
 edition.workspace = true
 license = "Apache-2.0"
-description = "Local web dashboard for Grok Turbo sessions"
+description = "Local web dashboard for Turbo Grok Build sessions"
 publish = false
 
 [dependencies]

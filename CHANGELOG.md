@@ -5,15 +5,15 @@ All notable changes to **Turbo** (`turbo` binary) are documented here.
 ## [Unreleased]
 
 ### Changed
-- **Full Hyper → Turbo rebrand** — product name is **Grok Turbo** / **Grok Turbo Beta**;
+- **Full Hyper → Turbo rebrand** — product name is **Turbo Grok Build**;
   CLI binary **`turbo`** (was `hyper`); install root **`~/.turbo`** (was `~/.hyper`);
   env vars **`TURBO_*`** (legacy `HYPER_*` still accepted where noted). Release assets
-  and archives use the `turbo-` prefix. GitHub repository slug remains `hyper-grok-build`
-  for continuity.
+  and archives use the `turbo-` prefix. GitHub repository remains
+  `danmsheets-dev/hyper-grok-build` (folder/history may still say Hyper).
 
 ## [0.2.114-r10] - 2026-08-02
 
-**Grok Turbo RC10** — ship blockers from `HYPER_DEVELOPER_FEEDBACK_20260802.md`
+**Turbo Grok Build RC10** — ship blockers from `HYPER_DEVELOPER_FEEDBACK_20260802.md`
 plus RC9 harness Q&A P0–P2 (see `docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`).
 
 ### Fixed
@@ -55,7 +55,7 @@ plus RC9 harness Q&A P0–P2 (see `docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`).
   incidents when the agent tool is unavailable.
 
 ### Notes
-- Product: **Grok Turbo**. CLI: **`turbo`**. Wire version `0.2.114-r10`.
+- Product: **Turbo Grok Build**. CLI: **`turbo`**. Wire version `0.2.114-r10`.
 - Harness retest matrix: `docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md` §9.
 
 ## [0.2.114-r9] - 2026-08-02

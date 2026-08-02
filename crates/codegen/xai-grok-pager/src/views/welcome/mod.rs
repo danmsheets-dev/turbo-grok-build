@@ -385,11 +385,11 @@ impl WelcomeLayout {
 
 /// Controls what the version badge renders.
 pub(super) enum VersionBadgeMode<'a> {
-    /// Full badge: team | tier | api_key | **Grok Turbo** VERSION+channel **Beta** (right-aligned).
+    /// Full badge: team | tier | api_key | **Turbo Grok Build** VERSION+channel **Beta** (right-aligned).
     Full { subscription_tier: Option<&'a str> },
-    /// Hero footer: team | api_key | Grok Turbo Beta [channel] (right-aligned, gray).
+    /// Hero footer: team | api_key | Turbo Grok Build Beta [channel] (right-aligned, gray).
     HeroFooter,
-    /// Hero inline: **Grok Turbo Beta**  VERSION (left-aligned).
+    /// Hero inline: **Turbo Grok Build Beta**  VERSION (left-aligned).
     HeroInline,
 }
 
@@ -445,7 +445,7 @@ pub(super) fn render_version_badge(
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
-                "Grok Turbo  ",
+                "Turbo Grok Build  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -474,7 +474,7 @@ pub(super) fn render_version_badge(
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Turbo Beta  ",
+                "Turbo Grok Build Beta  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),

@@ -1,7 +1,7 @@
 //! Turbo community updater.
 //!
 //! This module is deliberately separate from the official Grok updater. It
-//! only reads releases from `DaviRain-Su/hyper-grok-build` and only activates
+//! only reads releases from `danmsheets-dev/hyper-grok-build` and only activates
 //! binaries below `~/.turbo` (or `TURBO_SHARE_DIR` in debug/test builds).
 //! Nothing here calls the x.ai/npm updater or writes `~/.grok/bin/grok`.
 
@@ -24,8 +24,9 @@ use crate::auto_update::{
     BackgroundUpdateCheck, EnsureLatestOutcome, UpdateAvailable, UpdateRunMode, UpdateStatus,
 };
 
-const RELEASE_REPO: &str = "DaviRain-Su/hyper-grok-build";
-const RELEASE_API_BASE: &str = "https://api.github.com/repos/DaviRain-Su/hyper-grok-build/releases";
+const RELEASE_REPO: &str = "danmsheets-dev/hyper-grok-build";
+const RELEASE_API_BASE: &str =
+    "https://api.github.com/repos/danmsheets-dev/hyper-grok-build/releases";
 const CHECK_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const SMOKE_TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1478,9 +1479,9 @@ pub(crate) async fn run_update(
         anyhow::anyhow!(
             "Turbo community update failed: {error:#}\n\nReinstall with:\n  {}",
             if cfg!(windows) {
-                "irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex"
+                "irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex"
             } else {
-                "curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash"
+                "curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash"
             }
         )
     })?;

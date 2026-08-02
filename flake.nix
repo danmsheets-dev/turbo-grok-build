@@ -18,7 +18,7 @@
 # `outputHashes` below and rebuild. See:
 # https://nixos.org/manual/nixpkgs/unstable/#buildrustpackage
 {
-  description = "Turbo — multi-provider community build of Grok Build (Grok Turbo Beta terminal AI coding agent)";
+  description = "Turbo Grok Build — multi-provider community build of Grok Build (terminal AI coding agent)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -149,7 +149,7 @@
 
             meta = with pkgs.lib; {
               description = "Unofficial multi-provider community build of Grok Build — terminal AI coding agent";
-              homepage = "https://github.com/DaviRain-Su/hyper-grok-build";
+              homepage = "https://github.com/danmsheets-dev/hyper-grok-build";
               license = licenses.asl20;
               # Single shipped binary `hyper`; required for `nix run` to
               # resolve to the right executable.

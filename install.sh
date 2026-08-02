@@ -8,19 +8,19 @@
 # atomic symlink in bin/).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | sh
-#   sh install.sh --version v0.2.109      # pin a specific release
+#   curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | sh
+#   sh install.sh --version v0.2.114-r10  # pin a specific release
 #
 # Environment:
 #   TURBO_SHARE_DIR        install root (default: ~/.turbo)
 #   TURBO_UPDATE_BASE_URL  GitHub-Releases-shaped API base (default:
-#                          https://api.github.com/repos/DaviRain-Su/hyper-grok-build/releases)
+#                          https://api.github.com/repos/danmsheets-dev/hyper-grok-build/releases)
 #
 # Fails fast on any error; never leaves a partial binary as the active turbo.
 
 set -eu
 
-REPO="DaviRain-Su/hyper-grok-build"
+REPO="danmsheets-dev/hyper-grok-build"
 API_BASE="${TURBO_UPDATE_BASE_URL:-https://api.github.com/repos/${REPO}/releases}"
 TURBO_HOME="${TURBO_SHARE_DIR:-$HOME/.turbo}"
 

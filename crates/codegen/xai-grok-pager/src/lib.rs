@@ -1,4 +1,4 @@
-//! xai-grok-pager — Grok Turbo TUI.
+//! xai-grok-pager — Turbo Grok Build TUI.
 //!
 //! A clean-room implementation built on the v3 pager rendering engine.
 
