@@ -243,6 +243,7 @@ impl xai_tool_runtime::Tool for SpawnManyTool {
                 model: spec.model.clone(),
                 timeout_ms: spec.timeout_ms,
                 retain_worktree: spec.retain_worktree,
+                allowed_paths: None,
                 task_id: Some(id.clone()),
             };
 
