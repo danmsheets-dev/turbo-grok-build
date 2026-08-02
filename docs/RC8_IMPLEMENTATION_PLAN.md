@@ -662,8 +662,7 @@ Four Grok 4.5 passes (explore×3 + oracle) converged:
 ### Pre-r8 residual batch (pull-forward; hold release until done)
 Ship these before packaging r8. Supervisors may parallelize with worktree agents.
 
-- [ ] **R1** WP7 residual: `last_tool` + `last_progress_age_ms` on `SubagentProgress` ACP ticks; ensure completion meta `land_status=pending` when worktree artifacts exist  
-- [ ] **R2** Path allowlists: `allowed_paths` on spawn + land/diff filter (refuse out-of-allowlist)  
+- [x] **R1** WP7 residual: `last_tool` + `last_progress_age_ms` on `SubagentProgress` ACP ticks; ensure completion meta `land_status=pending` when worktree artifacts exist  
 - [ ] **R3** RO / explore|plan|oracle default `isolation=none` when spawn omits isolation (explicit worktree still honored)  
 - [ ] **R4** `spawn_many` tool (or Task multi-spawn) + barrier wait respecting max concurrency  
 - [ ] **R5** `/ultracode` slash alias → deep-audit (full `/effort ultracode` mode can follow)  
