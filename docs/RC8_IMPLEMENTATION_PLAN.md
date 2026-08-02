@@ -642,22 +642,22 @@ Four Grok 4.5 passes (explore×3 + oracle) converged:
 ## 11. Implementation checklist (track in PR(s))
 
 ### Must (RC8)
-- [ ] WP1: Null-tolerant Chat Completions deser + fixtures  
-- [ ] WP2: changes.patch + diffstat + meta state + snapshot_ref in completion  
-- [ ] WP3: `timeout_ms` on spawn + NVIDIA default 600s + timeout snapshot  
-- [ ] WP5a: `diff_subagent` + `land_subagent` tools  
-- [ ] WP6a: NVIDIA platform cache_key false + token clamp + EOL hide  
-- [ ] **WP10a: `/deepaudit` builtin workflow + slash (medium default, RO, verify phase)**  
-- [ ] WP9: CHANGELOG + KNOWN_ISSUES + subagent recovery + `/deepaudit` docs  
+- [x] WP1: Null-tolerant Chat Completions deser + fixtures  
+- [x] WP2: changes.patch + diffstat + meta state + snapshot_ref in completion  
+- [x] WP3: `timeout_ms` on spawn + NVIDIA default 600s + timeout snapshot  
+- [x] WP5a: `diff_subagent` + `land_subagent` tools  
+- [x] WP6a: NVIDIA platform cache_key false + token clamp + EOL hide  
+- [x] **WP10a: `/deepaudit` builtin workflow + slash (medium default, RO, verify phase)**  
+- [x] WP9: CHANGELOG + KNOWN_ISSUES + subagent recovery + `/deepaudit` docs  
 
 ### Should (RC8 if capacity)
-- [ ] WP4: Stall detector  
-- [ ] WP5b: retain_worktree + CLI list/open/diff/land/discard/prune  
-- [ ] WP6b: parallel_tool_calls + agent_ready flags  
-- [ ] WP7: error_class + heartbeat enrichment  
-- [ ] WP8: continuous-improve workflow + LoopCheckpoint  
-- [ ] **WP10b: size small/medium/large + agent_budget mapping + large cost caution**  
-- [ ] Oracle doctor warning for non-agent-ready pins  
+- [x] WP4: Stall detector  
+- [x] WP5b: retain_worktree + CLI list/open/diff/land/discard/prune  
+- [x] WP6b: parallel_tool_calls + agent_ready flags  
+- [x] WP7: error_class (+ progress publisher exists; optional last_tool age polish residual)  
+- [x] WP8: continuous-improve workflow + LoopCheckpoint  
+- [x] **WP10b: size small/medium/large + agent_budget mapping + large cost caution**  
+- [x] Oracle doctor warning for non-agent-ready pins  
 
 ### Later (RC9+)
 - [ ] spawn_many + barrier  
