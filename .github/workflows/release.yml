@@ -1,8 +1,8 @@
 name: Release
 
-# On tag push v*, build the single-file `hyper` binary for the five supported
+# On tag push v*, build the single-file `turbo` binary for the five supported
 # targets, package per-target archives named
-# hyper-<version>-<target-triple>.{tar.gz|zip} (binary + bundled runtime skills +
+# turbo-<version>-<target-triple>.{tar.gz|zip} (binary + bundled runtime skills +
 # LICENSE + NOTICE + THIRD-PARTY-NOTICES), generate SHA256SUMS, and publish as a
 # GitHub Release. install.sh / install.ps1 resolve these exact asset names.
 
@@ -154,7 +154,7 @@ jobs:
           # objects linked against a different libc abilist.
           key: ${{ matrix.target }}-glibc-${{ env.LINUX_GLIBC_FLOOR }}
 
-      - name: Build hyper (release-dist)
+      - name: Build turbo (release-dist)
         env:
           GROK_VERSION: ${{ env.GROK_VERSION }}
         shell: bash
@@ -177,7 +177,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then suffix=".exe"; fi
           src=""
           for cand in \
-            "target/${{ matrix.target }}/release-dist/hyper${suffix}" \
+            "target/${{ matrix.target }}/release-dist/turbo${suffix}" \
             "target/${{ matrix.target }}/release-dist/xai-grok-pager${suffix}"
           do
             if [ -f "$cand" ]; then src="$cand"; break; fi
@@ -192,7 +192,7 @@ jobs:
           fi
 
           if [ "${{ runner.os }}" = "Linux" ]; then
-            sections="$RUNNER_TEMP/hyper-sections.txt"
+            sections="$RUNNER_TEMP/turbo-sections.txt"
             readelf -SW "$src" > "$sections"
             if grep -Eq '\.(z)?debug_|\.gnu_debuglink' "$sections"; then
               echo "Linux release binary still contains debug sections" >&2
@@ -227,21 +227,21 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          archive="hyper-${version}-${{ matrix.target }}.tar.gz"
+          archive="turbo-${version}-${{ matrix.target }}.tar.gz"
           staging="$(mktemp -d)"
-          # Cargo may emit either `hyper` (preferred) or the upstream
+          # Cargo may emit either `turbo` (preferred) or the upstream
           # `xai-grok-pager` name depending on the local [[bin]] entry —
-          # normalize to `hyper` for installers.
+          # normalize to `turbo` for installers.
           src=""
           for cand in \
-            "target/${{ matrix.target }}/release-dist/hyper" \
+            "target/${{ matrix.target }}/release-dist/turbo" \
             "target/${{ matrix.target }}/release-dist/xai-grok-pager"
           do
             if [ -f "$cand" ]; then src="$cand"; break; fi
           done
           [ -n "$src" ] || { echo "release binary not found under release-dist/" >&2; ls -la "target/${{ matrix.target }}/release-dist/" >&2; exit 1; }
-          cp "$src" "$staging/hyper"
-          chmod 0755 "$staging/hyper"
+          cp "$src" "$staging/turbo"
+          chmod 0755 "$staging/turbo"
           cp LICENSE "$staging/"
           cp -R bundled "$staging/"
           find "$staging/bundled" -type d -name __pycache__ -prune -exec rm -rf {} +
@@ -259,10 +259,10 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart("v")
-          $archive = "hyper-$version-${{ matrix.target }}.zip"
+          $archive = "turbo-$version-${{ matrix.target }}.zip"
           $staging = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "staging")
           $candidates = @(
-            "target/${{ matrix.target }}/release-dist/hyper.exe",
+            "target/${{ matrix.target }}/release-dist/turbo.exe",
             "target/${{ matrix.target }}/release-dist/xai-grok-pager.exe"
           )
           $src = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -270,7 +270,7 @@ jobs:
             Get-ChildItem "target/${{ matrix.target }}/release-dist/" | Format-Table
             throw "release binary not found under release-dist/"
           }
-          Copy-Item $src (Join-Path $staging "hyper.exe")
+          Copy-Item $src (Join-Path $staging "turbo.exe")
           Copy-Item LICENSE $staging
           Copy-Item bundled $staging -Recurse
           Get-ChildItem (Join-Path $staging "bundled") -Directory -Recurse -Filter "__pycache__" |
@@ -306,7 +306,7 @@ jobs:
         working-directory: dist
         run: |
           ls -l
-          sha256sum hyper-* > SHA256SUMS
+          sha256sum turbo-* > SHA256SUMS
           cat SHA256SUMS
 
       # v3 = Node 24. draft:false publishes (reuses/updates an existing draft if
@@ -319,13 +319,13 @@ jobs:
           # Always publish as a full release. Community revision tags use a
           # hyphenated suffix (e.g. v0.2.114-r1); treating those as GitHub
           # prereleases would hide them from /latest and break installers /
-          # `hyper update`.
+          # `turbo update`.
           prerelease: false
           make_latest: true
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            ## Hyper `${{ github.ref_name }}`
+            ## Turbo `${{ github.ref_name }}`
 
             Unofficial multi-provider community build of [Grok Build](https://github.com/xai-org/grok-build).
 

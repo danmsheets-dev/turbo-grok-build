@@ -38,7 +38,7 @@ pub struct LandSubagentInput {
     /// Bypass the large-patch safety guard (default max 50 files).
     #[serde(default)]
     #[schemars(
-        description = "When true, allow landing agent deltas larger than the safety limit (default 50 files). Use only after reviewing `diff_subagent` / `hyper subagent diff`."
+        description = "When true, allow landing agent deltas larger than the safety limit (default 50 files). Use only after reviewing `diff_subagent` / `turbo subagent diff`."
     )]
     pub force: Option<bool>,
 }
@@ -191,7 +191,18 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
         super::land_size_guard(files_hint, force, super::DEFAULT_LAND_MAX_FILES)?;
         let resources = shared_resources(&ctx)?;
 
-        // 1) Live worktree
+        // Prefer agent-only snapshot (baseline..snap) over live dirty tree when
+        // a spawn baseline exists — soft-preserve leaves live trees full of
+        // parent dirt that would inflate land (harness QA P1).
+        let prefer_snapshot = work.meta.baseline_ref.as_ref().is_some_and(|b| !b.is_empty())
+            && work.snapshot_ref.is_some();
+        if prefer_snapshot {
+            if let Some(ref snap) = work.snapshot_ref {
+                return land_snapshot_ref(&work, snap, mode).await;
+            }
+        }
+
+        // 1) Live worktree (no baseline, or snapshot missing)
         if let Some(ref wt) = work.live_worktree {
             // Pre-check allowlist against worktree change set before any apply.
             if let Ok(paths) = collect_live_worktree_paths(wt, &work.parent_git_root).await {
@@ -513,13 +524,34 @@ async fn land_snapshot_ref(
         })?;
     let parent_head = parent_head.trim().to_owned();
 
-    // Prefer three-way base = merge-base(HEAD, snap) when available.
-    let base_rev = git_capture(parent, &["merge-base", "HEAD", snap])
-        .await
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_else(|_| parent_head.clone());
+    // Agent-only base: spawn baseline when present (excludes dirty-parent bulk
+    // copied into the sandbox). Fall back to merge-base(HEAD, snap) / HEAD.
+    let baseline = work
+        .meta
+        .baseline_ref
+        .as_deref()
+        .filter(|b| !b.is_empty());
+    let base_rev = if let Some(base) = baseline {
+        if git_capture(parent, &["rev-parse", "--verify", base])
+            .await
+            .is_ok()
+        {
+            base.to_owned()
+        } else {
+            git_capture(parent, &["merge-base", "HEAD", snap])
+                .await
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_else(|_| parent_head.clone())
+        }
+    } else {
+        git_capture(parent, &["merge-base", "HEAD", snap])
+            .await
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_else(|_| parent_head.clone())
+    };
 
-    let name_status = git_capture(parent, &["diff", "--name-status", "HEAD", snap])
+    // Agent-only path list: baseline..snapshot (not HEAD..snapshot).
+    let name_status = git_capture(parent, &["diff", "--name-status", &base_rev, snap])
         .await
         .map_err(|e| {
             xai_tool_runtime::ToolError::custom("git_error", format!("diff name-status: {e}"))
@@ -539,7 +571,7 @@ async fn land_snapshot_ref(
             files_landed: vec![],
             conflicts: vec![],
             message: format!(
-                "Subagent `{}` snapshot `{snap}` has no diff vs parent HEAD — nothing to land.",
+                "Subagent `{}` snapshot `{snap}` has no agent-only diff vs `{base_rev}` — nothing to land.",
                 work.subagent_id
             ),
         });

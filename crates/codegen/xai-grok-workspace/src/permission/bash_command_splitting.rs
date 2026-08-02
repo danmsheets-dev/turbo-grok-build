@@ -884,7 +884,7 @@ fn sh_split_simple(s: &str) -> Vec<String> {
 /// Given a bash *script string* like:
 ///
 /// ```bash
-/// XAI_API_KEY='xai-some-key' cargo run --bin hyper
+/// XAI_API_KEY='xai-some-key' cargo run --bin turbo
 /// ```
 ///
 /// returns the first "important" command as a `BashCommandHighlights` where:
@@ -1398,7 +1398,7 @@ mod tests {
             })
         );
 
-        let environment_key_command = "XAI_API_KEY='xai-some-key' cargo run --bin hyper";
+        let environment_key_command = "XAI_API_KEY='xai-some-key' cargo run --bin turbo";
         assert_eq!(
             primary_command_from_script(environment_key_command),
             Some(BashCommandHighlights {
@@ -1436,7 +1436,7 @@ mod tests {
             })
         );
 
-        let redirection_command = "cargo build --bin hyper 2>&1";
+        let redirection_command = "cargo build --bin turbo 2>&1";
         assert_eq!(
             primary_command_from_script(redirection_command),
             Some(BashCommandHighlights {

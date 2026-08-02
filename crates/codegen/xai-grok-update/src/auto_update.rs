@@ -48,7 +48,7 @@ fn manual_install_cmd() -> &'static str {
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str) -> String {
     if cfg!(feature = "community-build") && installer == "community-github" {
-        return format!("Please reinstall Hyper via:\n  {}", manual_install_cmd());
+        return format!("Please reinstall Turbo via:\n  {}", manual_install_cmd());
     }
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
@@ -78,7 +78,7 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     }
 
     let product = if cfg!(feature = "community-build") {
-        "Hyper"
+        "Turbo"
     } else {
         "Grok Build"
     };
@@ -746,7 +746,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
             let status = cmd.status().await?;
             if !status.success() {
                 let command = if cfg!(feature = "community-build") {
-                    "hyper update"
+                    "turbo update"
                 } else {
                     "grok update"
                 };
@@ -769,7 +769,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
 
 /// Canonical managed application for this build flavor.
 ///
-/// Community builds return `~/.hyper/bin/hyper`; official builds retain the
+/// Community builds return `~/.turbo/bin/turbo`; official builds retain the
 /// upstream `~/.grok/bin/grok` path. Callers use this for managed-install gates
 /// without duplicating product-specific path logic.
 pub fn managed_application() -> std::path::PathBuf {
@@ -783,7 +783,7 @@ pub fn managed_application() -> std::path::PathBuf {
     }
 }
 
-/// Whether this running managed Hyper process is now behind the active link.
+/// Whether this running managed Turbo process is now behind the active link.
 ///
 /// This also detects checksum-distinct republished assets whose semantic
 /// version is unchanged, allowing a same-version leader to relaunch promptly.
@@ -823,7 +823,7 @@ pub fn restart_grok() -> Result<()> {
     eprintln!(
         "Restarting {}...",
         if cfg!(feature = "community-build") {
-            "Hyper"
+            "Turbo"
         } else {
             "Grok"
         }

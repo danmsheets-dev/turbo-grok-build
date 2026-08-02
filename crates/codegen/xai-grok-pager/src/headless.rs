@@ -1005,7 +1005,7 @@ impl HeadlessEmitter {
             "servedModel": served_model,
             "permissionMode": permission_mode,
             "sandbox": sandbox,
-            "binary": "hyper",
+            "binary": "turbo",
             "version": xai_grok_version::VERSION,
             "alwaysApprove": always_approve,
             "rulesApplied": rules_applied,
@@ -1732,7 +1732,7 @@ pub async fn run_single_turn(
     if options.worktree.is_some() {
         anyhow::bail!(
             "--worktree is not supported in headless mode; create the worktree \
-             first (e.g. `hyper worktree` or `git worktree add`) and pass \
+             first (e.g. `turbo worktree` or `git worktree add`) and pass \
              --confine <path> (and optionally --cwd <path>). --worktree-ref was \
              also dropped in this mode."
         );
@@ -2760,9 +2760,13 @@ fn handle_headless_acp_message(
                 acp::SessionUpdate::ToolCallUpdate(tcu) => {
                     // Updates do not re-count as new tool calls (the ToolCall
                     // event already did). Harvest Edit locations + stream update.
+                    //
+                    // Write/search_replace emit Edit+locations on the *start*
+                    // update (often without status=Completed). Previously we
+                    // required Completed on the same event and missed all
+                    // writes → false --require-changes NoChanges.
                     emitter.on_tool_call_update(tcu);
                     if matches!(tcu.fields.kind, Some(acp::ToolKind::Edit))
-                        && matches!(tcu.fields.status, Some(acp::ToolCallStatus::Completed))
                         && let Some(locs) = tcu.fields.locations.as_ref()
                     {
                         emitter.note_edit_locations(locs);

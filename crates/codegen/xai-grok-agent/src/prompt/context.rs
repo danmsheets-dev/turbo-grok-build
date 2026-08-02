@@ -149,6 +149,9 @@ pub struct PromptContext {
     /// Not the UI picker name. Defaults to [`DEFAULT_SYSTEM_PROMPT_LABEL`].
     #[serde(default = "default_system_prompt_label")]
     pub system_prompt_label: String,
+    /// Session model id for boot-card `Model:` field (public slug when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 /// Default identity on trim-tool-descriptions (`You are Grok released by xAI`).
 pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "Grok";
@@ -193,6 +196,7 @@ impl Default for PromptContext {
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
+            model: None,
         }
     }
 }
@@ -248,6 +252,7 @@ impl PromptContext {
             "current_date": self.current_date.as_deref().unwrap_or(""),
             "is_non_interactive": self.is_non_interactive,
             "system_prompt_label": self.system_prompt_label.as_str(),
+            "model": self.model.as_deref().unwrap_or(""),
         })
     }
     /// Render the full system prompt via `ToolBridge`.
@@ -311,11 +316,17 @@ impl PromptContext {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let model = self
-                .placeholders()
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .model
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| {
+                    self.placeholders()
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("(session default)")
+                        .to_string()
+                });
             let mut ctx = crate::prompt::boot_card::BootCardContext::from_env(&cwd, &model);
             if mode == crate::prompt::boot_card::BootCardMode::Child {
                 ctx.isolation = "worktree".into();
@@ -358,6 +369,7 @@ mod tests {
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
+            model: None,
         }
     }
     #[test]
@@ -643,6 +655,7 @@ mod tests {
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
+            model: None,
         }
     }
     #[test]

@@ -70,7 +70,7 @@ const THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
-    // --- Hyper preset collection (eleven dark, three light) -------------
+    // --- Turbo preset collection (eleven dark, three light) -------------
     EnumChoice {
         canonical: "everforest",
         display: "Everforest",
@@ -642,7 +642,7 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
-    // --- Hyper preset collection (eleven dark, three light) -------------
+    // --- Turbo preset collection (eleven dark, three light) -------------
     EnumChoice {
         canonical: "everforest",
         display: "Everforest",
@@ -1558,7 +1558,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             owner: SettingOwner::Shell,
             label: "Auto-update",
             description: "Automatically download and install application updates on startup. \
-                          Hyper builds use community releases only. Restart required.",
+                          Turbo builds use community releases only. Restart required.",
             keywords: &[
                 "auto", "update", "updates", "upgrade", "version", "install", "channel",
             ],

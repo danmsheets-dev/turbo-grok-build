@@ -19,7 +19,7 @@ core and multi-provider stack, then layers production-grade subagent worktrees,
 recovery tooling, field logging, and agent orientation that the upstream
 product does not ship.
 
-CLI binary today: **`hyper`** (installs to `~/.hyper/bin`). Product name: **Turbo**.
+CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Grok Turbo** / **Grok Turbo Beta**.
 
 [What changed](#what-makes-turbo-different) ·
 [Install](#installation) ·
@@ -43,17 +43,17 @@ multi-agent development runtime** built on that foundation.
 |------|---------------------|----------------------|
 | Product focus | Official agent CLI | Community multi-agent platform |
 | Subagents | Present | Isolation by default, land/diff/discard, soft-preserve, restore |
-| Worktree recovery | Ephemeral / hard to find | Snapshot + baseline agent-only diffs + `hyper subagent …` CLI |
+| Worktree recovery | Ephemeral / hard to find | Snapshot + baseline agent-only diffs + `turbo subagent …` CLI |
 | Dirty-parent pollution | Diff vs HEAD can explode | Spawn **baseline** refs → agent-only patches; land fails closed if huge |
 | Agent orientation | System prompt + project rules | **Agent Boot Card** (ops brief, recovery, required field logging) |
-| Product field signal | `/feedback`, crashes | **Auto Developer Log** (`developer_log` tool + `hyper issues`) |
+| Product field signal | `/feedback`, crashes | **Auto Developer Log** (`developer_log` tool + `turbo issues`) |
 | Providers | xAI-centric | Multi-provider (Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, …) |
 | Reliability track | Upstream cadence | RC7→RC8→RC9 community reliability + deep-audit workflows |
-| Branding / binary | `grok` · `~/.grok` | Product **Turbo** · CLI **`hyper`** · binary under `~/.hyper` |
+| Branding / binary | `grok` · `~/.grok` | Product **Grok Turbo** · CLI **`turbo`** · binary under `~/.turbo` |
 
 ### Highlights (RC8–RC9)
 
-- **Isolated worktrees that stay recoverable** — soft-preserve by default, `hyper subagent open|diff|land|discard`, `open --restore`, agent-only baselines
+- **Isolated worktrees that stay recoverable** — soft-preserve by default, `turbo subagent open|diff|land|discard`, `open --restore`, agent-only baselines
 - **Agent Boot Card** — every new session gets a short ops briefing (recovery CLI, land safety, required logging)
 - **Auto Developer Log** — agents must file structured product issues; configurable log directory
 - **Land safety** — refuse mega-patches from dirty-tree pollution unless `force=true`
@@ -76,13 +76,13 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 
 | | Official | This project |
 |---|---|---|
-| Product | Grok Build | **Grok Build Turbo** |
-| CLI binary | `grok` | **`hyper`** (Turbo CLI) |
-| Install root | `~/.grok` | **`~/.hyper`** (binary only) |
+| Product | Grok Build | **Grok Turbo** (Grok Turbo Beta) |
+| CLI binary | `grok` | **`turbo`** |
+| Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
-Repo folder/history may still say `hyper-grok-build`. **Turbo** is the product name.
+Repo folder/history may still say `hyper-grok-build`. Product/CLI name is **Turbo** (`turbo`).
 
 ---
 
@@ -102,9 +102,9 @@ irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/instal
 ```
 
 ```sh
-hyper --version
-hyper login          # xAI / Grok session (browser OAuth)
-hyper                # start the TUI
+turbo --version
+turbo login          # xAI / Grok session (browser OAuth)
+turbo                # start the TUI
 ```
 
 Pin a release:
@@ -113,14 +113,14 @@ Pin a release:
 curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r9
 ```
 
-Installer verifies `SHA256SUMS`, installs to `~/.hyper/bin/hyper`
-(`%USERPROFILE%\.hyper\bin\hyper.exe` on Windows).
+Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
+(`%USERPROFILE%\.turbo\bin\turbo.exe` on Windows).
 
 ### Install with Nix
 
 ```sh
-nix run github:danmsheets-dev/hyper-grok-build#hyper-grok-build -- --version
-nix profile install github:danmsheets-dev/hyper-grok-build#hyper-grok-build
+nix run github:danmsheets-dev/hyper-grok-build#turbo-grok-build -- --version
+nix profile install github:danmsheets-dev/hyper-grok-build#turbo-grok-build
 ```
 
 From a clone:
@@ -128,7 +128,7 @@ From a clone:
 ```sh
 git clone https://github.com/danmsheets-dev/hyper-grok-build
 cd hyper-grok-build
-nix run .#hyper-grok-build -- --version
+nix run .#turbo-grok-build -- --version
 nix develop
 ```
 
@@ -138,7 +138,7 @@ nix develop
 
 | Platform | Auth | Notes |
 | -------- | ---- | ----- |
-| xAI / Grok | `hyper login` or `XAI_API_KEY` | First-party models |
+| xAI / Grok | `turbo login` or `XAI_API_KEY` | First-party models |
 | NVIDIA Integrate | platform key | Large catalog; Turbo adds agent-ready hardening |
 | Kimi Code / Moonshot | OAuth / API key | `kimi-code/*`, open platform |
 | ChatGPT Codex | ChatGPT OAuth | GPT-5.x + experimental live voice |
@@ -166,12 +166,12 @@ spawn (isolation=worktree)
 ```
 
 ```bash
-hyper subagent list
-hyper subagent open <id>
-hyper subagent open <id> --restore          # materialize snapshot
-hyper subagent diff <id>
-hyper subagent land <id>                    # refuses huge dirty-tree patches
-hyper subagent discard <id>
+turbo subagent list
+turbo subagent open <id>
+turbo subagent open <id> --restore          # materialize snapshot
+turbo subagent diff <id>
+turbo subagent land <id>                    # refuses huge dirty-tree patches
+turbo subagent discard <id>
 ```
 
 Optional:
@@ -193,17 +193,17 @@ Agents are instructed (Boot Card) to **always** file product friction with the
 `developer_log` tool. Humans triage with:
 
 ```bash
-hyper issues list
-hyper issues show <id>
-hyper issues export --severity p0 --out ./turbo-issues-pack
-hyper issues path
-hyper issues set-dir D:/TurboLogs/developer-log   # persist custom root
-hyper issues clear-dir
+turbo issues list
+turbo issues show <id>
+turbo issues export --severity p0 --out ./turbo-issues-pack
+turbo issues path
+turbo issues set-dir D:/TurboLogs/developer-log   # persist custom root
+turbo issues clear-dir
 ```
 
 | Precedence | Log directory source |
 |------------|----------------------|
-| 1 | `hyper issues set-dir` (session + `~/.grok/developer-log.toml`) |
+| 1 | `turbo issues set-dir` (session + `~/.grok/developer-log.toml`) |
 | 2 | `GROK_DEVELOPER_LOG_DIR` |
 | 3 | `~/.grok/developer-log.toml` |
 | 4 | Default `~/.grok/developer-log` |
@@ -231,16 +231,16 @@ Requirements: Rust (`rust-toolchain.toml`), [DotSlash](https://dotslash-cli.com)
 for `bin/protoc`, CMake 3.5+.
 
 ```sh
-cargo run -p xai-grok-pager-bin              # TUI (binary name: hyper)
+cargo run -p xai-grok-pager-bin              # TUI (binary name: turbo)
 GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-dist
-./target/release-dist/hyper --version
+./target/release-dist/turbo --version
 ```
 
 Windows PowerShell:
 
 ```powershell
 $env:GROK_VERSION = (Get-Content VERSION -Raw).Trim()
-cargo build -p xai-grok-pager-bin --profile release-dist --bin hyper
+cargo build -p xai-grok-pager-bin --profile release-dist --bin turbo
 ```
 
 Community branding / updater: `--features community-build` (default on this tree).
@@ -269,16 +269,16 @@ git push origin "v${VERSION}"
 ```
 
 Workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml).
-Artifacts ship as `hyper-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
+Artifacts ship as `turbo-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 
 ---
 
 ## Coexistence with official `grok`
 
-| Surface | Official | Turbo (`hyper`) |
+| Surface | Official | Turbo (`turbo`) |
 |---------|----------|-----------------|
-| Binary | `grok` | `hyper` |
-| Install root | `~/.grok/bin` | `~/.hyper/bin` |
+| Binary | `grok` | `turbo` |
+| Install root | `~/.grok/bin` | `~/.turbo/bin` |
 | Config / auth / sessions | `~/.grok` | **same** |
 | Leader IPC | under `~/.grok` | **same namespace** |
 
@@ -292,7 +292,7 @@ Artifacts ship as `hyper-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 
 | Doc | Content |
 |-----|---------|
-| [User guide (EN)](crates/codegen/xai-grok-pager/docs/user-guide/) | Product how-to (examples may say `grok`; CLI is `hyper`) |
+| [User guide (EN)](crates/codegen/xai-grok-pager/docs/user-guide/) | Product how-to (examples may say `grok`; CLI is `turbo`) |
 | [用户指南 (中文)](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/) | Chinese guide |
 | [RC9 features](docs/RC9_FEATURES.md) | Worktrees, Boot Card, copy UI, ADL |
 | [Auto Developer Log](docs/AUTO_DEVELOPER_LOG.md) | Field logging for maintainers |
@@ -308,7 +308,7 @@ Artifacts ship as `hyper-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 
 | Path | Contents |
 |------|----------|
-| `crates/codegen/xai-grok-pager-bin` | Composition root → `hyper` binary |
+| `crates/codegen/xai-grok-pager-bin` | Composition root → `turbo` binary |
 | `crates/codegen/xai-grok-pager` | TUI |
 | `crates/codegen/xai-grok-shell` | Agent runtime / subagents |
 | `crates/codegen/xai-grok-developer-log` | Auto Developer Log store |

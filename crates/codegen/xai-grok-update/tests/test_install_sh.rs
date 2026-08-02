@@ -15,7 +15,7 @@
 //! the path resolves and the installer is exercised end to end.
 
 // This exercises the upstream Grok installer under xai-grok-pager/scripts,
-// not the repository-root Hyper community installer.
+// not the repository-root Turbo community installer.
 #![cfg(all(unix, not(feature = "community-build")))]
 
 use std::os::unix::fs::PermissionsExt;

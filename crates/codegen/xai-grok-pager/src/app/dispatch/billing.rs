@@ -36,9 +36,9 @@ pub(crate) const UPSELL_URL_UPGRADE: &str = "https://grok.com/supergrok?referrer
 pub(crate) const UPSELL_URL_PAYG: &str = "https://grok.com?_s=usage";
 
 /// Internal free-usage modal action: clear the sticky block and open `/model`.
-pub(crate) const UPSELL_ACTION_SWITCH_MODEL: &str = "hyper:switch-model";
+pub(crate) const UPSELL_ACTION_SWITCH_MODEL: &str = "turbo:switch-model";
 /// Internal free-usage modal action: dismiss the paywall without upgrading.
-pub(crate) const UPSELL_ACTION_DISMISS: &str = "hyper:dismiss-paywall";
+pub(crate) const UPSELL_ACTION_DISMISS: &str = "turbo:dismiss-paywall";
 
 /// Billing mode for credit-limit upsell copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,7 +313,7 @@ fn open_supergrok_upsell(
             id: Some(UPSELL_URL_UPGRADE.into()),
         },
     ];
-    // Hyper community: never trap users on a paywall-only path. Let them
+    // Turbo community: never trap users on a paywall-only path. Let them
     // switch model / BYOK / other logins instead of only "pay SuperGrok".
     if cfg!(feature = "community-build") && matches!(reason, UpsellReason::FreeUsageLimit) {
         options.push(QuestionOption {

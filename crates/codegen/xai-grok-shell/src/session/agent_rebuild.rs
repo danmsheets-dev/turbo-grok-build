@@ -251,6 +251,7 @@ impl AgentRebuildSpec {
         .with_memory_paths(memory_global_path.clone(), memory_workspace_path.clone())
         .with_is_non_interactive(*is_non_interactive)
         .with_system_prompt_label(system_prompt_label.clone())
+        .with_session_model(models_manager.current_model_id().0.as_ref().to_string())
         .with_session_env(session_env.clone())
         .with_state_path(bridge_state_path.clone())
         .with_web_search_config(web_search_config.clone())

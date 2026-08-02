@@ -113,30 +113,63 @@ pub fn set_root_override(path: Option<PathBuf>) {
 }
 
 /// Persist `dir` to `$GROK_HOME/developer-log.toml` and set the process override.
+///
+/// If `path` looks like an application source tree (git root + Cargo/crates),
+/// incidents are stored under `{path}/developer-log` instead so logs are not
+/// co-mingled with code. Set env `GROK_DEVELOPER_LOG_FORCE_DIR=1` to force the
+/// exact path.
 pub fn set_configured_dir(path: &Path) -> Result<PathBuf, StoreError> {
     let expanded = expand_dir(path);
     if expanded.as_os_str().is_empty() {
         return Err(StoreError::Invalid("directory path is empty".into()));
     }
+    let force = std::env::var_os("GROK_DEVELOPER_LOG_FORCE_DIR").is_some_and(|v| {
+        matches!(
+            v.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    let target = if !force && path_looks_like_app_source_tree(&expanded) {
+        let nested = expanded.join("developer-log");
+        tracing::warn!(
+            requested = %expanded.display(),
+            using = %nested.display(),
+            "developer-log set-dir: path looks like a source tree; using nested developer-log/"
+        );
+        nested
+    } else {
+        expanded
+    };
     // Reject relative paths that would escape in surprising ways after expand.
-    fs::create_dir_all(&expanded).map_err(StoreError::Io)?;
+    fs::create_dir_all(&target).map_err(StoreError::Io)?;
+    // Ensure real store layout exists so empty stores are not "healthy" ghosts.
+    let _ = DeveloperLogStore::new(target.clone()).ensure_layout();
     let cfg_path = config_file_path();
     if let Some(parent) = cfg_path.parent() {
         fs::create_dir_all(parent)?;
     }
     // Minimal TOML — no extra dep. Quote path for spaces/backslashes.
-    let escaped = expanded.display().to_string().replace('\\', "\\\\");
+    let escaped = target.display().to_string().replace('\\', "\\\\");
     let body = format!(
-        "# Hyper Auto Developer Log — root directory for product incidents\n\
+        "# Turbo Auto Developer Log — root directory for product incidents\n\
          # Override with env {DIR_ENV}=...\n\
-         # Managed by `hyper issues set-dir`\n\
+         # Managed by `turbo issues set-dir`\n\
          dir = \"{escaped}\"\n"
     );
     let tmp = cfg_path.with_extension("toml.tmp");
     fs::write(&tmp, body)?;
     fs::rename(&tmp, &cfg_path)?;
-    set_root_override(Some(expanded.clone()));
-    Ok(expanded)
+    set_root_override(Some(target.clone()));
+    Ok(target)
+}
+
+/// True when `path` looks like an app repo root (would be a bad log root).
+fn path_looks_like_app_source_tree(path: &Path) -> bool {
+    let has_git = path.join(".git").exists();
+    let has_cargo = path.join("Cargo.toml").is_file();
+    let has_crates = path.join("crates").is_dir();
+    let has_package = path.join("package.json").is_file();
+    (has_git || has_cargo || has_package) && (has_crates || has_cargo || has_package)
 }
 
 /// Clear the persisted dir config (revert to builtin default). Also clears override.
@@ -259,9 +292,17 @@ impl DeveloperLogStore {
         self.root.join(BUNDLES_DIR)
     }
 
-    fn ensure_layout(&self) -> Result<(), StoreError> {
+    pub fn ensure_layout(&self) -> Result<(), StoreError> {
         fs::create_dir_all(self.incidents_dir())?;
         fs::create_dir_all(self.bundles_dir())?;
+        // Touch an empty index if missing so operators see a real store.
+        let index = self.index_path();
+        if !index.is_file() {
+            let empty = IndexFile::default();
+            let pretty = serde_json::to_string_pretty(&empty)
+                .map_err(|e| StoreError::Invalid(e.to_string()))?;
+            fs::write(index, pretty)?;
+        }
         Ok(())
     }
 
@@ -671,8 +712,8 @@ fn merge_strings(dst: &mut Vec<String>, src: &[String]) {
 }
 
 fn fill_environment_defaults(env: &mut Environment) {
-    if env.hyper_version.is_none() {
-        env.hyper_version = Some(xai_grok_version::installed());
+    if env.product_version.is_none() {
+        env.product_version = Some(xai_grok_version::installed());
     }
     if env.os.is_none() {
         env.os = Some(std::env::consts::OS.to_string());

@@ -598,7 +598,7 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
         tracing::warn!(
             %reason,
             "auth: Codex refresh short-circuited by sticky permanent failure \
-             (run `hyper login --openai` or `hyper logout --openai` then re-login)"
+             (run `turbo login --openai` or `turbo logout --openai` then re-login)"
         );
         return None;
     }

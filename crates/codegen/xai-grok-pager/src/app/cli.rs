@@ -242,7 +242,7 @@ pub struct DashboardArgs {
     pub no_open: bool,
 }
 
-/// `hyper models` / `grok models` flags.
+/// `turbo models` / `grok models` flags.
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct ModelsArgs {
     /// Emit machine-readable JSON (`schemaVersion`, `defaultModel`, `models[]`
@@ -537,7 +537,7 @@ pub struct LeaderArgs {
 #[command(
     name = "grok",
     version = env!("VERSION_WITH_COMMIT"),
-    about = "Grok Build TUI",
+    about = "Grok Turbo TUI",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -822,7 +822,7 @@ pub struct PagerArgs {
         env = "GROK_CONFINE"
     )]
     pub confine: Option<PathBuf>,
-    /// Put this Hyper process in a Windows Job Object (`KILL_ON_JOB_CLOSE`) so
+    /// Put this Turbo process in a Windows Job Object (`KILL_ON_JOB_CLOSE`) so
     /// a harness can kill the whole process tree by closing the job handle.
     /// Also enabled by env `HYPER_JOB_OBJECT=1`. Off by default so interactive
     /// users are unaffected. No-op on non-Windows.

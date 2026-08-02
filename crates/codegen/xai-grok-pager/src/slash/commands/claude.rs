@@ -6,7 +6,7 @@
 //! this is a one-time login.
 //!
 //! - `/claude`        — start (or re-run) the subscription login
-//! - `/claude logout` — points to `hyper logout --claude` (CLI-side logout)
+//! - `/claude logout` — points to `turbo logout --claude` (CLI-side logout)
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -38,12 +38,12 @@ impl SlashCommand for ClaudeCommand {
             }
             // Claude logout is a CLI-side operation (no in-TUI action yet).
             "logout" | "off" | "signout" | "sign-out" => CommandResult::Error(
-                "To sign out of Claude, run `hyper logout --claude` in your shell \
-                 (or `hyper logout --all`)."
+                "To sign out of Claude, run `turbo logout --claude` in your shell \
+                 (or `turbo logout --all`)."
                     .into(),
             ),
             other => CommandResult::Error(format!(
-                "Unknown option '{other}'. Use `/claude` to sign in, or `hyper logout --claude` to sign out."
+                "Unknown option '{other}'. Use `/claude` to sign in, or `turbo logout --claude` to sign out."
             )),
         }
     }

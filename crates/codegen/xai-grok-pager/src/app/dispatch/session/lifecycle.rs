@@ -1141,7 +1141,7 @@ pub(in crate::app::dispatch) fn model_switch_context_hint(
     }
     Some(format!(
         "Current context is about {percent}% of {target_name}'s context window \
-         ({used_tokens}/{target_window} tokens). Grok Build will check whether \
+         ({used_tokens}/{target_window} tokens). Grok Turbo will check whether \
          compaction is needed before the next model call; run `/compact` first \
          if you want to guide the summary."
     ))

@@ -908,6 +908,73 @@ mod tests {
         }
     }
 
+    /// Pins Rhai string trim semantics: `s.trim()` mutates and returns `()`,
+    /// so helpers must return `s` after trim (deep-audit / continuous-improve).
+    #[test]
+    fn rhai_trimmed_helper_returns_string_for_to_lower() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = spawn_mock_host(rx, |req| match req {
+            WorkflowHostRequest::Phase { .. } | WorkflowHostRequest::Log { .. } => {}
+            other => panic!("unexpected request: {other:?}"),
+        });
+
+        // Broken pattern was: `return s.trim();` then `.to_lower()` → to_lower(()).
+        let script = r#"
+            let meta = #{ name: "trim-test", description: "d" };
+            fn trimmed(s) {
+                if type_of(s) == "string" {
+                    s.trim();
+                    s
+                } else {
+                    ""
+                }
+            }
+            let out = trimmed("  Hello World  ").to_lower();
+            complete(out);
+        "#;
+        let outcome = run_workflow(params(script, Journal::new(None), tx));
+        drop(host);
+        match outcome {
+            WorkflowOutcome::Completed { result } => {
+                assert_eq!(result, serde_json::json!("hello world"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rhai_broken_trim_return_unit_fails_to_lower() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = spawn_mock_host(rx, |req| match req {
+            WorkflowHostRequest::Phase { .. } | WorkflowHostRequest::Log { .. } => {}
+            other => panic!("unexpected request: {other:?}"),
+        });
+        let script = r#"
+            let meta = #{ name: "trim-broken", description: "d" };
+            fn trimmed(s) {
+                if type_of(s) == "string" {
+                    return s.trim();
+                } else {
+                    ""
+                }
+            }
+            let out = trimmed("  X  ").to_lower();
+            complete(out);
+        "#;
+        let outcome = run_workflow(params(script, Journal::new(None), tx));
+        drop(host);
+        // Must not complete successfully with a lowercased string.
+        assert!(
+            !matches!(
+                outcome,
+                WorkflowOutcome::Completed {
+                    result: serde_json::Value::String(ref s)
+                } if s == "x"
+            ),
+            "broken trim must not produce lowercase string: {outcome:?}"
+        );
+    }
+
     #[test]
     fn happy_path_completes_with_agent_output() {
         let (tx, rx) = mpsc::unbounded_channel();

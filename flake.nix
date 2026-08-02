@@ -1,6 +1,6 @@
-# Nix flake for the Hyper (`hyper`) terminal AI coding agent.
+# Nix flake for the Turbo (`turbo`) terminal AI coding agent.
 #
-# This flake builds the `hyper` binary (the composition-root crate
+# This flake builds the `turbo` binary (the composition-root crate
 # `xai-grok-pager-bin`) and provides a dev shell with all build-time
 # tooling. It is written in the same style as an in-tree nixpkgs package
 # expression so that the `package` output below can be lifted almost
@@ -9,8 +9,8 @@
 # differs.
 #
 # Usage:
-#   nix build .#hyper-grok-build        # build the `hyper` binary
-#   nix run   .#hyper-grok-build -- --version
+#   nix build .#turbo-grok-build        # build the `hyper` binary
+#   nix run   .#turbo-grok-build -- --version
 #   nix develop                          # rust + protoc + cmake + git shell
 #
 # The first `nix build` will fail on `cargoLock.outputHashes` for the
@@ -18,14 +18,14 @@
 # `outputHashes` below and rebuild. See:
 # https://nixos.org/manual/nixpkgs/unstable/#buildrustpackage
 {
-  description = "Hyper — unofficial multi-provider community build of Grok Build (terminal AI coding agent)";
+  description = "Turbo — multi-provider community build of Grok Build (Grok Turbo Beta terminal AI coding agent)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
     { self, nixpkgs }:
     let
-      # The `hyper` binary ships from the `xai-grok-pager-bin` crate; the
+      # The `turbo` binary ships from the `xai-grok-pager-bin` crate; the
       # workspace root has no `[package]`, so we target the crate directly.
       mainCrate = "xai-grok-pager-bin";
 
@@ -46,13 +46,13 @@
           pkgs = nixpkgsFor localSystem;
         in
         {
-          # Default output: the `hyper` binary, exposed under the
-          # non-conflicting attribute name `hyper-grok-build` (the `hyper`
-          # attribute is already taken in nixpkgs by the Hyper terminal).
-          default = self.packages.${localSystem}.hyper-grok-build;
+          # Default output: the `turbo` binary, exposed under the
+          # non-conflicting attribute name `turbo-grok-build` (avoids clash with
+          # any unrelated packages).
+          default = self.packages.${localSystem}.turbo-grok-build;
 
-          hyper-grok-build = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
-            pname = "hyper-grok-build";
+          turbo-grok-build = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
+            pname = "turbo-grok-build";
             # The lockstep client version lives in the root `VERSION` file
             # (the README's "Releasing" section says to set it there; the
             # shipped crate's `Cargo.toml` is kept in sync by hand). Read
@@ -153,7 +153,7 @@
               license = licenses.asl20;
               # Single shipped binary `hyper`; required for `nix run` to
               # resolve to the right executable.
-              mainProgram = "hyper";
+              mainProgram = "turbo";
               # Linux glibc targets first (matches the repo's release matrix).
               # macOS works upstream but is not exercised here.
               platforms = platforms.linux;
@@ -190,13 +190,13 @@
         }
       );
 
-      # Convenience app so `nix run .#hyper-grok-build` works without
-      # remembering the binary is named `hyper` (mainProgram also handles
+      # Convenience app so `nix run .#turbo-grok-build` works without
+      # remembering the binary is named `turbo` (mainProgram also handles
       # this, but an explicit app is friendlier for newcomers).
       apps = forAllSystems (localSystem: {
         default = {
           type = "app";
-          program = "${self.packages.${localSystem}.hyper-grok-build}/bin/hyper";
+          program = "${self.packages.${localSystem}.turbo-grok-build}/bin/turbo";
         };
       });
 

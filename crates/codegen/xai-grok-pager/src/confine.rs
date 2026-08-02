@@ -1,11 +1,11 @@
 //! Process-wide `--confine` / `--workspace-root` startup.
 //!
-//! Harnesses hand Hyper a git worktree path and need a hard guarantee that
+//! Harnesses hand Turbo a git worktree path and need a hard guarantee that
 //! writes and absolute path resolution stay under that root. The OS sandbox
 //! cannot provide that on Windows (advisory only); this is path-prefix
 //! confinement, cross-platform.
 //!
-//! The root is also exported as `GROK_CONFINE` so nested `hyper` processes,
+//! The root is also exported as `GROK_CONFINE` so nested `turbo` processes,
 //! MCP servers, and hook subprocesses inherit the same boundary. A nested
 //! process may tighten the root to a subdirectory but must not widen it.
 
@@ -48,14 +48,14 @@ pub fn apply_confine_root(path: &Path) -> anyhow::Result<()> {
         )
     })?;
 
-    // Nested hyper: refuse to widen beyond the inherited confine root.
+    // Nested turbo: refuse to widen beyond the inherited confine root.
     if let Some(inherited) = inherited_confine_root()? {
         if !path_is_under_confine_root(&canonical, &inherited)
             && canonicalize_compare(&canonical) != canonicalize_compare(&inherited)
         {
             anyhow::bail!(
                 "--confine: cannot widen beyond inherited GROK_CONFINE root `{}` \
-                 (requested `{}`). Nested hyper may only tighten confinement.",
+                 (requested `{}`). Nested turbo may only tighten confinement.",
                 inherited.display(),
                 canonical.display()
             );
@@ -72,7 +72,7 @@ pub fn apply_confine_root(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve an already-exported `GROK_CONFINE` (from a parent hyper) if present.
+/// Resolve an already-exported `GROK_CONFINE` (from a parent turbo) if present.
 fn inherited_confine_root() -> anyhow::Result<Option<PathBuf>> {
     let Ok(raw) = std::env::var(ENV_GROK_CONFINE) else {
         return Ok(None);

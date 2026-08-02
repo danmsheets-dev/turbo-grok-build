@@ -9,9 +9,11 @@ let meta = #{
     ],
 };
 
+// Rhai string::trim() mutates in place and returns (); return the string.
 fn trimmed(s) {
     if type_of(s) == "string" {
-        return s.trim();
+        s.trim();
+        s
     } else {
         ""
     }
@@ -41,6 +43,8 @@ fn normalize_focus(raw) {
 let scope = "";
 let focus = "all";
 let size = "medium";
+// Optional multi-model pins (array or comma-separated CSV). Round-robin on find jobs.
+let models = [];
 if args != () {
     if type_of(args) == "string" {
         scope = trimmed(args);
@@ -59,6 +63,41 @@ if args != () {
         }
         if args.size != () {
             size = normalize_size(args.size);
+        }
+        if args.models != () {
+            if type_of(args.models) == "array" {
+                for m in args.models {
+                    let mid = trimmed(m);
+                    if mid != "" {
+                        models.push(mid);
+                    }
+                }
+            } else {
+                let csv = trimmed(args.models);
+                // single string id
+                if csv != "" {
+                    models.push(csv);
+                }
+            }
+        }
+        if models.len() == 0 && args.models_csv != () {
+            let csv = trimmed(args.models_csv);
+            // Split on comma in a simple loop
+            let part = "";
+            let i = 0;
+            while i <= csv.len() {
+                let ch = if i < csv.len() { csv.sub_string(i, 1) } else { "," };
+                if ch == "," || ch == ";" || i == csv.len() {
+                    let mid = trimmed(part);
+                    if mid != "" {
+                        models.push(mid);
+                    }
+                    part = "";
+                } else {
+                    part += ch;
+                }
+                i += 1;
+            }
         }
     }
 }
@@ -83,8 +122,33 @@ if size == "small" {
     verifier_count = 4;
 }
 
+// When multi-model is requested, prefer one find job per model (capped by size).
+if models.len() > 0 {
+    find_count = models.len();
+    if size == "small" && find_count > 3 {
+        find_count = 3;
+    } else if size == "medium" && find_count > 5 {
+        find_count = 5;
+    } else if size == "large" && find_count > 8 {
+        find_count = 8;
+    }
+}
+
+fn model_for_index(idx) {
+    if models.len() == 0 {
+        ()
+    } else {
+        models[idx % models.len()]
+    }
+}
+
+// Stall budget for long multi-tool NVIDIA/finder runs (ms). Explicit so platform
+// defaults cannot cut multi-model audits at 3 minutes.
+let stall_ms = 600000;
+
 log("deep-audit size=" + size + " focus=" + focus + " find_count=" + find_count.to_string()
-    + " claim_cap=" + claim_cap.to_string());
+    + " claim_cap=" + claim_cap.to_string()
+    + " models=" + models.len().to_string());
 let planned_agents = 1 + find_count + verifier_count + 1;
 if planned_agents > 25 {
     log("Cost caution: planned agents ~" + planned_agents.to_string()
@@ -137,16 +201,19 @@ try {
         + "<audit-packet-json>\n"
         + json_encode(#{ scope: scope, focus: focus, size: size })
         + "\n</audit-packet-json>";
-    let plan = agent(
-        plan_prompt,
-        #{
-            label: "audit-scoper",
-            capability_mode: "read-only",
-            timeout_ms: 600000,
-            output_schema: plan_schema,
-            phase: "Scope",
-        },
-    );
+    let scoper_opts = #{
+        label: "audit-scoper",
+        capability_mode: "read-only",
+        timeout_ms: 600000,
+        stall_timeout_ms: stall_ms,
+        output_schema: plan_schema,
+        phase: "Scope",
+    };
+    let m0 = model_for_index(0);
+    if m0 != () {
+        scoper_opts.model = m0;
+    }
+    let plan = agent(plan_prompt, scoper_opts);
     if plan.success && plan.output.targets != () {
         let planned = [];
         for t in plan.output.targets {
@@ -246,14 +313,20 @@ for t in targets {
         + "<scope-json>\n" + json_encode(scope) + "\n</scope-json>\n"
         + "<focus-json>\n" + json_encode(focus) + "\n</focus-json>\n\n"
         + "<question-json>\n" + json_encode(t.question) + "\n</question-json>";
-    find_jobs.push(#{
+    let job = #{
         prompt: prompt,
         label: "find:" + t.label,
         capability_mode: "read-only",
-            timeout_ms: 600000,
+        timeout_ms: 600000,
+        stall_timeout_ms: stall_ms,
         output_schema: findings_schema,
         phase: "Investigate",
-    });
+    };
+    let mid = model_for_index(ti);
+    if mid != () {
+        job.model = mid;
+    }
+    find_jobs.push(job);
     ti += 1;
 }
 let find_results = parallel(find_jobs);
@@ -404,14 +477,21 @@ for shard_claims in verifier_claims {
         + "this packet, use each ID exactly once, and never return an ID outside this packet.\n\n"
         + "<candidate-findings-json>\n"
         + json_encode(shard_claims) + "\n</candidate-findings-json>";
-    verify_jobs.push(#{
+    let vjob = #{
         prompt: prompt,
         label: "verify:" + verifier_idx.to_string(),
         capability_mode: "read-only",
-            timeout_ms: 600000,
+        timeout_ms: 600000,
+        stall_timeout_ms: stall_ms,
         output_schema: verdict_schema,
         phase: "Verify",
-    });
+    };
+    // Prefer session/default for verify when multi-model finders were used,
+    // unless only one model was pinned (use it for verify too).
+    if models.len() == 1 {
+        vjob.model = models[0];
+    }
+    verify_jobs.push(vjob);
     verifier_idx += 1;
 }
 let verification_results = parallel(verify_jobs);

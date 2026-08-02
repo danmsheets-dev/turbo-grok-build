@@ -115,7 +115,7 @@ pub async fn serve(config: DashboardServerConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
     let url = format!("http://{address}");
-    tracing::info!(%url, "Hyper dashboard listening");
+    tracing::info!(%url, "Turbo dashboard listening");
 
     if config.open_browser {
         let url = url.clone();
@@ -138,7 +138,7 @@ fn shell(_options: LeptosOptions) -> impl IntoView {
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <meta name="color-scheme" content="dark"/>
-                <title>"Hyper Observability"</title>
+                <title>"Turbo Observability"</title>
                 <style>{DASHBOARD_CSS}</style>
             </head>
             <body><App/></body>

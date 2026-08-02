@@ -11,9 +11,11 @@ let meta = #{
     ],
 };
 
+// Rhai string::trim() mutates in place and returns (); return the string.
 fn trimmed(s) {
     if type_of(s) == "string" {
-        return s.trim();
+        s.trim();
+        s
     } else {
         ""
     }

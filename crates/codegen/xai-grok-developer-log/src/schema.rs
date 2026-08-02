@@ -282,8 +282,14 @@ pub enum ReproConfidence {
 /// Runtime environment snapshot (redacted / low-PII).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Environment {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hyper_version: Option<String>,
+    /// Product/CLI version (formerly `hyper_version` in older logs).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "hyper_version",
+        alias = "turbo_version"
+    )]
+    pub product_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,4 +1,4 @@
-//! Hyper preset theme collection.
+//! Turbo preset theme collection.
 //!
 //! Fourteen additional built-in themes, layered on top of the original five
 //! (GrokNight / GrokDay / TokyoNight / RosePineMoon / OscuraMidnight). They

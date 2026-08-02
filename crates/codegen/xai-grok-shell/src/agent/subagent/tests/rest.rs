@@ -571,10 +571,12 @@ fn dispose_with_artifacts_sets_land_status_pending() {
         dir.path(),
         &SubagentMetaDisposeUpdate {
             snapshot_ref: Some("refs/grok/subagents/sa-land".into()),
+            baseline_ref: Some("refs/grok/subagent-baselines/sa-land".into()),
             status: Some("completed".into()),
             worktree_state: Some("preserved".into()),
             patch_path: Some("changes.patch".into()),
             diffstat: Some("1 file, +1/-0".into()),
+            changed_paths: Some(vec!["probe.txt".into()]),
             land_status: Some("pending".into()),
             clear_worktree_path: false,
         },

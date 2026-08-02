@@ -421,7 +421,7 @@ impl AgentsModalState {
                 "Model pin activated — fresh spawns requested now use it; resumed agents keep their source model",
             ),
             Err(error) => AgentsModalMessage::error(format!(
-                "Model pin was saved, but live activation failed: {error}. Apply the pin again or restart Hyper."
+                "Model pin was saved, but live activation failed: {error}. Apply the pin again or restart Turbo."
             )),
         });
     }

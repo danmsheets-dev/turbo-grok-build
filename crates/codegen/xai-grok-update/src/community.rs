@@ -1,8 +1,8 @@
-//! Hyper community updater.
+//! Turbo community updater.
 //!
 //! This module is deliberately separate from the official Grok updater. It
 //! only reads releases from `DaviRain-Su/hyper-grok-build` and only activates
-//! binaries below `~/.hyper` (or `HYPER_SHARE_DIR` in debug/test builds).
+//! binaries below `~/.turbo` (or `TURBO_SHARE_DIR` in debug/test builds).
 //! Nothing here calls the x.ai/npm updater or writes `~/.grok/bin/grok`.
 
 use std::collections::HashSet;
@@ -137,17 +137,26 @@ impl Drop for TempArtifact {
     }
 }
 
-pub(crate) fn hyper_home() -> PathBuf {
-    if let Some(path) = std::env::var_os("HYPER_SHARE_DIR") {
+pub(crate) fn turbo_home() -> PathBuf {
+    // Prefer Turbo env; accept legacy Hyper env during migration.
+    if let Some(path) = std::env::var_os("TURBO_SHARE_DIR")
+        .or_else(|| std::env::var_os("HYPER_SHARE_DIR"))
+    {
         return PathBuf::from(path);
     }
     #[allow(deprecated)]
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".hyper")
+    home.join(".turbo")
+}
+
+/// Back-compat alias for call sites still using the old name.
+#[inline]
+pub(crate) fn hyper_home() -> PathBuf {
+    turbo_home()
 }
 
 pub(crate) fn managed_application() -> PathBuf {
-    let name = if cfg!(windows) { "hyper.exe" } else { "hyper" };
+    let name = if cfg!(windows) { "turbo.exe" } else { "turbo" };
     hyper_home().join("bin").join(name)
 }
 
@@ -186,7 +195,7 @@ fn reject_symlink(path: &Path, label: &str) -> Result<()> {
         && metadata.file_type().is_symlink()
     {
         bail!(
-            "refusing to use symlinked Hyper {label}: {}",
+            "refusing to use symlinked Turbo {label}: {}",
             path.display()
         );
     }
@@ -196,13 +205,13 @@ fn reject_symlink(path: &Path, label: &str) -> Result<()> {
 fn ensure_safe_layout() -> Result<()> {
     let home = hyper_home();
     if home.as_os_str().is_empty() {
-        bail!("Hyper install root is empty");
+        bail!("Turbo install root is empty");
     }
     if home.exists() {
         reject_symlink(&home, "install root")?;
     } else {
         std::fs::create_dir_all(&home)
-            .with_context(|| format!("creating Hyper install root {}", home.display()))?;
+            .with_context(|| format!("creating Turbo install root {}", home.display()))?;
     }
     for (name, label) in [
         ("bin", "bin directory"),
@@ -215,7 +224,7 @@ fn ensure_safe_layout() -> Result<()> {
             std::fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         if !std::fs::metadata(&dir)?.is_dir() {
-            bail!("Hyper {label} is not a directory: {}", dir.display());
+            bail!("Turbo {label} is not a directory: {}", dir.display());
         }
     }
     Ok(())
@@ -232,13 +241,13 @@ async fn acquire_update_lock() -> Result<UpdateLock> {
             .read(true)
             .write(true)
             .open(&lock_path)
-            .with_context(|| format!("opening Hyper update lock {}", lock_path.display()))?;
+            .with_context(|| format!("opening Turbo update lock {}", lock_path.display()))?;
         file.lock_exclusive()
             .with_context(|| format!("locking {}", lock_path.display()))?;
         Ok(UpdateLock(file))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Hyper update lock task failed: {e}"))?
+    .map_err(|e| anyhow::anyhow!("Turbo update lock task failed: {e}"))?
 }
 
 fn unique_sibling(base: &Path, suffix: &str) -> PathBuf {
@@ -278,7 +287,7 @@ fn write_state_atomic(state: &UpdateState) -> Result<()> {
         let had_old = path.exists();
         if had_old {
             std::fs::rename(&path, &backup).with_context(|| {
-                format!("moving existing Hyper update state {}", path.display())
+                format!("moving existing Turbo update state {}", path.display())
             })?;
         }
         if let Err(error) = std::fs::rename(&tmp, &path) {
@@ -304,7 +313,7 @@ fn platform() -> Result<Platform> {
         local_os: "macos",
         local_arch: "aarch64",
         archive_suffix: "tar.gz",
-        binary_entry: "hyper",
+        binary_entry: "turbo",
     });
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     return Ok(Platform {
@@ -312,7 +321,7 @@ fn platform() -> Result<Platform> {
         local_os: "macos",
         local_arch: "x86_64",
         archive_suffix: "tar.gz",
-        binary_entry: "hyper",
+        binary_entry: "turbo",
     });
     #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
     return Ok(Platform {
@@ -320,7 +329,7 @@ fn platform() -> Result<Platform> {
         local_os: "linux",
         local_arch: "aarch64",
         archive_suffix: "tar.gz",
-        binary_entry: "hyper",
+        binary_entry: "turbo",
     });
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     return Ok(Platform {
@@ -328,7 +337,7 @@ fn platform() -> Result<Platform> {
         local_os: "linux",
         local_arch: "x86_64",
         archive_suffix: "tar.gz",
-        binary_entry: "hyper",
+        binary_entry: "turbo",
     });
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     return Ok(Platform {
@@ -336,13 +345,13 @@ fn platform() -> Result<Platform> {
         local_os: "windows",
         local_arch: "x86_64",
         archive_suffix: "zip",
-        binary_entry: "hyper.exe",
+        binary_entry: "turbo.exe",
     });
-    bail!("this platform does not have a published Hyper community artifact")
+    bail!("this platform does not have a published Turbo community artifact")
 }
 
 fn update_source() -> Result<UpdateSource> {
-    let Some(override_base) = std::env::var_os("HYPER_UPDATE_BASE_URL") else {
+    let Some(override_base) = std::env::var_os("TURBO_UPDATE_BASE_URL").or_else(|| std::env::var_os("HYPER_UPDATE_BASE_URL")) else {
         return Ok(UpdateSource {
             api_base: RELEASE_API_BASE.to_string(),
             allow_insecure_local: false,
@@ -353,18 +362,18 @@ fn update_source() -> Result<UpdateSource> {
     // override exists only for hermetic debug/integration tests and requires a
     // second, explicit opt-in so an accidental environment leak fails closed.
     if !cfg!(debug_assertions)
-        || std::env::var_os("HYPER_ALLOW_INSECURE_UPDATE_BASE").as_deref()
+        || std::env::var_os("TURBO_ALLOW_INSECURE_UPDATE_BASE").or_else(|| std::env::var_os("HYPER_ALLOW_INSECURE_UPDATE_BASE")).as_deref()
             != Some(std::ffi::OsStr::new("1"))
     {
         bail!(
-            "HYPER_UPDATE_BASE_URL is disabled in production Hyper builds; updates are pinned to {RELEASE_REPO}"
+            "TURBO_UPDATE_BASE_URL is disabled in production Turbo builds; updates are pinned to {RELEASE_REPO}"
         );
     }
     let api_base = override_base
         .to_string_lossy()
         .trim_end_matches('/')
         .to_string();
-    let url = reqwest::Url::parse(&api_base).context("invalid HYPER_UPDATE_BASE_URL")?;
+    let url = reqwest::Url::parse(&api_base).context("invalid TURBO_UPDATE_BASE_URL")?;
     let local = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
     if !local {
         bail!("debug update-base overrides are restricted to localhost");
@@ -401,7 +410,7 @@ fn http_client(source: &UpdateSource) -> Result<reqwest::Client> {
     });
     let redirect = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= 5 {
-            return attempt.error("too many redirects while updating Hyper");
+            return attempt.error("too many redirects while updating Turbo");
         }
         let url = attempt.url();
         if allow_local {
@@ -422,7 +431,7 @@ fn http_client(source: &UpdateSource) -> Result<reqwest::Client> {
         }
     });
     Ok(reqwest::Client::builder()
-        .user_agent("hyper-community-updater")
+        .user_agent("turbo-community-updater")
         .timeout(REQUEST_TIMEOUT)
         .redirect(redirect)
         .build()?)
@@ -475,7 +484,7 @@ fn validate_release_asset_url(source: &UpdateSource, url: &str) -> Result<()> {
         || parsed.host_str() != Some("github.com")
         || !parsed.path().starts_with(&expected_prefix)
     {
-        bail!("release asset URL is outside the pinned Hyper GitHub repository");
+        bail!("release asset URL is outside the pinned Turbo GitHub repository");
     }
     Ok(())
 }
@@ -540,15 +549,15 @@ async fn resolve_candidate(pinned_version: Option<&str>) -> Result<Candidate> {
         request = request.bearer_auth(token.trim());
     }
     let response =
-        checked_response(request.send().await?, "Hyper release metadata request").await?;
+        checked_response(request.send().await?, "Turbo release metadata request").await?;
     let release_bytes = response_bytes_limited(response, MAX_MANIFEST_BYTES).await?;
     let release: ReleaseMetadata =
-        serde_json::from_slice(&release_bytes).context("invalid Hyper release metadata")?;
+        serde_json::from_slice(&release_bytes).context("invalid Turbo release metadata")?;
     if release.draft {
         bail!("refusing to install draft release {}", release.tag_name);
     }
     if pinned_version.is_none() && release.prerelease {
-        bail!("the latest Hyper release endpoint returned a prerelease");
+        bail!("the latest Turbo release endpoint returned a prerelease");
     }
     let version = release
         .tag_name
@@ -559,12 +568,12 @@ async fn resolve_candidate(pinned_version: Option<&str>) -> Result<Candidate> {
     if let Some(requested) = pinned_version
         && requested != version
     {
-        bail!("requested Hyper {requested}, but the release endpoint returned {version}");
+        bail!("requested Turbo {requested}, but the release endpoint returned {version}");
     }
 
     let platform = platform()?;
     let asset_name = format!(
-        "hyper-{version}-{}.{}",
+        "turbo-{version}-{}.{}",
         platform.asset_triple, platform.archive_suffix
     );
     let archive_asset = one_asset(&release, &asset_name)?;
@@ -574,7 +583,7 @@ async fn resolve_candidate(pinned_version: Option<&str>) -> Result<Candidate> {
 
     let sums_response = checked_response(
         client.get(&sums_asset.browser_download_url).send().await?,
-        "Hyper SHA256SUMS download",
+        "Turbo SHA256SUMS download",
     )
     .await?;
     let sums = response_bytes_limited(sums_response, MAX_MANIFEST_BYTES).await?;
@@ -591,7 +600,7 @@ async fn resolve_candidate(pinned_version: Option<&str>) -> Result<Candidate> {
 
 fn version_from_managed_name(name: &str) -> Option<String> {
     let name = name.strip_suffix(".exe").unwrap_or(name);
-    let suffix = name.strip_prefix("hyper-")?;
+    let suffix = name.strip_prefix("turbo-")?;
     let marker = ["-macos-", "-linux-", "-windows-"]
         .into_iter()
         .find_map(|marker| suffix.find(marker).map(|index| (marker, index)))?;
@@ -642,7 +651,7 @@ fn active_deployment() -> Option<ActiveDeployment> {
     })
 }
 
-fn current_exe_belongs_to_hyper_home() -> bool {
+fn current_exe_belongs_to_turbo_home() -> bool {
     let Ok(exe) = std::env::current_exe().and_then(dunce::canonicalize) else {
         return false;
     };
@@ -663,7 +672,7 @@ fn current_process_is_managed() -> bool {
 }
 
 pub(crate) fn running_differs_from_active() -> bool {
-    if !current_exe_belongs_to_hyper_home() {
+    if !current_exe_belongs_to_turbo_home() {
         return false;
     }
     match (
@@ -767,13 +776,13 @@ async fn download_archive(candidate: &Candidate, destination: &Path) -> Result<S
     let client = http_client(&source)?;
     let response = checked_response(
         client.get(&candidate.archive_url).send().await?,
-        "Hyper archive download",
+        "Turbo archive download",
     )
     .await?;
     if let Some(length) = response.content_length()
         && length > MAX_ARCHIVE_BYTES
     {
-        bail!("Hyper archive is too large ({length} bytes)");
+        bail!("Turbo archive is too large ({length} bytes)");
     }
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)
@@ -788,7 +797,7 @@ async fn download_archive(candidate: &Candidate, destination: &Path) -> Result<S
         let chunk = chunk?;
         size = size.saturating_add(chunk.len() as u64);
         if size > MAX_ARCHIVE_BYTES {
-            bail!("Hyper archive exceeded the {MAX_ARCHIVE_BYTES}-byte limit");
+            bail!("Turbo archive exceeded the {MAX_ARCHIVE_BYTES}-byte limit");
         }
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
@@ -843,15 +852,15 @@ fn extract_tar_binary(archive_path: &Path, destination: &Path, binary_entry: &st
     let mut found_binary = false;
     let mut entries = 0usize;
 
-    for entry in archive.entries().context("reading Hyper tar archive")? {
+    for entry in archive.entries().context("reading Turbo tar archive")? {
         entries += 1;
         if entries > MAX_ARCHIVE_ENTRIES {
-            bail!("Hyper archive contains too many entries");
+            bail!("Turbo archive contains too many entries");
         }
-        let entry = entry.context("reading Hyper tar entry")?;
+        let entry = entry.context("reading Turbo tar entry")?;
         let path = entry
             .path()
-            .context("reading Hyper tar entry path")?
+            .context("reading Turbo tar entry path")?
             .into_owned();
         let name = normalized_root_entry(&path)?;
         let kind = entry.header().entry_type();
@@ -860,22 +869,22 @@ fn extract_tar_binary(archive_path: &Path, destination: &Path, binary_entry: &st
         }
         if !kind.is_file() {
             bail!(
-                "Hyper archive contains a non-regular entry: {}",
+                "Turbo archive contains a non-regular entry: {}",
                 path.display()
             );
         }
         let Some(name) = name else {
-            bail!("Hyper archive contains an unnamed regular entry");
+            bail!("Turbo archive contains an unnamed regular entry");
         };
         if !seen_names.insert(name.clone()) {
-            bail!("Hyper archive contains duplicate entry {name}");
+            bail!("Turbo archive contains duplicate entry {name}");
         }
         if name == binary_entry {
             if found_binary {
-                bail!("Hyper archive contains duplicate {binary_entry}");
+                bail!("Turbo archive contains duplicate {binary_entry}");
             }
             if entry.size() > MAX_BINARY_BYTES {
-                bail!("Hyper binary exceeds the decompressed size limit");
+                bail!("Turbo binary exceeds the decompressed size limit");
             }
             let mut out = OpenOptions::new()
                 .create_new(true)
@@ -883,14 +892,14 @@ fn extract_tar_binary(archive_path: &Path, destination: &Path, binary_entry: &st
                 .open(destination)?;
             let copied = std::io::copy(&mut entry.take(MAX_BINARY_BYTES + 1), &mut out)?;
             if copied > MAX_BINARY_BYTES {
-                bail!("Hyper binary exceeds the decompressed size limit");
+                bail!("Turbo binary exceeds the decompressed size limit");
             }
             out.sync_all()?;
             std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
             found_binary = true;
         } else if auxiliary_entry_allowed(&name) {
             if entry.size() > MAX_AUXILIARY_BYTES {
-                bail!("Hyper archive auxiliary entry {name} is too large");
+                bail!("Turbo archive auxiliary entry {name} is too large");
             }
             // Drain to validate the compressed stream without unpacking it.
             let copied = std::io::copy(
@@ -898,14 +907,14 @@ fn extract_tar_binary(archive_path: &Path, destination: &Path, binary_entry: &st
                 &mut std::io::sink(),
             )?;
             if copied > MAX_AUXILIARY_BYTES {
-                bail!("Hyper archive auxiliary entry {name} is too large");
+                bail!("Turbo archive auxiliary entry {name} is too large");
             }
         } else {
-            bail!("Hyper archive contains unexpected entry {name}");
+            bail!("Turbo archive contains unexpected entry {name}");
         }
     }
     if !found_binary {
-        bail!("Hyper archive does not contain {binary_entry}");
+        bail!("Turbo archive does not contain {binary_entry}");
     }
     Ok(())
 }
@@ -913,9 +922,9 @@ fn extract_tar_binary(archive_path: &Path, destination: &Path, binary_entry: &st
 #[cfg(windows)]
 fn extract_zip_binary(archive_path: &Path, destination: &Path, binary_entry: &str) -> Result<()> {
     let file = File::open(archive_path)?;
-    let mut archive = zip::ZipArchive::new(file).context("reading Hyper zip archive")?;
+    let mut archive = zip::ZipArchive::new(file).context("reading Turbo zip archive")?;
     if archive.len() > MAX_ARCHIVE_ENTRIES {
-        bail!("Hyper archive contains too many entries");
+        bail!("Turbo archive contains too many entries");
     }
     let mut seen_names = HashSet::new();
     let mut found_binary = false;
@@ -928,7 +937,7 @@ fn extract_zip_binary(archive_path: &Path, destination: &Path, binary_entry: &st
         }
         if entry.is_dir() {
             bail!(
-                "Hyper archive contains an unexpected directory: {}",
+                "Turbo archive contains an unexpected directory: {}",
                 entry.name()
             );
         }
@@ -936,23 +945,23 @@ fn extract_zip_binary(archive_path: &Path, destination: &Path, binary_entry: &st
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
-            bail!("Hyper archive contains a symlink: {}", entry.name());
+            bail!("Turbo archive contains a symlink: {}", entry.name());
         }
         let Some(name) = name else {
-            bail!("Hyper archive contains an unnamed regular entry");
+            bail!("Turbo archive contains an unnamed regular entry");
         };
         if !seen_names.insert(name.clone()) {
-            bail!("Hyper archive contains duplicate entry {name}");
+            bail!("Turbo archive contains duplicate entry {name}");
         }
         let max = if name == binary_entry {
             MAX_BINARY_BYTES
         } else if auxiliary_entry_allowed(&name) {
             MAX_AUXILIARY_BYTES
         } else {
-            bail!("Hyper archive contains unexpected entry {name}");
+            bail!("Turbo archive contains unexpected entry {name}");
         };
         if entry.size() > max {
-            bail!("Hyper archive entry {name} exceeds the decompressed size limit");
+            bail!("Turbo archive entry {name} exceeds the decompressed size limit");
         }
         if name == binary_entry {
             let mut out = OpenOptions::new()
@@ -961,19 +970,19 @@ fn extract_zip_binary(archive_path: &Path, destination: &Path, binary_entry: &st
                 .open(destination)?;
             let copied = std::io::copy(&mut entry.take(max + 1), &mut out)?;
             if copied > max {
-                bail!("Hyper binary exceeds the decompressed size limit");
+                bail!("Turbo binary exceeds the decompressed size limit");
             }
             out.sync_all()?;
             found_binary = true;
         } else {
             let copied = std::io::copy(&mut entry.take(max + 1), &mut std::io::sink())?;
             if copied > max {
-                bail!("Hyper archive auxiliary entry {name} is too large");
+                bail!("Turbo archive auxiliary entry {name} is too large");
             }
         }
     }
     if !found_binary {
-        bail!("Hyper archive does not contain {binary_entry}");
+        bail!("Turbo archive does not contain {binary_entry}");
     }
     Ok(())
 }
@@ -992,11 +1001,11 @@ async fn extract_binary(archive: &Path, destination: &Path, platform: Platform) 
         }
         #[cfg(not(any(unix, windows)))]
         {
-            bail!("unsupported Hyper archive format")
+            bail!("unsupported Turbo archive format")
         }
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Hyper archive extraction task failed: {e}"))?
+    .map_err(|e| anyhow::anyhow!("Turbo archive extraction task failed: {e}"))?
 }
 
 async fn smoke_test(binary: &Path) -> Result<()> {
@@ -1008,9 +1017,9 @@ async fn smoke_test(binary: &Path) -> Result<()> {
         .stderr(Stdio::null());
     let status = tokio::time::timeout(SMOKE_TEST_TIMEOUT, command.status())
         .await
-        .context("downloaded Hyper binary smoke test timed out")??;
+        .context("downloaded Turbo binary smoke test timed out")??;
     if !status.success() {
-        bail!("downloaded Hyper binary failed its --version smoke test ({status})");
+        bail!("downloaded Turbo binary failed its --version smoke test ({status})");
     }
     Ok(())
 }
@@ -1039,7 +1048,7 @@ fn publish_versioned_binary(stage: &Path, destination: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if sha256_file(stage)? != sha256_file(destination)? {
                 bail!(
-                    "existing checksum-addressed Hyper binary does not match the verified download: {}",
+                    "existing checksum-addressed Turbo binary does not match the verified download: {}",
                     destination.display()
                 );
             }
@@ -1057,7 +1066,7 @@ fn publish_versioned_binary(stage: &Path, destination: &Path) -> Result<()> {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if sha256_file(stage)? != sha256_file(destination)? {
-                        bail!("existing Hyper binary conflicts with verified download");
+                        bail!("existing Turbo binary conflicts with verified download");
                     }
                     return Ok(());
                 }
@@ -1080,15 +1089,15 @@ fn publish_versioned_binary(stage: &Path, destination: &Path) -> Result<()> {
 #[cfg(unix)]
 fn activate_binary(versioned: &Path) -> Result<()> {
     let app = managed_application();
-    let bin_dir = app.parent().context("Hyper application has no parent")?;
+    let bin_dir = app.parent().context("Turbo application has no parent")?;
     let downloads = hyper_home().join("downloads");
     let name = versioned
         .file_name()
-        .context("versioned Hyper binary has no filename")?;
+        .context("versioned Turbo binary has no filename")?;
     let relative = Path::new("..").join(
         downloads
             .file_name()
-            .context("Hyper downloads directory has no filename")?,
+            .context("Turbo downloads directory has no filename")?,
     );
     let relative = relative.join(name);
     let tmp = unique_sibling(&app, "tmp-link");
@@ -1096,7 +1105,7 @@ fn activate_binary(versioned: &Path) -> Result<()> {
     std::os::unix::fs::symlink(&relative, &tmp)?;
     std::fs::rename(&tmp, &app).with_context(|| {
         format!(
-            "atomically activating Hyper at {} (bin dir {})",
+            "atomically activating Turbo at {} (bin dir {})",
             app.display(),
             bin_dir.display()
         )
@@ -1112,14 +1121,14 @@ fn activate_binary(versioned: &Path) -> Result<()> {
     std::fs::copy(versioned, &staged)?;
     let staged_guard = TempArtifact::new(staged.clone());
     if sha256_file(versioned)? != sha256_file(&staged)? {
-        bail!("copied Hyper executable failed activation integrity check");
+        bail!("copied Turbo executable failed activation integrity check");
     }
     let aside = unique_sibling(&app, "old.exe");
     let had_old = app.exists();
     if had_old {
         std::fs::rename(&app, &aside).with_context(|| {
             format!(
-                "cannot replace running {}; close all Hyper sessions and retry",
+                "cannot replace running {}; close all Turbo sessions and retry",
                 app.display()
             )
         })?;
@@ -1128,7 +1137,7 @@ fn activate_binary(versioned: &Path) -> Result<()> {
         if had_old {
             let _ = std::fs::rename(&aside, &app);
         }
-        return Err(error).context("activating downloaded Hyper executable");
+        return Err(error).context("activating downloaded Turbo executable");
     }
     let _ = staged_guard.keep();
     // A still-running old image may keep the aside locked. It is harmless and
@@ -1144,7 +1153,7 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
     let archive_tmp = unique_sibling(&downloads.join(&candidate.asset_name), "download");
     let archive_guard = TempArtifact::new(archive_tmp.clone());
     eprintln!(
-        "  Downloading Hyper v{} ({}) from community releases...",
+        "  Downloading Turbo v{} ({}) from community releases...",
         candidate.version, platform.asset_triple
     );
     let actual_sha = download_archive(candidate, &archive_tmp).await?;
@@ -1157,14 +1166,14 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
         );
     }
 
-    let stage = unique_sibling(&downloads.join("hyper-extracted"), "tmp");
+    let stage = unique_sibling(&downloads.join("turbo-extracted"), "tmp");
     let stage_guard = TempArtifact::new(stage.clone());
     extract_binary(&archive_tmp, &stage, platform).await?;
     smoke_test(&stage).await?;
 
     let extension = if cfg!(windows) { ".exe" } else { "" };
     let binary_name = format!(
-        "hyper-{}-{}-{}-sha256-{}{}",
+        "turbo-{}-{}-{}-sha256-{}{}",
         candidate.version, platform.local_os, platform.local_arch, candidate.sha256, extension
     );
     let versioned = downloads.join(&binary_name);
@@ -1310,7 +1319,7 @@ async fn spawn_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio
                 .status()
                 .await?;
             if !status.success() {
-                bail!("hyper update failed with {status}");
+                bail!("turbo update failed with {status}");
             }
             Ok(None)
         }
@@ -1357,7 +1366,7 @@ pub(crate) async fn check_update_background() -> BackgroundUpdateCheck {
     let candidate = match resolve_candidate(None).await {
         Ok(candidate) => candidate,
         Err(error) => {
-            tracing::warn!("Hyper community update check failed: {error:#}");
+            tracing::warn!("Turbo community update check failed: {error:#}");
             return BackgroundUpdateCheck {
                 update: None,
                 download: None,
@@ -1370,7 +1379,7 @@ pub(crate) async fn check_update_background() -> BackgroundUpdateCheck {
         candidate_requires_install(&candidate, active.as_ref(), &state).unwrap_or(false);
     if !needs_install {
         if let Err(error) = record_no_update(&candidate).await {
-            tracing::debug!("failed to cache Hyper update check: {error:#}");
+            tracing::debug!("failed to cache Turbo update check: {error:#}");
         }
         return BackgroundUpdateCheck {
             update: None,
@@ -1381,7 +1390,7 @@ pub(crate) async fn check_update_background() -> BackgroundUpdateCheck {
     let download = match spawn_update_subcommand(UpdateRunMode::NonBlocking).await {
         Ok(child) => child,
         Err(error) => {
-            tracing::warn!("Hyper background update failed to start: {error:#}");
+            tracing::warn!("Turbo background update failed to start: {error:#}");
             None
         }
     };
@@ -1412,13 +1421,13 @@ pub(crate) async fn run_update_if_available(
         })
         .await
     {
-        tracing::warn!("failed to save Hyper auto-update setting: {error}");
+        tracing::warn!("failed to save Turbo auto-update setting: {error}");
     }
 
     let candidate = match resolve_candidate(None).await {
         Ok(candidate) => candidate,
         Err(error) => {
-            tracing::debug!("Hyper community update check failed: {error:#}");
+            tracing::debug!("Turbo community update check failed: {error:#}");
             return Ok(false);
         }
     };
@@ -1433,7 +1442,7 @@ pub(crate) async fn run_update_if_available(
         .map(|active| active.version.as_str())
         .unwrap_or(xai_grok_version::VERSION);
     eprintln!(
-        "A new Hyper community release is available: {} -> {} [stable]",
+        "A new Turbo community release is available: {} -> {} [stable]",
         current, candidate.version
     );
     let child = spawn_update_subcommand(run_mode).await?;
@@ -1449,11 +1458,11 @@ pub(crate) async fn run_update(
     if let Some(channel) = channel_switch
         && channel != "stable"
     {
-        bail!("Hyper community releases support only the stable channel");
+        bail!("Turbo community releases support only the stable channel");
     }
     if let Some(version) = pinned_version {
         semver::Version::parse(version)
-            .with_context(|| format!("'{version}' is not a valid Hyper release version"))?;
+            .with_context(|| format!("'{version}' is not a valid Turbo release version"))?;
     }
 
     let before = active_deployment();
@@ -1462,12 +1471,12 @@ pub(crate) async fn run_update(
         .map(|active| active.version.as_str())
         .unwrap_or(xai_grok_version::VERSION);
     eprintln!(
-        "Checking Hyper community releases (installed: {before_version}, destination: {})...",
+        "Checking Turbo community releases (installed: {before_version}, destination: {})...",
         managed_application().display()
     );
     let outcome = converge(force, pinned_version).await.map_err(|error| {
         anyhow::anyhow!(
-            "Hyper community update failed: {error:#}\n\nReinstall with:\n  {}",
+            "Turbo community update failed: {error:#}\n\nReinstall with:\n  {}",
             if cfg!(windows) {
                 "irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex"
             } else {
@@ -1482,14 +1491,14 @@ pub(crate) async fn run_update(
         })
         .await
     {
-        tracing::warn!("failed to disable auto-update after pinned Hyper install: {error}");
+        tracing::warn!("failed to disable auto-update after pinned Turbo install: {error}");
     }
 
     if outcome.installed {
-        eprintln!("  ✓ Hyper v{} installed successfully.", outcome.target);
-        eprintln!("  Restart Hyper to use the new community build.");
+        eprintln!("  ✓ Turbo v{} installed successfully.", outcome.target);
+        eprintln!("  Restart Turbo to use the new community build.");
     } else {
-        eprintln!("Already up to date (Hyper {}).", outcome.target);
+        eprintln!("Already up to date (Turbo {}).", outcome.target);
     }
     Ok(Some(outcome.target))
 }
@@ -1505,7 +1514,7 @@ mod tests {
     #[test]
     fn manifest_parser_accepts_gnu_and_star_formats() {
         let hash = "a".repeat(64);
-        let asset = "hyper-0.2.113-x86_64-unknown-linux-gnu.tar.gz";
+        let asset = "turbo-0.2.113-x86_64-unknown-linux-gnu.tar.gz";
         assert_eq!(
             parse_manifest_checksum(&format!("{hash}  *{asset}\n"), asset).unwrap(),
             hash
@@ -1514,7 +1523,7 @@ mod tests {
 
     #[test]
     fn manifest_parser_rejects_duplicate_or_invalid_entries() {
-        let asset = "hyper-0.2.113-x86_64-unknown-linux-gnu.tar.gz";
+        let asset = "turbo-0.2.113-x86_64-unknown-linux-gnu.tar.gz";
         let hash = "b".repeat(64);
         assert!(parse_manifest_checksum(&format!("bad  {asset}\n"), asset).is_err());
         assert!(
@@ -1525,14 +1534,14 @@ mod tests {
     #[test]
     fn managed_name_round_trips_version_and_digest() {
         let digest = "c".repeat(64);
-        let name = format!("hyper-0.2.113-linux-x86_64-sha256-{digest}");
+        let name = format!("turbo-0.2.113-linux-x86_64-sha256-{digest}");
         assert_eq!(version_from_managed_name(&name).as_deref(), Some("0.2.113"));
         assert_eq!(
             digest_from_managed_name(&name).as_deref(),
             Some(digest.as_str())
         );
         assert_eq!(
-            version_from_managed_name("hyper-0.2.113-linux-x86_64").as_deref(),
+            version_from_managed_name("turbo-0.2.113-linux-x86_64").as_deref(),
             Some("0.2.113")
         );
     }
@@ -1543,7 +1552,7 @@ mod tests {
         let new = "e".repeat(64);
         let active = ActiveDeployment {
             version: "0.2.113".to_string(),
-            binary_name: format!("hyper-0.2.113-linux-x86_64-sha256-{old}"),
+            binary_name: format!("turbo-0.2.113-linux-x86_64-sha256-{old}"),
             sha256: Some(old.clone()),
         };
         let candidate = Candidate {
@@ -1570,7 +1579,7 @@ mod tests {
             normalized_root_entry(Path::new("./hyper"))
                 .unwrap()
                 .as_deref(),
-            Some("hyper")
+            Some("turbo")
         );
         assert!(normalized_root_entry(Path::new("../hyper")).is_err());
         assert!(normalized_root_entry(Path::new("nested/hyper")).is_err());
@@ -1603,23 +1612,23 @@ mod tests {
     fn strict_tar_extraction_rejects_links_and_duplicate_binary() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("bad.tar.gz");
-        let destination = dir.path().join("hyper");
+        let destination = dir.path().join("turbo");
         write_test_tar(
-            &[("hyper", tar::EntryType::Symlink, b"".as_slice())],
+            &[("turbo", tar::EntryType::Symlink, b"".as_slice())],
             &archive,
         );
-        assert!(extract_tar_binary(&archive, &destination, "hyper").is_err());
+        assert!(extract_tar_binary(&archive, &destination, "turbo").is_err());
         assert!(!destination.exists());
 
         std::fs::remove_file(&archive).unwrap();
         write_test_tar(
             &[
-                ("hyper", tar::EntryType::Regular, b"one".as_slice()),
-                ("hyper", tar::EntryType::Regular, b"two".as_slice()),
+                ("turbo", tar::EntryType::Regular, b"one".as_slice()),
+                ("turbo", tar::EntryType::Regular, b"two".as_slice()),
             ],
             &archive,
         );
-        assert!(extract_tar_binary(&archive, &destination, "hyper").is_err());
+        assert!(extract_tar_binary(&archive, &destination, "turbo").is_err());
     }
 
     #[test]

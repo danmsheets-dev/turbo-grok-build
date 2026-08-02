@@ -1,11 +1,11 @@
 # Auto Developer Log (ADL)
 
-Structured product-issue pipeline for Hyper agents and maintainers.
+Structured product-issue pipeline for Turbo agents and maintainers.
 
 When agents or the runtime hit product friction (worktrees deleted without
 recovery artifacts, provider deser failures, isolation fallback, stalls),
-Hyper records a **deduplicated, redacted incident** under the configured log
-root (default `$GROK_HOME/developer-log/`). The Hyper Development Team exports
+Turbo records a **deduplicated, redacted incident** under the configured log
+root (default `$GROK_HOME/developer-log/`). The Turbo Development Team exports
 a pack and triages from real field signal — not chat archaeology.
 
 The **Agent Boot Card** instructs agents that `developer_log` is **required**
@@ -15,25 +15,25 @@ for product friction (not optional).
 
 ```bash
 # List open incidents
-hyper issues list
+turbo issues list
 
 # Show one incident
-hyper issues show inc_<id>
+turbo issues show inc_<id>
 
 # Export a maintainer pack (summary.md + incidents.ndjson + evidence/)
-hyper issues export
-hyper issues export --severity p0 --severity p1 --out ./hyper-issues-pack
+turbo issues export
+turbo issues export --severity p0 --severity p1 --out ./hyper-issues-pack
 
 # Paths / status
-hyper issues path
-hyper issues path --json
-hyper issues ack <id>
-hyper issues resolve <id>
+turbo issues path
+turbo issues path --json
+turbo issues ack <id>
+turbo issues resolve <id>
 
 # Set where logs are stored (writes ~/.grok/developer-log.toml)
-hyper issues set-dir D:/HyperLogs/developer-log
-hyper issues set-dir ~/Projects/hyper-field-logs
-hyper issues clear-dir
+turbo issues set-dir D:/HyperLogs/developer-log
+turbo issues set-dir ~/Projects/hyper-field-logs
+turbo issues clear-dir
 ```
 
 Disable writes:
@@ -50,7 +50,7 @@ $env:GROK_DEVELOPER_LOG = "0"
 
 | Precedence | Source |
 |------------|--------|
-| 1 (highest) | Process override after `hyper issues set-dir` this session |
+| 1 (highest) | Process override after `turbo issues set-dir` this session |
 | 2 | Env `GROK_DEVELOPER_LOG_DIR=/absolute/or/~/path` |
 | 3 | File `$GROK_HOME/developer-log.toml` → `dir = "..."` |
 | 4 (default) | `$GROK_HOME/developer-log` |
@@ -58,7 +58,7 @@ $env:GROK_DEVELOPER_LOG = "0"
 Example `~/.grok/developer-log.toml`:
 
 ```toml
-# Hyper Auto Developer Log root (managed by `hyper issues set-dir`)
+# Turbo Auto Developer Log root (managed by `turbo issues set-dir`)
 dir = "D:\\HyperLogs\\developer-log"
 ```
 
@@ -72,7 +72,7 @@ dir = "D:\\HyperLogs\\developer-log"
     YYYY-MM-DD/
       inc_<uuid>.json          # canonical incident document
   bundles/
-    export-<timestamp>/        # hyper issues export output
+    export-<timestamp>/        # turbo issues export output
       summary.md
       incidents.ndjson
       fingerprints.csv
@@ -85,7 +85,7 @@ Default `$GROK_HOME` is `~/.grok` (shared with official `grok`).
 
 ## Agent tool: `developer_log`
 
-**Required** for Hyper product friction. Agents file issues with the built-in tool:
+**Required** for Turbo product friction. Agents file issues with the built-in tool:
 
 | Field | Required | Notes |
 |-------|----------|--------|
@@ -102,7 +102,7 @@ Default `$GROK_HOME` is `~/.grok` (shared with official `grok`).
 
 Rules for agents:
 
-- **Always** call this tool when Hyper product behavior blocks work — do not rely on chat alone.
+- **Always** call this tool when Turbo product behavior blocks work — do not rely on chat alone.
 - Prefer a stable `error_class` over essays.
 - One call per distinct product issue; the store **dedups by fingerprint** and increments `occurrence_count`.
 - Never log secrets, tokens, or full unredacted prompts (fields are redacted, but do not rely on that alone).
@@ -149,9 +149,9 @@ Key fields:
 - `evidence` (meta_path, snapshot_ref, patch_path, related_events)
 - `source` (`agent` | `runtime` | `human` | `cli`, `auto`, `detector`)
 
-## Export pack for the Hyper team
+## Export pack for the Turbo team
 
-`hyper issues export` produces a reviewable pack:
+`turbo issues export` produces a reviewable pack:
 
 1. **summary.md** — human TL;DR with top incidents
 2. **incidents.ndjson** — one JSON object per line
@@ -159,7 +159,7 @@ Key fields:
 4. **evidence/** — full incident JSON copies
 5. **manifest.json** — version, OS, counts, redaction policy
 
-Hand the directory (or zip it) to the Hyper Development Team.
+Hand the directory (or zip it) to the Turbo Development Team.
 
 ## Privacy
 

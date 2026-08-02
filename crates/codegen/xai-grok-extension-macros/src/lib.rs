@@ -1,4 +1,4 @@
-//! Procedural macros for Hyper WASM extension guests.
+//! Procedural macros for Turbo WASM extension guests.
 //!
 //! The public macros are re-exported by `xai-grok-extension-sdk`; guest
 //! authors should depend on that SDK rather than this crate directly.
@@ -15,7 +15,7 @@ use syn::{
     parse_macro_input,
 };
 
-/// Turn an inline module containing annotated ordinary functions into a Hyper
+/// Turn an inline module containing annotated ordinary functions into a Turbo
 /// WASM guest while keeping those functions visible to rust-analyzer.
 ///
 /// Use `#[hyper_hook(pre_tool_use)]` for lifecycle handlers and
@@ -83,7 +83,7 @@ impl HookKind {
             "pre_compact" => Ok(Self::PreCompact),
             _ => Err(Error::new(
                 ident.span(),
-                "unknown Hyper hook; expected one of: session_start, session_end, pre_tool_use, before_agent_start, before_model, stop, pre_compact",
+                "unknown Turbo hook; expected one of: session_start, session_end, pre_tool_use, before_agent_start, before_model, stop, pre_compact",
             )),
         }
     }
@@ -216,7 +216,7 @@ fn process_function(
             errors,
             Error::new(
                 function.sig.ident.span(),
-                "a function cannot be both a Hyper lifecycle hook and a Hyper tool",
+                "a function cannot be both a Turbo lifecycle hook and a Turbo tool",
             ),
         );
         return;
@@ -253,7 +253,7 @@ fn process_function(
         }
         let name_value = name.value();
         if let Some(first_span) = tool_names.get(&name_value) {
-            let mut error = Error::new(marker_span, format!("duplicate Hyper tool name `{name_value}`"));
+            let mut error = Error::new(marker_span, format!("duplicate Turbo tool name `{name_value}`"));
             error.combine(Error::new(*first_span, "first tool declared here"));
             push_error(errors, error);
         } else {
@@ -311,7 +311,7 @@ fn parse_tool_attribute(attribute: &Attribute) -> syn::Result<ToolArgs> {
     if description.value().is_empty() {
         return Err(Error::new(
             description.span(),
-            "Hyper tool description must not be empty",
+            "Turbo tool description must not be empty",
         ));
     }
 
@@ -330,7 +330,7 @@ fn validate_hook_signature(signature: &Signature, kind: HookKind) -> syn::Result
             format!("`{}` hooks must take no arguments", kind.name()),
         ));
     }
-    validate_i32_return(signature, "Hyper hook")
+    validate_i32_return(signature, "Turbo hook")
 }
 
 fn validate_tool_signature(signature: &Signature) -> syn::Result<()> {
@@ -338,33 +338,33 @@ fn validate_tool_signature(signature: &Signature) -> syn::Result<()> {
     if signature.inputs.len() != 1 {
         return Err(Error::new(
             signature.inputs.span(),
-            "Hyper tools must have the signature `fn(args: &str) -> i32`",
+            "Turbo tools must have the signature `fn(args: &str) -> i32`",
         ));
     }
     let Some(FnArg::Typed(argument)) = signature.inputs.first() else {
         return Err(Error::new(
             signature.inputs.span(),
-            "Hyper tools must have the signature `fn(args: &str) -> i32`",
+            "Turbo tools must have the signature `fn(args: &str) -> i32`",
         ));
     };
     if !is_str_reference(&argument.ty) {
         return Err(Error::new(
             argument.ty.span(),
-            "Hyper tool argument must be `&str`",
+            "Turbo tool argument must be `&str`",
         ));
     }
-    validate_i32_return(signature, "Hyper tool")
+    validate_i32_return(signature, "Turbo tool")
 }
 
 fn validate_common_signature(signature: &Signature) -> syn::Result<()> {
     if let Some(token) = signature.constness {
-        return Err(Error::new(token.span(), "Hyper handlers cannot be `const`"));
+        return Err(Error::new(token.span(), "Turbo handlers cannot be `const`"));
     }
     if let Some(token) = signature.asyncness {
-        return Err(Error::new(token.span(), "Hyper handlers cannot be `async`"));
+        return Err(Error::new(token.span(), "Turbo handlers cannot be `async`"));
     }
     if let Some(token) = signature.unsafety {
-        return Err(Error::new(token.span(), "Hyper handlers cannot be `unsafe`"));
+        return Err(Error::new(token.span(), "Turbo handlers cannot be `unsafe`"));
     }
     if let Some(abi) = &signature.abi {
         return Err(Error::new(
@@ -375,13 +375,13 @@ fn validate_common_signature(signature: &Signature) -> syn::Result<()> {
     if !signature.generics.params.is_empty() || signature.generics.where_clause.is_some() {
         return Err(Error::new(
             signature.generics.span(),
-            "Hyper handlers cannot be generic",
+            "Turbo handlers cannot be generic",
         ));
     }
     if let Some(variadic) = &signature.variadic {
         return Err(Error::new(
             variadic.span(),
-            "Hyper handlers cannot be variadic",
+            "Turbo handlers cannot be variadic",
         ));
     }
     Ok(())
@@ -425,7 +425,7 @@ fn validate_tool_name(name: &LitStr) -> syn::Result<()> {
     if value.is_empty() || value.len() > 64 {
         return Err(Error::new(
             name.span(),
-            "Hyper tool name must contain 1 to 64 bytes",
+            "Turbo tool name must contain 1 to 64 bytes",
         ));
     }
     if !value
@@ -434,7 +434,7 @@ fn validate_tool_name(name: &LitStr) -> syn::Result<()> {
     {
         return Err(Error::new(
             name.span(),
-            "Hyper tool name may contain only ASCII letters, digits, `_`, `-`, or `.`",
+            "Turbo tool name may contain only ASCII letters, digits, `_`, `-`, or `.`",
         ));
     }
     Ok(())
@@ -582,14 +582,14 @@ fn generate_tool_exports(sdk: &TokenStream2, tools: &[Tool]) -> TokenStream2 {
 
     quote! {
         #[doc(hidden)]
-        const __HYPER_EXT_TOOL_META: &[(&str, &str, &str)] = &[
+        const __TURBO_EXT_TOOL_META: &[(&str, &str, &str)] = &[
             #(#metadata)*
         ];
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "C" fn hyper_ext_tool_count() -> i32 {
-            __HYPER_EXT_TOOL_META.len() as i32
+            __TURBO_EXT_TOOL_META.len() as i32
         }
 
         #[doc(hidden)]
@@ -600,10 +600,10 @@ fn generate_tool_exports(sdk: &TokenStream2, tools: &[Tool]) -> TokenStream2 {
                 return 1;
             }
             let index = index as usize;
-            if index >= __HYPER_EXT_TOOL_META.len() {
+            if index >= __TURBO_EXT_TOOL_META.len() {
                 return 1;
             }
-            let (name, description, schema) = __HYPER_EXT_TOOL_META[index];
+            let (name, description, schema) = __TURBO_EXT_TOOL_META[index];
             #sdk::describe_tool(name, description, schema);
             0
         }

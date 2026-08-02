@@ -1,6 +1,6 @@
-//! # Hyper Extension SDK (Rust-first)
+//! # Turbo Extension SDK (Rust-first)
 //!
-//! Safe helpers for writing Hyper WASM guests without hand-rolling
+//! Safe helpers for writing Turbo WASM guests without hand-rolling
 //! `hyper_host` imports and `ptr`/`len` calls.
 //!
 //! ## Authoring style

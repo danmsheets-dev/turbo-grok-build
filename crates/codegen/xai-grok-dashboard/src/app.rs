@@ -24,7 +24,7 @@ pub fn App() -> impl IntoView {
             <div class="container">
                 <header class="header">
                     <div class="brand">
-                        <h1>"Hyper Observability"</h1>
+                        <h1>"Turbo Observability"</h1>
                         <span>"local · read-only · Rust"</span>
                     </div>
                     <nav class="nav">

@@ -1,4 +1,4 @@
-//! Hyper WASM guest — written with **xai-grok-extension-sdk** (recommended path).
+//! Turbo WASM guest — written with **xai-grok-extension-sdk** (recommended path).
 //!
 //! Lifecycle hooks and tools are ordinary named Rust functions. The
 //! `#[hyper_plugin]` procedural macro generates the stable `hyper_ext_*` ABI

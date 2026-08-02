@@ -1782,10 +1782,10 @@ fn install_heap_profile_hooks() {
     });
 }
 fn version_text(channel_label: &str) -> String {
-    // Community Hyper builds ship the `hyper` binary; keep the official
+    // Community Turbo builds ship the `turbo` binary; keep the official
     // product name only when this crate is built without `community-build`.
     let product = if cfg!(feature = "community-build") {
-        "hyper"
+        "turbo"
     } else {
         "grok"
     };
@@ -1871,7 +1871,7 @@ fn main() {
     }
     let args = PagerArgs::parse_cli();
     // Opt-in Windows Job Object for the whole process tree so harnesses can
-    // kill Hyper cleanly (see docs/windows-process-tree.md). Must run early —
+    // kill Turbo cleanly (see docs/windows-process-tree.md). Must run early —
     // children inherit the job automatically when breakaway is not requested.
     xai_tty_utils::enter_self_job_object_if_requested(args.job_object);
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
@@ -2462,7 +2462,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
             let command = if cfg!(feature = "community-build") {
-                "hyper"
+                "turbo"
             } else {
                 "grok"
             };
@@ -2562,7 +2562,8 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     let disabled =
         |name: &str| std::env::var_os(name).is_some_and(|v| env_flag_enabled(&v.to_string_lossy()));
     !disabled("GROK_DISABLE_AUTOUPDATER")
-        && !(cfg!(feature = "community-build") && disabled("HYPER_DISABLE_AUTOUPDATER"))
+        && !(cfg!(feature = "community-build")
+            && (disabled("TURBO_DISABLE_AUTOUPDATER") || disabled("HYPER_DISABLE_AUTOUPDATER")))
 }
 /// Gate for the stdio agent's background auto-update: only the direct stdio
 /// agent, from the managed install. Other modes update in `run_agent_command`.
@@ -2575,7 +2576,7 @@ fn stdio_auto_update_enabled(
     is_stdio && !use_leader && updates_enabled && managed_install
 }
 /// True when `exe` is the binary the product's managed application resolves
-/// to (`~/.hyper/bin/hyper` for community builds, `~/.grok/bin/grok` for
+/// to (`~/.turbo/bin/turbo` for community builds, `~/.grok/bin/grok` for
 /// official builds). Both sides are canonicalized; any failure reports
 /// unmanaged and skips automatic updates.
 fn is_managed_install(
@@ -2621,7 +2622,7 @@ async fn run_update_command(
     if cfg!(feature = "community-build")
         && channel_switch.is_some_and(|channel| channel != "stable")
     {
-        anyhow::bail!("Hyper community releases support only the stable channel");
+        anyhow::bail!("Turbo community releases support only the stable channel");
     }
     if json && !check {
         anyhow::bail!("--json requires --check");
@@ -2827,7 +2828,7 @@ mod tests {
             write_version(&mut output, label).unwrap();
             let output = String::from_utf8(output).unwrap();
             let product = if cfg!(feature = "community-build") {
-                "hyper "
+                "turbo "
             } else {
                 "grok "
             };
@@ -3004,19 +3005,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join("bin")).unwrap();
         std::fs::create_dir_all(home.join("downloads")).unwrap();
-        let managed = home.join("bin").join("hyper");
+        let managed = home.join("bin").join("turbo");
         assert!(!is_managed_install(Some(managed.clone()), &managed));
         assert!(!is_managed_install(None, &managed));
         assert!(!is_managed_install(
             Some(managed.clone()),
             std::path::Path::new("")
         ));
-        let target = home.join("downloads").join("hyper-1.2.3");
+        let target = home.join("downloads").join("turbo-1.2.3");
         std::fs::write(&target, b"binary").unwrap();
         std::os::unix::fs::symlink(&target, &managed).unwrap();
         assert!(is_managed_install(Some(managed.clone()), &managed));
         assert!(is_managed_install(Some(target.clone()), &managed));
-        let pinned = home.join("bin").join("hyper-9.9.9");
+        let pinned = home.join("bin").join("turbo-9.9.9");
         std::fs::write(&pinned, b"binary").unwrap();
         assert!(!is_managed_install(Some(pinned), &managed));
         let _ = std::fs::remove_dir_all(&home);

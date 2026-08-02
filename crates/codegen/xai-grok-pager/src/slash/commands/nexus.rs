@@ -8,7 +8,7 @@
 //! - `/nexus clear`               — remove the stored key (alias: off / logout)
 //!
 //! A bare `/nexus` (no args) prints setup guidance instead of doing nothing —
-//! see [`nexus_setup_guide`], which is shared with the `hyper nexus` CLI
+//! see [`nexus_setup_guide`], which is shared with the `turbo nexus` CLI
 //! subcommand so the two entry points never drift.
 //!
 //! Everything else is delegated to [`super::providers::ProvidersCommand`] with a
@@ -20,9 +20,9 @@ use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, Slas
 
 use super::providers::ProvidersCommand;
 
-/// Onboarding text shown by bare `/nexus` and by `hyper nexus` (no args).
+/// Onboarding text shown by bare `/nexus` and by `turbo nexus` (no args).
 ///
-/// Shared between the TUI slash command and the `hyper nexus` CLI subcommand
+/// Shared between the TUI slash command and the `turbo nexus` CLI subcommand
 /// (`xai-grok-pager-bin`) so the guidance stays identical in both places.
 pub fn nexus_setup_guide() -> String {
     format!(
@@ -31,16 +31,16 @@ pub fn nexus_setup_guide() -> String {
          \n\
          1) 申请 API key:  {NEXUS_BASE_URL_DEFAULT}\n\
          2) 保存(只需一次,持久化到 ~/.grok/auth.json):\n\
-         \x20    hyper nexus <api_key>                    # 命令行,登录前即可用\n\
+         \x20    turbo nexus <api_key>                    # 命令行,登录前即可用\n\
          \x20    /nexus <api_key>                         # 在 TUI 内\n\
          \x20    /nexus <api_key> https://your-gateway    # 自定义网关根(可选)\n\
-         3) 删除:  hyper nexus --clear   或   /nexus clear"
+         3) 删除:  turbo nexus --clear   或   /nexus clear"
     )
 }
 
 /// The compiled-in default Nexus gateway root (`https://nexuscore.now`).
 ///
-/// Re-exported so the `hyper nexus` CLI subcommand can show it without adding a
+/// Re-exported so the `turbo nexus` CLI subcommand can show it without adding a
 /// direct `xai-grok-models` dependency to the binary crate.
 pub fn nexus_default_root() -> &'static str {
     NEXUS_BASE_URL_DEFAULT
@@ -133,7 +133,7 @@ mod tests {
     fn guide_mentions_gateway_and_commands() {
         let guide = nexus_setup_guide();
         assert!(guide.contains("nexuscore.now"), "guide: {guide}");
-        assert!(guide.contains("hyper nexus"), "guide: {guide}");
+        assert!(guide.contains("turbo nexus"), "guide: {guide}");
         assert!(guide.contains("/nexus"), "guide: {guide}");
     }
 

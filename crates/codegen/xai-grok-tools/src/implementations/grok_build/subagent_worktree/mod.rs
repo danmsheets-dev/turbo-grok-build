@@ -79,7 +79,7 @@ pub fn land_size_guard(
             format!(
                 "Refusing land: agent delta touches {n} files (limit {max_files}). \
                  On dirty parents without a spawn baseline this often includes \
-                 unrelated untracked files. Review with `hyper subagent diff <id>` \
+                 unrelated untracked files. Review with `turbo subagent diff <id>` \
                  / `diff_subagent`, then re-run with force=true only if intentional."
             ),
         ));

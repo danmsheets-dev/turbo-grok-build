@@ -33,7 +33,7 @@ git pull origin dev
 cargo build -p xai-grok-pager-bin --release
 
 # Binary path (Windows)
-# target\release\hyper.exe
+# target\release\turbo.exe
 # or target\release\xai-grok-pager-bin.exe depending on package binary name
 ```
 
@@ -42,13 +42,13 @@ cargo build -p xai-grok-pager-bin --release
 cd /path/to/hyper-grok-build
 git fetch origin && git checkout dev && git pull origin dev
 cargo build -p xai-grok-pager-bin --release
-# target/release/hyper
+# target/release/turbo
 ```
 
 Confirm version stamp:
 
 ```powershell
-.\target\release\hyper.exe --version
+.\target\release\turbo.exe --version
 # expect 0.2.114-r8 (or marketing string containing r8 / 0.2.114)
 ```
 
@@ -59,16 +59,16 @@ Confirm version stamp:
 ```powershell
 # Windows
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.hyper\bin" | Out-Null
-Copy-Item -Force .\target\release\hyper.exe "$env:USERPROFILE\.hyper\bin\hyper.exe"
-# Ensure %USERPROFILE%\.hyper\bin is on PATH
+Copy-Item -Force .\target\release\turbo.exe "$env:USERPROFILE\.turbo\bin\turbo.exe"
+# Ensure %USERPROFILE%\.turbo\bin is on PATH
 ```
 
 ```bash
 # Linux / macOS
-mkdir -p ~/.hyper/bin
-cp -f target/release/hyper ~/.hyper/bin/hyper
-chmod +x ~/.hyper/bin/hyper
-# add ~/.hyper/bin to PATH
+mkdir -p ~/.turbo/bin
+cp -f target/release/turbo ~/.turbo/bin/turbo
+chmod +x ~/.turbo/bin/turbo
+# add ~/.turbo/bin to PATH
 ```
 
 ### Option B — Project install scripts
@@ -82,7 +82,7 @@ chmod +x ~/.hyper/bin/hyper
 ./install.sh
 ```
 
-Runtime state remains under `~/.grok` (config, sessions, worktrees). Binary install root is `~/.hyper`.
+Runtime state remains under `~/.grok` (config, sessions, worktrees). Binary install root is `~/.turbo`.
 
 ## Smoke checks after install
 
@@ -117,5 +117,5 @@ cargo check -p xai-grok-tools --lib
 ```powershell
 git checkout 0.2.114-r7   # or previous tag/commit
 cargo build -p xai-grok-pager-bin --release
-# re-copy binary to ~/.hyper/bin
+# re-copy binary to ~/.turbo/bin
 ```

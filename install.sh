@@ -1,10 +1,10 @@
 #!/bin/sh
 #
-# Hyper installer (macOS / Linux).
+# Turbo installer (macOS / Linux).
 #
 # Downloads the matching platform artifact from this repo's GitHub Releases,
 # verifies its SHA-256 against the release's SHA256SUMS manifest, and installs
-# the binary as ~/.hyper/bin/hyper (versioned binary in ~/.hyper/downloads/,
+# the binary as ~/.turbo/bin/turbo (versioned binary in ~/.turbo/downloads/,
 # atomic symlink in bin/).
 #
 # Usage:
@@ -12,17 +12,17 @@
 #   sh install.sh --version v0.2.109      # pin a specific release
 #
 # Environment:
-#   HYPER_SHARE_DIR        install root (default: ~/.hyper)
-#   HYPER_UPDATE_BASE_URL  GitHub-Releases-shaped API base (default:
+#   TURBO_SHARE_DIR        install root (default: ~/.turbo)
+#   TURBO_UPDATE_BASE_URL  GitHub-Releases-shaped API base (default:
 #                          https://api.github.com/repos/DaviRain-Su/hyper-grok-build/releases)
 #
-# Fails fast on any error; never leaves a partial binary as the active hyper.
+# Fails fast on any error; never leaves a partial binary as the active turbo.
 
 set -eu
 
 REPO="DaviRain-Su/hyper-grok-build"
-API_BASE="${HYPER_UPDATE_BASE_URL:-https://api.github.com/repos/${REPO}/releases}"
-HYPER_HOME="${HYPER_SHARE_DIR:-$HOME/.hyper}"
+API_BASE="${TURBO_UPDATE_BASE_URL:-https://api.github.com/repos/${REPO}/releases}"
+TURBO_HOME="${TURBO_SHARE_DIR:-$HOME/.turbo}"
 
 err() {
     printf 'install.sh: error: %s\n' "$*" >&2
@@ -149,7 +149,7 @@ else
     err "either sha256sum or shasum is required to verify the download"
 fi
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hyper-install.XXXXXX")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/turbo-install.XXXXXX")"
 STAGED=""
 TMP_LINK=""
 STATE_TMP=""
@@ -218,7 +218,7 @@ ASSET=""
 ARCHIVE_URL=""
 for cand in "$TRIPLE" ${TRIPLE_FALLBACK:-}; do
     [ -n "$cand" ] || continue
-    trial="hyper-${RESOLVED_VERSION}-${cand}.tar.gz"
+    trial="turbo-${RESOLVED_VERSION}-${cand}.tar.gz"
     if found="$(find_asset_url "$trial")"; then
         ASSET="$trial"
         ARCHIVE_URL="$found"
@@ -228,7 +228,7 @@ for cand in "$TRIPLE" ${TRIPLE_FALLBACK:-}; do
 done
 if [ -z "$ARCHIVE_URL" ]; then
     available="$(printf '%s\n' "$URLS" \
-        | sed -n 's|.*/\(hyper-[^/"]*\)|\1|p' \
+        | sed -n 's|.*/\(turbo-[^/"]*\)|\1|p' \
         | grep -v '^$' \
         | sort -u \
         | tr '\n' ' ')"
@@ -236,7 +236,7 @@ if [ -z "$ARCHIVE_URL" ]; then
 fi
 
 # ── Download + verify ────────────────────────────────────────────────────────
-printf 'Downloading hyper v%s (%s)...\n' "$RESOLVED_VERSION" "$TRIPLE"
+printf 'Downloading Turbo v%s (%s)...\n' "$RESOLVED_VERSION" "$TRIPLE"
 fetch "$ARCHIVE_URL" "$TMP_DIR/$ASSET" || err "download failed: $ARCHIVE_URL"
 fetch "$SUMS_URL" "$TMP_DIR/SHA256SUMS" || err "download failed: $SUMS_URL"
 
@@ -273,17 +273,17 @@ printf 'Checksum verified.\n'
 tar -tzf "$TMP_DIR/$ASSET" > "$TMP_DIR/archive.list" \
     || err "failed to inspect $ASSET"
 if ! BINARY_MEMBER="$(awk '
-    $0 == "hyper" || $0 == "./hyper" { count++; member = $0 }
+    $0 == "turbo" || $0 == "./turbo" { count++; member = $0 }
     END { if (count == 1) print member; else exit 1 }
 ' "$TMP_DIR/archive.list")"; then
-    err "archive $ASSET must contain exactly one root-level hyper binary"
+    err "archive $ASSET must contain exactly one root-level turbo binary"
 fi
-tar -xOzf "$TMP_DIR/$ASSET" "$BINARY_MEMBER" > "$TMP_DIR/hyper" \
-    || err "failed to extract hyper from $ASSET"
-[ -s "$TMP_DIR/hyper" ] || err "archive $ASSET contains an empty hyper binary"
-BINARY_SIZE="$(wc -c < "$TMP_DIR/hyper" | tr -d '[:space:]')"
-[ "$BINARY_SIZE" -le 1073741824 ] || err "extracted hyper exceeds the 1 GiB safety limit"
-chmod 0755 "$TMP_DIR/hyper"
+tar -xOzf "$TMP_DIR/$ASSET" "$BINARY_MEMBER" > "$TMP_DIR/turbo" \
+    || err "failed to extract turbo from $ASSET"
+[ -s "$TMP_DIR/turbo" ] || err "archive $ASSET contains an empty turbo binary"
+BINARY_SIZE="$(wc -c < "$TMP_DIR/turbo" | tr -d '[:space:]')"
+[ "$BINARY_SIZE" -le 1073741824 ] || err "extracted turbo exceeds the 1 GiB safety limit"
+chmod 0755 "$TMP_DIR/turbo"
 
 # Optionally extract the installer-owned `bundled/` tree for resume-session
 # skills and related runtime assets packaged in the release archive.
@@ -324,20 +324,20 @@ ensure_directory() {
         mkdir -p "$path" || err "could not create $label: $path"
     fi
 }
-DOWNLOADS_DIR="$HYPER_HOME/downloads"
-BIN_DIR="$HYPER_HOME/bin"
-ensure_directory "$HYPER_HOME" "Hyper install root"
-ensure_directory "$DOWNLOADS_DIR" "Hyper downloads directory"
-ensure_directory "$BIN_DIR" "Hyper bin directory"
+DOWNLOADS_DIR="$TURBO_HOME/downloads"
+BIN_DIR="$TURBO_HOME/bin"
+ensure_directory "$TURBO_HOME" "Turbo install root"
+ensure_directory "$DOWNLOADS_DIR" "Turbo downloads directory"
+ensure_directory "$BIN_DIR" "Turbo bin directory"
 
 # The archive digest is part of the deployment identity. A deliberately
 # republished tag therefore gets a new path and cannot overwrite the active
 # same-semver binary before its smoke test succeeds.
-VERSIONED="hyper-${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}-sha256-${EXPECTED}"
+VERSIONED="turbo-${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}-sha256-${EXPECTED}"
 DEST="$DOWNLOADS_DIR/$VERSIONED"
-STAGED="$(mktemp "$DOWNLOADS_DIR/.hyper-stage.XXXXXX")" \
+STAGED="$(mktemp "$DOWNLOADS_DIR/.turbo-stage.XXXXXX")" \
     || err "could not create a staged binary under $DOWNLOADS_DIR"
-cp "$TMP_DIR/hyper" "$STAGED" || err "could not stage downloaded hyper"
+cp "$TMP_DIR/turbo" "$STAGED" || err "could not stage downloaded turbo"
 chmod 0755 "$STAGED"
 "$STAGED" --version >/dev/null 2>&1 \
     || err "downloaded binary failed smoke test; existing install left untouched"
@@ -357,21 +357,21 @@ if [ -d "$TMP_DIR/bundled" ]; then
         || err "failed to stage bundled runtime assets; existing install left untouched"
 fi
 
-TMP_LINK="$BIN_DIR/hyper.install.$$"
+TMP_LINK="$BIN_DIR/turbo.install.$$"
 [ ! -e "$TMP_LINK" ] && [ ! -L "$TMP_LINK" ] \
     || { rm -rf "$BUNDLE_STAGE"; err "temporary activation path already exists: $TMP_LINK"; }
 ln -s "../downloads/$VERSIONED" "$TMP_LINK" \
-    || { rm -rf "$BUNDLE_STAGE"; err "failed to stage active hyper link"; }
-mv -f "$TMP_LINK" "$BIN_DIR/hyper" \
-    || { rm -f "$TMP_LINK"; rm -rf "$BUNDLE_STAGE"; err "failed to activate hyper binary"; }
+    || { rm -rf "$BUNDLE_STAGE"; err "failed to stage active turbo link"; }
+mv -f "$TMP_LINK" "$BIN_DIR/turbo" \
+    || { rm -f "$TMP_LINK"; rm -rf "$BUNDLE_STAGE"; err "failed to activate turbo binary"; }
 TMP_LINK=""
 
 # Record the exact release-archive identity used by the in-app community
-# updater. This lets Hyper detect a deliberately republished tag by checksum
+# updater. This lets Turbo detect a deliberately republished tag by checksum
 # without ever consulting the official Grok updater state under ~/.grok.
-STATE_FILE="$HYPER_HOME/update-state.json"
-STATE_TMP="$(mktemp "$HYPER_HOME/.update-state.XXXXXX")" \
-    || { rm -rf "$BUNDLE_STAGE"; err "could not create temporary update state under $HYPER_HOME"; }
+STATE_FILE="$TURBO_HOME/update-state.json"
+STATE_TMP="$(mktemp "$TURBO_HOME/.update-state.XXXXXX")" \
+    || { rm -rf "$BUNDLE_STAGE"; err "could not create temporary update state under $TURBO_HOME"; }
 CHECKED_AT="$(date -u +%s)"
 case "$CHECKED_AT" in
     *[!0-9]*|'') rm -rf "$BUNDLE_STAGE"; err "could not determine the current Unix timestamp" ;;
@@ -382,7 +382,7 @@ esac
 printf '{\n  "installed_version": "%s",\n  "installed_asset": "%s",\n  "installed_sha256": "%s",\n  "installed_binary": "%s",\n  "checked_at_unix": %s\n}\n' \
     "$RESOLVED_VERSION" "$ASSET" "$EXPECTED" "$VERSIONED" "$CHECKED_AT" > "$STATE_TMP"
 mv -f "$STATE_TMP" "$STATE_FILE" \
-    || { rm -rf "$BUNDLE_STAGE"; err "could not record Hyper update state"; }
+    || { rm -rf "$BUNDLE_STAGE"; err "could not record Turbo update state"; }
 STATE_TMP=""
 
 # Activate the complete bundle after the binary is known-good.
@@ -398,11 +398,11 @@ if [ -n "$BUNDLE_STAGE" ]; then
 fi
 rm -rf "$BUNDLE_ASIDE"
 
-printf '\nhyper v%s installed to %s\n' "$RESOLVED_VERSION" "$BIN_DIR/hyper"
+printf '\nturbo v%s installed to %s\n' "$RESOLVED_VERSION" "$BIN_DIR/turbo"
 
 case ":$PATH:" in
     *":$BIN_DIR:"*)
-        printf 'Run `hyper` to get started.\n'
+        printf 'Run `Turbo` to get started.\n'
         ;;
     *)
         # Persist BIN_DIR on PATH in the login shell's rc file.
@@ -413,8 +413,8 @@ case ":$PATH:" in
                 printf '\n%s is already configured in %s.\n' "$BIN_DIR" "$rc"
                 return 0
             fi
-            printf '\n# Added by the hyper installer\n%s\n' "$line" >> "$rc" \
-                || err "could not write $rc — add hyper to your PATH manually: $line"
+            printf '\n# Added by the Turbo installer\n%s\n' "$line" >> "$rc" \
+                || err "could not write $rc — add Turbo to your PATH manually: $line"
             printf '\nAdded %s to your PATH in %s.\n' "$BIN_DIR" "$rc"
         }
         EXPORT_LINE="export PATH=\"$BIN_DIR:\$PATH\""
@@ -438,6 +438,6 @@ case ":$PATH:" in
                 persist_line "$HOME/.profile" "$EXPORT_LINE"
                 ;;
         esac
-        printf 'Open a new terminal, then run `hyper` to get started.\n'
+        printf 'Open a new terminal, then run `Turbo` to get started.\n'
         ;;
 esac

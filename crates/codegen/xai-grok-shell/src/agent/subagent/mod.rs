@@ -1845,10 +1845,11 @@ impl SubagentExecutionBudget {
                 .unwrap_or(30)
                 .min(timeout.saturating_sub(1).max(1))
         });
-        // Stall: explicit → NVIDIA smoke default 3 min → 10 min when any hard budget.
+        // Stall: explicit → NVIDIA multi-tool default 10 min (was 3 min; Super/Ultra
+        // streams can look idle between tool batches) → 10 min when any hard budget.
         let stall_timeout_ms = match stall_timeout_ms {
             Some(ms) if ms > 0 => Some(ms),
-            _ if model_is_nvidia_platform(model_id) => Some(180_000),
+            _ if model_is_nvidia_platform(model_id) => Some(600_000),
             _ if timeout_secs.is_some() || definition.max_tool_calls.is_some() => Some(600_000),
             _ => None,
         };

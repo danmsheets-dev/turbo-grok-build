@@ -249,14 +249,20 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "deepaudit",
         description: "Deep codebase audit: investigate → verify → report (read-only, verified findings only)",
-        argument_hint: Some("<scope or topic> [--size small|medium|large]"),
+        argument_hint: Some(
+            "<scope or topic> [--size small|medium|large] [--models m1,m2,...]",
+        ),
         // /ultracode and /ultra-code are slash aliases only (R5). Free-text
         // keyword auto-trigger and `/effort ultracode` session mode are RC9.
         aliases: &["deep-audit", "ultracode", "ultra-code"],
         gate: BuiltinGate::WorkflowLaunches,
         resolve: |args| {
-            let (query, size) = parse_deepaudit_args(args);
-            BuiltinAction::DeepAudit { query, size }
+            let (query, size, models) = parse_deepaudit_args(args);
+            BuiltinAction::DeepAudit {
+                query,
+                size,
+                models,
+            }
         },
     },
     BuiltinCommand {
@@ -319,10 +325,14 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
 ];
 
-/// Parse `/deepaudit` free text plus an optional `--size small|medium|large`
-/// flag in any position. Unknown size values are ignored (default medium).
-fn parse_deepaudit_args(args: &str) -> (String, String) {
+/// Parse `/deepaudit` free text plus optional `--size` and `--models` flags
+/// in any position. Unknown size values are ignored (default medium).
+///
+/// `--models m1,m2,m3` pins find (and optionally verify) agents to those
+/// model ids, round-robin. Empty models means inherit the session model.
+fn parse_deepaudit_args(args: &str) -> (String, String, Vec<String>) {
     let mut size = "medium".to_string();
+    let mut models: Vec<String> = Vec::new();
     let mut out: Vec<&str> = Vec::new();
     let mut parts = args.split_whitespace().peekable();
     while let Some(tok) = parts.next() {
@@ -348,9 +358,32 @@ fn parse_deepaudit_args(args: &str) -> (String, String) {
                 continue;
             }
         }
+        if tok.eq_ignore_ascii_case("--models") || tok.eq_ignore_ascii_case("--model") {
+            if let Some(val) = parts.next() {
+                models = parse_model_list(val);
+            }
+            continue;
+        }
+        if let Some(rest) = tok
+            .strip_prefix("--models=")
+            .or_else(|| tok.strip_prefix("--models:"))
+            .or_else(|| tok.strip_prefix("--model="))
+            .or_else(|| tok.strip_prefix("--model:"))
+        {
+            models = parse_model_list(rest);
+            continue;
+        }
         out.push(tok);
     }
-    (out.join(" "), size)
+    (out.join(" "), size, models)
+}
+
+fn parse_model_list(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c == ',' || c == ';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
@@ -916,6 +949,8 @@ pub(super) enum BuiltinAction {
     DeepAudit {
         query: String,
         size: String,
+        /// Optional model pins for find/verify agents (round-robin).
+        models: Vec<String>,
     },
     WorkflowManage {
         run_id: String,
@@ -3023,30 +3058,47 @@ mod tests {
     fn deepaudit_parses_size_flag_and_scope() {
         assert_eq!(
             parse_deepaudit_args("nvidia subagent tool path"),
-            ("nvidia subagent tool path".into(), "medium".into())
+            ("nvidia subagent tool path".into(), "medium".into(), vec![])
         );
         assert_eq!(
             parse_deepaudit_args("--size large src/agent/subagent"),
-            ("src/agent/subagent".into(), "large".into())
+            ("src/agent/subagent".into(), "large".into(), vec![])
         );
         assert_eq!(
             parse_deepaudit_args("auth module --size small"),
-            ("auth module".into(), "small".into())
+            ("auth module".into(), "small".into(), vec![])
         );
         assert_eq!(
             parse_deepaudit_args("--size=large security"),
-            ("security".into(), "large".into())
+            ("security".into(), "large".into(), vec![])
         );
-        assert_eq!(parse_deepaudit_args(""), ("".into(), "medium".into()));
+        assert_eq!(
+            parse_deepaudit_args(""),
+            ("".into(), "medium".into(), vec![])
+        );
         // Invalid size values are left in the free-text scope; default size stays medium.
         assert_eq!(
             parse_deepaudit_args("--size huge topic"),
-            ("huge topic".into(), "medium".into())
+            ("huge topic".into(), "medium".into(), vec![])
+        );
+        assert_eq!(
+            parse_deepaudit_args(
+                "--size small --models grok-4.5,nvidia/nvidia/nemotron-3-super-120b-a12b auth"
+            ),
+            (
+                "auth".into(),
+                "small".into(),
+                vec![
+                    "grok-4.5".into(),
+                    "nvidia/nvidia/nemotron-3-super-120b-a12b".into()
+                ]
+            )
         );
         assert_eq!(
             BuiltinAction::DeepAudit {
                 query: "x".into(),
                 size: "medium".into(),
+                models: vec![],
             }
             .command_name(),
             "deepaudit"
@@ -3061,9 +3113,14 @@ mod tests {
             let outcome =
                 resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err();
             match outcome {
-                SlashCommandOutcome::Builtin(BuiltinAction::DeepAudit { query, size }) => {
+                SlashCommandOutcome::Builtin(BuiltinAction::DeepAudit {
+                    query,
+                    size,
+                    models,
+                }) => {
                     assert_eq!(query, "auth", "alias={alias}");
                     assert_eq!(size, "small", "alias={alias}");
+                    assert!(models.is_empty(), "alias={alias}");
                 }
                 other => panic!("expected DeepAudit via /{alias}, got {other:?}"),
             }

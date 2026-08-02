@@ -1,18 +1,72 @@
 # Changelog
 
-All notable changes to **Hyper** (`hyper` binary) are documented here.
+All notable changes to **Turbo** (`turbo` binary) are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **Full Hyper → Turbo rebrand** — product name is **Grok Turbo** / **Grok Turbo Beta**;
+  CLI binary **`turbo`** (was `hyper`); install root **`~/.turbo`** (was `~/.hyper`);
+  env vars **`TURBO_*`** (legacy `HYPER_*` still accepted where noted). Release assets
+  and archives use the `turbo-` prefix. GitHub repository slug remains `hyper-grok-build`
+  for continuity.
+
+## [0.2.114-r10] - 2026-08-02
+
+**Grok Turbo RC10** — ship blockers from `HYPER_DEVELOPER_FEEDBACK_20260802.md`
+plus RC9 harness Q&A P0–P2 (see `docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`).
+
+### Fixed
+- **`/deepaudit` Rhai `trimmed()`** — stock workflow no longer crashes on
+  `to_lower(())` (Rhai `string::trim` returns unit). Same fix in
+  `continuous-improve`. Unit tests pin correct vs broken trim helpers.
+- **`developer_log` on agent toolsets** — default / explore / plan / orchestrator
+  / concise / hashline toolsets expose `DeveloperLogTool` so boot card policy
+  can be followed (tool was registered but not listed).
+- **NVIDIA Super/Ultra workflow stall** — default stall budget raised from
+  **3 min → 10 min**; workflows can set `stall_timeout_ms` on `agent()` /
+  `parallel()` jobs; deep-audit pins 600s stall on find/verify/scoper.
+- **Boot card on resume** — default **on** (`GROK_BOOT_CARD_ON_RESUME=0` to
+  disable). Top-level resume appends `<turbo_boot_card>` when missing from the
+  stored system prompt.
+- **P0 `capability_mode=read-only`** — spawn stamps effective mode onto
+  `AgentDefinition` and re-clamps after memory tool inject; builder skips write
+  re-injection under ReadOnly/Execute (QA: GP + RO no longer wrote on parent).
+- **P1 agent-only land/diff** — prefer `baseline_ref..snapshot_ref` over live
+  dirty tree / `HEAD..snap`; CLI `turbo subagent diff|land` clone-safe
+  (`git -C` worktree, no abs pathspec from parent).
+- **P1 `--require-changes`** — headless records Edit locations on tool start
+  updates (not only Completed on same message) so write/search_replace no
+  longer false-fail as `NoChanges`.
+- **P1 ADL set-dir** — path that looks like an app source tree nests under
+  `developer-log/`; `ensure_layout` creates empty index; force exact path with
+  `GROK_DEVELOPER_LOG_FORCE_DIR=1`.
+- **P1 export honesty** — summary/CSV only count successfully loaded incidents;
+  skipped unreadable bodies listed.
+- **P2 boot card Model** — `PromptContext.model` plumbed from session
+  `ModelsManager.current_model_id()`.
+
+### Added
+- **`/deepaudit --models m1,m2,...`** — multi-model finders (round-robin);
+  models passed through workflow args; verify inherits single pin or session.
+- **Headless deepaudit wait** — non-interactive sessions **await** workflow
+  completion instead of `EndTurn` after background launch.
+- **`turbo issues file`** (alias `report`) — human/script path to file ADL
+  incidents when the agent tool is unavailable.
+
+### Notes
+- Product: **Grok Turbo**. CLI: **`turbo`**. Wire version `0.2.114-r10`.
+- Harness retest matrix: `docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md` §9.
+
 ## [0.2.114-r9] - 2026-08-02
 
-**Grok Build Turbo** RC9 — worktree trust, boot card, Auto Developer Log, copy buttons.
+**Grok Turbo** RC9 — worktree trust, boot card, Auto Developer Log, copy buttons.
 
 ### Added
 - **RC9 worktree trust:** spawn **baseline** refs
   (`refs/grok/subagent-baselines/<id>`) so diff/land are **agent-only**
   (`baseline..snapshot`), not dirty-parent pollution. Land refuses >50 files
-  unless `force=true`. `hyper subagent open <id> --restore` materializes a
+  unless `force=true`. `turbo subagent open <id> --restore` materializes a
   detached worktree. Soft-preserve live trees by default
   (`GROK_SUBAGENT_SOFT_PRESERVE=0` deletes immediately). Optional clean seed
   via `GROK_SUBAGENT_WORKTREE_SEED=clean`. Windows: `USERPROFILE` fallback when
@@ -21,15 +75,15 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
   on new sessions (subagents get a child stub). Configure with
   `GROK_BOOT_CARD=off|short|full`. Teaches worktree recovery, land safety,
   tools, and **required** `developer_log` usage (with resolved log root path).
-- **Configurable Auto Developer Log dir:** `hyper issues set-dir <path>`,
-  `hyper issues clear-dir`, env `GROK_DEVELOPER_LOG_DIR`, or
+- **Configurable Auto Developer Log dir:** `turbo issues set-dir <path>`,
+  `turbo issues clear-dir`, env `GROK_DEVELOPER_LOG_DIR`, or
   `$GROK_HOME/developer-log.toml` (`dir = "..."`).
 - **Copy-to-clipboard on messages:** `selection_buttons` defaults **on** so
   completed scrollback messages show a copy icon (bottom-right of selection)
   that copies full output.
 - **Auto Developer Log (ADL):** structured product-issue store for agents and
   runtime detectors under `$GROK_HOME/developer-log/`. Agent tool
-  `developer_log` files/dedups redacted incidents; `hyper issues
+  `developer_log` files/dedups redacted incidents; `turbo issues
   list|show|export|ack|resolve|path` reviews and exports maintainer packs;
   auto-detectors cover worktree dispose without recovery artifacts, isolation
   fallback, and stall/timeout. Disable with `GROK_DEVELOPER_LOG=0`. See
@@ -47,8 +101,8 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
   `loops/<workflow_run_id>/checkpoint.json` for cross-process resume.
 
 ### Notes
-- Product name: **Grok Build Turbo**. CLI binary remains **`hyper`**
-  (local installs may also expose a `turbo` shim). Wire version `0.2.114-r9`.
+- Product name: **Grok Turbo**. CLI binary is **`turbo`**
+  Wire version `0.2.114-r9`.
 
 ## [0.2.114-r8] - 2026-08-01
 

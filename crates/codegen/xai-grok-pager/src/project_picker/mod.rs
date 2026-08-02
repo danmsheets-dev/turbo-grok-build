@@ -78,8 +78,8 @@ pub fn build_project_question(
 
     ProjectQuestion {
         question: Question {
-            question: "Run Grok Build in a project directory?\n\n\
-                 This gives Grok Build full context of your codebase for better results."
+            question: "Run Grok Turbo in a project directory?\n\n\
+                 This gives Grok Turbo full context of your codebase for better results."
                 .into(),
             id: None,
             options,

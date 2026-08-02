@@ -8,9 +8,9 @@ use xai_grok_dashboard::{DashboardServerConfig, serve};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "hyper-dashboard",
+    name = "turbo-dashboard",
     version,
-    about = "Local web observability for Hyper sessions"
+    about = "Local web observability for Turbo sessions"
 )]
 struct Args {
     /// Loopback address for the HTTP server.

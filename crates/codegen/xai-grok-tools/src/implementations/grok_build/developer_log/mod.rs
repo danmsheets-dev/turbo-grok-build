@@ -1,7 +1,7 @@
-//! `developer_log` — file a structured product incident for Hyper maintainers.
+//! `developer_log` — file a structured product incident for Turbo maintainers.
 //!
 //! Writes into `$GROK_HOME/developer-log/` (deduped by fingerprint, redacted).
-//! Operators export packs with `hyper issues export`.
+//! Operators export packs with `turbo issues export`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -152,8 +152,8 @@ Rules:
 - Never include secrets, API keys, tokens, or full unredacted prompts.
 - Do not spam: if you already filed this fingerprint in the session, skip unless new evidence.
 
-Storage: default `$GROK_HOME/developer-log`; override with `GROK_DEVELOPER_LOG_DIR` or `hyper issues set-dir <path>`.
-Operators review with `hyper issues list`, `hyper issues export`, `hyper issues path`."#
+Storage: default `$GROK_HOME/developer-log`; override with `GROK_DEVELOPER_LOG_DIR` or `turbo issues set-dir <path>`.
+Operators review with `turbo issues list`, `turbo issues export`, `turbo issues path`."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -289,7 +289,7 @@ impl xai_tool_runtime::Tool for DeveloperLogTool {
             "Updated"
         };
         let message = format!(
-            "{action} Auto Developer Log incident `{}` (fingerprint `{}`, occurrences={}, severity={}). Path: {}. Review with `hyper issues show {}` or `hyper issues export`.",
+            "{action} Auto Developer Log incident `{}` (fingerprint `{}`, occurrences={}, severity={}). Path: {}. Review with `turbo issues show {}` or `turbo issues export`.",
             result.incident_id,
             result.fingerprint,
             result.occurrence_count,

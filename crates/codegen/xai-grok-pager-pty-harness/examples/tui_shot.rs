@@ -1,8 +1,8 @@
-//! Capture a styled welcome screen from the real `hyper` binary in a PTY and
+//! Capture a styled welcome screen from the real `turbo` binary in a PTY and
 //! dump it as JSON (Vec<StyledLine>) for an external rasterizer.
 //!
 //! Usage:
-//!   PAGER_BINARY=target/debug/hyper cargo run -p xai-grok-pager-pty-harness \
+//!   PAGER_BINARY=target/debug/turbo cargo run -p xai-grok-pager-pty-harness \
 //!     --example tui_shot -- <lang> <out.json>
 //!
 //! The harness auto-answers the pager's terminal feature probes

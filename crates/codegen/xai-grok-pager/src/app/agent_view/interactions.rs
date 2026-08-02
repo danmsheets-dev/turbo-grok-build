@@ -1139,7 +1139,7 @@ impl AgentView {
                 kind,
                 crate::views::question_view::LocalQuestionKind::DoctorFix { .. }
             );
-            // Hyper community free-usage escapes need `&mut self` (clear sticky
+            // Turbo community free-usage escapes need `&mut self` (clear sticky
             // block + toast). Detect before the pure `translate_local_submit`.
             if !skipped
                 && let crate::views::question_view::LocalQuestionKind::FreeUsageUpsell { source } =

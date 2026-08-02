@@ -1,4 +1,4 @@
-//! `hyper models` / `grok models` subcommand.
+//! `turbo models` / `grok models` subcommand.
 //!
 //! Served from the local model + platform registry — does **not** spawn the
 //! full agent shell (that path previously aborted with exit 255 during

@@ -176,7 +176,7 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
         tracing::warn!(
             %reason,
             "auth: Kimi refresh short-circuited by sticky permanent failure \
-             (run `hyper login --kimi` or `hyper logout --kimi` then re-login)"
+             (run `turbo login --kimi` or `turbo logout --kimi` then re-login)"
         );
         return None;
     }

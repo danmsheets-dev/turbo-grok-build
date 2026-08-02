@@ -213,11 +213,11 @@ pub fn global_process_scope() -> &'static ProcessScope {
     GLOBAL.get_or_init(ProcessScope::new)
 }
 
-/// Env var / CLI opt-in: put the **current Hyper process** into a Win32 Job
+/// Env var / CLI opt-in: put the **current Turbo process** into a Win32 Job
 /// Object with `KILL_ON_JOB_CLOSE` so a harness can kill the entire tree by
 /// closing the job handle (not by guessing PIDs).
 ///
-/// - Env: `HYPER_JOB_OBJECT=1` (or `true` / `yes`)
+/// - Env: `TURBO_JOB_OBJECT=1` (legacy: `HYPER_JOB_OBJECT=1`) (or `true` / `yes`)
 /// - CLI: `--job-object` (see pager CLI)
 ///
 /// Interactive users leave this off — nested jobs or an already-jobbed parent
@@ -226,7 +226,7 @@ pub fn global_process_scope() -> &'static ProcessScope {
 ///
 /// On non-Windows this is a no-op.
 pub fn enter_self_job_object_if_requested(force: bool) {
-    let env_on = std::env::var("HYPER_JOB_OBJECT")
+    let env_on = std::env::var("TURBO_JOB_OBJECT").or_else(|_| std::env::var("HYPER_JOB_OBJECT"))
         .map(|v| {
             let t = v.trim();
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
@@ -240,7 +240,7 @@ pub fn enter_self_job_object_if_requested(force: bool) {
         if let Err(e) = enter_self_job_object_windows() {
             // Already-in-a-job (no nested-job support) is expected under some
             // harnesses — do not abort startup.
-            eprintln!("warning: HYPER_JOB_OBJECT: could not enter job object: {e}");
+            eprintln!("warning: TURBO_JOB_OBJECT: could not enter job object: {e}");
         }
     }
     #[cfg(not(windows))]

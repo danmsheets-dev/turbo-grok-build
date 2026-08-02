@@ -1,4 +1,4 @@
-//! End-to-end tests for the isolated Hyper community updater.
+//! End-to-end tests for the isolated Turbo community updater.
 
 #![cfg(all(unix, feature = "community-build"))]
 
@@ -53,7 +53,7 @@ fn release_archive(binary: &[u8]) -> Vec<u8> {
     header.set_size(binary.len() as u64);
     header.set_mode(0o755);
     header.set_cksum();
-    builder.append_data(&mut header, "hyper", binary).unwrap();
+    builder.append_data(&mut header, "turbo", binary).unwrap();
 
     let license = b"test license\n";
     let mut header = tar::Header::new_gnu();
@@ -80,12 +80,12 @@ fn root_installer_path() -> PathBuf {
         .expect("repository-root install.sh should exist")
 }
 
-fn run_root_installer(hyper_home: &Path, user_home: &Path, server: &MockServer) -> Output {
+fn run_root_installer(turbo_home: &Path, user_home: &Path, server: &MockServer) -> Output {
     let tmp = user_home.join("tmp");
     std::fs::create_dir_all(&tmp).unwrap();
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     let path = std::env::join_paths(
-        std::iter::once(hyper_home.join("bin")).chain(std::env::split_paths(&inherited_path)),
+        std::iter::once(turbo_home.join("bin")).chain(std::env::split_paths(&inherited_path)),
     )
     .unwrap();
 
@@ -95,11 +95,11 @@ fn run_root_installer(hyper_home: &Path, user_home: &Path, server: &MockServer) 
         .env("TMPDIR", tmp)
         .env("PATH", path)
         .env("SHELL", "/bin/sh")
-        .env("HYPER_SHARE_DIR", hyper_home)
-        .env("HYPER_UPDATE_BASE_URL", server.uri())
+        .env("TURBO_SHARE_DIR", turbo_home)
+        .env("TURBO_UPDATE_BASE_URL", server.uri())
         .env("GITHUB_TOKEN", "must-not-leak-to-custom-update-host")
         .output()
-        .expect("root Hyper installer should run")
+        .expect("root Turbo installer should run")
 }
 
 fn active_target(active: &Path) -> PathBuf {
@@ -124,7 +124,7 @@ async fn mount_release(
     manifest_hash: &str,
 ) -> (MockServer, String) {
     let server = MockServer::start().await;
-    let asset = format!("hyper-{version}-{}.tar.gz", platform_triple());
+    let asset = format!("turbo-{version}-{}.tar.gz", platform_triple());
     let base = server.uri();
     let metadata = serde_json::json!({
         "tag_name": format!("v{version}"),
@@ -164,34 +164,34 @@ async fn mount_release(
 }
 
 struct EnvGuard {
-    hyper_home: PathBuf,
+    turbo_home: PathBuf,
 }
 
 impl EnvGuard {
     fn install() -> Self {
         let _ = test_home();
         reset_home();
-        let hyper_home = tempfile::tempdir().unwrap().keep();
+        let turbo_home = tempfile::tempdir().unwrap().keep();
         unsafe {
-            std::env::set_var("HYPER_SHARE_DIR", &hyper_home);
-            std::env::set_var("HYPER_ALLOW_INSECURE_UPDATE_BASE", "1");
+            std::env::set_var("TURBO_SHARE_DIR", &turbo_home);
+            std::env::set_var("TURBO_ALLOW_INSECURE_UPDATE_BASE", "1");
         }
-        Self { hyper_home }
+        Self { turbo_home }
     }
 
     fn use_server(&self, server: &MockServer) {
-        unsafe { std::env::set_var("HYPER_UPDATE_BASE_URL", server.uri()) };
+        unsafe { std::env::set_var("TURBO_UPDATE_BASE_URL", server.uri()) };
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         unsafe {
-            std::env::remove_var("HYPER_SHARE_DIR");
-            std::env::remove_var("HYPER_ALLOW_INSECURE_UPDATE_BASE");
-            std::env::remove_var("HYPER_UPDATE_BASE_URL");
+            std::env::remove_var("TURBO_SHARE_DIR");
+            std::env::remove_var("TURBO_ALLOW_INSECURE_UPDATE_BASE");
+            std::env::remove_var("TURBO_UPDATE_BASE_URL");
         }
-        let _ = std::fs::remove_dir_all(&self.hyper_home);
+        let _ = std::fs::remove_dir_all(&self.turbo_home);
     }
 }
 
@@ -203,13 +203,13 @@ fn install_official_sentinel() -> (PathBuf, Vec<u8>) {
     (grok, bytes)
 }
 
-fn install_old_hyper(home: &Path, version: &str) -> PathBuf {
+fn install_old_turbo(home: &Path, version: &str) -> PathBuf {
     let (os, arch) = local_platform();
     let downloads = home.join("downloads");
     let bin = home.join("bin");
     std::fs::create_dir_all(&downloads).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
-    let old = downloads.join(format!("hyper-{version}-{os}-{arch}"));
+    let old = downloads.join(format!("turbo-{version}-{os}-{arch}"));
     let mut file = std::fs::File::create(&old).unwrap();
     file.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
@@ -220,7 +220,7 @@ fn install_old_hyper(home: &Path, version: &str) -> PathBuf {
             Path::new("..")
                 .join("downloads")
                 .join(old.file_name().unwrap()),
-            bin.join("hyper"),
+            bin.join("turbo"),
         )
         .unwrap();
     }
@@ -233,7 +233,7 @@ async fn community_update_installs_verified_archive_without_touching_official_gr
     let env = EnvGuard::install();
     set_test_version("0.2.112");
     let (grok, sentinel) = install_official_sentinel();
-    install_old_hyper(&env.hyper_home, "0.2.112");
+    install_old_turbo(&env.turbo_home, "0.2.112");
 
     let archive = release_archive(b"#!/bin/sh\nexit 0\n");
     let digest = sha256(&archive);
@@ -247,16 +247,16 @@ async fn community_update_installs_verified_archive_without_touching_official_gr
     assert_eq!(installed.as_deref(), Some("0.2.113"));
     assert_eq!(std::fs::read(&grok).unwrap(), sentinel);
 
-    let active = env.hyper_home.join("bin/hyper");
+    let active = env.turbo_home.join("bin/turbo");
     assert!(active.is_symlink());
     let target = std::fs::read_link(&active).unwrap();
     let target_name = target.file_name().unwrap().to_string_lossy();
-    assert!(target_name.contains("hyper-0.2.113-"), "{target_name}");
+    assert!(target_name.contains("turbo-0.2.113-"), "{target_name}");
     assert!(target_name.contains(&digest), "{target_name}");
     assert!(std::fs::metadata(&active).unwrap().len() > 0);
 
     let state: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(env.hyper_home.join("update-state.json")).unwrap())
+        serde_json::from_slice(&std::fs::read(env.turbo_home.join("update-state.json")).unwrap())
             .unwrap();
     assert_eq!(state["installed_version"], "0.2.113");
     assert_eq!(state["installed_asset"], asset);
@@ -272,7 +272,7 @@ async fn community_update_installs_verified_archive_without_touching_official_gr
     assert!(requests.iter().all(|request| matches!(
         request.url.path(),
         "/latest" | "/assets/SHA256SUMS"
-    ) || request.url.path().starts_with("/assets/hyper-")));
+    ) || request.url.path().starts_with("/assets/turbo-")));
 }
 
 #[tokio::test]
@@ -280,7 +280,7 @@ async fn community_update_installs_verified_archive_without_touching_official_gr
 async fn concurrent_updaters_download_and_activate_archive_once() {
     let env = EnvGuard::install();
     set_test_version("0.2.112");
-    install_old_hyper(&env.hyper_home, "0.2.112");
+    install_old_turbo(&env.turbo_home, "0.2.112");
 
     let archive = release_archive(b"#!/bin/sh\nexit 0\n");
     let digest = sha256(&archive);
@@ -306,10 +306,10 @@ async fn concurrent_updaters_download_and_activate_archive_once() {
         "the cross-process install lock must suppress duplicate archive downloads"
     );
     let state: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(env.hyper_home.join("update-state.json")).unwrap())
+        serde_json::from_slice(&std::fs::read(env.turbo_home.join("update-state.json")).unwrap())
             .unwrap();
     assert_eq!(state["installed_sha256"], digest);
-    assert!(std::fs::metadata(env.hyper_home.join("bin/hyper")).is_ok());
+    assert!(std::fs::metadata(env.turbo_home.join("bin/turbo")).is_ok());
 }
 
 #[tokio::test]
@@ -317,13 +317,13 @@ async fn concurrent_updaters_download_and_activate_archive_once() {
 async fn same_semver_digest_change_updates_once_then_converges() {
     let env = EnvGuard::install();
     set_test_version("0.2.113");
-    let old = install_old_hyper(&env.hyper_home, "0.2.113");
+    let old = install_old_turbo(&env.turbo_home, "0.2.113");
     let old_name = old.file_name().unwrap().to_string_lossy().to_string();
     std::fs::write(
-        env.hyper_home.join("update-state.json"),
+        env.turbo_home.join("update-state.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "installed_version": "0.2.113",
-            "installed_asset": format!("hyper-0.2.113-{}.tar.gz", platform_triple()),
+            "installed_asset": format!("turbo-0.2.113-{}.tar.gz", platform_triple()),
             "installed_sha256": "1".repeat(64),
             "installed_binary": old_name,
             "checked_at_unix": 0,
@@ -358,7 +358,7 @@ async fn same_semver_digest_change_updates_once_then_converges() {
         1,
         "same tag + new digest installs once; the matching digest then converges"
     );
-    let target = std::fs::read_link(env.hyper_home.join("bin/hyper")).unwrap();
+    let target = std::fs::read_link(env.turbo_home.join("bin/turbo")).unwrap();
     assert!(target.to_string_lossy().contains(&digest));
 }
 
@@ -374,7 +374,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
     let archive_a = release_archive(b"#!/bin/sh\nexit 0\n# build a\n");
     let digest_a = sha256(&archive_a);
     let (server_a, _) = mount_release("0.2.113", archive_a, &digest_a).await;
-    let first = run_root_installer(&env.hyper_home, user_home.path(), &server_a);
+    let first = run_root_installer(&env.turbo_home, user_home.path(), &server_a);
     assert!(
         first.status.success(),
         "first install failed:\nstdout={}\nstderr={}",
@@ -382,7 +382,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
         String::from_utf8_lossy(&first.stderr)
     );
 
-    let active = env.hyper_home.join("bin/hyper");
+    let active = env.turbo_home.join("bin/turbo");
     let target_a = active_target(&active);
     assert!(target_a.to_string_lossy().contains(&digest_a));
     assert!(target_a.exists());
@@ -390,7 +390,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
     let archive_b = release_archive(b"#!/bin/sh\nexit 0\n# build b\n");
     let digest_b = sha256(&archive_b);
     let (server_b, _) = mount_release("0.2.113", archive_b, &digest_b).await;
-    let second = run_root_installer(&env.hyper_home, user_home.path(), &server_b);
+    let second = run_root_installer(&env.turbo_home, user_home.path(), &server_b);
     assert!(
         second.status.success(),
         "republished install failed:\nstdout={}\nstderr={}",
@@ -409,7 +409,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
     let bad_archive = release_archive(b"#!/bin/sh\nexit 1\n");
     let bad_digest = sha256(&bad_archive);
     let (bad_server, _) = mount_release("0.2.113", bad_archive, &bad_digest).await;
-    let failed = run_root_installer(&env.hyper_home, user_home.path(), &bad_server);
+    let failed = run_root_installer(&env.turbo_home, user_home.path(), &bad_server);
     assert!(
         !failed.status.success(),
         "bad binary must fail its smoke test"
@@ -417,7 +417,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
     assert_eq!(active_target(&active), target_b);
 
     let state: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(env.hyper_home.join("update-state.json")).unwrap())
+        serde_json::from_slice(&std::fs::read(env.turbo_home.join("update-state.json")).unwrap())
             .unwrap();
     assert_eq!(state["installed_sha256"], digest_b);
     assert_eq!(
@@ -436,8 +436,8 @@ async fn checksum_failure_preserves_both_active_hyper_and_official_grok() {
     let env = EnvGuard::install();
     set_test_version("0.2.112");
     let (grok, sentinel) = install_official_sentinel();
-    let old = install_old_hyper(&env.hyper_home, "0.2.112");
-    let active = env.hyper_home.join("bin/hyper");
+    let old = install_old_turbo(&env.turbo_home, "0.2.112");
+    let active = env.turbo_home.join("bin/turbo");
     let old_target = std::fs::read_link(&active).unwrap();
 
     let archive = release_archive(b"#!/bin/sh\nexit 0\n");
@@ -452,5 +452,5 @@ async fn checksum_failure_preserves_both_active_hyper_and_official_grok() {
     assert_eq!(std::fs::read_link(&active).unwrap(), old_target);
     assert_eq!(std::fs::read(&old).unwrap(), b"#!/bin/sh\nexit 0\n");
     assert_eq!(std::fs::read(&grok).unwrap(), sentinel);
-    assert!(!env.hyper_home.join("update-state.json").exists());
+    assert!(!env.turbo_home.join("update-state.json").exists());
 }

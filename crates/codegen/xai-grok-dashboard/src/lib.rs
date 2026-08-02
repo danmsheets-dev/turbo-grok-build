@@ -1,4 +1,4 @@
-//! Local, read-only web observability for Grok Build / Hyper sessions.
+//! Local, read-only web observability for Grok Turbo sessions.
 
 pub mod api;
 pub mod app;

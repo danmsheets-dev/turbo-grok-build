@@ -1,4 +1,4 @@
-//! Shared contract types for Hyper WASM extensions.
+//! Shared contract types for Turbo WASM extensions.
 //!
 //! This crate is dependency-light (serde + thiserror) so hooks, agent, and
 //! the extension runtime can all depend on it without pulling wasmtime.

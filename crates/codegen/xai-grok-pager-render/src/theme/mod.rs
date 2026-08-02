@@ -43,7 +43,7 @@ pub enum ThemeKind {
     /// Excluded from [`ALL`] and [`available()`].
     Auto = 4,
 
-    // Hyper preset collection (truecolor). Discriminants 6..=17 are stable
+    // Turbo preset collection (truecolor). Discriminants 6..=17 are stable
     // on-disk identifiers via `cache`'s u8 encoding — never renumber them.
     Everforest = 6,
     Nord = 7,
@@ -63,7 +63,7 @@ pub enum ThemeKind {
     Omp = 19,
 }
 
-/// The Hyper preset kinds, in catalog order (eleven dark, three light).
+/// The Turbo preset kinds, in catalog order (eleven dark, three light).
 /// Shared by tests that exercise every compact-palette theme.
 #[allow(dead_code)]
 const PRESET_KINDS: &[ThemeKind] = &[
@@ -99,7 +99,7 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
-        // Hyper preset collection.
+        // Turbo preset collection.
         ThemeKind::Everforest,
         ThemeKind::Nord,
         ThemeKind::Dracula,
@@ -173,7 +173,7 @@ impl ThemeKind {
             Self::OscuraMidnight => true,
             // Auto is resolved to a concrete theme before rendering.
             Self::Auto => false,
-            // Every Hyper preset is authored in truecolor RGB and loses its
+            // Every Turbo preset is authored in truecolor RGB and loses its
             // background identity when quantized to 256/16 colors.
             Self::Everforest
             | Self::Nord

@@ -1,4 +1,4 @@
-//! Hyper WASM extension runtime (Phase 0/1).
+//! Turbo WASM extension runtime (Phase 0/1).
 //!
 //! ## Core-wasm bootstrap ABI
 //!

@@ -217,13 +217,13 @@ pub fn kill_process_with_signal(pid: u32, signal: KillSignal) -> std::io::Result
         terminate.map_err(|e| std::io::Error::other(format!("TerminateProcess({pid}): {e}")))
     }
 }
-/// True if `pid` is a Grok Build / Hyper product process.
+/// True if `pid` is a Grok Build / Turbo product process.
 ///
 /// Pairs with [`kill_process_by_pid`] so leader cleanup does not treat a recycled
 /// PID as "stale" and delete live lock/socket files. Recognizes:
 /// - shipped binaries `grok` and `hyper` (exact basename)
 /// - in-tree test/dev binaries named `xai-grok-*`
-/// - managed install roots `~/.grok/bin/` and `~/.hyper/bin/`
+/// - managed install roots `~/.grok/bin/`, `~/.turbo/bin/`, and legacy `~/.hyper/bin/`
 ///
 /// Exact on Linux (`/proc` cmdline argv0), Windows (image path), and macOS
 /// (`proc_pidpath`). Other Unix falls back to liveness-only (`kill -0`).
@@ -357,7 +357,7 @@ pub(crate) fn process_image_looks_like_product(image: &str) -> bool {
         .unwrap_or(argv0)
         .trim_end_matches(".exe");
     let base_lower = base.to_ascii_lowercase();
-    if base_lower == "grok" || base_lower == "hyper" {
+    if base_lower == "grok" || base_lower == "turbo" || base_lower == "hyper" {
         return true;
     }
     // Cargo test / example binaries: package names use hyphens in Cargo.toml
@@ -509,10 +509,10 @@ mod tests {
         assert!(!is_grok_process(u32::MAX));
     }
     #[test]
-    fn process_image_recognizes_hyper_and_grok_basenames() {
-        assert!(process_image_looks_like_product("/home/u/.hyper/bin/hyper"));
+    fn process_image_recognizes_turbo_hyper_and_grok_basenames() {
+        assert!(process_image_looks_like_product("/home/u/.turbo/bin/turbo"));
         assert!(process_image_looks_like_product(
-            r"C:\Users\u\.hyper\bin\hyper.exe"
+            r"C:\Users\u\.turbo\bin\turbo.exe"
         ));
         assert!(process_image_looks_like_product("/home/u/.grok/bin/grok"));
         assert!(process_image_looks_like_product(
@@ -523,7 +523,7 @@ mod tests {
         ));
         // Linux-style cmdline: argv0 + NUL + args
         assert!(process_image_looks_like_product(
-            "/home/u/.hyper/bin/hyper\0leader\0kill"
+            "/home/u/.turbo/bin/turbo\0leader\0kill"
         ));
         // Later argv tokens must NOT match (false-positive vector).
         assert!(!process_image_looks_like_product(

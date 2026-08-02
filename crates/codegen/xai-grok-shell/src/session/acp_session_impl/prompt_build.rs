@@ -216,7 +216,8 @@ pub(super) fn is_project_instructions(item: &ConversationItem) -> bool {
         .is_some_and(|t| t.starts_with(LEGACY_AGENTS_MD_REMINDER_PREFIX))
 }
 /// Subagent spawns (incl. `resume_from`) overwrite the leading System with the fresh
-/// prompt; top-level user-resumed sessions keep theirs. Absent → insert + grow prefix.
+/// prompt; top-level user-resumed sessions keep theirs unless boot-card-on-resume
+/// needs to inject a missing ops briefing. Absent → insert + grow prefix.
 pub(super) fn install_system_prompt(
     conversation: &mut Vec<ConversationItem>,
     inherited_prefix_len: &mut Option<usize>,
@@ -227,6 +228,19 @@ pub(super) fn install_system_prompt(
     if let Some(ConversationItem::System(sys)) = conversation.first_mut() {
         if is_subagent_spawn && !preserve_inherited_system {
             sys.content = std::sync::Arc::<str>::from(system_prompt);
+        } else if !is_subagent_spawn
+            && xai_grok_agent::prompt::boot_card::boot_card_on_resume()
+            && !sys.content.contains("<turbo_boot_card")
+        {
+            // Resume path: keep the existing system body, append boot card from the
+            // freshly rendered prompt when the card was never present (RC10).
+            if let Some(card) = extract_turbo_boot_card(system_prompt) {
+                let mut content = sys.content.as_ref().to_string();
+                content.push_str("\n\n");
+                content.push_str(card);
+                sys.content = std::sync::Arc::<str>::from(content);
+                tracing::info!("boot_card injected on resume into existing system prompt");
+            }
         }
     } else {
         conversation.insert(0, ConversationItem::system(system_prompt.to_string()));
@@ -234,6 +248,15 @@ pub(super) fn install_system_prompt(
             *len += 1;
         }
     }
+}
+
+fn extract_turbo_boot_card(prompt: &str) -> Option<&str> {
+    const OPEN: &str = "<turbo_boot_card";
+    const CLOSE: &str = "</turbo_boot_card>";
+    let start = prompt.find(OPEN)?;
+    let close_at = prompt[start..].find(CLOSE)? + start;
+    let end = close_at + CLOSE.len();
+    Some(&prompt[start..end])
 }
 #[cfg(test)]
 mod install_system_prompt_tests {
@@ -292,8 +315,49 @@ mod install_system_prompt_tests {
             ConversationItem::user("hi"),
         ];
         let mut prefix = None;
+        // Fresh prompt has no boot card block → stored system unchanged.
         install_system_prompt(&mut conv, &mut prefix, false, false, "fresh");
         assert_eq!(system_text(&conv[0]), "stored");
+    }
+    #[test]
+    fn top_level_resume_appends_boot_card_when_missing() {
+        // Ensure default-on resume inject is active for this process.
+        // SAFETY: unit test isolation only.
+        unsafe {
+            std::env::remove_var("GROK_BOOT_CARD_ON_RESUME");
+        }
+        let mut conv = vec![
+            ConversationItem::system("stored without card"),
+            ConversationItem::user("hi"),
+        ];
+        let mut prefix = None;
+        let fresh = "prelude\n\n<turbo_boot_card version=\"1\" mode=\"short\">\nops brief\n</turbo_boot_card>\n\ntail";
+        install_system_prompt(&mut conv, &mut prefix, false, false, fresh);
+        let text = system_text(&conv[0]);
+        assert!(
+            text.contains("stored without card"),
+            "must keep original system body"
+        );
+        assert!(
+            text.contains("<turbo_boot_card") && text.contains("ops brief"),
+            "must append boot card from fresh prompt: {text}"
+        );
+    }
+    #[test]
+    fn top_level_resume_does_not_duplicate_boot_card() {
+        let mut conv = vec![
+            ConversationItem::system(
+                "sys\n<turbo_boot_card version=\"1\" mode=\"short\">\nold-card\n</turbo_boot_card>",
+            ),
+            ConversationItem::user("hi"),
+        ];
+        let mut prefix = None;
+        let fresh =
+            "new\n<turbo_boot_card version=\"1\" mode=\"short\">\nnew-card\n</turbo_boot_card>";
+        install_system_prompt(&mut conv, &mut prefix, false, false, fresh);
+        let text = system_text(&conv[0]);
+        assert!(text.contains("old-card"));
+        assert!(!text.contains("new-card"));
     }
     #[test]
     fn inserts_system_and_bumps_prefix_when_absent() {

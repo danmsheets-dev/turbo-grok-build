@@ -1,16 +1,16 @@
-# Hyper installer (Windows x86_64).
+# Turbo installer (Windows x86_64).
 #
 # Downloads the x86_64-pc-windows-msvc artifact from this repo's GitHub
 # Releases, verifies its SHA-256 against the release's SHA256SUMS manifest,
-# and installs the binary as %USERPROFILE%\.hyper\bin\hyper.exe.
+# and installs the binary as %USERPROFILE%\.turbo\bin\turbo.exe.
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.109
 #
 # Environment:
-#   HYPER_SHARE_DIR        install root (default: %USERPROFILE%\.hyper)
-#   HYPER_UPDATE_BASE_URL  GitHub-Releases-shaped API base (default:
+#   TURBO_SHARE_DIR        install root (default: %USERPROFILE%\.turbo)
+#   TURBO_UPDATE_BASE_URL  GitHub-Releases-shaped API base (default:
 #                          https://api.github.com/repos/DaviRain-Su/hyper-grok-build/releases)
 
 [CmdletBinding()]
@@ -41,13 +41,13 @@ function Ensure-SafeDirectory([string]$Path, [string]$Label) {
 }
 
 $Repo = "DaviRain-Su/hyper-grok-build"
-$ApiBase = if ($env:HYPER_UPDATE_BASE_URL) { $env:HYPER_UPDATE_BASE_URL } else { "https://api.github.com/repos/$Repo/releases" }
-$HyperHome = if ($env:HYPER_SHARE_DIR) { $env:HYPER_SHARE_DIR } else { Join-Path $env:USERPROFILE ".hyper" }
+$ApiBase = if ($env:TURBO_UPDATE_BASE_URL) { $env:TURBO_UPDATE_BASE_URL } else { "https://api.github.com/repos/$Repo/releases" }
+$TurboHome = if ($env:TURBO_SHARE_DIR) { $env:TURBO_SHARE_DIR } else { Join-Path $env:USERPROFILE ".turbo" }
 $Triple = "x86_64-pc-windows-msvc"
 
 # ── Platform gate ────────────────────────────────────────────────────────────
 if (-not [System.Environment]::Is64BitOperatingSystem) {
-    Fail "hyper requires 64-bit Windows (x86_64)"
+    Fail "turbo requires 64-bit Windows (x86_64)"
 }
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -ne "AMD64") {
@@ -63,7 +63,7 @@ if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Z
 # TLS 1.2 for older PowerShell 5.1 defaults.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$Headers = @{ "User-Agent" = "hyper-install"; "Accept" = "application/vnd.github+json" }
+$Headers = @{ "User-Agent" = "turbo-install"; "Accept" = "application/vnd.github+json" }
 
 # ── Resolve the release ──────────────────────────────────────────────────────
 $ReleaseUrl = if ($Version) { "$ApiBase/tags/v$Version" } else { "$ApiBase/latest" }
@@ -84,7 +84,7 @@ if ($Version -and $ResolvedVersion -ne $Version) {
     Fail "requested version $Version but release tag is $Tag"
 }
 
-$Asset = "hyper-$ResolvedVersion-$Triple.zip"
+$Asset = "turbo-$ResolvedVersion-$Triple.zip"
 if ($null -eq $Release.assets) { Fail "release $Tag has no assets" }
 $ArchiveMatches = @($Release.assets | Where-Object { $_.name -eq $Asset })
 $SumsMatches = @($Release.assets | Where-Object { $_.name -eq "SHA256SUMS" })
@@ -94,14 +94,14 @@ $ArchiveAsset = $ArchiveMatches[0]
 $SumsAsset = $SumsMatches[0]
 
 # ── Download + verify ────────────────────────────────────────────────────────
-$TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("hyper-install-" + [System.IO.Path]::GetRandomFileName())
+$TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("turbo-install-" + [System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Path $TmpDir -Force | Out-Null
 $StateTmp = $null
 try {
     $ArchivePath = Join-Path $TmpDir $Asset
     $SumsPath = Join-Path $TmpDir "SHA256SUMS"
 
-    Write-Host "Downloading hyper v$ResolvedVersion ($Triple)..."
+    Write-Host "Downloading Turbo v$ResolvedVersion ($Triple)..."
     Invoke-WebRequest -Uri $ArchiveAsset.browser_download_url -Headers $Headers -OutFile $ArchivePath
     Invoke-WebRequest -Uri $SumsAsset.browser_download_url -Headers $Headers -OutFile $SumsPath
 
@@ -137,7 +137,7 @@ try {
     # Materialize only the unique root-level executable, plus optional
     # installer-owned `bundled/` assets. Nested path traversal is rejected.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $BinaryPath = Join-Path $TmpDir "hyper.exe"
+    $BinaryPath = Join-Path $TmpDir "turbo.exe"
     $BundledSource = Join-Path $TmpDir "bundled"
     $GrokHome = if ($env:GROK_HOME) { $env:GROK_HOME } else { Join-Path $HOME ".grok" }
     $BundledDest = Join-Path $GrokHome "bundled"
@@ -149,18 +149,18 @@ try {
             Fail "archive $Asset contains too many entries"
         }
         $BinaryEntries = @($Zip.Entries | Where-Object {
-            $_.FullName -eq "hyper.exe" -or $_.FullName -eq "./hyper.exe"
+            $_.FullName -eq "turbo.exe" -or $_.FullName -eq "./turbo.exe"
         })
         if ($BinaryEntries.Count -ne 1) {
-            Fail "archive $Asset must contain exactly one root-level hyper.exe"
+            Fail "archive $Asset must contain exactly one root-level turbo.exe"
         }
         $BinaryEntry = $BinaryEntries[0]
         if ($BinaryEntry.Length -le 0 -or $BinaryEntry.Length -gt 1GB) {
-            Fail "archive $Asset contains an invalid-size hyper.exe"
+            Fail "archive $Asset contains an invalid-size turbo.exe"
         }
         $UnixFileType = (($BinaryEntry.ExternalAttributes -shr 16) -band 0xF000)
         if ($UnixFileType -ne 0 -and $UnixFileType -ne 0x8000) {
-            Fail "archive $Asset contains a non-regular hyper.exe entry"
+            Fail "archive $Asset contains a non-regular turbo.exe entry"
         }
         [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
             $BinaryEntry, $BinaryPath, $true
@@ -197,11 +197,11 @@ try {
     }
     $Binary = Get-Item -LiteralPath $BinaryPath
 
-    Ensure-SafeDirectory $HyperHome "Hyper install root"
-    $BinDir = Join-Path $HyperHome "bin"
-    Ensure-SafeDirectory $BinDir "Hyper bin directory"
-    $Dest = Join-Path $BinDir "hyper.exe"
-    $StatePath = Join-Path $HyperHome "update-state.json"
+    Ensure-SafeDirectory $TurboHome "Turbo install root"
+    $BinDir = Join-Path $TurboHome "bin"
+    Ensure-SafeDirectory $BinDir "Turbo bin directory"
+    $Dest = Join-Path $BinDir "turbo.exe"
+    $StatePath = Join-Path $TurboHome "update-state.json"
     if (Test-Path -LiteralPath $StatePath) {
         $StateItem = Get-Item -LiteralPath $StatePath -Force
         if (($StateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -240,14 +240,14 @@ try {
         installed_version = $ResolvedVersion
         installed_asset = $Asset
         installed_sha256 = $Expected
-        installed_binary = "hyper.exe"
+        installed_binary = "turbo.exe"
         checked_at_unix = $CheckedAtUnix
     }
     $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     $StateJson = ($State | ConvertTo-Json) + [Environment]::NewLine
     [IO.File]::WriteAllText($StateTmp, $StateJson, $Utf8NoBom)
 
-    # A running hyper.exe blocks writes but may allow renames. Use a unique
+    # A running turbo.exe blocks writes but may allow renames. Use a unique
     # aside path so a locked backup from an older process cannot block updates.
     $Aside = "$Dest.old.$PID.$([Guid]::NewGuid().ToString('N'))"
     $HadPrior = Test-Path -LiteralPath $Dest
@@ -256,7 +256,7 @@ try {
             Move-Item -LiteralPath $Dest -Destination $Aside
         } catch {
             Remove-Item -LiteralPath $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
-            Fail "cannot replace $Dest (close all running hyper sessions and retry): $($_.Exception.Message)"
+            Fail "cannot replace $Dest (close all running turbo sessions and retry): $($_.Exception.Message)"
         }
     }
     try {
@@ -308,7 +308,7 @@ try {
             Move-Item -LiteralPath $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
         }
         Remove-Item -LiteralPath $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
-        Fail "cannot record Hyper update state; previous install restored if available: $($_.Exception.Message)"
+        Fail "cannot record Turbo update state; previous install restored if available: $($_.Exception.Message)"
     }
     if ($HadState -and (Test-Path -LiteralPath $StateAside)) {
         Remove-Item -LiteralPath $StateAside -Force -ErrorAction SilentlyContinue
@@ -338,7 +338,7 @@ try {
     Remove-Item -LiteralPath $BundledAside -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host ""
-    Write-Host "hyper v$ResolvedVersion installed to $Dest"
+    Write-Host "Turbo v$ResolvedVersion installed to $Dest"
 
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $OnPath = (($UserPath -split ";") -contains $BinDir) -or
@@ -348,9 +348,9 @@ try {
         [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
         Write-Host ""
         Write-Host "Added $BinDir to your user PATH."
-        Write-Host "Open a new terminal, then run 'hyper' to get started."
+        Write-Host "Open a new terminal, then run 'Turbo' to get started."
     } else {
-        Write-Host "Run 'hyper' to get started."
+        Write-Host "Run 'Turbo' to get started."
     }
 } finally {
     if ($StateTmp -and (Test-Path -LiteralPath $StateTmp)) {

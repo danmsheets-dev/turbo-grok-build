@@ -601,7 +601,7 @@ pub fn channel_name() -> Option<&'static str> {
 pub fn channel_label() -> &'static str {
     #[cfg(feature = "community-build")]
     {
-        // Hyper community releases have a single stable lane; omit the
+        // Turbo community releases have a single stable lane; omit the
         // official alpha/stable badge, whose cache lives under ~/.grok.
         return "";
     }

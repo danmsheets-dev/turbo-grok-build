@@ -1034,7 +1034,7 @@ pub fn perform_logout(
     })
 }
 
-/// `grok logout` / `hyper logout` CLI handler. Clears the **xAI** session only
+/// `grok logout` / `turbo logout` CLI handler. Clears the **xAI** session only
 /// and formats the result to stderr. Third-party OAuth scopes are reported when
 /// still present so users know how to clear them.
 pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<()> {
@@ -1125,21 +1125,21 @@ fn print_remaining_third_party_scopes_hint() {
     eprintln!();
     eprintln!("Still signed in to third-party subscriptions:");
     if kimi {
-        eprintln!("  • Kimi Code — run: hyper logout --kimi");
+        eprintln!("  • Kimi Code — run: turbo logout --kimi");
     }
     if codex {
-        eprintln!("  • OpenAI Codex — run: hyper logout --openai");
+        eprintln!("  • OpenAI Codex — run: turbo logout --openai");
     }
     if claude {
-        eprintln!("  • Anthropic Claude — run: hyper logout --claude");
+        eprintln!("  • Anthropic Claude — run: turbo logout --claude");
     }
     if github {
-        eprintln!("  • GitHub Copilot — run: hyper logout --github");
+        eprintln!("  • GitHub Copilot — run: turbo logout --github");
     }
     if radius {
-        eprintln!("  • Radius — run: hyper logout --radius");
+        eprintln!("  • Radius — run: turbo logout --radius");
     }
-    eprintln!("  Or clear them (plus xAI): hyper logout --all");
+    eprintln!("  Or clear them (plus xAI): turbo logout --all");
 }
 
 /// Clear only the Kimi Code subscription credential (`oauth/kimi-code`).
@@ -1181,7 +1181,7 @@ pub fn run_cli_logout_openai_codex() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `hyper logout --claude`: clear only the Anthropic Claude OAuth scope.
+/// `turbo logout --claude`: clear only the Anthropic Claude OAuth scope.
 pub fn run_cli_logout_anthropic_claude() -> anyhow::Result<()> {
     let auth_path = crate::auth::auth_json_path();
     let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
@@ -1199,7 +1199,7 @@ pub fn run_cli_logout_anthropic_claude() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `hyper logout --github`: clear only the GitHub Copilot OAuth scope.
+/// `turbo logout --github`: clear only the GitHub Copilot OAuth scope.
 pub fn run_cli_logout_github_copilot() -> anyhow::Result<()> {
     let auth_path = crate::auth::auth_json_path();
     let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
@@ -1214,7 +1214,7 @@ pub fn run_cli_logout_github_copilot() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `hyper logout --radius`: clear only the Radius OAuth scope.
+/// `turbo logout --radius`: clear only the Radius OAuth scope.
 pub fn run_cli_logout_radius() -> anyhow::Result<()> {
     let auth_path = crate::auth::auth_json_path();
     let home = auth_path.parent().unwrap_or(std::path::Path::new("."));

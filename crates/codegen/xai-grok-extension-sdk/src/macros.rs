@@ -1,4 +1,4 @@
-//! Legacy declarative macros for Hyper WASM guests.
+//! Legacy declarative macros for Turbo WASM guests.
 //!
 //! These exports remain source-compatible for existing guests. New plugins
 //! should use `#[hyper_plugin]` with ordinary annotated functions so IDE
@@ -132,7 +132,7 @@ macro_rules! extension_tools {
             , invoke: $invoke:expr $(,)?
         }
     ),+ $(,)?) => {
-        const __HYPER_EXT_TOOL_META: &[(&str, &str, &str)] = &[
+        const __TURBO_EXT_TOOL_META: &[(&str, &str, &str)] = &[
             $(
                 (
                     stringify!($tool_name),
@@ -144,7 +144,7 @@ macro_rules! extension_tools {
 
         #[unsafe(no_mangle)]
         pub extern "C" fn hyper_ext_tool_count() -> i32 {
-            __HYPER_EXT_TOOL_META.len() as i32
+            __TURBO_EXT_TOOL_META.len() as i32
         }
 
         #[unsafe(no_mangle)]
@@ -154,10 +154,10 @@ macro_rules! extension_tools {
                 return 1;
             }
             let i = i as usize;
-            if i >= __HYPER_EXT_TOOL_META.len() {
+            if i >= __TURBO_EXT_TOOL_META.len() {
                 return 1;
             }
-            let (name, desc, schema) = __HYPER_EXT_TOOL_META[i];
+            let (name, desc, schema) = __TURBO_EXT_TOOL_META[i];
             $crate::describe_tool(name, desc, schema);
             0
         }

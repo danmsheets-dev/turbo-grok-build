@@ -154,7 +154,7 @@ pub fn theme_is_dark(theme: ThemeKind) -> bool {
     if theme == ThemeKind::GrokDay {
         return false;
     }
-    // Light-polarity Hyper presets must render Mermaid diagrams on a light
+    // Light-polarity Turbo presets must render Mermaid diagrams on a light
     // canvas like GrokDay does. Dark presets such as Base16 Default Dark are
     // intentionally absent from LIGHT_PRESET_KINDS.
     !crate::theme::LIGHT_PRESET_KINDS.contains(&theme)

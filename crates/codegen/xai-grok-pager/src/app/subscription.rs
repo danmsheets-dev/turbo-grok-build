@@ -143,7 +143,7 @@ impl AppView {
             self.gate = Some(gate);
             return vec![];
         }
-        // Hyper community builds support multi-provider auth (API keys, Codex,
+        // Turbo community builds support multi-provider auth (API keys, Codex,
         // Kimi, …). A SuperGrok *consumer* paywall must not lock the whole TUI
         // — users should keep working by switching model / credentials. Team /
         // enterprise gates still apply.

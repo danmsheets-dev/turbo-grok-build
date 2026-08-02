@@ -1,4 +1,4 @@
-//! `hyper subagent` — list / open / diff / land / discard / prune session subagents.
+//! `turbo subagent` — list / open / diff / land / discard / prune session subagents.
 //!
 //! Offline CLI over `~/.grok/sessions/<cwd-hash>/<session>/subagents/<id>/`.
 //! Parity with the `diff_subagent` / `land_subagent` / `discard_subagent` tools
@@ -186,7 +186,7 @@ fn resolve(cwd: &str, id: &str, session: Option<&str>) -> Result<Resolved> {
     let root = sessions_root_for_cwd(cwd);
     if !root.is_dir() {
         bail!(
-            "no sessions directory for this cwd ({}); has hyper ever been run here?",
+            "no sessions directory for this cwd ({}); has turbo ever been run here?",
             root.display()
         );
     }
@@ -344,7 +344,7 @@ fn cmd_list(cwd: &str, session: Option<&str>, json: bool) -> Result<()> {
             truncate(&e.session_id, 36)
         );
     }
-    println!("\n{} subagent(s). Use `hyper subagent open <id>`.", entries.len());
+    println!("\n{} subagent(s). Use `turbo subagent open <id>`.", entries.len());
     Ok(())
 }
 
@@ -370,7 +370,7 @@ fn cmd_open(r: &Resolved) -> Result<()> {
         println!("snapshot_ref: {s}");
         println!("  recover: git show {s}:<path>");
         println!("  agent-only diff: git diff {base} {s}");
-        println!("  full restore: hyper subagent open {} --restore", r.id);
+        println!("  full restore: turbo subagent open {} --restore", r.id);
     }
     if let Some(ref b) = r.meta.baseline_ref {
         println!("baseline_ref: {b}");
@@ -458,25 +458,36 @@ fn cmd_restore(cwd: &Path, r: &Resolved, dest: Option<&Path>) -> Result<()> {
 }
 
 fn cmd_diff(cwd: &Path, r: &Resolved) -> Result<()> {
-    // Prefer live worktree, then snapshot_ref, then changes.patch
-    if let Some(ref wt) = r.meta.worktree_path {
-        let wt = Path::new(wt);
-        if wt.is_dir() {
-            let out = git(cwd, &["diff", "--no-ext-diff", "HEAD", "--", &wt.display().to_string()])?;
-            // worktree may be outside repo — fall back to -C worktree
-            if out.trim().is_empty() {
-                let out = git(wt, &["diff", "--no-ext-diff", "HEAD"])?;
-                print_diff("live_worktree", &out);
-                return Ok(());
-            }
-            print_diff("live_worktree", &out);
+    // Prefer agent-only baseline..snapshot (clone-safe, dirty-parent-safe).
+    if let (Some(base), Some(snap)) = (
+        r.meta.baseline_ref.as_deref().filter(|b| !b.is_empty()),
+        r.meta.snapshot_ref.as_deref(),
+    ) {
+        if git(cwd, &["rev-parse", "--verify", base]).is_ok()
+            && git(cwd, &["rev-parse", "--verify", snap]).is_ok()
+        {
+            let out = git(cwd, &["diff", "--no-ext-diff", base, snap])?;
+            print_diff("baseline_snapshot", &out);
             return Ok(());
         }
     }
+    // Snapshot vs HEAD (legacy when no baseline)
     if let Some(ref snap) = r.meta.snapshot_ref {
-        let out = git(cwd, &["diff", "--no-ext-diff", "HEAD", snap])?;
-        print_diff("snapshot_ref", &out);
-        return Ok(());
+        if git(cwd, &["rev-parse", "--verify", snap]).is_ok() {
+            let out = git(cwd, &["diff", "--no-ext-diff", "HEAD", snap])?;
+            print_diff("snapshot_ref", &out);
+            return Ok(());
+        }
+    }
+    // Live worktree: always `git -C <wt>` — never abs pathspec from parent
+    // (clone-style trees under ~/.grok/worktrees are outside the parent repo).
+    if let Some(ref wt) = r.meta.worktree_path {
+        let wt = Path::new(wt);
+        if wt.is_dir() {
+            let out = git(wt, &["diff", "--no-ext-diff", "HEAD"]).unwrap_or_default();
+            print_diff("live_worktree", &out);
+            return Ok(());
+        }
     }
     let patch = r.meta.patch_path.as_deref().map(PathBuf::from).or_else(|| {
         let p = r.dir.join("changes.patch");
@@ -508,8 +519,13 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
         bail!("mode must be `merge` or `overwrite`");
     }
 
-    // 1) Live worktree: three-way style via git apply of worktree diff is complex;
-    //    use `git -C worktree diff` piped into apply when merge, or checkout files.
+    // Prefer agent-only snapshot land when baseline exists.
+    if r.meta.baseline_ref.as_ref().is_some_and(|b| !b.is_empty()) {
+        if let Some(ref snap) = r.meta.snapshot_ref {
+            return land_from_snapshot(cwd, snap, &mode, r);
+        }
+    }
+    // 1) Live worktree
     if let Some(ref wt) = r.meta.worktree_path {
         let wt = Path::new(wt);
         if wt.is_dir() {
@@ -546,9 +562,17 @@ fn land_from_worktree(cwd: &Path, wt: &Path, mode: &str, r: &Resolved) -> Result
 }
 
 fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Result<()> {
-    let diff = git(cwd, &["diff", "--binary", "HEAD", snap])?;
+    // Agent-only when baseline_ref is present; otherwise HEAD..snap (legacy).
+    let base = r
+        .meta
+        .baseline_ref
+        .as_deref()
+        .filter(|b| !b.is_empty())
+        .filter(|b| git(cwd, &["rev-parse", "--verify", b]).is_ok())
+        .unwrap_or("HEAD");
+    let diff = git(cwd, &["diff", "--binary", base, snap])?;
     if diff.trim().is_empty() {
-        println!("Snapshot `{snap}` matches HEAD (nothing to land).");
+        println!("Snapshot `{snap}` has no agent-only diff vs `{base}` (nothing to land).");
         update_land_status(&r.meta_path, "landed_empty")?;
         return Ok(());
     }

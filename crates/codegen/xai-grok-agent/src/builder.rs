@@ -84,6 +84,8 @@ pub struct AgentBuilder {
     memory_workspace_path: Option<String>,
     is_non_interactive: bool,
     system_prompt_label: String,
+    /// Public/session model id for boot-card `Model:` (optional).
+    session_model: Option<String>,
     session_env: Option<Arc<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
     memory_backend: Option<Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>>,
@@ -230,6 +232,7 @@ impl AgentBuilder {
             memory_workspace_path: None,
             is_non_interactive: false,
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
+            session_model: None,
             session_env: None,
             state_path: None,
             memory_backend: None,
@@ -372,6 +375,12 @@ impl AgentBuilder {
     }
     pub fn with_system_prompt_label(mut self, label: impl Into<String>) -> Self {
         self.system_prompt_label = label.into();
+        self
+    }
+    /// Session model slug shown on the boot card `Model:` line.
+    pub fn with_session_model(mut self, model: impl Into<String>) -> Self {
+        let m = model.into();
+        self.session_model = if m.trim().is_empty() { None } else { Some(m) };
         self
     }
     pub fn with_reminder_policy(mut self, policy: ReminderPolicy) -> Self {
@@ -761,7 +770,14 @@ impl AgentBuilder {
                 .tools
                 .iter()
                 .any(|tc| tc.id.ends_with(":write") || tc.id.ends_with(":Write"));
-            if self.write_file_enabled && !has_write_tool {
+            // Never inject write under a restrictive capability ceiling; final
+            // clamp also drops it, but skipping inject keeps tool lists honest.
+            let write_allowed_by_mode = !matches!(
+                definition.capability_mode,
+                Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+                    | Some(xai_tool_types::SubagentCapabilityMode::Execute)
+            );
+            if self.write_file_enabled && !has_write_tool && write_allowed_by_mode {
                 tool_config
                     .tools
                     .push((&xai_grok_tools::implementations::opencode::OpenCodeWriteTool).into());
@@ -1187,6 +1203,7 @@ impl AgentBuilder {
             ),
             is_non_interactive: self.is_non_interactive,
             system_prompt_label: self.system_prompt_label,
+            model: self.session_model,
         };
         let system_prompt = prompt_context
             .render(&tool_bridge)

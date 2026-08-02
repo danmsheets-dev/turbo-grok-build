@@ -149,6 +149,69 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
         let work = resolve_subagent_work(&ctx, &input.subagent_id).await?;
         let parent = &work.parent_git_root;
 
+        // Prefer agent-only baseline..snapshot when both refs exist (avoids
+        // dirty-parent bulk and clone-style pathspec failures).
+        if let (Some(base), Some(snap)) = (
+            work.meta.baseline_ref.as_deref().filter(|b| !b.is_empty()),
+            work.snapshot_ref.as_deref(),
+        ) {
+            if git_capture(parent, &["rev-parse", "--verify", base])
+                .await
+                .is_ok()
+                && git_capture(parent, &["rev-parse", "--verify", snap])
+                    .await
+                    .is_ok()
+            {
+                let name_status = git_capture(parent, &["diff", "--name-status", base, snap])
+                    .await
+                    .map_err(|e| {
+                        xai_tool_runtime::ToolError::custom(
+                            "git_error",
+                            format!("diff name-status: {e}"),
+                        )
+                    })?;
+                let all_files = parse_name_status(&name_status);
+                let allow = effective_allowed_paths(&work.meta);
+                let (files, filtered_out) = match &allow {
+                    Some(prefixes) => {
+                        let (ok, denied) = partition_by_allowlist(&all_files, prefixes);
+                        (ok, denied.len())
+                    }
+                    None => (all_files, 0),
+                };
+                let mut raw_diff = git_capture(parent, &["diff", base, snap])
+                    .await
+                    .map_err(|e| {
+                        xai_tool_runtime::ToolError::custom("git_error", format!("diff: {e}"))
+                    })?;
+                if let Some(ref prefixes) = allow {
+                    raw_diff = filter_unified_diff_by_allowlist(&raw_diff, prefixes);
+                }
+                let (diff, truncated) = truncate_diff_text(&raw_diff);
+                let mut message = format!(
+                    "Diff for subagent `{}` agent-only (`{base}`..`{snap}`, {} file(s)).",
+                    work.subagent_id,
+                    files.len()
+                );
+                if filtered_out > 0 {
+                    message.push_str(&format!(
+                        " Filtered {filtered_out} path(s) outside allowed_paths."
+                    ));
+                }
+                return Ok(DiffSubagentOutput {
+                    subagent_id: work.subagent_id,
+                    source: "baseline_snapshot".into(),
+                    snapshot_ref: Some(snap.to_owned()),
+                    worktree_path: work.meta.worktree_path.clone(),
+                    patch_path: work.patch_path.as_ref().map(|p| p.display().to_string()),
+                    files,
+                    diff,
+                    truncated,
+                    message,
+                });
+            }
+        }
+
         // 1) Live worktree
         if let Some(ref wt) = work.live_worktree {
             let parent_head = git_capture(parent, &["rev-parse", "HEAD"])
@@ -273,14 +336,20 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                     )
                 })?;
 
-            let name_status = git_capture(
-                parent,
-                &["diff", "--name-status", "HEAD", snap],
-            )
-            .await
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::custom("git_error", format!("diff name-status: {e}"))
-            })?;
+            let base = work
+                .meta
+                .baseline_ref
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .unwrap_or("HEAD");
+            let name_status = git_capture(parent, &["diff", "--name-status", base, snap])
+                .await
+                .map_err(|e| {
+                    xai_tool_runtime::ToolError::custom(
+                        "git_error",
+                        format!("diff name-status: {e}"),
+                    )
+                })?;
             let all_files = parse_name_status(&name_status);
             let allow = effective_allowed_paths(&work.meta);
             let (files, filtered_out) = match &allow {
@@ -290,7 +359,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 }
                 None => (all_files, 0),
             };
-            let mut raw_diff = git_capture(parent, &["diff", "HEAD", snap])
+            let mut raw_diff = git_capture(parent, &["diff", base, snap])
                 .await
                 .map_err(|e| {
                     xai_tool_runtime::ToolError::custom("git_error", format!("diff: {e}"))
@@ -300,7 +369,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
             }
             let (diff, truncated) = truncate_diff_text(&raw_diff);
             let mut message = format!(
-                "Diff for subagent `{}` from snapshot_ref `{snap}` ({} file(s) vs parent HEAD).",
+                "Diff for subagent `{}` from snapshot_ref `{snap}` ({} file(s) vs `{base}`).",
                 work.subagent_id,
                 files.len()
             );

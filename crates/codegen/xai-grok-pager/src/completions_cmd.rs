@@ -1,4 +1,4 @@
-//! `hyper completions <shell>` / `grok completions <shell>` — generate shell
+//! `turbo completions <shell>` / `grok completions <shell>` — generate shell
 //! completion scripts.
 //!
 //! Used by the installers and npm postinstall; must stay side-effect free
@@ -11,11 +11,11 @@ use crate::app::PagerArgs;
 
 /// Public CLI name embedded in completion scripts.
 ///
-/// Community Hyper builds (`community-build` feature) emit `hyper`; upstream-
+/// Community Turbo builds (`community-build` feature) emit `turbo`; upstream-
 /// style builds keep the historical `grok` name.
 fn cli_bin_name() -> &'static str {
     if cfg!(feature = "community-build") {
-        "hyper"
+        "turbo"
     } else {
         "grok"
     }
@@ -51,7 +51,7 @@ pub fn run(shell: Shell) {
 /// The generated root `_arguments` spec emits a `'::prompt …'` slot before
 /// the subcommand slot but dispatches subcommands with `case $line[2]`. zsh
 /// assigns the typed subcommand to the *prompt* slot (`$line[1]`), leaves
-/// `$line[2]` empty, and the dispatch falls through — so `hyper worktree <TAB>`
+/// `$line[2]` empty, and the dispatch falls through — so `turbo worktree <TAB>`
 /// re-offers every top-level command. (`hide = true` on the positional does
 /// not change the generated script.)
 ///
@@ -61,8 +61,8 @@ pub fn run(shell: Shell) {
 /// patterns are unique to the root block (pinned by the test below — delete
 /// this whole workaround once upstream fixes the generator).
 ///
-/// `bin` is the public CLI name (`hyper` or `grok`) embedded by clap_complete
-/// in curcontext paths such as `:hyper-command-$line[2]:`.
+/// `bin` is the public CLI name (`turbo` or `grok`) embedded by clap_complete
+/// in curcontext paths such as `:turbo-command-$line[2]:`.
 fn fix_zsh_root_prompt_positional(script: &str, bin: &str) -> String {
     let mut out = String::with_capacity(script.len());
     script
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn cli_bin_name_matches_community_feature() {
         if cfg!(feature = "community-build") {
-            assert_eq!(cli_bin_name(), "hyper");
+            assert_eq!(cli_bin_name(), "turbo");
         } else {
             assert_eq!(cli_bin_name(), "grok");
         }

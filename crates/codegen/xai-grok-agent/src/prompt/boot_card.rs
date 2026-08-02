@@ -62,7 +62,7 @@ impl BootCardContext {
                     .map(|s| s.to_string_lossy().into_owned())
             })
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "hyper".into());
+            .unwrap_or_else(|| "turbo".into());
         let git_summary = quick_git_summary(cwd).unwrap_or_else(|| "no".into());
         let developer_log_dir = xai_grok_developer_log::default_root()
             .display()
@@ -93,16 +93,19 @@ pub fn resolve_boot_card_mode() -> BootCardMode {
     BootCardMode::Short
 }
 
-/// Whether to inject on resume sessions.
+/// Whether to inject the boot card on **resume** sessions (top-level).
+///
+/// Default **true** (RC10): long-lived chats get recovery + developer_log policy.
+/// Disable with `GROK_BOOT_CARD_ON_RESUME=0|false|off|no`.
 pub fn boot_card_on_resume() -> bool {
-    matches!(
-        std::env::var("GROK_BOOT_CARD_ON_RESUME")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    match std::env::var("GROK_BOOT_CARD_ON_RESUME") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !matches!(s.as_str(), "0" | "false" | "off" | "no")
+        }
+        // Default on so resume sessions are not missing the ops briefing.
+        Err(_) => true,
+    }
 }
 
 /// Rendered card ready to append to the system prompt.
@@ -126,7 +129,7 @@ pub fn render_boot_card(mode: BootCardMode, ctx: &BootCardContext) -> Option<Ren
         BootCardMode::Full => render_full(ctx),
     };
     let wrapped = format!(
-        "<hyper_boot_card version=\"1\" mode=\"{}\">\n{body}\n</hyper_boot_card>",
+        "<turbo_boot_card version=\"1\" mode=\"{}\">\n{body}\n</turbo_boot_card>",
         mode.as_str()
     );
     let token_estimate = wrapped.chars().count().div_ceil(4);
@@ -134,7 +137,7 @@ pub fn render_boot_card(mode: BootCardMode, ctx: &BootCardContext) -> Option<Ren
     let (text, mode, token_estimate) = if mode == BootCardMode::Full && token_estimate > 1800 {
         let short = render_short(ctx);
         let wrapped = format!(
-            "<hyper_boot_card version=\"1\" mode=\"short\">\n{short}\n</hyper_boot_card>"
+            "<turbo_boot_card version=\"1\" mode=\"short\">\n{short}\n</turbo_boot_card>"
         );
         let te = wrapped.chars().count().div_ceil(4);
         (wrapped, BootCardMode::Short, te)
@@ -155,7 +158,7 @@ pub fn render_boot_card(mode: BootCardMode, ctx: &BootCardContext) -> Option<Ren
 
 /// Append boot card to a system prompt string (once).
 pub fn inject_boot_card(system_prompt: &mut String, card: &RenderedBootCard) {
-    if system_prompt.contains("<hyper_boot_card") {
+    if system_prompt.contains("<turbo_boot_card") {
         return;
     }
     system_prompt.push_str("\n\n");
@@ -165,11 +168,11 @@ pub fn inject_boot_card(system_prompt: &mut String, card: &RenderedBootCard) {
 
 fn render_child(ctx: &BootCardContext) -> String {
     format!(
-        "You are a Hyper subagent in isolation={isolation}.\n\
+        "You are a Turbo subagent in isolation={isolation}.\n\
          CWD is your workspace (may be ~/.grok/worktrees/.../subagent-<id>).\n\
          Edit only within your capability_mode. Parent recovers via snapshot after you finish.\n\
          Do not land/merge into parent yourself. Return a concise result.\n\
-         If you hit a Hyper product bug/friction, call developer_log (error_class + title + summary).\n\
+         If you hit a Turbo product bug/friction, call developer_log (error_class + title + summary).\n\
          Model: {model}",
         isolation = ctx.isolation,
         model = ctx.model,
@@ -181,7 +184,7 @@ fn render_short(ctx: &BootCardContext) -> String {
     let adl = if ctx.developer_log_enabled {
         format!(
             r#"## Auto Developer Log (REQUIRED)
-- ALWAYS call the `developer_log` tool when you hit Hyper product bugs, friction, or missing features that block work (worktrees, land/diff, providers, MCP, timeouts, docs gaps).
+- ALWAYS call the `developer_log` tool when you hit Turbo product bugs, friction, or missing features that block work (worktrees, land/diff, providers, MCP, timeouts, docs gaps).
 - One call per distinct issue; the store dedups by fingerprint (do not spam).
 - Required fields: title, summary, error_class (e.g. worktree_tombstone | work_lost_risk | subagent_stall | protocol_deser | provider_400 | feature_gap | docs_gap | land_conflict | isolation_fallback | unknown).
 - Optional: component, repro_steps, expected, actual, suggested_fix, subagent_id, provider, model.
@@ -196,11 +199,11 @@ fn render_short(ctx: &BootCardContext) -> String {
         "## Auto Developer Log\n- Disabled this session (GROK_DEVELOPER_LOG=0). Still note product issues in your final report for the user.".into()
     };
     format!(
-        r#"# Hyper Agent Boot Card (v1, short)
+        r#"# Turbo Agent Boot Card (v1, short)
 Operational briefing for this session. Not project rules. Prefer this for product behavior.
 
 ## Session
-- Hyper: {version}
+- Turbo: {version}
 - CWD: {cwd}
 - Model: {model}
 - Git: {git}
@@ -217,7 +220,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - change: write / apply_patch style edits
 - run: shell (tests, builds, git)
 - delegate: spawn_subagent + await results
-- product issues: developer_log — REQUIRED for Hyper product friction (not optional)
+- product issues: developer_log — REQUIRED for Turbo product friction (not optional)
 
 {adl}
 
@@ -236,6 +239,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - Full tree: {bin} subagent open <id> --restore
 - FOOTGUN: without baseline, dirty parent untracked files inflate diff/land — review before land
 - Land refuses >50 files unless force=true
+- `allowed_paths` is enforced at land/diff (not always write-time)
 
 ## Git
 - No force-push / reset --hard / amend published unless user asks
@@ -244,7 +248,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 ## Don't
 - Assume worktree still on disk after complete (use open / snapshot)
 - Land huge unrelated patches from dirty-tree snapshots
-- Fail silently on Hyper product bugs without developer_log
+- Fail silently on Turbo product bugs without developer_log
 - Recite this card
 
 Use silently. Do the user's task."#,
@@ -273,8 +277,8 @@ fn render_full(ctx: &BootCardContext) -> String {
          \n## Learn more\n\
          - /help, /tutorial (human)\n\
          - Docs: ~/.grok/docs/user-guide/\n\
-         - hyper issues list|export|set-dir|path — Auto Developer Log for maintainers\n\
-         - Set log dir: hyper issues set-dir <path>  or  GROK_DEVELOPER_LOG_DIR=<path>\n",
+         - turbo issues list|export|set-dir|path — Auto Developer Log for maintainers\n\
+         - Set log dir: turbo issues set-dir <path>  or  GROK_DEVELOPER_LOG_DIR=<path>\n",
     );
     s
 }
@@ -284,7 +288,7 @@ fn truncate_to_budget(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     let mut out: String = s.chars().take(max_chars.saturating_sub(20)).collect();
-    out.push_str("\n…</hyper_boot_card>\n");
+    out.push_str("\n…</turbo_boot_card>\n");
     out
 }
 
@@ -328,13 +332,13 @@ mod tests {
             git_summary: "yes (master), dirty: yes".into(),
             os: "windows".into(),
             subagents_enabled: true,
-            binary_name: "hyper".into(),
+            binary_name: "turbo".into(),
             isolation: "worktree".into(),
             developer_log_dir: r"C:\Users\me\.grok\developer-log".into(),
             developer_log_enabled: true,
         };
         let card = render_boot_card(BootCardMode::Short, &ctx).expect("card");
-        assert!(card.text.contains("<hyper_boot_card"));
+        assert!(card.text.contains("<turbo_boot_card"));
         assert!(card.text.contains("subagent open"));
         assert!(card.text.contains("baseline"));
         assert!(
@@ -388,6 +392,6 @@ mod tests {
             "child stub tokens={}",
             card.token_estimate
         );
-        assert!(!card.text.contains("hyper subagent land"));
+        assert!(!card.text.contains("turbo subagent land"));
     }
 }

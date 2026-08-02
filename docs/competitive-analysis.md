@@ -4,7 +4,7 @@
 |----|------|
 | 状态 | 分析文档（非实现规格） |
 | 受众 | 个人 power user（终端重度、多 provider、重视 harness 锐度） |
-| 产品 | **Hyper** — Grok Build 多 provider 社区版 |
+| 产品 | **Turbo** — Grok Build 多 provider 社区版 |
 | 初稿日期 | 2026-07-21 |
 | 最近更新 | 2026-07-23 — 补 Pi / Nanocodex 画像、吸收原则与看板；对齐 Modes 缓停 / Oracle 主线 |
 | 维护 | 能力矩阵与竞品特性会过时；落地功能后请回写「Hyper 基线 / 矩阵 / 吸收看板」列 |
@@ -57,10 +57,10 @@ Hyper 已经站在「一流终端 coding agent」梯队：hashline 编辑、LSP�
 
 ### 2.1 产品形态
 
-- 全屏 TUI agent（`hyper`）
+- 全屏 TUI agent（`turbo`）
 - Headless / CI（`hyper -p`）
 - ACP 嵌入 IDE
-- 配置与凭证：`~/.grok`；二进制：`~/.hyper`
+- 配置与凭证：`~/.grok`；二进制：`~/.turbo`
 
 详见根目录 [README.md](../README.md) 与
 [user-guide](../crates/codegen/xai-grok-pager/docs/user-guide/)。

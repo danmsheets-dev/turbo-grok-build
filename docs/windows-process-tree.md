@@ -23,7 +23,7 @@ Closing the last handle to that job terminates **every** process in the tree
 ```text
 hyper --job-object -p "…"
 # or
-set HYPER_JOB_OBJECT=1
+set TURBO_JOB_OBJECT=1
 hyper -p "…"
 ```
 
@@ -32,7 +32,7 @@ can make assignment fail; Hyper logs a warning and continues.
 
 ### What the harness should do
 
-1. Launch Hyper with `--job-object` / `HYPER_JOB_OBJECT=1`.
+1. Launch Turbo with `--job-object` / `TURBO_JOB_OBJECT=1`.
 2. Prefer holding a job handle if you created the job yourself and assigned
    Hyper into it; **close that handle** to stop the run.
 3. If you only have Hyper's PID: open the process, query its job

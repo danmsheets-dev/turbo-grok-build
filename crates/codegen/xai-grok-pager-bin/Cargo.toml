@@ -1,19 +1,19 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "0.2.114-r9"
+version = "0.2.114-r10"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
-default-run = "hyper"
+default-run = "turbo"
 
-# Composition-root binary for the Hyper / Grok Build TUI.
-# Community builds ship the artifact as `hyper` (coexists with the official
+# Composition-root binary for the Turbo / Grok Turbo TUI.
+# Community builds ship the artifact as `turbo` (coexists with the official
 # `grok` binary). This package exists so the binary can link both the pager
 # library and the optional `xai-grok-pager-minimal` render mode: `minimal`
 # depends on `xai-grok-pager`, so the pager library cannot depend back on it
 # (cargo cycle). The binary installs the minimal-mode IoC hooks at startup.
 [[bin]]
-name = "hyper"
+name = "turbo"
 path = "src/main.rs"
 
 [dependencies]
@@ -89,9 +89,9 @@ clap = { workspace = true, features = ["derive"] }
 default = [
     "jemalloc",
     "sandbox-enforce",
-    # This fork ships as Hyper; enable community branding + updater guards by default.
+    # This fork ships as Turbo; enable community branding + updater guards by default.
     "community-build",
-    # Codex Live (`/live`): enabled in the normal Hyper default set.
+    # Codex Live (`/live`): enabled in the normal Turbo default set.
     "codex-live",
     ]
 default-bazel = [
@@ -101,9 +101,9 @@ default-bazel = [
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 release-dist = ["xai-grok-pager/release-dist"]
-# Community Hyper builds: use Hyper branding and the isolated community updater.
+# Community Turbo builds: use Turbo branding and the isolated community updater.
 # The updater reads only this fork's GitHub Releases, keeps managed payloads and
-# update state under ~/.hyper, and never invokes or overwrites ~/.grok/bin/grok.
+# update state under ~/.turbo, and never invokes or overwrites ~/.grok/bin/grok.
 community-build = [
     "xai-grok-pager/community-build",
     "xai-grok-update/community-build",

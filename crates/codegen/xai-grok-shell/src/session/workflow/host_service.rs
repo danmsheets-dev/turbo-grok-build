@@ -438,7 +438,7 @@ impl HostService {
                         } else {
                             None
                         },
-                        stall_timeout_ms: None,
+                        stall_timeout_ms: opts.stall_timeout_ms,
                         ..Default::default()
                     },
                     run_in_background: false,

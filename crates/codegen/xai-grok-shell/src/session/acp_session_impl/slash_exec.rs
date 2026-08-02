@@ -864,7 +864,11 @@ impl SessionActor {
                 }
                 ok_end_turn(0, None)
             }
-            BuiltinAction::DeepAudit { query, size } => {
+            BuiltinAction::DeepAudit {
+                query,
+                size,
+                models,
+            } => {
                 let size = match size.to_ascii_lowercase().as_str() {
                     "small" | "medium" | "large" => size.to_ascii_lowercase(),
                     _ => "medium".to_string(),
@@ -894,15 +898,21 @@ impl SessionActor {
                         return ok_end_turn(0, None);
                     }
                 };
+                let models_csv = models.join(",");
+                let mut args = serde_json::json!({
+                    "scope": objective,
+                    "objective": objective,
+                    "query": objective,
+                    "size": size,
+                    "focus": "all",
+                });
+                if !models.is_empty() {
+                    args["models"] = serde_json::json!(models);
+                    args["models_csv"] = serde_json::json!(models_csv);
+                }
                 let spec = crate::session::workflow::manager::LaunchSpec {
                     objective: objective.clone(),
-                    args: serde_json::json!({
-                        "scope": objective,
-                        "objective": objective,
-                        "query": objective,
-                        "size": size,
-                        "focus": "all",
-                    }),
+                    args,
                     agent_budget,
                     resume_run_id: None,
                 };
@@ -916,10 +926,15 @@ impl SessionActor {
                             .get(&run_id)
                             .map(|r| (r.name.clone(), r.objective.clone()))
                             .unwrap_or_else(|| ("deep-audit".to_string(), objective.clone()));
-                        let slash_line = if query.is_empty() {
-                            format!("/deepaudit --size {size}")
+                        let models_flag = if models.is_empty() {
+                            String::new()
                         } else {
-                            format!("/deepaudit --size {size} {run_objective}")
+                            format!(" --models {models_csv}")
+                        };
+                        let slash_line = if query.is_empty() {
+                            format!("/deepaudit --size {size}{models_flag}")
+                        } else {
+                            format!("/deepaudit --size {size}{models_flag} {run_objective}")
                         };
                         self.push_workflow_launch_reminder(
                             &display,
@@ -928,18 +943,59 @@ impl SessionActor {
                             &slash_line,
                             false,
                         );
-                        self.send_host_turn_slash_command_output(&format!(
-                            "Deep audit '{display}' started in the background (size={size}). \
-                             It will investigate with parallel find agents, independently verify \
-                             claims, and return only confirmed findings here. \
-                             Use /workflows to follow progress."
-                        ))
-                        .await;
-                        tokio::spawn(async move {
-                            if let Ok(outcome) = outcome_rx.await {
-                                tracing::info!(run_id, ?outcome, "deep-audit finished");
+                        let wait_headless = self.startup_hints.non_interactive;
+                        if wait_headless {
+                            self.send_host_turn_slash_command_output(&format!(
+                                "Deep audit '{display}' running to completion (size={size}{models_flag})…"
+                            ))
+                            .await;
+                            match outcome_rx.await {
+                                Ok(outcome) => {
+                                    tracing::info!(run_id, ?outcome, "deep-audit finished (headless wait)");
+                                    let summary = match &outcome {
+                                        xai_workflow::WorkflowOutcome::Completed { result } => {
+                                            format!("completed — result keys/payload: {result}")
+                                        }
+                                        xai_workflow::WorkflowOutcome::Failed { error } => {
+                                            format!("failed — {error}")
+                                        }
+                                        xai_workflow::WorkflowOutcome::Cancelled => {
+                                            "cancelled".to_string()
+                                        }
+                                        xai_workflow::WorkflowOutcome::Paused {
+                                            kind,
+                                            message,
+                                        } => format!("paused ({kind:?}) — {message}"),
+                                        xai_workflow::WorkflowOutcome::BudgetExceeded {
+                                            message,
+                                        } => format!("budget exceeded — {message}"),
+                                    };
+                                    self.send_host_turn_slash_command_output(&format!(
+                                        "Deep audit '{display}' finished: {summary}"
+                                    ))
+                                    .await;
+                                }
+                                Err(_) => {
+                                    self.send_host_turn_slash_command_output(
+                                        "Deep audit ended without a final outcome (channel closed).",
+                                    )
+                                    .await;
+                                }
                             }
-                        });
+                        } else {
+                            self.send_host_turn_slash_command_output(&format!(
+                                "Deep audit '{display}' started in the background (size={size}{models_flag}). \
+                                 It will investigate with parallel find agents, independently verify \
+                                 claims, and return only confirmed findings here. \
+                                 Use /workflows to follow progress."
+                            ))
+                            .await;
+                            tokio::spawn(async move {
+                                if let Ok(outcome) = outcome_rx.await {
+                                    tracing::info!(run_id, ?outcome, "deep-audit finished");
+                                }
+                            });
+                        }
                     }
                     Err(e) => {
                         self.send_host_turn_slash_command_output(&format!(

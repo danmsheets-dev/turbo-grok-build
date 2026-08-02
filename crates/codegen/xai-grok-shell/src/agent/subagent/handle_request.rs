@@ -545,6 +545,10 @@ pub(crate) async fn run_shell_child(
         effective_runtime.capability_mode,
         allow_nested_subagents,
     );
+    // Stamp the ceiling onto the definition so AgentBuilder's post-inject
+    // capability clamp re-runs (blocks write re-injection under read-only).
+    // Without this, inject_default_tools + write_file_enabled re-adds `write`.
+    definition.capability_mode = effective_runtime.capability_mode;
     if let Some(mode) = effective_runtime.capability_mode {
         tracing::info!(
             subagent_id = %request.id,
@@ -988,6 +992,10 @@ pub(crate) async fn run_shell_child(
             if !definition.tool_config.tools.iter().any(|t| t.id == tc.id) {
                 definition.tool_config.tools.push(tc);
             }
+        }
+        // Memory inject can re-add write/edit after capability filter — re-clamp.
+        if let Some(mode) = definition.capability_mode {
+            mode.filter_tool_config(&mut definition.tool_config);
         }
         let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
         let memory_dir = &resolved_mem.path;
@@ -2214,7 +2222,7 @@ pub(crate) async fn run_shell_child(
     if worktree_removed {
         result.worktree_path = None;
     }
-    // Auto Developer Log: structured product incidents for Hyper maintainers.
+    // Auto Developer Log: structured product incidents for Turbo maintainers.
     {
         let meta_path = subagent_meta_dir.join("meta.json");
         let _ = xai_grok_developer_log::detect_worktree_dispose(

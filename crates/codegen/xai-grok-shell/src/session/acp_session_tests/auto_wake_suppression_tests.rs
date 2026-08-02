@@ -1011,6 +1011,11 @@ async fn subagent_completed_drops_matching_pending_input() {
                 isolation_fallback: false,
                 snapshot_ref: None,
                 worktree_state: None,
+                patch_path: None,
+                diffstat: None,
+                changed_paths: None,
+                baseline_ref: None,
+                error_class: None,
             });
             let consumed = consumed_completion_ids(&output);
             assert_eq!(consumed, vec!["sub-target"]);

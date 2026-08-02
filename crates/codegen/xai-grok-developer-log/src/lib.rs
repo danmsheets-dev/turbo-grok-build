@@ -1,10 +1,10 @@
-//! Auto Developer Log (ADL) — structured product-issue store for Hyper.
+//! Auto Developer Log (ADL) — structured product-issue store for Turbo.
 //!
 //! Agents and runtime detectors file **incidents** under the configured root
 //! (default `$GROK_HOME/developer-log/`). Override with env
-//! `GROK_DEVELOPER_LOG_DIR`, `hyper issues set-dir`, or
+//! `GROK_DEVELOPER_LOG_DIR`, `turbo issues set-dir`, or
 //! `$GROK_HOME/developer-log.toml`. Incidents are deduplicated by fingerprint,
-//! redacted for secrets/user paths, and exportable via `hyper issues export`.
+//! redacted for secrets/user paths, and exportable via `turbo issues export`.
 //!
 //! Disable with `GROK_DEVELOPER_LOG=0`.
 

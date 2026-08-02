@@ -72,9 +72,9 @@ Structured product-issue store for agents + runtime detectors. See
 
 | ID | Topic | Fix |
 |----|--------|-----|
-| F-1 | `is_grok_process` ignored `hyper` | Recognizes basenames `hyper` / `grok`, `xai-grok-*` / `xai_grok_*` test bins, and `~/.hyper/bin` / `~/.grok/bin` paths. |
+| F-1 | `is_grok_process` ignored `turbo` | Recognizes basenames `turbo` / `grok`, `xai-grok-*` / `xai_grok_*` test bins, and `~/.turbo/bin` / `~/.grok/bin` paths. |
 | F-2 | MiniMax / Fireworks Messages 404 | Messages `base_url_override` values are normalized to end in `/v1` before the sampler joins `/messages`. |
-| F-3 | Branding | `community-build` (default on the Hyper binary) makes `--version` and `completions` emit `hyper`. |
+| F-3 | Branding | `community-build` (default on the Hyper binary) makes `--version` and `completions` emit `turbo`. |
 | F-9 | Local builds without community-build | `xai-grok-pager-bin` defaults include `community-build`. |
 
 ### S1 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â OAuth refresh storms + oracle discoverability
@@ -99,7 +99,7 @@ Structured product-issue store for agents + runtime detectors. See
 |--------|----------|
 | Shell confine is not an OS sandbox | `--confine` is path-prefix + fail-closed program classifier (`confineShellEnforcement: fail-closed`). Windows AppContainer / Linux Landlock / bwrap are **out of scope** for this package; set `GROK_CONFINE_SHELL_MODE=operand` only for the legacy write-operand scan. |
 | Ecosystem / MCP verify plan trust | Clone-and-delegate baseline verify RCE and `delegate_run.verify` live in the **bridge plugin**, not this Hyper tree ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â tracked separately. |
-| Shared `~/.grok` | Config, auth, sessions, and leader IPC live under the upstream home. Binary install root is `~/.hyper`. |
+| Shared `~/.grok` | Config, auth, sessions, and leader IPC live under the upstream home. Binary install root is `~/.turbo`. |
 | Shared Kimi + Codex proxy | Catalog id (`kimi-code/*` vs `openai-codex/*`) selects credentials; ambiguous URL alone does not guess a family. |
 | Hyper Modes | **Deferred** ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Amp four-tier modes will not ship as designed; see [design-modes.md](./design-modes.md) Ãƒâ€šÃ‚Â§0. |
 | Oracle upgrade | Design in [design-oracle.md](./design-oracle.md); pin + trigger productized (Phase 0/1); Phase 2 harness signals not scheduled. Do **not** pin Oracle to NVIDIA Ultra until `agent_ready`. |
@@ -110,7 +110,7 @@ Structured product-issue store for agents + runtime detectors. See
 
 ## Coexistence with official `grok`
 
-- Different binaries: `hyper` vs `grok`.
+- Different binaries: `turbo` vs `grok`.
 - Shared runtime state under `~/.grok` (including `leader*.sock` / `leader*.lock`).
 - Prefer `hyper leader kill` / `grok leader kill` only against leaders you own; both binaries recognize the other product process by name when cleaning locks (Linux argv0, Windows image path, macOS `proc_pidpath`).
 - Community builds never run the upstream self-updater that targets `~/.grok/bin/grok`.

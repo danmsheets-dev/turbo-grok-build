@@ -66,7 +66,7 @@ started. Partial ledgers set `"usageIsIncomplete": true`.
   "servedModel": "grok-4.5-build|null",
   "permissionMode": "plan|default|auto|bypassPermissions",
   "sandbox": "read-only|null",
-  "binary": "hyper",
+  "binary": "turbo",
   "version": "0.2.114-r5",
   "alwaysApprove": true,
   "rulesApplied": true,

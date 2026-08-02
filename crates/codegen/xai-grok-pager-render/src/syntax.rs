@@ -152,7 +152,7 @@ pub fn get_syntect() -> &'static Syntect {
         | ThemeKind::RosePineMoon
         | ThemeKind::OscuraMidnight
         | ThemeKind::Auto
-        // Dark Hyper presets share the night syntect palette.
+        // Dark Turbo presets share the night syntect palette.
         | ThemeKind::Everforest
         | ThemeKind::Nord
         | ThemeKind::Dracula
@@ -169,7 +169,7 @@ pub fn get_syntect() -> &'static Syntect {
         ThemeKind::Omp => &SYNTECT_OMP,
         ThemeKind::TokyoNight => SYNTECT_TOKYONIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))),
-        // GrokDay + light Hyper presets share the day syntect palette.
+        // GrokDay + light Turbo presets share the day syntect palette.
         ThemeKind::GrokDay
         | ThemeKind::SolarizedLight
         | ThemeKind::CatppuccinLatte

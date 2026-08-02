@@ -1,10 +1,11 @@
-//! `hyper issues` — list / show / export / resolve Auto Developer Log incidents.
+//! `turbo issues` — list / show / export / resolve Auto Developer Log incidents.
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use xai_grok_developer_log::{
-    DIR_ENV, DeveloperLogStore, ExportOptions, IncidentStatus, ListFilter, Severity,
-    clear_configured_dir, config_file_path, export_pack, root_resolution_note, set_configured_dir,
+    DIR_ENV, DeveloperLogStore, Environment, ErrorClass, ExportOptions, IncidentStatus,
+    ListFilter, ReportRequest, ReporterKind, Severity, Source, clear_configured_dir,
+    config_file_path, export_pack, root_resolution_note, set_configured_dir,
 };
 
 #[derive(Debug, clap::Args, Clone)]
@@ -84,6 +85,29 @@ pub enum IssuesCommand {
     },
     /// Clear a custom log dir and revert to `$GROK_HOME/developer-log`
     ClearDir,
+    /// File a product incident from the CLI (human / script fallback when the
+    /// agent `developer_log` tool is unavailable)
+    #[command(visible_alias = "report")]
+    File {
+        /// Short title
+        #[arg(long)]
+        title: String,
+        /// Summary of the issue
+        #[arg(long)]
+        summary: String,
+        /// error_class (e.g. feature_gap, land_conflict, tool_schema)
+        #[arg(long = "class", default_value = "unknown")]
+        error_class: String,
+        /// Severity override: p0,p1,p2,p3
+        #[arg(long)]
+        severity: Option<String>,
+        /// Component tags (repeatable)
+        #[arg(long = "component")]
+        component: Vec<String>,
+        /// Suggested fix
+        #[arg(long)]
+        suggested_fix: Option<String>,
+    },
 }
 
 pub fn run(args: IssuesArgs) -> Result<()> {
@@ -113,7 +137,7 @@ pub fn run(args: IssuesArgs) -> Result<()> {
                     "No open Auto Developer Log incidents under {}.",
                     store.root().display()
                 );
-                println!("Agents file them with the `developer_log` tool; export with `hyper issues export`.");
+                println!("Agents file them with the `developer_log` tool; export with `turbo issues export`.");
             } else {
                 println!(
                     "{:<4} {:<6} {:>5} {:<22} {}",
@@ -131,7 +155,7 @@ pub fn run(args: IssuesArgs) -> Result<()> {
                     );
                 }
                 println!(
-                    "\n{} incident(s). Show: hyper issues show <id> · Export: hyper issues export",
+                    "\n{} incident(s). Show: turbo issues show <id> · Export: turbo issues export",
                     entries.len()
                 );
             }
@@ -256,7 +280,7 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             let path = set_configured_dir(&dir).context("set developer log dir")?;
             println!("Auto Developer Log directory set to:\n  {}", path.display());
             println!(
-                "Saved in {}\nAgents will write product incidents here. Review with `hyper issues list`.",
+                "Saved in {}\nAgents will write product incidents here. Review with `turbo issues list`.",
                 config_file_path().display()
             );
             Ok(())
@@ -267,6 +291,57 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             println!(
                 "Cleared custom log dir. Using default:\n  {}",
                 store.root().display()
+            );
+            Ok(())
+        }
+        IssuesCommand::File {
+            title,
+            summary,
+            error_class,
+            severity,
+            component,
+            suggested_fix,
+        } => {
+            let error_class =
+                ErrorClass::parse(&error_class).unwrap_or(ErrorClass::Unknown);
+            let severity = severity
+                .as_deref()
+                .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+                    "p0" => Some(Severity::P0),
+                    "p1" => Some(Severity::P1),
+                    "p2" => Some(Severity::P2),
+                    "p3" => Some(Severity::P3),
+                    _ => None,
+                });
+            let req = ReportRequest {
+                title,
+                summary,
+                error_class,
+                severity,
+                component,
+                suggested_fix,
+                source: Source {
+                    reporter: ReporterKind::Human,
+                    auto: false,
+                    tool: Some("turbo issues file".into()),
+                    ..Default::default()
+                },
+                environment: Environment {
+                    product_version: Some(xai_grok_version::installed()),
+                    os: Some(std::env::consts::OS.into()),
+                    arch: Some(std::env::consts::ARCH.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let result = store.report(req).context("file incident")?;
+            println!(
+                "{} {} ({}) — {} occurrence(s)\n  {}",
+                if result.is_new { "Filed" } else { "Merged" },
+                result.incident_id,
+                result.error_class.as_str(),
+                result.occurrence_count,
+                result.path,
             );
             Ok(())
         }

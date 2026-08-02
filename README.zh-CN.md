@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n:10 种语言">
 </p>
 
-**Hyper** 是 [Grok Build](https://github.com/xai-org/grok-build) 的非官方多供应商社区构建版本 ——
+**Turbo** 是 [Grok Build](https://github.com/xai-org/grok-build) 的非官方多供应商社区构建版本 ——
 一个用 Rust 编写的终端 AI 编码代理,对多家 LLM 供应商提供一流支持:
 xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenCode Go、OpenAI、Anthropic、Z.AI、Ollama Cloud 等。
 
@@ -55,13 +55,13 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 
 ## 为什么叫 "Hyper"?
 
-本 fork 仓库已经命名为 `hyper-grok-build`,**Hyper** 沿用了这个品牌:
+本 fork 仓库已经命名为 `hyper-grok-build`,**Turbo** 沿用了这个品牌:
 
 | | 官方版本 | 本 fork |
 |---|---|---|
-| 产品 | Grok Build | **Hyper** |
-| 二进制文件 | `grok` | **`hyper`** |
-| 安装目录 | `~/.grok` | **`~/.hyper`**(仅二进制) |
+| 产品 | Grok Build | **Turbo** |
+| 二进制文件 | `grok` | **`turbo`** |
+| 安装目录 | `~/.grok` | **`~/.turbo`**(仅二进制) |
 | 配置 / 认证 | `~/.grok` | **`~/.grok`**(共享;同一运行时) |
 | 上游 | [xai-org/grok-build](https://github.com/xai-org/grok-build) | 多供应商社区补丁 |
 
@@ -101,7 +101,7 @@ curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/in
 ```
 
 安装程序会根据发布版的 `SHA256SUMS` 校验每一次下载,
-安装到 `~/.hyper/bin/hyper`(Windows 上为 `%USERPROFILE%\.hyper\bin\hyper.exe`),
+安装到 `~/.turbo/bin/turbo`(Windows 上为 `%USERPROFILE%\.turbo\bin\turbo.exe`),
 并在需要时打印出需要添加的 PATH 配置行。
 
 > 如需尚未发布的改动，可从下方源码构建；否则请安装上方的最新发布版。
@@ -109,7 +109,7 @@ curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/in
 ### 用 Nix 安装
 
 本项目提供 [Nix](https://nixos.org) flake(`flake.nix`)，在任意已启用
-Nix 的机器上可跳过安装脚本，直接构建/运行。flake 构建出的 `hyper`
+Nix 的机器上可跳过安装脚本，直接构建/运行。flake 构建出的 `turbo`
 二进制与发布产物一致(Opus 与 jemalloc 均静态链接；`ldd` 仅依赖
 glibc)。
 
@@ -117,7 +117,7 @@ glibc)。
 # 直接从仓库运行(无需 clone、无需安装):
 nix run github:DaviRain-Su/hyper-grok-build#hyper-grok-build -- --version
 
-# 或安装到你的 Nix profile(把 `hyper` 加入 PATH):
+# 或安装到你的 Nix profile(把 `turbo` 加入 PATH):
 nix profile install github:DaviRain-Su/hyper-grok-build#hyper-grok-build
 ```
 
@@ -186,7 +186,7 @@ GROK_VERSION=$(cat VERSION) cargo build -p xai-grok-pager-bin --profile release-
 ```
 
 组合根包仍然是 `xai-grok-pager-bin`(monorepo 布局);
-**发布的二进制名称**是 `hyper`。
+**发布的二进制名称**是 `turbo`。
 
 ---
 
@@ -236,8 +236,8 @@ Hyper 与 xAI / SpaceXAI **没有隶属关系**。在同一台机器上:
 
 | 项目 | 官方 `grok` | Hyper |
 |---------|-----------------|-------|
-| 二进制 | `grok` | `hyper` |
-| 托管安装目录 | `~/.grok/bin` | `~/.hyper/bin` |
+| 二进制 | `grok` | `turbo` |
+| 托管安装目录 | `~/.grok/bin` | `~/.turbo/bin` |
 | 配置 / 认证 / 会话 | `~/.grok` | **相同的** `~/.grok` |
 | Leader IPC(`leader*.sock` / `.lock`) | 位于 `~/.grok` | **相同的**命名空间 |
 
@@ -245,7 +245,7 @@ Hyper 与 xAI / SpaceXAI **没有隶属关系**。在同一台机器上:
 
 - 会话、API key 和 OAuth 权限是共享的 —— 登录一次,两个 CLI 都能看到。
 - Leader 的 list/kill 可以同时看到两个产品的 leader。请只 kill 你自己启动的 leader。
-- 社区构建版使用完全隔离的更新器：`hyper update` 和启动时自动更新只读取本仓库的 GitHub Releases，Hyper 二进制及更新状态都保存在 `~/.hyper`（托管可执行文件为 `~/.hyper/bin/hyper`），绝不会覆盖 `~/.grok/bin/grok`。自动更新偏好仍属于 Hyper 与官方版共享的 `~/.grok` 配置。重新运行 `install.sh` / `install.ps1` 仍可用于修复安装。
+- 社区构建版使用完全隔离的更新器：`hyper update` 和启动时自动更新只读取本仓库的 GitHub Releases，Hyper 二进制及更新状态都保存在 `~/.turbo`（托管可执行文件为 `~/.turbo/bin/turbo`），绝不会覆盖 `~/.grok/bin/grok`。自动更新偏好仍属于 Hyper 与官方版共享的 `~/.grok` 配置。重新运行 `install.sh` / `install.ps1` 仍可用于修复安装。
 
 Hyper 的安装脚本不会改写官方安装程序的任何内容。
 
@@ -271,7 +271,7 @@ Amp 风格的 **agent 模式**(low / medium / high / ultra 档位)目前**仅有
 ## 文档
 
 仓库内用户指南(示例中可能仍写着 `grok`;Hyper 的二进制名是
-`hyper`,路径仍在 `~/.grok` 下):
+`turbo`,路径仍在 `~/.grok` 下):
 
 - 中文：[用户指南（中文）](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)
 - English：[User Guide](crates/codegen/xai-grok-pager/docs/user-guide/)
@@ -291,7 +291,7 @@ Amp 风格的 **agent 模式**(low / medium / high / ultra 档位)目前**仅有
 
 | 路径 | 内容 |
 |------|----------|
-| `crates/codegen/xai-grok-pager-bin` | 组合根;构建 `hyper` 二进制 |
+| `crates/codegen/xai-grok-pager-bin` | 组合根;构建 `turbo` 二进制 |
 | `crates/codegen/xai-grok-pager` | TUI |
 | `crates/codegen/xai-grok-shell` | Agent 运行时 |
 | `install.sh` / `install.ps1` | 发布安装脚本 |

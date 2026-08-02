@@ -1350,7 +1350,7 @@ impl MvpAgent {
         // relying on the client to ignore `x.ai/announcements/update`.
         {
             let cfg = self.cfg.borrow();
-            // Headless (`hyper -p` / streaming-json) has no UI for banners or
+            // Headless (`turbo -p` / streaming-json) has no UI for banners or
             // CTAs. Other modes (TUI, Leader, Stdio) may still host a client
             // that paints them.
             if cfg.mode == crate::agent::config::AgentMode::Headless {

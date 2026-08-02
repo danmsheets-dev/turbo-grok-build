@@ -64,7 +64,7 @@ impl SlashCommand for LoginCommand {
             // Nexus is BYOK (API key), not OAuth — redirect instead of erroring.
             CommandResult::Error(
                 "Nexus 用 API key,不走 OAuth —— 请用 `/nexus <key>`(TUI 内)或 \
-                 `hyper nexus <key>`(命令行,登录前即可用)。空敲 `/nexus` 查看引导。"
+                 `turbo nexus <key>`(命令行,登录前即可用)。空敲 `/nexus` 查看引导。"
                     .into(),
             )
         } else if arg.is_empty() {
