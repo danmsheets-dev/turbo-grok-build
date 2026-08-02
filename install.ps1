@@ -266,7 +266,7 @@ try {
             Move-Item -LiteralPath $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
         }
         Remove-Item -LiteralPath $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
-        Fail "cannot install to $Dest: $($_.Exception.Message)"
+        Fail "cannot install to ${Dest}: $($_.Exception.Message)"
     }
 
     # Secondary smoke-test of the activated path; restore prior binary on failure.
