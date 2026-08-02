@@ -4,9 +4,12 @@ Structured product-issue pipeline for Hyper agents and maintainers.
 
 When agents or the runtime hit product friction (worktrees deleted without
 recovery artifacts, provider deser failures, isolation fallback, stalls),
-Hyper records a **deduplicated, redacted incident** under
-`$GROK_HOME/developer-log/`. The Hyper Development Team exports a pack and
-triages from real field signal — not chat archaeology.
+Hyper records a **deduplicated, redacted incident** under the configured log
+root (default `$GROK_HOME/developer-log/`). The Hyper Development Team exports
+a pack and triages from real field signal — not chat archaeology.
+
+The **Agent Boot Card** instructs agents that `developer_log` is **required**
+for product friction (not optional).
 
 ## Quick start
 
@@ -23,8 +26,14 @@ hyper issues export --severity p0 --severity p1 --out ./hyper-issues-pack
 
 # Paths / status
 hyper issues path
+hyper issues path --json
 hyper issues ack <id>
 hyper issues resolve <id>
+
+# Set where logs are stored (writes ~/.grok/developer-log.toml)
+hyper issues set-dir D:/HyperLogs/developer-log
+hyper issues set-dir ~/Projects/hyper-field-logs
+hyper issues clear-dir
 ```
 
 Disable writes:
@@ -37,17 +46,33 @@ export GROK_DEVELOPER_LOG=0
 $env:GROK_DEVELOPER_LOG = "0"
 ```
 
+### Configuring the log directory
+
+| Precedence | Source |
+|------------|--------|
+| 1 (highest) | Process override after `hyper issues set-dir` this session |
+| 2 | Env `GROK_DEVELOPER_LOG_DIR=/absolute/or/~/path` |
+| 3 | File `$GROK_HOME/developer-log.toml` → `dir = "..."` |
+| 4 (default) | `$GROK_HOME/developer-log` |
+
+Example `~/.grok/developer-log.toml`:
+
+```toml
+# Hyper Auto Developer Log root (managed by `hyper issues set-dir`)
+dir = "D:\\HyperLogs\\developer-log"
+```
+
 ## Storage layout
 
 ```text
-$GROK_HOME/developer-log/
-  index.json                 # fast list / fingerprint index
-  events.jsonl               # append-only create/increment/status events
+<log-root>/                    # default: $GROK_HOME/developer-log
+  index.json                   # fast list / fingerprint index
+  events.jsonl                 # append-only create/increment/status events
   incidents/
     YYYY-MM-DD/
-      inc_<uuid>.json        # canonical incident document
+      inc_<uuid>.json          # canonical incident document
   bundles/
-    export-<timestamp>/      # hyper issues export output
+    export-<timestamp>/        # hyper issues export output
       summary.md
       incidents.ndjson
       fingerprints.csv
@@ -60,7 +85,7 @@ Default `$GROK_HOME` is `~/.grok` (shared with official `grok`).
 
 ## Agent tool: `developer_log`
 
-Agents file issues with the built-in tool:
+**Required** for Hyper product friction. Agents file issues with the built-in tool:
 
 | Field | Required | Notes |
 |-------|----------|--------|
@@ -77,6 +102,7 @@ Agents file issues with the built-in tool:
 
 Rules for agents:
 
+- **Always** call this tool when Hyper product behavior blocks work — do not rely on chat alone.
 - Prefer a stable `error_class` over essays.
 - One call per distinct product issue; the store **dedups by fingerprint** and increments `occurrence_count`.
 - Never log secrets, tokens, or full unredacted prompts (fields are redacted, but do not rely on that alone).

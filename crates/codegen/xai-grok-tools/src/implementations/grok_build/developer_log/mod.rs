@@ -142,17 +142,18 @@ impl crate::types::tool_metadata::ToolMetadata for DeveloperLogTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"File a structured product issue into Hyper's Auto Developer Log for maintainers.
+        r#"REQUIRED for Hyper product issues: file a structured incident into the Auto Developer Log for maintainers.
 
-Use when Hyper product behavior blocks agents or surprises supervisors — e.g. worktree paths deleted and hard to find, provider deser failures, missing land/diff affordances, isolation fallback, stalls, catalog dead models.
+**Always call this tool** when Hyper product behavior blocks you or surprises supervisors — worktrees deleted/hard to find, land/diff pollution, provider deser failures, isolation fallback, stalls, MCP failures, missing features, docs gaps. Do not rely on chat alone for product bugs.
 
 Rules:
-- Prefer a stable `error_class` (see schema) over long essays.
+- Prefer a stable `error_class` (worktree_tombstone, work_lost_risk, subagent_stall, protocol_deser, provider_400, feature_gap, docs_gap, land_conflict, isolation_fallback, mcp_connect, unknown, …).
 - One call per distinct product issue; the store dedups by fingerprint and increments occurrence_count.
 - Never include secrets, API keys, tokens, or full unredacted prompts.
 - Do not spam: if you already filed this fingerprint in the session, skip unless new evidence.
 
-Operators review with `hyper issues list` and `hyper issues export`."#
+Storage: default `$GROK_HOME/developer-log`; override with `GROK_DEVELOPER_LOG_DIR` or `hyper issues set-dir <path>`.
+Operators review with `hyper issues list`, `hyper issues export`, `hyper issues path`."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {

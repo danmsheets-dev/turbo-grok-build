@@ -15,8 +15,11 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
   `HOME` unset. Completion summary surfaces snapshot/baseline/patch/top paths.
 - **Agent Boot Card:** short operational briefing injected into system context
   on new sessions (subagents get a child stub). Configure with
-  `GROK_BOOT_CARD=off|short|full`. Teaches worktree recovery, land safety, and
-  tools without a full user-guide dump.
+  `GROK_BOOT_CARD=off|short|full`. Teaches worktree recovery, land safety,
+  tools, and **required** `developer_log` usage (with resolved log root path).
+- **Configurable Auto Developer Log dir:** `hyper issues set-dir <path>`,
+  `hyper issues clear-dir`, env `GROK_DEVELOPER_LOG_DIR`, or
+  `$GROK_HOME/developer-log.toml` (`dir = "..."`).
 - **Copy-to-clipboard on messages:** `selection_buttons` defaults **on** so
   completed scrollback messages show a copy icon (bottom-right of selection)
   that copies full output.

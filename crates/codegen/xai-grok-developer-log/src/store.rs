@@ -20,11 +20,17 @@ const INCIDENTS_DIR: &str = "incidents";
 const INDEX_FILE: &str = "index.json";
 const EVENTS_FILE: &str = "events.jsonl";
 const BUNDLES_DIR: &str = "bundles";
+/// Sidecar under `$GROK_HOME` that stores the user-chosen log root.
+const CONFIG_FILE: &str = "developer-log.toml";
 
 /// Env var to disable all developer-log writes (`0` / `false` / `off`).
 pub const ENABLED_ENV: &str = "GROK_DEVELOPER_LOG";
+/// Env var overriding the developer-log root directory (absolute path preferred).
+pub const DIR_ENV: &str = "GROK_DEVELOPER_LOG_DIR";
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// Process-local override set by `set_root_override` (CLI / tests).
+static ROOT_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Errors from the developer-log store.
 #[derive(Debug, thiserror::Error)]
@@ -64,9 +70,129 @@ struct IndexFile {
     entries: Vec<IndexEntry>,
 }
 
-/// Root of the developer-log tree under `$GROK_HOME`.
-pub fn default_root() -> PathBuf {
+/// Path to `$GROK_HOME/developer-log.toml` (user-configured log root).
+pub fn config_file_path() -> PathBuf {
+    xai_grok_config::grok_home().join(CONFIG_FILE)
+}
+
+/// Default on-disk location when nothing is configured: `$GROK_HOME/developer-log`.
+pub fn builtin_default_root() -> PathBuf {
     xai_grok_config::grok_home().join(ROOT_DIR)
+}
+
+/// Resolve the developer-log root directory.
+///
+/// Precedence (highest first):
+/// 1. Process override via [`set_root_override`]
+/// 2. Env [`DIR_ENV`] (`GROK_DEVELOPER_LOG_DIR`)
+/// 3. `$GROK_HOME/developer-log.toml` → `dir = "..."`
+/// 4. Builtin [`builtin_default_root`] (`$GROK_HOME/developer-log`)
+pub fn default_root() -> PathBuf {
+    if let Ok(guard) = ROOT_OVERRIDE.lock() {
+        if let Some(ref p) = *guard {
+            return expand_dir(p);
+        }
+    }
+    if let Ok(v) = std::env::var(DIR_ENV) {
+        let v = v.trim();
+        if !v.is_empty() {
+            return expand_dir(Path::new(v));
+        }
+    }
+    if let Some(p) = read_config_dir() {
+        return expand_dir(&p);
+    }
+    builtin_default_root()
+}
+
+/// Set a process-local root override (tests / one-shot CLI). Does not persist.
+pub fn set_root_override(path: Option<PathBuf>) {
+    if let Ok(mut guard) = ROOT_OVERRIDE.lock() {
+        *guard = path.map(|p| expand_dir(&p));
+    }
+}
+
+/// Persist `dir` to `$GROK_HOME/developer-log.toml` and set the process override.
+pub fn set_configured_dir(path: &Path) -> Result<PathBuf, StoreError> {
+    let expanded = expand_dir(path);
+    if expanded.as_os_str().is_empty() {
+        return Err(StoreError::Invalid("directory path is empty".into()));
+    }
+    // Reject relative paths that would escape in surprising ways after expand.
+    fs::create_dir_all(&expanded).map_err(StoreError::Io)?;
+    let cfg_path = config_file_path();
+    if let Some(parent) = cfg_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // Minimal TOML — no extra dep. Quote path for spaces/backslashes.
+    let escaped = expanded.display().to_string().replace('\\', "\\\\");
+    let body = format!(
+        "# Hyper Auto Developer Log — root directory for product incidents\n\
+         # Override with env {DIR_ENV}=...\n\
+         # Managed by `hyper issues set-dir`\n\
+         dir = \"{escaped}\"\n"
+    );
+    let tmp = cfg_path.with_extension("toml.tmp");
+    fs::write(&tmp, body)?;
+    fs::rename(&tmp, &cfg_path)?;
+    set_root_override(Some(expanded.clone()));
+    Ok(expanded)
+}
+
+/// Clear the persisted dir config (revert to builtin default). Also clears override.
+pub fn clear_configured_dir() -> Result<(), StoreError> {
+    let cfg = config_file_path();
+    if cfg.is_file() {
+        fs::remove_file(&cfg)?;
+    }
+    set_root_override(None);
+    Ok(())
+}
+
+fn read_config_dir() -> Option<PathBuf> {
+    let cfg = config_file_path();
+    let raw = fs::read_to_string(cfg).ok()?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // dir = "..." or dir = '...'
+        let rest = line.strip_prefix("dir")?;
+        let rest = rest.trim().strip_prefix('=')?.trim();
+        let unquoted = rest
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(rest);
+        let unescaped = unquoted.replace("\\\\", "\\");
+        if !unescaped.is_empty() {
+            return Some(PathBuf::from(unescaped));
+        }
+    }
+    None
+}
+
+fn expand_dir(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    // Expand leading ~ to home.
+    if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
+        #[allow(deprecated)]
+        let home = std::env::home_dir()
+            .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        if s == "~" {
+            return home;
+        }
+        return home.join(&s[2..]);
+    }
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    // Relative: resolve against current_dir for stability in CLI.
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Whether the developer log is enabled (default true).
@@ -78,6 +204,22 @@ pub fn is_enabled() -> bool {
         }
         Err(_) => true,
     }
+}
+
+/// Human-readable summary of how the root was resolved (for CLI / boot card).
+pub fn root_resolution_note() -> String {
+    if let Ok(guard) = ROOT_OVERRIDE.lock() {
+        if guard.is_some() {
+            return "process override / set-dir this session".into();
+        }
+    }
+    if std::env::var(DIR_ENV).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        return format!("env {DIR_ENV}");
+    }
+    if config_file_path().is_file() && read_config_dir().is_some() {
+        return format!("config {}", config_file_path().display());
+    }
+    "default ($GROK_HOME/developer-log)".into()
 }
 
 /// Handle for a developer-log store rooted at `root`.
@@ -621,5 +763,14 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, StoreError::Invalid(_)));
+    }
+
+    #[test]
+    fn root_override_takes_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("my-adl");
+        set_root_override(Some(custom.clone()));
+        assert_eq!(default_root(), custom);
+        set_root_override(None);
     }
 }

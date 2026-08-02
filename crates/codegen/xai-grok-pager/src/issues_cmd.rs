@@ -3,7 +3,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use xai_grok_developer_log::{
-    DeveloperLogStore, ExportOptions, IncidentStatus, ListFilter, Severity, export_pack,
+    DIR_ENV, DeveloperLogStore, ExportOptions, IncidentStatus, ListFilter, Severity,
+    clear_configured_dir, config_file_path, export_pack, root_resolution_note, set_configured_dir,
 };
 
 #[derive(Debug, clap::Args, Clone)]
@@ -66,8 +67,23 @@ pub enum IssuesCommand {
     Ack {
         id: String,
     },
-    /// Print the developer-log root path
-    Path,
+    /// Print the developer-log root path and how it was resolved
+    Path {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Persist where Auto Developer Log incidents are stored
+    ///
+    /// Writes `$GROK_HOME/developer-log.toml` (`dir = "..."`). Precedence:
+    /// process override → env `GROK_DEVELOPER_LOG_DIR` → this config → default
+    /// `$GROK_HOME/developer-log`.
+    SetDir {
+        /// Absolute path (or `~/...`) for the log root directory
+        dir: std::path::PathBuf,
+    },
+    /// Clear a custom log dir and revert to `$GROK_HOME/developer-log`
+    ClearDir,
 }
 
 pub fn run(args: IssuesArgs) -> Result<()> {
@@ -210,8 +226,48 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             println!("Acknowledged {} ({})", inc.incident_id, inc.title);
             Ok(())
         }
-        IssuesCommand::Path => {
-            println!("{}", store.root().display());
+        IssuesCommand::Path { json } => {
+            let root = store.root();
+            let note = root_resolution_note();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "root": root.display().to_string(),
+                        "resolution": note,
+                        "config_file": config_file_path().display().to_string(),
+                        "env": DIR_ENV,
+                        "enabled": xai_grok_developer_log::is_enabled(),
+                    }))?
+                );
+            } else {
+                println!("{}", root.display());
+                println!("resolved via: {note}");
+                println!("config file:  {}", config_file_path().display());
+                println!("env override: {DIR_ENV}");
+                println!(
+                    "enabled:      {} (set {DIR_ENV}=0 to disable)",
+                    xai_grok_developer_log::is_enabled()
+                );
+            }
+            Ok(())
+        }
+        IssuesCommand::SetDir { dir } => {
+            let path = set_configured_dir(&dir).context("set developer log dir")?;
+            println!("Auto Developer Log directory set to:\n  {}", path.display());
+            println!(
+                "Saved in {}\nAgents will write product incidents here. Review with `hyper issues list`.",
+                config_file_path().display()
+            );
+            Ok(())
+        }
+        IssuesCommand::ClearDir => {
+            clear_configured_dir().context("clear developer log dir")?;
+            let store = DeveloperLogStore::default();
+            println!(
+                "Cleared custom log dir. Using default:\n  {}",
+                store.root().display()
+            );
             Ok(())
         }
     }

@@ -22,12 +22,22 @@ Injected into the system prompt on new primary sessions (and a tiny child stub f
 GROK_BOOT_CARD=off|short|full   # default short
 ```
 
-Content: session facts, tools map, subagent lifecycle, recovery CLI, dirty-diff footgun, git safety.
+Content: session facts, tools map, **required Auto Developer Log usage**, subagent lifecycle, recovery CLI, dirty-diff footgun, git safety.
+
+Agents are instructed to **always** call `developer_log` for Hyper product friction; the card includes the resolved log root path.
 
 ## 3. Copy icon on completed messages
 
 `appearance.scrollback.display.selection_buttons` defaults to **true**. Select a completed message to show the copy (and view) icon on the bottom-right of the selection frame; click copies full message text.
 
-## 4. Auto Developer Log (from earlier RC9 work)
+## 4. Auto Developer Log
 
 See [AUTO_DEVELOPER_LOG.md](./AUTO_DEVELOPER_LOG.md).
+
+```bash
+hyper issues set-dir <path>   # persist log root
+hyper issues path             # show root + resolution
+hyper issues list|export
+```
+
+Env: `GROK_DEVELOPER_LOG_DIR`, `GROK_DEVELOPER_LOG=0` to disable.
