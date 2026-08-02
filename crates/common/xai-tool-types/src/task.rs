@@ -356,6 +356,12 @@ pub struct SubagentCompletedOutput {
     /// Optional short diffstat vs the snapshot base, e.g. `2 files, +40/-12`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diffstat: Option<String>,
+    /// Top agent-only changed paths (for completion card / land safety).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_paths: Option<Vec<String>>,
+    /// Spawn baseline ref when agent-only diffs are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_ref: Option<String>,
     /// Stable snake_case failure class for orchestrators when the run failed
     /// (`timeout`, `stall`, `serialize`, `provider_400`, `cancelled`, `budget`, `unknown`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,16 +400,36 @@ impl SubagentCompletedOutput {
             text.push_str(&format!("\n\n<worktree_state>{state}</worktree_state>"));
         }
         if let Some(ref snap) = self.snapshot_ref {
+            let base = self.baseline_ref.as_deref().unwrap_or("HEAD");
             text.push_str(&format!(
                 "\n\n<snapshot_ref>{snap}</snapshot_ref>\n\
-                 Recover files with: git show {snap}:<path>  or  git diff HEAD {snap}"
+                 Recover: `hyper subagent open {id} --restore` · \
+                 `git show {snap}:<path>` · `git diff {base} {snap}`",
+                id = self.subagent_id
             ));
+        }
+        if let Some(ref base) = self.baseline_ref {
+            text.push_str(&format!("\n\n<baseline_ref>{base}</baseline_ref>"));
         }
         if let Some(ref patch) = self.patch_path {
             text.push_str(&format!("\n\n<patch_path>{patch}</patch_path>"));
         }
         if let Some(ref stat) = self.diffstat {
             text.push_str(&format!("\n\n<diffstat>{stat}</diffstat>"));
+        }
+        if let Some(ref paths) = self.changed_paths {
+            if !paths.is_empty() {
+                text.push_str("\n\n<changed_paths>\n");
+                for p in paths.iter().take(15) {
+                    text.push_str("- ");
+                    text.push_str(p);
+                    text.push('\n');
+                }
+                if paths.len() > 15 {
+                    text.push_str(&format!("- … +{} more\n", paths.len() - 15));
+                }
+                text.push_str("</changed_paths>");
+            }
         }
         if self.isolation_fallback {
             text.push_str(
@@ -1551,6 +1577,8 @@ mod tests {
             worktree_state: Some("cleaned".into()),
             patch_path: Some("/tmp/sessions/s/subagents/sa-1/changes.patch".into()),
             diffstat: Some("1 files, +3/-0".into()),
+            changed_paths: Some(vec!["src/lib.rs".into()]),
+            baseline_ref: Some("refs/grok/subagent-baselines/sa-1".into()),
             error_class: None,
         };
         let text = output.to_model_text();

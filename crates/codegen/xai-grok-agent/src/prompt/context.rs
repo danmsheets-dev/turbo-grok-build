@@ -297,6 +297,38 @@ impl PromptContext {
             }
             PromptMode::Full => render(self.prompt_body.as_deref().unwrap_or(""))?,
         };
+        // Agent Boot Card: operational briefing for primary sessions only.
+        // Subagents get a tiny child stub.
+        let mut prompt = prompt;
+        let mode = match self.audience {
+            PromptAudience::Subagent => crate::prompt::boot_card::BootCardMode::Child,
+            PromptAudience::Primary => crate::prompt::boot_card::resolve_boot_card_mode(),
+        };
+        if mode != crate::prompt::boot_card::BootCardMode::Off {
+            let cwd = self
+                .working_directory
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let model = self
+                .placeholders()
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut ctx = crate::prompt::boot_card::BootCardContext::from_env(&cwd, &model);
+            if mode == crate::prompt::boot_card::BootCardMode::Child {
+                ctx.isolation = "worktree".into();
+            }
+            if let Some(card) = crate::prompt::boot_card::render_boot_card(mode, &ctx) {
+                crate::prompt::boot_card::inject_boot_card(&mut prompt, &card);
+                tracing::info!(
+                    mode = card.mode.as_str(),
+                    tokens = card.token_estimate,
+                    "boot_card injected"
+                );
+            }
+        }
         Some(prompt)
     }
 }

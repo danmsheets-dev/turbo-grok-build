@@ -34,6 +34,13 @@ pub struct LandSubagentInput {
         description = "Land mode: `merge` (default) or `overwrite`. Merge fails closed on conflict — no silent parent overwrite. Overwrite replaces parent files with the child's content for all changed paths."
     )]
     pub mode: Option<String>,
+
+    /// Bypass the large-patch safety guard (default max 50 files).
+    #[serde(default)]
+    #[schemars(
+        description = "When true, allow landing agent deltas larger than the safety limit (default 50 files). Use only after reviewing `diff_subagent` / `hyper subagent diff`."
+    )]
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -169,6 +176,19 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
         })?;
 
         let work = resolve_subagent_work(&ctx, &input.subagent_id).await?;
+        let force = input.force.unwrap_or(false);
+        let files_hint = work
+            .meta
+            .diffstat
+            .as_deref()
+            .and_then(super::parse_files_changed_from_diffstat)
+            .or_else(|| {
+                work.meta
+                    .changed_paths
+                    .as_ref()
+                    .map(|p| p.len() as u32)
+            });
+        super::land_size_guard(files_hint, force, super::DEFAULT_LAND_MAX_FILES)?;
         let resources = shared_resources(&ctx)?;
 
         // 1) Live worktree

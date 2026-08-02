@@ -389,11 +389,22 @@ pub fn resolve_grok_home() -> Result<PathBuf> {
     if let Ok(v) = std::env::var("GROK_HOME") {
         return Ok(PathBuf::from(v));
     }
-    let home = PathBuf::from(std::env::var("HOME").context("neither $GROK_HOME nor $HOME is set")?);
+    // Prefer $HOME; on Windows fall back to USERPROFILE when HOME is unset
+    // (common in shells where only USERPROFILE is defined). Last resort:
+    // std::env::home_dir() so worktree list/create do not hard-fail.
+    let home = if let Ok(h) = std::env::var("HOME") {
+        PathBuf::from(h)
+    } else if let Ok(h) = std::env::var("USERPROFILE") {
+        PathBuf::from(h)
+    } else {
+        #[allow(deprecated)]
+        std::env::home_dir().context(
+            "neither $GROK_HOME, $HOME, nor $USERPROFILE is set and home_dir() failed",
+        )?
+    };
     // Canonicalize the home dir so worktree paths share the same physical .grok
     // tree as trust/hooks even when it is symlinked. The dunce canonicalization
-    // must stay in sync with xai_grok_config::default_grok_home();
-    // home resolution deliberately differs ($HOME here vs std::env::home_dir()).
+    // must stay in sync with xai_grok_config::default_grok_home().
     Ok(dunce::canonicalize(&home).unwrap_or(home).join(".grok"))
 }
 

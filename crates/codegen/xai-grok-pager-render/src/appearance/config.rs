@@ -180,7 +180,8 @@ impl Default for ScrollbackDisplayConfig {
             expandable_indicator: true,
             expandable_indicator_running: true,
             expandable_indicator_char: "›".to_string(),
-            selection_buttons: false,
+            // RC9: show copy/view icons on selection by default (message copy affordance).
+            selection_buttons: true,
             sticky_headers: true,
             tab_width: 4,
             group_max_visible: 10,
@@ -910,7 +911,7 @@ impl Default for RawScrollbackDisplayConfig {
             expandable_indicator: Some(true),
             expandable_indicator_running: Some(true),
             expandable_indicator_char: Some("›".to_string()),
-            selection_buttons: Some(false),
+            selection_buttons: Some(true),
             sticky_headers: Some(true),
             tab_width: Some(4),
             group_max_visible: Some(10),
@@ -1437,7 +1438,7 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
                         .display
                         .expandable_indicator_char
                         .unwrap_or_else(|| "›".to_string()),
-                    selection_buttons: raw.scrollback.display.selection_buttons.unwrap_or(false),
+                    selection_buttons: raw.scrollback.display.selection_buttons.unwrap_or(true),
                     sticky_headers: raw.scrollback.display.sticky_headers.unwrap_or(true),
                     tab_width: raw.scrollback.display.tab_width.unwrap_or(4),
                     group_max_visible: raw.scrollback.display.group_max_visible.unwrap_or(10),

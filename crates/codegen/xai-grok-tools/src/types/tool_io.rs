@@ -101,6 +101,7 @@ pub enum ToolInput {
     DiscardSubagent(
         crate::implementations::grok_build::subagent_worktree::discard::DiscardSubagentInput,
     ),
+    DeveloperLog(crate::implementations::grok_build::developer_log::DeveloperLogInput),
     SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),

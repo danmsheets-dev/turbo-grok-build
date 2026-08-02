@@ -38,6 +38,12 @@ pub enum SubagentCommand {
         /// Session id (required if the id is ambiguous across sessions)
         #[arg(long)]
         session: Option<String>,
+        /// Materialize the snapshot into a local directory (one-command restore)
+        #[arg(long)]
+        restore: bool,
+        /// Destination for --restore (default: ./.grok-restore/<id>)
+        #[arg(long)]
+        restore_dir: Option<PathBuf>,
     },
     /// Show unified diff of a subagent's work vs parent HEAD
     Diff {
@@ -90,6 +96,8 @@ struct MetaView {
     #[serde(default)]
     snapshot_ref: Option<String>,
     #[serde(default)]
+    baseline_ref: Option<String>,
+    #[serde(default)]
     patch_path: Option<String>,
     #[serde(default)]
     worktree_state: Option<String>,
@@ -97,6 +105,10 @@ struct MetaView {
     land_status: Option<String>,
     #[serde(default)]
     child_cwd: Option<String>,
+    #[serde(default)]
+    diffstat: Option<String>,
+    #[serde(default)]
+    changed_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,9 +137,18 @@ pub fn run(args: SubagentArgs) -> Result<()> {
     let cwd_str = cwd.to_string_lossy().into_owned();
     match args.command {
         SubagentCommand::List { session, json } => cmd_list(&cwd_str, session.as_deref(), json),
-        SubagentCommand::Open { id, session } => {
+        SubagentCommand::Open {
+            id,
+            session,
+            restore,
+            restore_dir,
+        } => {
             let r = resolve(&cwd_str, &id, session.as_deref())?;
-            cmd_open(&r)
+            if restore {
+                cmd_restore(&cwd, &r, restore_dir.as_deref())
+            } else {
+                cmd_open(&r)
+            }
         }
         SubagentCommand::Diff { id, session } => {
             let r = resolve(&cwd_str, &id, session.as_deref())?;
@@ -266,10 +287,13 @@ fn list_entries(cwd: &str, session: Option<&str>) -> Result<Vec<ListedSubagent>>
                 status: None,
                 worktree_path: None,
                 snapshot_ref: None,
+                baseline_ref: None,
                 patch_path: None,
                 worktree_state: None,
                 land_status: None,
                 child_cwd: None,
+                diffstat: None,
+                changed_paths: None,
             });
             let patch = meta.patch_path.clone().or_else(|| {
                 let p = entry.path().join("changes.patch");
@@ -342,8 +366,25 @@ fn cmd_open(r: &Resolved) -> Result<()> {
         println!("worktree_path: {p} ({})", if live { "live" } else { "gone" });
     }
     if let Some(ref s) = r.meta.snapshot_ref {
+        let base = r.meta.baseline_ref.as_deref().unwrap_or("HEAD");
         println!("snapshot_ref: {s}");
-        println!("  recover: git show {s}:<path>   or   git diff HEAD {s}");
+        println!("  recover: git show {s}:<path>");
+        println!("  agent-only diff: git diff {base} {s}");
+        println!("  full restore: hyper subagent open {} --restore", r.id);
+    }
+    if let Some(ref b) = r.meta.baseline_ref {
+        println!("baseline_ref: {b}");
+    }
+    if let Some(ref d) = r.meta.diffstat {
+        println!("diffstat:     {d}");
+    }
+    if let Some(ref paths) = r.meta.changed_paths {
+        if !paths.is_empty() {
+            println!("changed_paths:");
+            for p in paths.iter().take(20) {
+                println!("  - {p}");
+            }
+        }
     }
     let patch = r.meta.patch_path.as_deref().map(PathBuf::from).or_else(|| {
         let p = r.dir.join("changes.patch");
@@ -351,6 +392,67 @@ fn cmd_open(r: &Resolved) -> Result<()> {
     });
     if let Some(p) = patch {
         println!("patch_path:   {}", p.display());
+    }
+    Ok(())
+}
+
+/// Materialize snapshot into a detached git worktree for inspection.
+fn cmd_restore(cwd: &Path, r: &Resolved, dest: Option<&Path>) -> Result<()> {
+    let snap = r
+        .meta
+        .snapshot_ref
+        .as_deref()
+        .context("no snapshot_ref in meta; cannot restore")?;
+    let dest = dest
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.join(".grok-restore").join(&r.id));
+    if dest.exists() {
+        bail!(
+            "restore destination already exists: {} (remove it or pass --restore-dir)",
+            dest.display()
+        );
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    // Prefer live worktree if still on disk.
+    if let Some(ref live) = r.meta.worktree_path {
+        let live_p = Path::new(live);
+        if live_p.is_dir() {
+            println!("Live worktree still present: {}", live_p.display());
+            println!("Copying to {} …", dest.display());
+            // Best-effort recursive copy via git archive when possible.
+            let status = Command::new("git")
+                .args(["worktree", "add", "--detach"])
+                .arg(&dest)
+                .arg(snap)
+                .current_dir(cwd)
+                .status()
+                .with_context(|| "git worktree add")?;
+            if !status.success() {
+                bail!("git worktree add failed (exit {status})");
+            }
+            println!("Restored to {}", dest.display());
+            return Ok(());
+        }
+    }
+    let status = Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&dest)
+        .arg(snap)
+        .current_dir(cwd)
+        .status()
+        .with_context(|| "git worktree add")?;
+    if !status.success() {
+        bail!(
+            "git worktree add --detach {} {} failed (exit {status})",
+            dest.display(),
+            snap
+        );
+    }
+    println!("Restored snapshot `{snap}` to {}", dest.display());
+    if let Some(ref base) = r.meta.baseline_ref {
+        println!("Agent-only review: git -C {} diff {base} {snap}", dest.display());
     }
     Ok(())
 }

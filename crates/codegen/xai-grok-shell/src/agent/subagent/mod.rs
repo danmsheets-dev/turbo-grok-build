@@ -2783,12 +2783,20 @@ pub(crate) struct SubagentMeta {
     /// state. Persisted so a deleted worktree can be rehydrated on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_ref: Option<String>,
+    /// Spawn-time full-tree snapshot (before agent edits). Diff/land use
+    /// `baseline_ref..snapshot_ref` so dirty parent files copied into the
+    /// sandbox are not attributed to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_ref: Option<String>,
     /// Worktree lifecycle after dispose: `live`, `cleaned`, or `preserved`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_state: Option<String>,
     /// Session-local path to exported `changes.patch` (survives cleanup).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_path: Option<String>,
+    /// Top changed paths from agent-only delta (for completion summary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_paths: Option<Vec<String>>,
     /// Compact diffstat summary vs snapshot base (e.g. `2 files, +40/-12`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diffstat: Option<String>,
@@ -3005,10 +3013,12 @@ struct GcsUploadContext {
 #[derive(Debug, Clone, Default)]
 struct SubagentMetaDisposeUpdate {
     snapshot_ref: Option<String>,
+    baseline_ref: Option<String>,
     status: Option<String>,
     worktree_state: Option<String>,
     patch_path: Option<String>,
     diffstat: Option<String>,
+    changed_paths: Option<Vec<String>>,
     /// When set, write `land_status` unless the existing value is already a
     /// terminal land disposition (`landed` / `landed_empty` / `discarded` /
     /// `conflict`). Dispose paths pass `"pending"` when snapshot/patch
@@ -3067,6 +3077,9 @@ fn update_subagent_meta_dispose(dir: &Path, update: &SubagentMetaDisposeUpdate) 
     if let Some(ref snapshot_ref) = update.snapshot_ref {
         meta.snapshot_ref = Some(snapshot_ref.clone());
     }
+    if let Some(ref baseline_ref) = update.baseline_ref {
+        meta.baseline_ref = Some(baseline_ref.clone());
+    }
     if let Some(ref status) = update.status {
         meta.status = status.clone();
     }
@@ -3078,6 +3091,9 @@ fn update_subagent_meta_dispose(dir: &Path, update: &SubagentMetaDisposeUpdate) 
     }
     if let Some(ref diffstat) = update.diffstat {
         meta.diffstat = Some(diffstat.clone());
+    }
+    if let Some(ref paths) = update.changed_paths {
+        meta.changed_paths = Some(paths.clone());
     }
     if let Some(ref land_status) = update.land_status
         && !land_status_is_terminal(meta.land_status.as_deref())

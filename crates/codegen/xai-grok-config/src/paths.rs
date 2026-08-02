@@ -26,8 +26,13 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.js
 /// Keep the dunce canonicalization in sync with the hand-rolled duplicate in
 /// `xai_fast_worktree::db::resolve_grok_home` (deliberately standalone crate).
 pub fn default_grok_home() -> PathBuf {
+    // Prefer platform home_dir(); on Windows also honor USERPROFILE when
+    // home_dir is missing and HOME is unset (matches fast-worktree resolve).
     #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::home_dir()
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
     dunce::canonicalize(&home).unwrap_or(home).join(".grok")
 }
 

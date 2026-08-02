@@ -15837,6 +15837,7 @@ dependencies = [
  "xai-grok-hooks",
  "xai-grok-sampling-types",
  "xai-grok-tools",
+ "xai-grok-version",
  "xai-token-estimation",
  "xai-tool-types",
  "xai-tty-utils",
@@ -15943,6 +15944,23 @@ dependencies = [
  "uuid",
  "webbrowser",
  "xai-grok-config",
+]
+
+[[package]]
+name = "xai-grok-developer-log"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "xai-grok-config",
+ "xai-grok-secrets",
+ "xai-grok-version",
 ]
 
 [[package]]
@@ -16230,6 +16248,7 @@ dependencies = [
  "xai-grok-agent",
  "xai-grok-announcements",
  "xai-grok-config",
+ "xai-grok-developer-log",
  "xai-grok-extension-api",
  "xai-grok-extension-runtime",
  "xai-grok-markdown",
@@ -16641,6 +16660,7 @@ dependencies = [
  "xai-grok-compaction",
  "xai-grok-config",
  "xai-grok-config-types",
+ "xai-grok-developer-log",
  "xai-grok-extension-api",
  "xai-grok-extension-runtime",
  "xai-grok-hooks",
@@ -16887,6 +16907,7 @@ dependencies = [
  "xai-computer-hub-sdk",
  "xai-file-utils",
  "xai-grok-config",
+ "xai-grok-developer-log",
  "xai-grok-env",
  "xai-grok-sandbox",
  "xai-grok-test-support",

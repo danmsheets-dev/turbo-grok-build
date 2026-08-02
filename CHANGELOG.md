@@ -5,6 +5,28 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 ## [Unreleased]
 
 ### Added
+- **RC9 worktree trust:** spawn **baseline** refs
+  (`refs/grok/subagent-baselines/<id>`) so diff/land are **agent-only**
+  (`baseline..snapshot`), not dirty-parent pollution. Land refuses >50 files
+  unless `force=true`. `hyper subagent open <id> --restore` materializes a
+  detached worktree. Soft-preserve live trees by default
+  (`GROK_SUBAGENT_SOFT_PRESERVE=0` deletes immediately). Optional clean seed
+  via `GROK_SUBAGENT_WORKTREE_SEED=clean`. Windows: `USERPROFILE` fallback when
+  `HOME` unset. Completion summary surfaces snapshot/baseline/patch/top paths.
+- **Agent Boot Card:** short operational briefing injected into system context
+  on new sessions (subagents get a child stub). Configure with
+  `GROK_BOOT_CARD=off|short|full`. Teaches worktree recovery, land safety, and
+  tools without a full user-guide dump.
+- **Copy-to-clipboard on messages:** `selection_buttons` defaults **on** so
+  completed scrollback messages show a copy icon (bottom-right of selection)
+  that copies full output.
+- **Auto Developer Log (ADL):** structured product-issue store for agents and
+  runtime detectors under `$GROK_HOME/developer-log/`. Agent tool
+  `developer_log` files/dedups redacted incidents; `hyper issues
+  list|show|export|ack|resolve|path` reviews and exports maintainer packs;
+  auto-detectors cover worktree dispose without recovery artifacts, isolation
+  fallback, and stall/timeout. Disable with `GROK_DEVELOPER_LOG=0`. See
+  `docs/AUTO_DEVELOPER_LOG.md`.
 - **`/ultracode`** (and `/ultra-code`): slash aliases for `/deepaudit`.
 - **RO isolation residual (R3):** when spawn omits `isolation`, explore/plan/
   oracle and `capability_mode=read-only` default to `isolation=none` (skip

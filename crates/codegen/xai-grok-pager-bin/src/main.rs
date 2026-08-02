@@ -2182,6 +2182,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Subagent(subagent_args) => {
                 return xai_grok_pager::subagent_cmd::run(subagent_args);
             }
+            Command::Issues(issues_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::issues_cmd::run(issues_args);
+            }
             Command::Update {
                 check,
                 json,

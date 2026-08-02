@@ -377,6 +377,10 @@ pub struct WorktreePatchExport {
 
 /// Export a unified diff of `snapshot_ref` against `HEAD` in `repo_path`.
 ///
+/// Prefer [`export_worktree_patch_between_refs`] with a **spawn baseline** ref
+/// when available — diffing vs HEAD includes parent dirty/untracked files that
+/// were copied into the sandbox at spawn (dirty-parent snapshot pollution).
+///
 /// Prefer calling this from the live worktree (or the durable source repo after
 /// transfer) while the snapshot ref is resolvable. Empty patches are valid
 /// (clean tree → empty string + zero diffstat).
@@ -384,25 +388,40 @@ pub fn export_worktree_patch_against_ref(
     repo_path: &Path,
     snapshot_ref: &str,
 ) -> Result<WorktreePatchExport> {
-    export_worktree_patch_against_ref_inner(repo_path, snapshot_ref).with_context(|| {
+    export_worktree_patch_between_refs(repo_path, "HEAD", snapshot_ref)
+}
+
+/// Export a unified diff of `head_ref` against `base_ref` in `repo_path`.
+///
+/// For subagent recovery, pass the **spawn baseline** (full tree right after
+/// worktree create) as `base_ref` and the **completion snapshot** as
+/// `head_ref` so the patch is agent-only, not HEAD→dirty-parent.
+pub fn export_worktree_patch_between_refs(
+    repo_path: &Path,
+    base_ref: &str,
+    head_ref: &str,
+) -> Result<WorktreePatchExport> {
+    export_worktree_patch_between_refs_inner(repo_path, base_ref, head_ref).with_context(|| {
         format!(
-            "failed to export patch for {snapshot_ref} in {}",
+            "failed to export patch {base_ref}..{head_ref} in {}",
             repo_path.display()
         )
     })
 }
 
-fn export_worktree_patch_against_ref_inner(
+fn export_worktree_patch_between_refs_inner(
     repo_path: &Path,
-    snapshot_ref: &str,
+    base_ref: &str,
+    head_ref: &str,
 ) -> Result<WorktreePatchExport> {
-    // Snapshot commits are `commit-tree -p HEAD` of the full working state, so
-    // `git diff HEAD <snapshot>` is the agent-authored change set (including
-    // previously-untracked non-ignored files captured into the snapshot).
-    let patch = snapshot_git(repo_path, &["diff", "--binary", "HEAD", snapshot_ref], &[])?;
+    let patch = snapshot_git(
+        repo_path,
+        &["diff", "--binary", base_ref, head_ref],
+        &[],
+    )?;
     let numstat = snapshot_git(
         repo_path,
-        &["diff", "--numstat", "HEAD", snapshot_ref],
+        &["diff", "--numstat", base_ref, head_ref],
         &[],
     )?;
     let mut files_changed = 0u32;

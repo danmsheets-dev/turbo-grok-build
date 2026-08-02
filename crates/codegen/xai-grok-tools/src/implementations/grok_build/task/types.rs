@@ -421,6 +421,10 @@ pub struct SubagentResult {
     pub patch_path: Option<String>,
     /// Optional short diffstat summary (e.g. `2 files, +40/-12`).
     pub diffstat: Option<String>,
+    /// Top changed paths from the agent-only delta (for parent completion card).
+    pub changed_paths: Option<Vec<String>>,
+    /// Spawn baseline ref used for agent-only diffs (if recorded).
+    pub baseline_ref: Option<String>,
     /// Set when isolation was requested but the child fell back to the shared
     /// workspace (only possible with
     /// `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`). Harnesses must treat the run
@@ -457,6 +461,8 @@ impl Default for SubagentResult {
             snapshot_ref: None,
             worktree_state: None,
             patch_path: None,
+            changed_paths: None,
+            baseline_ref: None,
             diffstat: None,
             isolation_fallback: false,
             backgrounded: false,

@@ -248,6 +248,8 @@ pub(crate) async fn run_shell_child(
         effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None;
     let allow_shared_fallback = isolation_shared_fallback_allowed();
     let mut isolation_fallback = false;
+    // Spawn-time worktree baseline ref (agent-only diffs). Set after create.
+    let mut spawn_baseline_ref: Option<String> = None;
     let worktree_path = if let Some(ref source) = resume_source {
         if isolation_requested && source.worktree_path.is_none() {
             // Resume of a pre-isolation (shared) child cannot invent a prior
@@ -366,10 +368,21 @@ pub(crate) async fn run_shell_child(
         let source_clone = source_cwd;
         let subagent_id = request.id.clone();
         let creation_mode: xai_fast_worktree::CreationMode = ctx.worktree_type.into();
+        // RC9: optional clean-slate seed (HEAD only — no parent dirty/untracked).
+        // GROK_SUBAGENT_WORKTREE_SEED=clean|head|dirty (default dirty/preserve).
+        let working_tree_mode = match std::env::var("GROK_SUBAGENT_WORKTREE_SEED")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "clean" | "head" | "head-only" => xai_fast_worktree::WorkingTreeMode::CleanAll,
+            _ => xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree,
+        };
         let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
         match tokio::task::spawn_blocking(move || {
             let mut builder = xai_fast_worktree::WorktreeBuilder::new(&source_clone, &dest)
-                .working_tree_mode(xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree)
+                .working_tree_mode(working_tree_mode)
                 .creation_mode(creation_mode)
                 .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
                 .session_id(subagent_id);
@@ -387,6 +400,34 @@ pub(crate) async fn run_shell_child(
                     commit = %report.commit,
                     "Created isolated worktree for subagent"
                 );
+                // Capture spawn baseline (full tree after create, before agent edits)
+                // so diff/land are agent-only even when the parent was dirty.
+                let baseline_ref_name =
+                    format!("refs/grok/subagent-baselines/{}", request.id);
+                let source_repo = resolve_subagent_source_repo(&ctx);
+                match crate::session::worktree::snapshot_subagent_worktree(
+                    &report.worktree_path,
+                    &source_repo,
+                    &baseline_ref_name,
+                )
+                .await
+                {
+                    Ok(baseline_ref) => {
+                        tracing::info!(
+                            subagent_id = %request.id,
+                            baseline_ref = %baseline_ref,
+                            "Recorded subagent worktree spawn baseline"
+                        );
+                        spawn_baseline_ref = Some(baseline_ref);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            subagent_id = %request.id,
+                            error = %e,
+                            "Failed to snapshot spawn baseline; diff may include dirty-parent files"
+                        );
+                    }
+                }
                 Some(report.worktree_path)
             }
             Ok(Err(e)) => {
@@ -703,9 +744,15 @@ pub(crate) async fn run_shell_child(
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
         snapshot_ref: None,
-        worktree_state: None,
+        baseline_ref: spawn_baseline_ref.clone(),
+        worktree_state: if worktree_path.is_some() {
+            Some("live".to_string())
+        } else {
+            None
+        },
         patch_path: None,
         diffstat: None,
+        changed_paths: None,
         land_status: None,
         allowed_paths: request
             .allowed_paths
@@ -1484,6 +1531,8 @@ pub(crate) async fn run_shell_child(
                         worktree_state: None,
                         patch_path: None,
                         diffstat: None,
+                        changed_paths: None,
+                        baseline_ref: None,
                         isolation_fallback,
                         backgrounded: false,
                         error_class: None,
@@ -1521,6 +1570,8 @@ pub(crate) async fn run_shell_child(
                     worktree_state: None,
                     patch_path: None,
                     diffstat: None,
+                    changed_paths: None,
+                    baseline_ref: None,
                     isolation_fallback,
                     backgrounded: false,
                     error_class: None,
@@ -1997,10 +2048,21 @@ pub(crate) async fn run_shell_child(
                     // recovery artifacts survive cleanup.
                     let mut patch_path: Option<String> = None;
                     let mut diffstat_summary: Option<String> = None;
-                    match crate::session::worktree::export_subagent_changes_patch(
+                    // Prefer spawn baseline so patch is agent-only (RC9).
+                    let baseline_for_export = spawn_baseline_ref.clone().or_else(|| {
+                        std::fs::read_to_string(subagent_meta_dir.join("meta.json"))
+                            .ok()
+                            .and_then(|raw| {
+                                serde_json::from_str::<SubagentMeta>(&raw)
+                                    .ok()
+                                    .and_then(|m| m.baseline_ref)
+                            })
+                    });
+                    match crate::session::worktree::export_subagent_changes_patch_with_baseline(
                         Some(wt_path.as_path()),
                         &source_repo,
                         &snapshot_ref,
+                        baseline_for_export.as_deref(),
                         &subagent_meta_dir,
                     )
                     .await
@@ -2009,13 +2071,29 @@ pub(crate) async fn run_shell_child(
                             patch_path =
                                 Some(exported.patch_path.to_string_lossy().into_owned());
                             diffstat_summary = Some(exported.diffstat_summary);
+                            // Load top changed paths for completion summary.
+                            if let Ok(names) =
+                                std::fs::read_to_string(subagent_meta_dir.join("changed_paths.txt"))
+                            {
+                                let paths: Vec<String> = names
+                                    .lines()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .take(20)
+                                    .map(str::to_string)
+                                    .collect();
+                                if !paths.is_empty() {
+                                    result.changed_paths = Some(paths.clone());
+                                }
+                            }
                             tracing::info!(
                                 subagent_id = %request.id,
                                 patch_path = ?patch_path,
                                 files_changed = exported.files_changed,
                                 insertions = exported.insertions,
                                 deletions = exported.deletions,
-                                "exported subagent changes.patch"
+                                baseline = ?baseline_for_export,
+                                "exported subagent changes.patch (agent-only when baseline set)"
                             );
                         }
                         Err(e) => {
@@ -2028,32 +2106,52 @@ pub(crate) async fn run_shell_child(
                         }
                     }
 
-                    // Persist snapshot_ref + patch first (resume-critical). Path
-                    // cleanup and final worktree_state happen after. Mark
-                    // land_status=pending so list/land tooling can see artifacts
-                    // awaiting parent action (won't clobber landed/discarded).
+                    // Soft-preserve by default so trees don't vanish mid-review.
+                    // Set GROK_SUBAGENT_SOFT_PRESERVE=0 to restore immediate delete.
+                    let soft_preserve = !retain_worktree
+                        && std::env::var("GROK_SUBAGENT_SOFT_PRESERVE")
+                            .map(|v| {
+                                !matches!(
+                                    v.trim().to_ascii_lowercase().as_str(),
+                                    "0" | "false" | "off" | "no"
+                                )
+                            })
+                            .unwrap_or(true);
+                    let keep_live = retain_worktree || soft_preserve;
+
+                    // Persist snapshot_ref + patch first (resume-critical).
                     let persisted = update_subagent_meta_dispose(
                         &subagent_meta_dir,
                         &SubagentMetaDisposeUpdate {
                             snapshot_ref: Some(snapshot_ref.clone()),
+                            baseline_ref: baseline_for_export.clone(),
                             status: Some(final_status.clone()),
-                            worktree_state: Some("preserved".to_string()),
+                            worktree_state: Some(if keep_live {
+                                "preserved".to_string()
+                            } else {
+                                "preserved".to_string()
+                            }),
                             patch_path: patch_path.clone(),
                             diffstat: diffstat_summary.clone(),
+                            changed_paths: result.changed_paths.clone(),
                             land_status: Some("pending".to_string()),
                             clear_worktree_path: false,
                         },
                     );
                     if persisted {
-                        disposed_snapshot_ref = Some(snapshot_ref);
+                        disposed_snapshot_ref = Some(snapshot_ref.clone());
+                        result.snapshot_ref = Some(snapshot_ref);
                         result.patch_path = patch_path;
                         result.diffstat = diffstat_summary;
-                        if retain_worktree {
+                        result.baseline_ref = baseline_for_export.clone();
+                        if keep_live {
                             result.worktree_state = Some("preserved".to_string());
                             tracing::info!(
                                 subagent_id = %request.id,
                                 worktree_path = %wt_path.display(),
-                                "snapshotted subagent worktree; retained (retain_worktree=true)"
+                                retain_worktree,
+                                soft_preserve,
+                                "snapshotted subagent worktree; kept on disk for review"
                             );
                         } else {
                             match crate::session::worktree::remove_subagent_worktree(wt_path)
@@ -2083,7 +2181,7 @@ pub(crate) async fn run_shell_child(
                                         worktree_path = %wt_path.display(),
                                         error = %e,
                                         "snapshotted subagent worktree but removal failed; ref persisted for resume"
-                                    )
+                                    );
                                 }
                             }
                         }
@@ -2115,6 +2213,57 @@ pub(crate) async fn run_shell_child(
     }
     if worktree_removed {
         result.worktree_path = None;
+    }
+    // Auto Developer Log: structured product incidents for Hyper maintainers.
+    {
+        let meta_path = subagent_meta_dir.join("meta.json");
+        let _ = xai_grok_developer_log::detect_worktree_dispose(
+            &xai_grok_developer_log::WorktreeDisposeSignal {
+                subagent_id: request.id.to_string(),
+                parent_session_id: Some(request.parent_session_id.clone()),
+                session_id: Some(request.id.to_string()),
+                worktree_path: result.worktree_path.clone(),
+                worktree_removed,
+                worktree_state: result.worktree_state.clone(),
+                snapshot_ref: disposed_snapshot_ref
+                    .clone()
+                    .or_else(|| result.snapshot_ref.clone()),
+                patch_path: result.patch_path.clone(),
+                meta_path: Some(meta_path.display().to_string()),
+                model: Some(tracker_model_id.clone()),
+                provider: None,
+            },
+        );
+        if result.isolation_fallback {
+            let _ = xai_grok_developer_log::detect_isolation_fallback(
+                &xai_grok_developer_log::IsolationFallbackSignal {
+                    subagent_id: request.id.to_string(),
+                    session_id: Some(request.parent_session_id.clone()),
+                    reason: "worktree create/resume fell back to shared parent cwd".into(),
+                },
+            );
+        }
+        if matches!(
+            result.error_class.as_deref(),
+            Some("stall" | "timeout" | "budget")
+        ) {
+            let _ = xai_grok_developer_log::detect_subagent_stall(
+                &xai_grok_developer_log::StallSignal {
+                    subagent_id: request.id.to_string(),
+                    session_id: Some(request.id.to_string()),
+                    parent_session_id: Some(request.parent_session_id.clone()),
+                    model: Some(tracker_model_id.clone()),
+                    provider: None,
+                    duration_ms: Some(result.duration_ms),
+                    last_tool: None,
+                    reason: result
+                        .error
+                        .clone()
+                        .or_else(|| result.error_class.clone())
+                        .unwrap_or_else(|| "subagent stalled or timed out".into()),
+                },
+            );
+        }
     }
     // Normal completion path owns dispose/preserve; do not double-remove.
     fresh_worktree_guard.disarm();

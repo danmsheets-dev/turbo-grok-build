@@ -165,6 +165,7 @@ xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
 xai-file-utils = { path = "../xai-file-utils" }
 xai-grok-auth = { workspace = true, features = ["middleware"] }
 xai-grok-telemetry = { workspace = true }
+xai-grok-developer-log = { workspace = true }
 xai-grok-http = { workspace = true }
 xai-grok-models = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }

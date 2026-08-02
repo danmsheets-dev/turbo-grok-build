@@ -138,6 +138,8 @@ pub enum Command {
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// List, open, diff, land, discard, or prune subagent worktrees
     Subagent(crate::subagent_cmd::SubagentArgs),
+    /// List, show, export, or resolve Auto Developer Log product incidents
+    Issues(crate::issues_cmd::IssuesArgs),
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;

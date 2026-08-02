@@ -3,7 +3,19 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
+Last reviewed: 2026-08-02 (Auto Developer Log package).
+
+## Added: Auto Developer Log
+
+Structured product-issue store for agents + runtime detectors. See
+[AUTO_DEVELOPER_LOG.md](./AUTO_DEVELOPER_LOG.md).
+
+| Surface | Notes |
+|---------|--------|
+| Tool `developer_log` | Agents file/dedup incidents under `~/.grok/developer-log/` |
+| CLI `hyper issues list\|show\|export\|ack\|resolve\|path` | Maintainer review + export packs |
+| Auto detectors | Worktree dispose without artifacts; isolation fallback; stall/timeout |
+| Disable | `GROK_DEVELOPER_LOG=0` |
 
 ## Fixed in v0.2.114-r8 (RC8)
 

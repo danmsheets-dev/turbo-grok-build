@@ -729,6 +729,9 @@ impl AgentView {
 
     /// Render ⧉ (copy) and ↗ (view) buttons on the scrollback selection box.
     ///
+    /// RC9: `selection_buttons` defaults **on** so completed messages expose a
+    /// bottom-right copy affordance when selected (click copies full output).
+    ///
     /// Two modes:
     /// - **Corner row** (expanded or ungrouped): buttons on the `╭...╮` row.
     /// - **Inline** (collapsed + grouped): buttons on the selected entry's row,

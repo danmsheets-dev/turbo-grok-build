@@ -34,15 +34,57 @@ pub struct SubagentMetaView {
     #[serde(default)]
     pub snapshot_ref: Option<String>,
     #[serde(default)]
+    pub baseline_ref: Option<String>,
+    #[serde(default)]
     pub patch_path: Option<String>,
     #[serde(default)]
     pub worktree_state: Option<String>,
     #[serde(default)]
     pub child_cwd: Option<String>,
+    #[serde(default)]
+    pub diffstat: Option<String>,
+    #[serde(default)]
+    pub changed_paths: Option<Vec<String>>,
     /// Relative path prefixes the child may write / parent may land.
     /// When non-empty, land refuses paths outside these prefixes.
     #[serde(default)]
     pub allowed_paths: Option<Vec<String>>,
+}
+
+/// Default max files for land without `force` (dirty-tree mega-patch guard).
+pub const DEFAULT_LAND_MAX_FILES: u32 = 50;
+
+/// Parse `files_changed` from a compact diffstat like `235 files, +22578/-51`.
+pub fn parse_files_changed_from_diffstat(stat: &str) -> Option<u32> {
+    let first = stat.split(',').next()?.trim();
+    let n = first.split_whitespace().next()?;
+    n.parse().ok()
+}
+
+/// Land safety: refuse huge unintended patches unless `force`.
+pub fn land_size_guard(
+    files_changed: Option<u32>,
+    force: bool,
+    max_files: u32,
+) -> Result<(), xai_tool_runtime::ToolError> {
+    if force {
+        return Ok(());
+    }
+    let Some(n) = files_changed else {
+        return Ok(());
+    };
+    if n > max_files {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "land_too_large",
+            format!(
+                "Refusing land: agent delta touches {n} files (limit {max_files}). \
+                 On dirty parents without a spawn baseline this often includes \
+                 unrelated untracked files. Review with `hyper subagent diff <id>` \
+                 / `diff_subagent`, then re-run with force=true only if intentional."
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolved artifacts for a subagent after reading meta + probing the filesystem.

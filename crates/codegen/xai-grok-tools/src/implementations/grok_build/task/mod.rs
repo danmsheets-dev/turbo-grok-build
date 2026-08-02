@@ -554,6 +554,8 @@ impl xai_tool_runtime::Tool for TaskTool {
                 worktree_state,
                 patch_path: result.patch_path,
                 diffstat: result.diffstat,
+                changed_paths: result.changed_paths,
+                baseline_ref: result.baseline_ref,
                 error_class: result.error_class,
             }))
         } else {

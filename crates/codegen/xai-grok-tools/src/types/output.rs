@@ -659,6 +659,7 @@ pub enum ToolOutput {
     DiscardSubagent(
         crate::implementations::grok_build::subagent_worktree::discard::DiscardSubagentOutput,
     ),
+    DeveloperLog(crate::implementations::grok_build::developer_log::DeveloperLogOutput),
     SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
@@ -1072,6 +1073,7 @@ impl ToolOutput {
                 text
             }
             ToolOutput::DiscardSubagent(o) => o.message.clone(),
+            ToolOutput::DeveloperLog(o) => o.message.clone(),
             ToolOutput::SpawnMany(o) => o.message.clone(),
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
@@ -2084,6 +2086,8 @@ mod tests {
             snapshot_ref: None,
             worktree_state: None,
             patch_path: None,
+            changed_paths: None,
+            baseline_ref: None,
             diffstat: None,
             error_class: None,
         });
@@ -2130,6 +2134,8 @@ mod tests {
             snapshot_ref: None,
             worktree_state: None,
             patch_path: None,
+            changed_paths: None,
+            baseline_ref: None,
             diffstat: None,
             error_class: None,
         });
@@ -2164,6 +2170,8 @@ mod tests {
             snapshot_ref: None,
             worktree_state: None,
             patch_path: None,
+            changed_paths: None,
+            baseline_ref: None,
             diffstat: None,
             error_class: None,
         });
@@ -2194,6 +2202,8 @@ mod tests {
             snapshot_ref: None,
             worktree_state: None,
             patch_path: None,
+            changed_paths: None,
+            baseline_ref: None,
             diffstat: None,
             error_class: None,
         };
@@ -2477,6 +2487,8 @@ mod tests {
             snapshot_ref: None,
             worktree_state: None,
             patch_path: None,
+            changed_paths: None,
+            baseline_ref: None,
             diffstat: None,
             error_class: None,
         };

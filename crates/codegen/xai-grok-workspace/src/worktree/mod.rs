@@ -1332,15 +1332,38 @@ pub struct SubagentPatchExportResult {
 /// Prefer `worktree_path` when the live tree still exists; fall back to
 /// `source_repo` (where the snapshot ref was transferred) so export still
 /// works after cleanup or if the worktree git store is already gone.
+///
+/// When `baseline_ref` is set (spawn-time full-tree snapshot), the patch is
+/// **agent-only** (`baseline..snapshot`). Without it, falls back to
+/// `HEAD..snapshot` (legacy; can include dirty-parent pollution).
 pub async fn export_subagent_changes_patch(
     worktree_path: Option<&Path>,
     source_repo: &Path,
     snapshot_ref: &str,
     dest_dir: &Path,
 ) -> Result<SubagentPatchExportResult> {
+    export_subagent_changes_patch_with_baseline(
+        worktree_path,
+        source_repo,
+        snapshot_ref,
+        None,
+        dest_dir,
+    )
+    .await
+}
+
+/// Like [`export_subagent_changes_patch`] but with an optional spawn baseline.
+pub async fn export_subagent_changes_patch_with_baseline(
+    worktree_path: Option<&Path>,
+    source_repo: &Path,
+    snapshot_ref: &str,
+    baseline_ref: Option<&str>,
+    dest_dir: &Path,
+) -> Result<SubagentPatchExportResult> {
     let worktree_path = worktree_path.map(|p| p.to_path_buf());
     let source_repo = source_repo.to_path_buf();
     let snapshot_ref = snapshot_ref.to_string();
+    let baseline_ref = baseline_ref.map(|s| s.to_string());
     let dest_dir = dest_dir.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<SubagentPatchExportResult> {
         std::fs::create_dir_all(&dest_dir).with_context(|| {
@@ -1352,23 +1375,18 @@ pub async fn export_subagent_changes_patch(
             .as_deref()
             .filter(|p| p.is_dir())
             .unwrap_or(source_repo.as_path());
-        let exported =
-            xai_fast_worktree::export_worktree_patch_against_ref(repo, &snapshot_ref).or_else(
-                |primary| {
-                    if repo == source_repo.as_path() {
-                        return Err(primary);
-                    }
-                    // Worktree path may be a standalone store that already
-                    // lost the ref; try the durable source repo.
-                    xai_fast_worktree::export_worktree_patch_against_ref(
-                        source_repo.as_path(),
-                        &snapshot_ref,
-                    )
-                    .map_err(|fallback| {
-                        primary.context(format!("source_repo fallback also failed: {fallback:#}"))
-                    })
-                },
-            )?;
+        let base = baseline_ref.as_deref().unwrap_or("HEAD");
+        let export_once = |r: &Path| {
+            xai_fast_worktree::export_worktree_patch_between_refs(r, base, &snapshot_ref)
+        };
+        let exported = export_once(repo).or_else(|primary| {
+            if repo == source_repo.as_path() {
+                return Err(primary);
+            }
+            export_once(source_repo.as_path()).map_err(|fallback| {
+                primary.context(format!("source_repo fallback also failed: {fallback:#}"))
+            })
+        })?;
         let patch_path = dest_dir.join("changes.patch");
         std::fs::write(&patch_path, exported.patch.as_bytes())
             .with_context(|| format!("failed to write {}", patch_path.display()))?;
@@ -1377,12 +1395,29 @@ pub async fn export_subagent_changes_patch(
         let _ = std::fs::write(
             &diffstat_path,
             format!(
-                "files_changed={}\ninsertions={}\ndeletions={}\nsummary={diffstat_summary}\n",
+                "files_changed={}\ninsertions={}\ndeletions={}\nsummary={diffstat_summary}\nbaseline_ref={}\nsnapshot_ref={snapshot_ref}\n",
                 exported.diffstat.files_changed,
                 exported.diffstat.insertions,
-                exported.diffstat.deletions
+                exported.diffstat.deletions,
+                baseline_ref.as_deref().unwrap_or("HEAD"),
             ),
         );
+        // Optional name-status for land safety / top-paths summary.
+        let names_path = dest_dir.join("changed_paths.txt");
+        if let Ok(names) = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(if source_repo.is_dir() {
+                source_repo.as_path()
+            } else {
+                repo
+            })
+            .args(["diff", "--name-only", base, &snapshot_ref])
+            .output()
+        {
+            if names.status.success() {
+                let _ = std::fs::write(&names_path, names.stdout);
+            }
+        }
         Ok(SubagentPatchExportResult {
             patch_path,
             diffstat_summary,
