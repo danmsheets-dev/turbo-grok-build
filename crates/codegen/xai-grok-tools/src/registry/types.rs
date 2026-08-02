@@ -697,6 +697,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::TaskTool>();
         b.register::<grok_build::DiffSubagentTool>();
         b.register::<grok_build::LandSubagentTool>();
+        b.register::<grok_build::DiscardSubagentTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
         b.register::<grok_build::LspTool>();

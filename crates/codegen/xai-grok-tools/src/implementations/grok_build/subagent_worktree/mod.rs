@@ -5,6 +5,7 @@
 //! diff/land against a live worktree, snapshot ref, or exported patch.
 
 pub mod diff;
+pub mod discard;
 pub mod land;
 
 use std::path::{Path, PathBuf};

@@ -28,6 +28,9 @@ pub struct AgentOpts {
     /// Hard wall-clock limit for this workflow child agent (milliseconds).
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// When true with worktree isolation, keep the child worktree after snapshot.
+    #[serde(default)]
+    pub retain_worktree: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

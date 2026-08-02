@@ -131,6 +131,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::Workflow(_)
         | ToolInput::DiffSubagent(_)
         | ToolInput::LandSubagent(_)
+        | ToolInput::DiscardSubagent(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

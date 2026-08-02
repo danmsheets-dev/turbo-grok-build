@@ -430,7 +430,11 @@ impl HostService {
                         isolation,
                         output_schema: None,
                         timeout_ms: opts.timeout_ms,
-                        retain_worktree: None,
+                        retain_worktree: if opts.retain_worktree {
+                            Some(true)
+                        } else {
+                            None
+                        },
                         stall_timeout_ms: None,
                         ..Default::default()
                     },

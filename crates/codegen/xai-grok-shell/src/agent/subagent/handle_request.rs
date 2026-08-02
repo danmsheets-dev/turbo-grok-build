@@ -527,14 +527,6 @@ pub(crate) async fn run_shell_child(
             )
         });
     }
-    // Wall-clock / tool / stall budget: spawn timeout_ms overrides definition.timeout_secs.
-    let execution_budget = SubagentExecutionBudget::resolve_with_overrides(
-        &definition,
-        ctx.parent_max_turns,
-        request.runtime_overrides.timeout_ms,
-        request.runtime_overrides.stall_timeout_ms,
-    );
-    append_execution_budget_prompt(&mut definition, execution_budget);
     // Fork reuses parent conversation prefix and prefers the parent model for
     // cache locality — but an *explicit* Task/spawn model override (e.g. goal
     // planner role model) must win so multi-model orchestration works.
@@ -594,6 +586,17 @@ pub(crate) async fn run_shell_child(
             return child_run_output(failure_result(&request, &msg), completion_data, None);
         }
     }
+    // Wall-clock / tool / stall budget AFTER model resolve so NVIDIA platform
+    // defaults (10 min timeout, 3 min stall) apply when spawn omits timeout_ms.
+    // Order: explicit timeout_ms > agent-def timeout_secs > NVIDIA 600s > none.
+    let execution_budget = SubagentExecutionBudget::resolve_with_platform(
+        &definition,
+        ctx.parent_max_turns,
+        request.runtime_overrides.timeout_ms,
+        request.runtime_overrides.stall_timeout_ms,
+        Some(effective_model_id.0.as_ref()),
+    );
+    append_execution_budget_prompt(&mut definition, execution_budget);
     if let Some(effort) = effective_runtime.reasoning_effort
         && ctx
             .models_manager

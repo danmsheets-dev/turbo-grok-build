@@ -33,6 +33,18 @@ if args.timeout_ms != () && args.timeout_ms > 0 {
     timeout_ms = args.timeout_ms;
 }
 
+// Durable LoopCheckpoint (RC8 WP8): single-component scratch name
+// (host rejects nested paths). Same-process journal still applies for replay.
+fn save_checkpoint(phase_name, payload) {
+    let body = json_encode(#{
+        phase: phase_name,
+        objective: objective,
+        updated_ms: 0,
+        payload: payload,
+    });
+    write_scratch_file("loop_checkpoint.json", body);
+}
+
 phase("Research");
 let research_schema = #{
     "type": "object",
@@ -59,6 +71,7 @@ let research = agent(
 if !research.success {
     pause("no_progress", "Research phase failed: " + research.output);
 }
+save_checkpoint("research_done", #{ research: research.output });
 
 phase("Plan");
 let plan_schema = #{
@@ -90,6 +103,7 @@ let plan = agent(
 if !plan.success {
     pause("no_progress", "Plan phase failed: " + plan.output);
 }
+save_checkpoint("plan_done", #{ research: research.output, plan: plan.output });
 
 phase("Implement");
 let implement = agent(
@@ -104,12 +118,18 @@ let implement = agent(
         agent_type: "general-purpose",
         capability_mode: "all",
         isolation_worktree: true,
+        retain_worktree: true,
         timeout_ms: timeout_ms,
     },
 );
 if !implement.success {
     pause("verification", "Implement phase failed or timed out: " + implement.output);
 }
+save_checkpoint("implement_done", #{
+    research: research.output,
+    plan: plan.output,
+    implement: implement.output,
+});
 
 phase("Verify");
 let verify_schema = #{
@@ -138,6 +158,13 @@ let verify = agent(
     },
 );
 
+save_checkpoint("verify_done", #{
+    research: research.output,
+    plan: plan.output,
+    implement: implement.output,
+    verify: verify.output,
+});
+
 phase("Report");
 let report = "# Continuous improve report\n\n"
     + "## Objective\n\n"
@@ -151,9 +178,16 @@ let report = "# Continuous improve report\n\n"
     + "\n\n## Verification\n\n"
     + json_encode(verify.output)
     + "\n\n## Next steps\n\n"
-    + "- If the implementer used a worktree, recover via `<snapshot_ref>` in the subagent result or `git show refs/grok/subagents/<id>`.\n"
-    + "- Land only after reviewing the diff; do not auto-merge unverified multi-file changes.\n"
+    + "- Review with `diff_subagent` then merge with `land_subagent` (merge mode fails closed on conflict).\n"
+    + "- Recover via `<snapshot_ref>` / `<patch_path>` if the worktree was cleaned; implement phase uses retain_worktree when possible.\n"
+    + "- LoopCheckpoint: workflow scratch `loop_checkpoint.json` holds the last successful phase payload.\n"
     + "- Re-run `/workflow continuous-improve` with a tighter objective for the next iteration.\n";
 
+save_checkpoint("complete", #{
+    research: research.output,
+    plan: plan.output,
+    implement: implement.output,
+    verify: verify.output,
+});
 log("continuous-improve complete");
 complete(report);

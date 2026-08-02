@@ -16,13 +16,19 @@ recovery, land/diff tools, stall detection, and multi-agent workflows.
   (worktree) → verify → report.
 - **`timeout_ms` / `stall_timeout_ms` / `retain_worktree` on spawn**: hard
   wall-clock, progress stall (default 10m when budgets set), optional keep path.
-- **`diff_subagent` + `land_subagent` tools**: parent merges child work from live
-  worktree, snapshot ref, or `changes.patch` (merge fails closed on conflict).
+- **`diff_subagent` + `land_subagent` + `discard_subagent` tools**: parent merges
+  or drops child work from live worktree, snapshot ref, or `changes.patch`
+  (merge fails closed on conflict; discard keeps snapshot by default).
 - **Worktree dispose**: always export `changes.patch` + diffstat before delete;
   completion surfaces `snapshot_ref`, `worktree_state`, `patch_path`.
 - **NVIDIA platform defaults**: no `prompt_cache_key` stamp without compat;
   catalog EOL hide; Nano 9B token clamp; `agent_ready` / `max_parallel_tool_calls`
-  on compat; Llama 70B single tool-call wire.
+  on compat; Llama 70B single tool-call wire; **10 min hard timeout** and
+  **3 min stall** defaults when spawn omits budgets on nvidia/nemotron models.
+- **`error_class`** on subagent completion/failure for smart-retry
+  (`timeout`, `stall`, `serialize`, `provider_400`, `cancelled`, `budget`, …).
+- **LoopCheckpoint**: `continuous-improve` writes `loop_checkpoint.json` under
+  workflow scratch after each phase; implement phase uses `retain_worktree`.
 
 ### Fixed
 - **NVIDIA Chat Completions deser**: `null` usage/index/tool_calls no longer

@@ -600,6 +600,7 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::Workflow(_)
         | ToolOutput::DiffSubagent(_)
         | ToolOutput::LandSubagent(_)
+        | ToolOutput::DiscardSubagent(_)
         | ToolOutput::ImageGen(_)
         | ToolOutput::ImageToVideo(_)
         | ToolOutput::ReferenceToVideo(_)

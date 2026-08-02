@@ -1766,6 +1766,22 @@ struct SubagentExecutionBudget {
     stall_timeout_ms: Option<u64>,
 }
 
+/// True when the resolved model slug looks like NVIDIA Integrate / Nemotron.
+///
+/// Matches catalog keys such as `nvidia/...`, `nvidia.*`, bare `nemotron-*`,
+/// and free-router aliases containing `nvidia/`.
+fn model_is_nvidia_platform(model_id: Option<&str>) -> bool {
+    let Some(raw) = model_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lower = raw.to_ascii_lowercase();
+    lower.starts_with("nvidia/")
+        || lower.starts_with("nvidia.")
+        || lower.contains("/nvidia/")
+        || lower.starts_with("nemotron")
+        || lower.contains("nemotron-")
+}
+
 impl SubagentExecutionBudget {
     fn resolve(
         definition: &xai_grok_agent::config::AgentDefinition,
@@ -1790,10 +1806,38 @@ impl SubagentExecutionBudget {
         timeout_ms_override: Option<u64>,
         stall_timeout_ms: Option<u64>,
     ) -> Self {
-        // explicit timeout_ms > AgentDefinition.timeout_secs > None
+        Self::resolve_with_platform(
+            definition,
+            parent_max_turns,
+            timeout_ms_override,
+            stall_timeout_ms,
+            None,
+        )
+    }
+
+    /// Resolve budget with optional platform/model-aware defaults.
+    ///
+    /// Timeout order: explicit `timeout_ms` → agent-definition `timeout_secs` →
+    /// NVIDIA Integrate default (600s) when `model_id` looks like nvidia →
+    /// unbounded (unless a stall budget still applies).
+    fn resolve_with_platform(
+        definition: &xai_grok_agent::config::AgentDefinition,
+        parent_max_turns: Option<usize>,
+        timeout_ms_override: Option<u64>,
+        stall_timeout_ms: Option<u64>,
+        model_id: Option<&str>,
+    ) -> Self {
+        // explicit timeout_ms > AgentDefinition.timeout_secs > NVIDIA platform default
         let timeout_secs = match timeout_ms_override {
             Some(ms) if ms > 0 => Some(ms.div_ceil(1000).max(1)),
-            _ => definition.timeout_secs,
+            _ => definition.timeout_secs.or_else(|| {
+                if model_is_nvidia_platform(model_id) {
+                    // RC8: NVIDIA agent path default hard wall-clock = 10 min.
+                    Some(600)
+                } else {
+                    None
+                }
+            }),
         };
         let finalize_grace_secs = timeout_secs.map(|timeout| {
             definition
@@ -1801,8 +1845,10 @@ impl SubagentExecutionBudget {
                 .unwrap_or(30)
                 .min(timeout.saturating_sub(1).max(1))
         });
+        // Stall: explicit → NVIDIA smoke default 3 min → 10 min when any hard budget.
         let stall_timeout_ms = match stall_timeout_ms {
             Some(ms) if ms > 0 => Some(ms),
+            _ if model_is_nvidia_platform(model_id) => Some(180_000),
             _ if timeout_secs.is_some() || definition.max_tool_calls.is_some() => Some(600_000),
             _ => None,
         };

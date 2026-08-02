@@ -58,6 +58,7 @@ pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
 pub use subagent_worktree::diff::{DIFF_SUBAGENT_TOOL_NAME, DiffSubagentTool};
+pub use subagent_worktree::discard::{DISCARD_SUBAGENT_TOOL_NAME, DiscardSubagentTool};
 pub use subagent_worktree::land::{LAND_SUBAGENT_TOOL_NAME, LandSubagentTool};
 pub use task::TaskTool;
 pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool, WaitTasksTool};
