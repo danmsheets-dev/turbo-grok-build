@@ -40,19 +40,20 @@ fn mode_ctrl_g_action(screen_mode: crate::app::ScreenMode) -> ActionDef {
             ),
         }
     } else {
+        // RC11: Ctrl+G toggles Game Mode (pixel office). Tasks moved to Ctrl+Shift+G.
         ActionDef {
-            id: ActionId::ToggleTasks,
-            label: "tasks",
-            description: "Toggle tasks pane",
+            id: ActionId::ToggleGameMode,
+            label: "game",
+            description: "Toggle Game Mode office",
             default_key: key!('g', CONTROL),
             alt_keys: vec![],
             category: Category::Panels,
             context: When::AgentScreen,
-            hint_priority: None,
-            hint_key_display: None,
+            hint_priority: Some(8),
+            hint_key_display: Some("Ctrl+G"),
             requires_confirmation: false,
             long_help: Some(
-                "Shows or hides the tasks pane, which lists background tasks and their status.\nUse it to monitor or return to work you sent to the background with Ctrl+B.\nA side pane; toggle off to reclaim width.",
+                "Toggles Game Mode: a pixel office view of the Supervisor and up to six subagent desks.\nThe composer stays open so you can chat with the Supervisor. Press Ctrl+G again to return to Normal view.\nTasks pane: Ctrl+Shift+G.",
             ),
         }
     }
@@ -546,6 +547,22 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: Some(
                 "Shows or hides the todo pane: the agent's live task checklist for the current work.\nWatch what it plans to do and what's left as the turn runs.\nA side pane; toggle it off to reclaim width.",
+            ),
+        },
+        // Tasks pane — was Ctrl+G; Game Mode took Ctrl+G in RC11.
+        ActionDef {
+            id: ActionId::ToggleTasks,
+            label: "tasks",
+            description: "Toggle tasks pane",
+            default_key: key!('g', CONTROL | SHIFT),
+            alt_keys: vec![],
+            category: Category::Panels,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some("Ctrl+Shift+G"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Shows or hides the tasks pane, which lists background tasks and their status.\nUse it to monitor or return to work you sent to the background with Ctrl+B.\nA side pane; toggle off to reclaim width.\n(Ctrl+G opens Game Mode.)",
             ),
         },
         ActionDef {

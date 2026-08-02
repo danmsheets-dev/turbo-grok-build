@@ -1081,6 +1081,20 @@ impl AgentView {
         {
             return InputOutcome::Action(Action::AcceptWordSelectTip);
         }
+        // Game Mode (Shift+G) before pane routing so it is not consumed by
+        // vim GotoBottom (also capital G on ScrollbackFocused).
+        // Settings modal owns Shift+G for jump-to-last — skip when open.
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && registry.matches_id(ActionId::ToggleGameMode, key)
+            && self.active_modal.is_none()
+            && self.extensions_modal.is_none()
+            && self.block_viewer.is_none()
+            && self.line_viewer.is_none()
+        {
+            self.game_mode.toggle();
+            return InputOutcome::Changed;
+        }
         let outcome = match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => match self.active_pane {
                 AgentPane::Prompt => self.handle_prompt_key(key, registry, prompt_paging),

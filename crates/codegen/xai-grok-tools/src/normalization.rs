@@ -133,6 +133,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::LandSubagent(_)
         | ToolInput::DiscardSubagent(_)
         | ToolInput::DeveloperLog(_)
+        | ToolInput::FeatureRequestLog(_)
         | ToolInput::SpawnMany(_)
         | ToolInput::Dynamic(_) => return None,
     })

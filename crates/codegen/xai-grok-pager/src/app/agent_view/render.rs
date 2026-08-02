@@ -889,7 +889,11 @@ impl AgentView {
         };
         let compact = appearance.prompt.compact;
         let inner_width = AgentViewLayout::inner_width(area, layout_cfg, compact);
-        let banner_height = if banner_height > 0 {
+        // Game Mode: strip top chrome (announcements, tips, privacy, ephemeral)
+        // so only the office + composer remain.
+        let banner_height = if self.game_mode.open {
+            0
+        } else if banner_height > 0 {
             if let Some(tip_text) = tip {
                 if self.session_banner_active {
                     banner_height
@@ -902,14 +906,21 @@ impl AgentView {
         } else {
             banner_height
         };
-        let banner_height = if privacy_banner {
+        let banner_height = if self.game_mode.open {
+            0
+        } else if privacy_banner {
             banner_height.max(crate::views::privacy_banner::height(inner_width))
         } else {
             banner_height
         };
-        let tip_row_visible =
-            self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
-        let banner_height = banner_height.max(u16::from(tip_row_visible));
+        let tip_row_visible = !self.game_mode.open
+            && self.ephemeral_tip_renderable(area.height)
+            && self.ephemeral_tip.is_active();
+        let banner_height = if self.game_mode.open {
+            0
+        } else {
+            banner_height.max(u16::from(tip_row_visible))
+        };
         let max_prompt_height = area.height / 2;
         let base_prompt_height = if !prompt_focused && appearance.prompt.collapse_unfocused {
             self.prompt
@@ -1179,21 +1190,49 @@ impl AgentView {
         };
         let voice_recording_height = if voice_listening { 1 } else { 0 };
         let _tool_usage_height = 0u16;
-        let btw_height =
-            crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width);
-        let cta_height = match &self.plugin_cta.phase {
-            _ if privacy_banner => 0,
-            CtaPhase::Hidden => 0,
-            CtaPhase::Matched { .. } if self.prompt.text().trim().is_empty() => 0,
-            _ => 1,
+        // Game Mode: office + composer only (no side panes / status chrome / tips).
+        let gm = self.game_mode.open;
+        let btw_height = if gm {
+            0
+        } else {
+            crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width)
         };
-        let follow_ups_height = u16::from(self.follow_ups.is_some());
-        let timeline_width = crate::views::timeline::rail_width(
-            appearance.show_timeline,
-            self.is_subagent_view,
-            area.width,
-            self.scrollback.turn_count(),
-        );
+        let cta_height = if gm {
+            0
+        } else {
+            match &self.plugin_cta.phase {
+                _ if privacy_banner => 0,
+                CtaPhase::Hidden => 0,
+                CtaPhase::Matched { .. } if self.prompt.text().trim().is_empty() => 0,
+                _ => 1,
+            }
+        };
+        let follow_ups_height = if gm {
+            0
+        } else {
+            u16::from(self.follow_ups.is_some())
+        };
+        let timeline_width = if gm {
+            0
+        } else {
+            crate::views::timeline::rail_width(
+                appearance.show_timeline,
+                self.is_subagent_view,
+                area.width,
+                self.scrollback.turn_count(),
+            )
+        };
+        let (tasks_height, catalog_height, todo_height, queue_height, turn_status_height) = if gm {
+            (0, 0, 0, 0, 0)
+        } else {
+            (
+                tasks_height,
+                catalog_height,
+                todo_height,
+                queue_height,
+                turn_status_height,
+            )
+        };
         let mut layout = AgentViewLayout::compute(
             area,
             layout_cfg,
@@ -1232,7 +1271,7 @@ impl AgentView {
             || !self.permission_queue.is_empty()
             || self.cancel_turn_view.is_some()
             || self.block_viewer.is_some();
-        if layout.timeline_width > 0 {
+        if layout.timeline_width > 0 && !self.game_mode.open {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
             let _ = self.sync_inline_edit_layout(layout.scrollback_content.width);
@@ -1554,7 +1593,26 @@ impl AgentView {
         self.hit_upgrade_cta
             .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
         let mut inline_edit_cursor: Option<(u16, u16)> = None;
-        {
+        // Game Mode: replace scrollback with the office spectator view.
+        // Composer / status bar / panes below still render normally.
+        if self.game_mode.open {
+            crate::views::game_mode::sync_game_mode(
+                self,
+                layout.scrollback.width,
+                layout.scrollback.height,
+            );
+            crate::views::game_mode::render_game_mode(buf, layout.scrollback, &mut self.game_mode);
+            self.clear_scrollback_selection_state();
+            // Stale Normal-view hit targets must not fire under the office.
+            self.hit_scrollbar.clear();
+            self.hit_sb_copy.clear();
+            self.hit_sb_view.clear();
+            self.hit_follow_indicator.clear();
+            self.timeline_rail = None;
+            self.timeline_hover = None;
+            self.timeline_hover_preview = None;
+        }
+        if !self.game_mode.open {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
             let inline_edit_dim_from =

@@ -1415,16 +1415,7 @@ fn durable_resume_source_for(
     parent_session_id: &str,
     parent_cwd: &Path,
 ) -> Option<ResumeSourceData> {
-    let parent_info = SessionInfo {
-        id: acp::SessionId::new(parent_session_id),
-        cwd: parent_cwd.to_string_lossy().into_owned(),
-    };
-    let meta_path = session::persistence::session_dir(&parent_info)
-        .join("subagents")
-        .join(id)
-        .join("meta.json");
-    let data = std::fs::read_to_string(meta_path).ok()?;
-    let meta: SubagentMeta = serde_json::from_str(&data).ok()?;
+    let meta = durable_subagent_meta(id, parent_session_id, parent_cwd)?;
     if meta.parent_session_id != parent_session_id
         || !matches!(meta.status.as_str(), "completed" | "failed" | "cancelled")
     {
@@ -1440,6 +1431,46 @@ fn durable_resume_source_for(
         persona: meta.persona,
         model_id: meta.effective_model_id,
     })
+}
+
+/// Load on-disk `meta.json` for a subagent under the parent session (any status).
+fn durable_subagent_meta(
+    id: &str,
+    parent_session_id: &str,
+    parent_cwd: &Path,
+) -> Option<SubagentMeta> {
+    let parent_info = SessionInfo {
+        id: acp::SessionId::new(parent_session_id),
+        cwd: parent_cwd.to_string_lossy().into_owned(),
+    };
+    let meta_path = session::persistence::session_dir(&parent_info)
+        .join("subagents")
+        .join(id)
+        .join("meta.json");
+    let data = std::fs::read_to_string(meta_path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Source `baseline_ref` from durable meta (resume fallback when live snapshot fails).
+fn durable_source_baseline_ref(
+    id: &str,
+    parent_session_id: &str,
+    parent_cwd: &Path,
+) -> Option<String> {
+    durable_subagent_meta(id, parent_session_id, parent_cwd)
+        .and_then(|m| m.baseline_ref)
+        .filter(|b| !b.is_empty())
+}
+
+/// Source `allowed_paths` from durable meta (resume inherits spawn allowlist).
+fn durable_source_allowed_paths(
+    id: &str,
+    parent_session_id: &str,
+    parent_cwd: &Path,
+) -> Option<Vec<String>> {
+    durable_subagent_meta(id, parent_session_id, parent_cwd)
+        .and_then(|m| m.allowed_paths)
+        .filter(|p| !p.is_empty())
 }
 /// Resolve the MCP pool a child subagent should import from its parent.
 ///

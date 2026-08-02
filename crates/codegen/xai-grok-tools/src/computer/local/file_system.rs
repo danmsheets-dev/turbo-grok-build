@@ -86,6 +86,32 @@ async fn write_file_with_transient_lock_retries(path: &Path, data: &[u8]) -> io:
     .await
 }
 
+/// Confirm `path` exists as a file with `expected_len` bytes (RC11 Round-2).
+///
+/// Catches races / AV scanners / incomplete flushes where `write` returned Ok
+/// but the agent-visible tree still lacks the file (empty snapshot after
+/// "successful" write under concurrent multi-agent load).
+async fn verify_write_persisted(path: &Path, expected_len: u64) -> io::Result<()> {
+    let meta = fs::metadata(path).await?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("path exists but is not a regular file: {}", path.display()),
+        ));
+    }
+    let len = meta.len();
+    if len != expected_len {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "size mismatch after write: expected {expected_len} bytes, got {len} at {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn write_file_with_retry_hooks<W, WFut, S, SFut, Success, Retry, Exhausted, IsRetryable>(
     mut write: W,
     mut sleep_for: S,
@@ -161,6 +187,35 @@ impl AsyncFileSystem for LocalFs {
             }
             return Err(e.into());
         }
+        // RC11 Round-2: never report success until the path is visible on disk
+        // with the expected size (Super concurrent "phantom write" FOOTGUN).
+        if let Err(e) = verify_write_persisted(path, data.len() as u64).await {
+            tracing::warn!(
+                path = %path.display(),
+                expected_len = data.len(),
+                error = %e,
+                "post-write verify failed; retrying write once"
+            );
+            if let Err(e2) = write_file_with_transient_lock_retries(path, data).await {
+                if is_permission_error(&e2) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "write");
+                }
+                return Err(e2.into());
+            }
+            if let Err(e3) = verify_write_persisted(path, data.len() as u64).await {
+                tracing::error!(
+                    path = %path.display(),
+                    expected_len = data.len(),
+                    error = %e3,
+                    "write reported OK but file missing or size mismatch after retry"
+                );
+                return Err(ComputerError::io(format!(
+                    "write to {} did not persist on disk (post-write verify failed: {e3}). \
+                     Refusing success so agents do not land empty snapshots.",
+                    path.display()
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -179,6 +234,7 @@ impl AsyncFileSystem for LocalFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computer::types::AsyncFileSystem;
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -210,6 +266,41 @@ mod tests {
         assert!(!is_transient_write_lock_error(
             &io::Error::from_raw_os_error(WINDOWS_ERROR_SHARING_VIOLATION,)
         ));
+    }
+
+    #[tokio::test]
+    async fn verify_write_persisted_accepts_matching_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.txt");
+        let data = b"hello-rc11";
+        fs::write(&path, data).await.unwrap();
+        verify_write_persisted(&path, data.len() as u64)
+            .await
+            .expect("matching size should pass");
+    }
+
+    #[tokio::test]
+    async fn verify_write_persisted_rejects_missing_and_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.txt");
+        assert!(verify_write_persisted(&missing, 1).await.is_err());
+
+        let path = dir.path().join("probe.txt");
+        fs::write(&path, b"abc").await.unwrap();
+        assert!(verify_write_persisted(&path, 99).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_file_refuses_success_when_path_missing_after_write() {
+        // Normal path: write + verify succeeds end-to-end.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.txt");
+        let data = b"persist-me";
+        LocalFs
+            .write_file(&path, data)
+            .await
+            .expect("LocalFs write should persist");
+        assert_eq!(fs::read(&path).await.unwrap(), data);
     }
 
     #[tokio::test]

@@ -92,6 +92,8 @@ pub enum ActionId {
     // Panes
     ToggleTodos,
     ToggleTasks,
+    /// Toggle Game Mode office view (Shift+G). Spectator room + composer.
+    ToggleGameMode,
     ToggleQueue,
     OpenSessions,
     OpenExtensions,
@@ -700,23 +702,27 @@ mod tests {
                 })
                 .map(|def| def.id)
                 .collect();
+            // Fullscreen/Inline: Ctrl+G = Game Mode. Minimal: external editor.
+            // Tasks pane is Ctrl+Shift+G on non-minimal.
             let expected = if mode.is_minimal() {
                 ActionId::EditPromptExternal
             } else {
-                ActionId::ToggleTasks
+                ActionId::ToggleGameMode
             };
             assert_eq!(ctrl_g_actions, vec![expected]);
             assert_eq!(registry.lookup(&ctrl_g, When::AgentScreen), Some(expected));
             assert!(registry.matches_id(expected, &ctrl_g));
 
-            assert_eq!(
-                registry.find(ActionId::ToggleTasks).is_some(),
-                !mode.is_minimal()
-            );
-            assert_eq!(
-                registry.find(ActionId::EditPromptExternal).is_some(),
-                mode.is_minimal()
-            );
+            if mode.is_minimal() {
+                assert!(registry.find(ActionId::EditPromptExternal).is_some());
+                // Game Mode / tasks panes are not the Ctrl+G owner in minimal.
+                assert!(!registry.matches_id(ActionId::ToggleGameMode, &ctrl_g));
+            } else {
+                assert!(registry.find(ActionId::ToggleTasks).is_some());
+                assert!(registry.find(ActionId::ToggleGameMode).is_some());
+                // Tasks moved off Ctrl+G → Ctrl+Shift+G
+                assert!(!registry.matches_id(ActionId::ToggleTasks, &ctrl_g));
+            }
         }
     }
 

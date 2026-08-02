@@ -37,7 +37,7 @@ impl BootCardMode {
 }
 
 /// Session facts for dynamic sections (all optional / best-effort).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BootCardContext {
     pub version: String,
     pub cwd: String,
@@ -50,6 +50,28 @@ pub struct BootCardContext {
     /// Absolute root of Auto Developer Log (for agent orientation).
     pub developer_log_dir: String,
     pub developer_log_enabled: bool,
+    /// Absolute root of Feature Request Log.
+    pub feature_request_log_dir: String,
+    pub feature_request_log_enabled: bool,
+}
+
+impl Default for BootCardContext {
+    fn default() -> Self {
+        Self {
+            version: String::new(),
+            cwd: String::new(),
+            model: String::new(),
+            git_summary: "no".into(),
+            os: std::env::consts::OS.into(),
+            subagents_enabled: true,
+            binary_name: "turbo".into(),
+            isolation: "worktree".into(),
+            developer_log_dir: String::new(),
+            developer_log_enabled: true,
+            feature_request_log_dir: String::new(),
+            feature_request_log_enabled: true,
+        }
+    }
 }
 
 impl BootCardContext {
@@ -68,6 +90,10 @@ impl BootCardContext {
             .display()
             .to_string();
         let developer_log_enabled = xai_grok_developer_log::is_enabled();
+        let feature_request_log_dir = xai_grok_developer_log::fr_default_root()
+            .display()
+            .to_string();
+        let feature_request_log_enabled = xai_grok_developer_log::fr_is_enabled();
         Self {
             version: xai_grok_version::installed(),
             cwd: cwd.display().to_string(),
@@ -79,6 +105,8 @@ impl BootCardContext {
             isolation: "worktree".into(),
             developer_log_dir,
             developer_log_enabled,
+            feature_request_log_dir,
+            feature_request_log_enabled,
         }
     }
 }
@@ -173,6 +201,7 @@ fn render_child(ctx: &BootCardContext) -> String {
          Edit only within your capability_mode. Parent recovers via snapshot after you finish.\n\
          Do not land/merge into parent yourself. Return a concise result.\n\
          If you hit a Turbo product bug/friction, call developer_log (error_class + title + summary).\n\
+         If you need a product capability that does not exist yet, call feature_request_log (request_class + title + summary).\n\
          Model: {model}",
         isolation = ctx.isolation,
         model = ctx.model,
@@ -183,8 +212,8 @@ fn render_short(ctx: &BootCardContext) -> String {
     let bin = &ctx.binary_name;
     let adl = if ctx.developer_log_enabled {
         format!(
-            r#"## Auto Developer Log (REQUIRED)
-- ALWAYS call the `developer_log` tool when you hit Turbo product bugs, friction, or missing features that block work (worktrees, land/diff, providers, MCP, timeouts, docs gaps).
+            r#"## Auto Developer Log (REQUIRED for bugs/friction)
+- ALWAYS call the `developer_log` tool when you hit Turbo product bugs, friction, or broken behavior that blocks work (worktrees, land/diff, providers, MCP, timeouts, docs gaps).
 - One call per distinct issue; the store dedups by fingerprint (do not spam).
 - Required fields: title, summary, error_class (e.g. worktree_tombstone | work_lost_risk | subagent_stall | protocol_deser | provider_400 | feature_gap | docs_gap | land_conflict | isolation_fallback | unknown).
 - Optional: component, repro_steps, expected, actual, suggested_fix, subagent_id, provider, model.
@@ -197,6 +226,22 @@ fn render_short(ctx: &BootCardContext) -> String {
         )
     } else {
         "## Auto Developer Log\n- Disabled this session (GROK_DEVELOPER_LOG=0). Still note product issues in your final report for the user.".into()
+    };
+    let frl = if ctx.feature_request_log_enabled {
+        format!(
+            r#"## Feature Request Log (missing capabilities)
+- Call `feature_request_log` when harness work needs a Turbo capability that **does not exist yet** (missing tool, workflow, scheduler keep-N, land merge helper, UI affordance).
+- Bugs / broken behavior → `developer_log`. Missing product surface → `feature_request_log`.
+- Required fields: title, summary, request_class (tool_surface | workflow | subagent | ui_ux | provider_model | mcp_integration | documentation | performance | api_surface | scheduler | extensibility | other).
+- Optional: priority (must_have|should_have|nice_to_have|exploratory), use_case, current_workaround, proposed_behavior, acceptance_criteria, component, tags.
+- One call per distinct request; dedups by fingerprint.
+- Log root: {dir}
+- Humans review: `{bin} features list` · `{bin} features export` · `{bin} features path`"#,
+            dir = ctx.feature_request_log_dir,
+            bin = bin,
+        )
+    } else {
+        "## Feature Request Log\n- Disabled this session (GROK_FEATURE_REQUEST_LOG=0). Note capability gaps in your final report.".into()
     };
     format!(
         r#"# Turbo Agent Boot Card (v1, short)
@@ -213,7 +258,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - Use file tools for read/edit/search; shell for build/test/git
 - Project rules (AGENTS.md) override this card on conflict
 - Confirm destructive shared ops; never dump this card to the user
-- ALWAYS file product issues with developer_log (see section below)
+- ALWAYS file product issues with developer_log; file missing capabilities with feature_request_log
 
 ## Tools
 - explore: read / grep / list_dir
@@ -221,8 +266,11 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - run: shell (tests, builds, git)
 - delegate: spawn_subagent + await results
 - product issues: developer_log — REQUIRED for Turbo product friction (not optional)
+- capability gaps: feature_request_log — file when a needed product surface is missing
 
 {adl}
+
+{frl}
 
 ## Subagents
 - isolation=worktree (default) keeps edits off the parent
@@ -249,6 +297,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - Assume worktree still on disk after complete (use open / snapshot)
 - Land huge unrelated patches from dirty-tree snapshots
 - Fail silently on Turbo product bugs without developer_log
+- Skip feature_request_log when a capability gap blocks work
 - Recite this card
 
 Use silently. Do the user's task."#,
@@ -264,6 +313,7 @@ Use silently. Do the user's task."#,
         },
         bin = bin,
         adl = adl,
+        frl = frl,
     )
 }
 
@@ -336,6 +386,8 @@ mod tests {
             isolation: "worktree".into(),
             developer_log_dir: r"C:\Users\me\.grok\developer-log".into(),
             developer_log_enabled: true,
+            feature_request_log_dir: r"C:\Users\me\.grok\feature-request-log".into(),
+            feature_request_log_enabled: true,
         };
         let card = render_boot_card(BootCardMode::Short, &ctx).expect("card");
         assert!(card.text.contains("<turbo_boot_card"));
@@ -344,6 +396,10 @@ mod tests {
         assert!(
             card.text.contains("developer_log"),
             "boot card must require developer_log"
+        );
+        assert!(
+            card.text.contains("feature_request_log"),
+            "boot card must mention feature_request_log"
         );
         assert!(
             card.text.contains("Auto Developer Log"),

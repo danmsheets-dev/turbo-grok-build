@@ -3,7 +3,7 @@ license = "Apache-2.0"
 edition.workspace = true
 name = "xai-grok-developer-log"
 version = "0.1.0"
-description = "Auto Developer Log — structured product-issue store for Turbo agents and maintainers"
+description = "Auto Developer Log + Feature Request Log — structured product-issue and capability-request stores for Turbo"
 
 [dependencies]
 chrono = { workspace = true }

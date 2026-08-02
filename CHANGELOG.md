@@ -4,6 +4,19 @@ All notable changes to **Turbo** (`turbo` binary) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Game Mode (RC11)** — `Shift+G` toggles a pixel office view of the Supervisor
+  (main agent) and up to six subagent desks. Mockup background + procedural
+  8-bit Rust sprites; halfblock paint; composer stays open for chat. Compact
+  terminals fall back to a card grid / Unicode office. Playground:
+  `cargo run -p xai-grok-pager --bin game-mode-playground`.
+
+### Fixed
+- **`/deepaudit` empty models** — Rhai `model_for_index` no longer fails with
+  `Variable not found: models` when nested (Rhai does not capture outer locals).
+  Passes `models` explicitly; empty list still inherits session model. (RC10 Q&A
+  P1 / developer_log.)
+
 ### Changed
 - **Full Hyper → Turbo rebrand** — product name is **Turbo Grok Build**;
   CLI binary **`turbo`** (was `hyper`); install root **`~/.turbo`** (was `~/.hyper`);

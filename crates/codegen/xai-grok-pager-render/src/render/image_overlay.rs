@@ -38,7 +38,7 @@ use geometry::ImagePlacement;
 use geometry::{
     MIN_BOX_WIDTH, MIN_META_BOX_HEIGHT, MIN_PIXEL_BOX_HEIGHT, overlay_geometry, plan_image_preview,
 };
-pub use halfblock::paint_halfblock_image;
+pub use halfblock::{paint_halfblock_image, paint_halfblock_rgba};
 
 #[derive(Debug)]
 struct ImageOverlayRender {

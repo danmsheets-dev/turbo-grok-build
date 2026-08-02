@@ -140,6 +140,8 @@ pub enum Command {
     Subagent(crate::subagent_cmd::SubagentArgs),
     /// List, show, export, or resolve Auto Developer Log product incidents
     Issues(crate::issues_cmd::IssuesArgs),
+    /// Feature Request Log — list / show / export capability requests from agents
+    Features(crate::features_cmd::FeaturesArgs),
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;

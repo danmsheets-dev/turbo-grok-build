@@ -17,6 +17,7 @@ pub mod docs;
 pub mod doctor_cmd;
 pub mod export_cmd;
 pub mod issues_cmd;
+pub mod features_cmd;
 pub mod git_info;
 pub mod headless;
 pub mod hyperlink_route;

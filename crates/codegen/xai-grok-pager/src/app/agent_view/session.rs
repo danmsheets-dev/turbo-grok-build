@@ -87,6 +87,7 @@ impl AgentView {
             tip_typing_dismissed: false,
             todo: TodoPane::new(),
             tasks: TasksPane::new(),
+            game_mode: crate::views::game_mode::GameModeState::new(),
             catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
             shared_queue: Vec::new(),

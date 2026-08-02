@@ -4741,16 +4741,25 @@ impl AppView {
                             d.restore_peek_viewport(agents);
                         }
                         if let Some(agent) = agents.get_mut(&id) {
-                            let announcement_banner_h =
+                            let game_mode = agent.game_mode.open;
+                            let announcement_banner_h = if game_mode {
+                                0
+                            } else {
                                 crate::views::announcements::session_banner_height(
                                     &self.active_announcements,
                                     &self.hidden_announcement_ids,
-                                );
-                            let privacy_banner = privacy_banner_agent;
-                            let show_session_tip =
-                                !privacy_banner && self.tip.is_some() && agent.should_show_tip();
-                            let has_mode_banner = agent.mode_switch_banner.is_some();
-                            let banner_height = if privacy_banner {
+                                )
+                            };
+                            let privacy_banner = privacy_banner_agent && !game_mode;
+                            let show_session_tip = !game_mode
+                                && !privacy_banner
+                                && self.tip.is_some()
+                                && agent.should_show_tip();
+                            let has_mode_banner =
+                                !game_mode && agent.mode_switch_banner.is_some();
+                            let banner_height = if game_mode {
+                                0
+                            } else if privacy_banner {
                                 crate::views::privacy_banner::MIN_HEIGHT
                             } else if has_mode_banner {
                                 1
@@ -5707,6 +5716,11 @@ impl AppView {
                     });
                 if fast {
                     return TickDemand::Fast;
+                }
+                // Game Mode office animations (~12fps) while the spectator
+                // view is open, even when the agent turn is idle.
+                if agent.game_mode.open {
+                    return TickDemand::Slow;
                 }
                 if cfg!(target_os = "macos")
                     && (agent.needs_link_modifier_poll()

@@ -134,7 +134,9 @@ if models.len() > 0 {
     }
 }
 
-fn model_for_index(idx) {
+// Rhai nested functions do not capture outer locals — pass `models` in.
+// Empty list → inherit session model (unit / ()).
+fn model_for_index(models, idx) {
     if models.len() == 0 {
         ()
     } else {
@@ -209,7 +211,7 @@ try {
         output_schema: plan_schema,
         phase: "Scope",
     };
-    let m0 = model_for_index(0);
+    let m0 = model_for_index(models, 0);
     if m0 != () {
         scoper_opts.model = m0;
     }
@@ -322,7 +324,7 @@ for t in targets {
         output_schema: findings_schema,
         phase: "Investigate",
     };
-    let mid = model_for_index(ti);
+    let mid = model_for_index(models, ti);
     if mid != () {
         job.model = mid;
     }

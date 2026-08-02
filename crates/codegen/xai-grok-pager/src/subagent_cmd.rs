@@ -109,6 +109,9 @@ struct MetaView {
     diffstat: Option<String>,
     #[serde(default)]
     changed_paths: Option<Vec<String>>,
+    /// Path prefixes the child was allowed to write / parent may land.
+    #[serde(default)]
+    allowed_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -294,6 +297,7 @@ fn list_entries(cwd: &str, session: Option<&str>) -> Result<Vec<ListedSubagent>>
                 child_cwd: None,
                 diffstat: None,
                 changed_paths: None,
+                allowed_paths: None,
             });
             let patch = meta.patch_path.clone().or_else(|| {
                 let p = entry.path().join("changes.patch");
@@ -457,7 +461,56 @@ fn cmd_restore(cwd: &Path, r: &Resolved, dest: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// Whether `path` is under any allowed_paths prefix (forward-slash normalized).
+fn path_in_allowlist(path: &str, allowed: &[String]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let p = path.replace('\\', "/");
+    let p = p.trim_start_matches("./");
+    allowed.iter().any(|a| {
+        let a = a.replace('\\', "/");
+        let a = a.trim_end_matches('/');
+        p == a || p.starts_with(&format!("{a}/"))
+    })
+}
+
+fn allowlist_pathspecs(r: &Resolved) -> Option<Vec<String>> {
+    r.meta
+        .allowed_paths
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .cloned()
+}
+
+fn git_diff_range(cwd: &Path, base: &str, snap: &str, pathspecs: Option<&[String]>) -> Result<String> {
+    let mut args: Vec<&str> = vec!["diff", "--no-ext-diff", "--binary", base, snap];
+    let owned: Vec<String>;
+    if let Some(ps) = pathspecs {
+        if !ps.is_empty() {
+            args.push("--");
+            owned = ps.to_vec();
+            for p in &owned {
+                args.push(p.as_str());
+            }
+            return git(cwd, &args);
+        }
+    }
+    git(cwd, &args)
+}
+
+fn filter_name_list(names: &str, allowed: &[String]) -> Vec<String> {
+    names
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| path_in_allowlist(s, allowed))
+        .map(str::to_string)
+        .collect()
+}
+
 fn cmd_diff(cwd: &Path, r: &Resolved) -> Result<()> {
+    let pathspecs = allowlist_pathspecs(r);
     // Prefer agent-only baseline..snapshot (clone-safe, dirty-parent-safe).
     if let (Some(base), Some(snap)) = (
         r.meta.baseline_ref.as_deref().filter(|b| !b.is_empty()),
@@ -466,15 +519,18 @@ fn cmd_diff(cwd: &Path, r: &Resolved) -> Result<()> {
         if git(cwd, &["rev-parse", "--verify", base]).is_ok()
             && git(cwd, &["rev-parse", "--verify", snap]).is_ok()
         {
-            let out = git(cwd, &["diff", "--no-ext-diff", base, snap])?;
+            let out = git_diff_range(cwd, base, snap, pathspecs.as_deref())?;
             print_diff("baseline_snapshot", &out);
+            if pathspecs.is_some() {
+                println!("# allowed_paths filter active");
+            }
             return Ok(());
         }
     }
-    // Snapshot vs HEAD (legacy when no baseline)
+    // Snapshot vs HEAD (legacy when no baseline) — still respect allowlist.
     if let Some(ref snap) = r.meta.snapshot_ref {
         if git(cwd, &["rev-parse", "--verify", snap]).is_ok() {
-            let out = git(cwd, &["diff", "--no-ext-diff", "HEAD", snap])?;
+            let out = git_diff_range(cwd, "HEAD", snap, pathspecs.as_deref())?;
             print_diff("snapshot_ref", &out);
             return Ok(());
         }
@@ -484,7 +540,17 @@ fn cmd_diff(cwd: &Path, r: &Resolved) -> Result<()> {
     if let Some(ref wt) = r.meta.worktree_path {
         let wt = Path::new(wt);
         if wt.is_dir() {
-            let out = git(wt, &["diff", "--no-ext-diff", "HEAD"]).unwrap_or_default();
+            let out = if let Some(ps) = pathspecs.as_deref().filter(|p| !p.is_empty()) {
+                let mut args: Vec<&str> = vec!["diff", "--no-ext-diff", "HEAD", "--"];
+                let owned: Vec<String> = ps.to_vec();
+                for p in &owned {
+                    args.push(p.as_str());
+                }
+                println!("# allowed_paths filter active");
+                git(wt, &args).unwrap_or_default()
+            } else {
+                git(wt, &["diff", "--no-ext-diff", "HEAD"]).unwrap_or_default()
+            };
             print_diff("live_worktree", &out);
             return Ok(());
         }
@@ -548,7 +614,44 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
 }
 
 fn land_from_worktree(cwd: &Path, wt: &Path, mode: &str, r: &Resolved) -> Result<()> {
-    let diff = git(wt, &["diff", "--binary", "HEAD"])?;
+    let pathspecs = allowlist_pathspecs(r);
+    let diff = if let Some(ref allow) = pathspecs {
+        // Name list first so we can surface skipped out-of-allowlist paths.
+        let names = git(wt, &["diff", "--name-only", "HEAD"]).unwrap_or_default();
+        let all: Vec<String> = names
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let allowed = filter_name_list(&names, allow);
+        let skipped: Vec<&str> = all
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !path_in_allowlist(p, allow))
+            .collect();
+        if !skipped.is_empty() {
+            println!(
+                "Skipping {} path(s) outside allowed_paths:",
+                skipped.len()
+            );
+            for p in skipped.iter().take(20) {
+                println!("  - {p}");
+            }
+        }
+        if allowed.is_empty() {
+            println!("No allowlisted tracked diff in live worktree for {}.", r.id);
+            update_land_status(&r.meta_path, "landed_empty")?;
+            return Ok(());
+        }
+        let mut args: Vec<&str> = vec!["diff", "--binary", "HEAD", "--"];
+        for p in &allowed {
+            args.push(p.as_str());
+        }
+        git(wt, &args)?
+    } else {
+        git(wt, &["diff", "--binary", "HEAD"])?
+    };
     if diff.trim().is_empty() {
         // include untracked via apply of full tree is out of scope; try name-status
         println!("No tracked diff in live worktree (untracked files are not auto-landed).");
@@ -558,37 +661,188 @@ fn land_from_worktree(cwd: &Path, wt: &Path, mode: &str, r: &Resolved) -> Result
     apply_diff_text(cwd, &diff, mode)?;
     update_land_status(&r.meta_path, "landed")?;
     println!("Landed live worktree for {} (mode={mode}).", r.id);
+    print_landed_paths_from_diff(&diff);
     Ok(())
 }
 
 fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Result<()> {
-    // Agent-only when baseline_ref is present; otherwise HEAD..snap (legacy).
-    let base = r
+    // Agent-only when baseline_ref is present. Without it, refuse bulk HEAD..snap
+    // (inflates dirty parent / resume FOOTGUN) unless changed_paths is a small set.
+    let base_opt = r
         .meta
         .baseline_ref
         .as_deref()
         .filter(|b| !b.is_empty())
-        .filter(|b| git(cwd, &["rev-parse", "--verify", b]).is_ok())
-        .unwrap_or("HEAD");
-    let diff = git(cwd, &["diff", "--binary", base, snap])?;
+        .filter(|b| git(cwd, &["rev-parse", "--verify", b]).is_ok());
+
+    let pathspecs = allowlist_pathspecs(r);
+
+    let (base, source_label) = if let Some(b) = base_opt {
+        (b, "baseline_snapshot")
+    } else if let Some(paths) = r.meta.changed_paths.as_ref().filter(|p| !p.is_empty() && p.len() <= 50)
+    {
+        // Path-scoped checkout from snap when no baseline (last-resort agent-only).
+        let mut filtered: Vec<String> = paths.clone();
+        if let Some(ref allow) = pathspecs {
+            filtered.retain(|p| path_in_allowlist(p, allow));
+        }
+        if filtered.is_empty() {
+            println!("No allowlisted changed_paths to land for {}.", r.id);
+            update_land_status(&r.meta_path, "landed_empty")?;
+            return Ok(());
+        }
+        land_checkout_paths(cwd, snap, &filtered, mode)?;
+        update_land_status(&r.meta_path, "landed")?;
+        println!(
+            "Landed {} path(s) from snapshot_ref `{snap}` for {} (mode={mode}, no baseline).",
+            filtered.len(),
+            r.id
+        );
+        print_landed_path_list(&filtered);
+        return Ok(());
+    } else {
+        bail!(
+            "refusing land of snapshot `{snap}` for {}: no baseline_ref and no small \
+             changed_paths list. Agent-only land is blocked because the snapshot is not \
+             baseline-scoped (dirty-parent bulk risk). Re-run with worktree isolation, or: \
+             turbo subagent open {} --restore  then land after a baseline is present.",
+            r.id,
+            r.id
+        );
+    };
+
+    let diff = git_diff_range(cwd, base, snap, pathspecs.as_deref())?;
     if diff.trim().is_empty() {
-        println!("Snapshot `{snap}` has no agent-only diff vs `{base}` (nothing to land).");
+        println!(
+            "Snapshot `{snap}` has no agent-only diff vs `{base}` (nothing to land; source={source_label})."
+        );
         update_land_status(&r.meta_path, "landed_empty")?;
         return Ok(());
     }
+
+    // Surface skipped allowlist paths when we can name them.
+    let mut landed_names: Vec<String> = Vec::new();
+    if let Ok(names) = git(cwd, &["diff", "--name-only", base, snap]) {
+        let all: Vec<&str> = names.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+        if let Some(ref allow) = pathspecs {
+            let skipped: Vec<&str> = all
+                .iter()
+                .copied()
+                .filter(|p| !path_in_allowlist(p, allow))
+                .collect();
+            if !skipped.is_empty() {
+                println!(
+                    "Skipping {} path(s) outside allowed_paths:",
+                    skipped.len()
+                );
+                for p in skipped.iter().take(20) {
+                    println!("  - {p}");
+                }
+            }
+            landed_names = all
+                .iter()
+                .copied()
+                .filter(|p| path_in_allowlist(p, allow))
+                .map(str::to_string)
+                .collect();
+        } else {
+            landed_names = all.iter().map(|s| (*s).to_string()).collect();
+        }
+    }
+
     if mode == "merge" {
-        // Fail closed: if apply --check fails, abort.
         apply_diff_text(cwd, &diff, "merge")?;
     } else {
         apply_diff_text(cwd, &diff, "overwrite")?;
     }
     update_land_status(&r.meta_path, "landed")?;
-    println!("Landed snapshot_ref `{snap}` for {} (mode={mode}).", r.id);
+    println!(
+        "Landed snapshot_ref `{snap}` for {} (mode={mode}, source={source_label}).",
+        r.id
+    );
+    if !landed_names.is_empty() {
+        print_landed_path_list(&landed_names);
+    } else {
+        print_landed_paths_from_diff(&diff);
+    }
+    Ok(())
+}
+
+/// Print paths applied by a successful land (Round-2 harness UX).
+fn print_landed_path_list(paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    println!("files_landed ({}):", paths.len());
+    for p in paths.iter().take(50) {
+        println!("  - {p}");
+    }
+    if paths.len() > 50 {
+        println!("  ... +{} more", paths.len() - 50);
+    }
+}
+
+fn print_landed_paths_from_diff(diff: &str) {
+    let paths = patch_changed_paths(diff);
+    print_landed_path_list(&paths);
+}
+
+fn land_checkout_paths(cwd: &Path, snap: &str, paths: &[String], mode: &str) -> Result<()> {
+    if mode == "merge" {
+        // Fail closed if any path would conflict — use diff --check via apply of path-scoped patch.
+        let mut args: Vec<&str> = vec!["diff", "--binary", "HEAD", snap, "--"];
+        let owned: Vec<String> = paths.to_vec();
+        for p in &owned {
+            args.push(p.as_str());
+        }
+        let diff = git(cwd, &args)?;
+        if !diff.trim().is_empty() {
+            apply_diff_text(cwd, &diff, "merge")?;
+        }
+        return Ok(());
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("checkout").arg(snap).arg("--");
+    for p in paths {
+        cmd.arg(p);
+    }
+    let status = cmd
+        .current_dir(cwd)
+        .status()
+        .context("git checkout snap -- paths")?;
+    if !status.success() {
+        bail!("git checkout {snap} -- paths failed (exit {status})");
+    }
     Ok(())
 }
 
 fn land_from_patch(cwd: &Path, patch: &Path, mode: &str, r: &Resolved) -> Result<()> {
     let text = fs::read_to_string(patch).with_context(|| format!("read {}", patch.display()))?;
+    // Fail closed: refuse patch land when any path falls outside allowed_paths
+    // (filtering a unified diff is lossy; snapshot/worktree land filters instead).
+    if let Some(ref allow) = allowlist_pathspecs(r) {
+        let paths = patch_changed_paths(&text);
+        let denied: Vec<&str> = paths
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !path_in_allowlist(p, allow))
+            .collect();
+        if !denied.is_empty() {
+            bail!(
+                "land refused: {} path(s) outside allowed_paths {:?}: {}{}. \
+                 Re-spawn with a wider allowlist or land from baseline_snapshot \
+                 (filters out-of-allowlist paths).",
+                denied.len(),
+                allow,
+                denied.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
+                if denied.len() > 8 {
+                    format!(" (+{} more)", denied.len() - 8)
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
     apply_diff_text(cwd, &text, mode)?;
     update_land_status(&r.meta_path, "landed")?;
     println!(
@@ -596,7 +850,36 @@ fn land_from_patch(cwd: &Path, patch: &Path, mode: &str, r: &Resolved) -> Result
         patch.display(),
         r.id
     );
+    print_landed_paths_from_diff(&text);
     Ok(())
+}
+
+/// Extract changed paths from a unified diff (`diff --git a/… b/…` lines).
+fn patch_changed_paths(diff: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in diff.lines() {
+        let Some(rest) = line.strip_prefix("diff --git ") else {
+            continue;
+        };
+        // Format: `a/path b/path` (paths may contain spaces rarely; take last ` b/` split).
+        if let Some(idx) = rest.rfind(" b/") {
+            let b = rest[idx + 3..].trim();
+            if !b.is_empty() && b != "/dev/null" {
+                out.push(b.to_string());
+                continue;
+            }
+        }
+        if let Some(a) = rest.strip_prefix("a/") {
+            if let Some((path, _)) = a.split_once(" b/") {
+                if path != "/dev/null" {
+                    out.push(path.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn apply_diff_text(cwd: &Path, diff: &str, mode: &str) -> Result<()> {
@@ -619,10 +902,22 @@ fn apply_diff_text(cwd: &Path, diff: &str, mode: &str) -> Result<()> {
             .context("git apply --check")?;
         if !status.status.success() {
             let err = String::from_utf8_lossy(&status.stderr);
-            bail!(
-                "merge land would conflict (nothing applied):\n{}",
-                err.trim()
-            );
+            let trimmed = err.trim();
+            // Round-2 UX: huge dirty-parent conflict dumps bury the remediation.
+            let preview = if trimmed.lines().count() > 40 || trimmed.len() > 4000 {
+                let head: String = trimmed.lines().take(24).collect::<Vec<_>>().join("\n");
+                format!(
+                    "{head}\n… (truncated; {} lines total)\n\n\
+                     Hint: if this looks like dirty-parent bulk (.grok-restore/, worktrees/), \
+                     the snapshot is probably not baseline-scoped. Prefer agent-only land via \
+                     baseline_ref..snapshot_ref (`turbo subagent open <id>` should show baseline_ref). \
+                     Refuse overwrite unless intentional.",
+                    trimmed.lines().count()
+                )
+            } else {
+                trimmed.to_string()
+            };
+            bail!("merge land would conflict (nothing applied):\n{preview}");
         }
     }
     let mut args = vec!["apply"];
@@ -818,5 +1113,38 @@ mod tests {
         assert_eq!(parse_duration("24h").unwrap(), Duration::from_secs(24 * 3600));
         assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(7 * 86400));
         assert_eq!(parse_duration("90").unwrap(), Duration::from_secs(90 * 3600));
+    }
+
+    #[test]
+    fn path_in_allowlist_prefix_and_exact() {
+        let allowed = vec!["results/harness/".into(), "docs".into()];
+        assert!(path_in_allowlist("results/harness/marker.txt", &allowed));
+        assert!(path_in_allowlist("docs", &allowed));
+        assert!(path_in_allowlist("docs/a.md", &allowed));
+        assert!(!path_in_allowlist("tasks/coding/outside.txt", &allowed));
+        assert!(!path_in_allowlist("results/other/x", &allowed));
+        // empty allowlist = unrestricted
+        assert!(path_in_allowlist("anything", &[]));
+    }
+
+    #[test]
+    fn patch_changed_paths_parses_diff_git_headers() {
+        let diff = "\
+diff --git a/results/ok.txt b/results/ok.txt
+index 111..222 100644
+--- a/results/ok.txt
++++ b/results/ok.txt
+@@ -0,0 +1 @@
++hi
+diff --git a/tasks/out.txt b/tasks/out.txt
+new file mode 100644
+--- /dev/null
++++ b/tasks/out.txt
+@@ -0,0 +1 @@
++nope
+";
+        let paths = patch_changed_paths(diff);
+        assert!(paths.iter().any(|p| p == "results/ok.txt"));
+        assert!(paths.iter().any(|p| p == "tasks/out.txt"));
     }
 }

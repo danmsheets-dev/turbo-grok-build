@@ -749,6 +749,9 @@ pub struct AgentView {
     pub tip_typing_dismissed: bool,
     pub todo: TodoPane,
     pub tasks: TasksPane,
+    /// Game Mode office view (Shift+G). Spectator room; composer still routes
+    /// to the Supervisor (main agent).
+    pub game_mode: crate::views::game_mode::GameModeState,
     pub catalog: SubagentCatalogPane,
     pub queue: QueuePane,
     /// Per-agent mirror of the server-authoritative shared prompt queue
@@ -2119,6 +2122,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::OpenSettings => return None,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
+        | ActionId::ToggleGameMode
         | ActionId::EditPromptExternal
         | ActionId::ToggleQueue
         | ActionId::OpenSessions

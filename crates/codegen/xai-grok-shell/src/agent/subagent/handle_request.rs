@@ -491,6 +491,58 @@ pub(crate) async fn run_shell_child(
         None
     };
 
+    // RC11: resume Reuse/Rehydrate never hit the fresh-create baseline path above.
+    // Capture a FRESH baseline for THIS child id at resume start so dispose
+    // export / diff / land stay agent-only (not dirty-parent bulk FOOTGUN).
+    // Prefer a new snapshot of the live tree; fall back to the source's
+    // baseline_ref from meta.json when snapshot fails.
+    if resume_source.is_some() && spawn_baseline_ref.is_none() {
+        if let Some(ref wt) = worktree_path {
+            let baseline_ref_name = format!("refs/grok/subagent-baselines/{}", request.id);
+            let source_repo = resolve_subagent_source_repo(&ctx);
+            match crate::session::worktree::snapshot_subagent_worktree(
+                wt,
+                &source_repo,
+                &baseline_ref_name,
+            )
+            .await
+            {
+                Ok(baseline_ref) => {
+                    tracing::info!(
+                        subagent_id = %request.id,
+                        baseline_ref = %baseline_ref,
+                        "Recorded resume-time spawn baseline for agent-only land/diff"
+                    );
+                    spawn_baseline_ref = Some(baseline_ref);
+                }
+                Err(e) => {
+                    let inherited = resume_source.as_ref().and_then(|src| {
+                        durable_source_baseline_ref(
+                            &src.subagent_id,
+                            &ctx.parent_session_id,
+                            &ctx.parent_cwd,
+                        )
+                    });
+                    if let Some(base) = inherited {
+                        tracing::warn!(
+                            subagent_id = %request.id,
+                            error = %e,
+                            baseline_ref = %base,
+                            "Resume baseline snapshot failed; inheriting source baseline_ref"
+                        );
+                        spawn_baseline_ref = Some(base);
+                    } else {
+                        tracing::warn!(
+                            subagent_id = %request.id,
+                            error = %e,
+                            "Failed to snapshot resume baseline; diff/land may include dirty-parent files"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
     // Remove a freshly created worktree if we bail before the normal
     // completion dispose path (model/bootstrap/spawn failures).
@@ -758,11 +810,22 @@ pub(crate) async fn run_shell_child(
         diffstat: None,
         changed_paths: None,
         land_status: None,
+        // Inherit source allowlist on resume when the caller omits one so land
+        // continues to enforce the original spawn boundary (RC11 harness).
         allowed_paths: request
             .allowed_paths
             .as_ref()
             .filter(|p| !p.is_empty())
-            .cloned(),
+            .cloned()
+            .or_else(|| {
+                resume_source.as_ref().and_then(|src| {
+                    durable_source_allowed_paths(
+                        &src.subagent_id,
+                        &ctx.parent_session_id,
+                        &ctx.parent_cwd,
+                    )
+                })
+            }),
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);

@@ -287,6 +287,10 @@ path = "src/bin/question_view_playground.rs"
 name = "todo-pane-playground"
 path = "src/bin/todo_pane_playground.rs"
 
+[[bin]]
+name = "game-mode-playground"
+path = "src/bin/game_mode_playground.rs"
+
 # Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
 # `cargo clippy --workspace -- -D warnings` on this package is stricter than
 # the workspace-default clippy allows used in CI.

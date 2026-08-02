@@ -217,6 +217,9 @@ pub(crate) fn execute_create_worktree(plan: WorktreePlan) -> Result<CreateWorktr
     let source = plan.source.clone();
     let result = execute_create_worktree_dispatch(plan)?;
     record_main_repo_marker(&source, &result.worktree_path);
+    // RC11: always seed objects/info/alternates for standalone `.git/` trees so
+    // a partial object CoW still resolves HEAD (bad object HEAD FOOTGUN).
+    write_objects_alternates(&source, &result.worktree_path);
     Ok(result)
 }
 
@@ -247,6 +250,106 @@ fn record_main_repo_marker(source: &Path, worktree: &Path) {
     };
     if let Err(e) = std::fs::write(&marker, main_repo.to_string_lossy().as_bytes()) {
         tracing::warn!(error = %e, marker = %marker.display(), "failed to write worktree source marker");
+    }
+}
+
+/// Resolve the source repo's `objects/` directory (handles linked worktrees).
+fn resolve_source_objects_dir(source: &Path) -> Option<std::path::PathBuf> {
+    let root = git::find_worktree_root(source).ok()?;
+    let git_path = root.join(".git");
+    if git_path.is_dir() {
+        let objects = git_path.join("objects");
+        return objects.is_dir().then_some(objects);
+    }
+    if git_path.is_file() {
+        // Linked worktree: `.git` is `gitdir: <common>/.git/worktrees/<name>`
+        let content = std::fs::read_to_string(&git_path).ok()?;
+        let gitdir = content
+            .lines()
+            .find_map(|l| l.strip_prefix("gitdir:"))
+            .map(str::trim)?;
+        let gitdir_path = std::path::PathBuf::from(gitdir);
+        // Prefer `commondir` when present (relative to the worktree gitdir).
+        let common_git = gitdir_path.join("commondir");
+        if let Ok(common_rel) = std::fs::read_to_string(&common_git) {
+            let common = gitdir_path.join(common_rel.trim());
+            let objects = common.join("objects");
+            if objects.is_dir() {
+                return Some(objects);
+            }
+        }
+        // Fallback: `<repo>/.git/worktrees/<name>` → parent.parent = `.git`
+        if let Some(common) = gitdir_path.parent().and_then(|p| p.parent()) {
+            let objects = common.join("objects");
+            if objects.is_dir() {
+                return Some(objects);
+            }
+        }
+    }
+    None
+}
+
+/// Write `<worktree>/.git/objects/info/alternates` → source objects path.
+///
+/// Standalone CoW can miss objects (Windows partial copy / race). Alternates
+/// let git resolve the parent object store so HEAD commits remain readable.
+/// No-op for linked worktrees (`.git` is a file) or when source objects are
+/// missing. Safe to call when objects were fully copied — local objects win.
+fn write_objects_alternates(source: &Path, worktree: &Path) {
+    let git_dir = worktree.join(".git");
+    if !git_dir.is_dir() {
+        return;
+    }
+    let Some(source_objects) = resolve_source_objects_dir(source) else {
+        tracing::debug!(
+            source = %source.display(),
+            worktree = %worktree.display(),
+            "objects alternates: could not resolve source objects dir"
+        );
+        return;
+    };
+    // Absolute path required so the worktree resolves objects after cwd moves.
+    let abs = match dunce::canonicalize(&source_objects) {
+        Ok(p) => p,
+        Err(_) => source_objects,
+    };
+    // Git alternates use one path per line; forward slashes are portable.
+    let line = abs.to_string_lossy().replace('\\', "/");
+    let info = git_dir.join("objects").join("info");
+    if let Err(e) = std::fs::create_dir_all(&info) {
+        tracing::warn!(
+            error = %e,
+            path = %info.display(),
+            "failed to create objects/info for alternates"
+        );
+        return;
+    }
+    let alternates = info.join("alternates");
+    // Preserve any existing alternate lines that aren't ours, then ensure ours
+    // is present (idempotent on re-create / rehydrate).
+    let mut lines: Vec<String> = std::fs::read_to_string(&alternates)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if !lines.iter().any(|l| l == &line || l.replace('\\', "/") == line) {
+        lines.push(line);
+    }
+    let body = format!("{}\n", lines.join("\n"));
+    if let Err(e) = std::fs::write(&alternates, body) {
+        tracing::warn!(
+            error = %e,
+            path = %alternates.display(),
+            "failed to write objects/info/alternates"
+        );
+    } else {
+        tracing::debug!(
+            worktree = %worktree.display(),
+            alternates = %alternates.display(),
+            "wrote objects/info/alternates for standalone worktree"
+        );
     }
 }
 
@@ -1727,5 +1830,53 @@ mod tests {
             "/the/ultimate/main/repo",
             "existing marker must not be overwritten"
         );
+    }
+
+    #[test]
+    fn test_objects_alternates_written_for_standalone() {
+        xai_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        xai_test_utils::git::init_git_repo(&source);
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(dest.join(".git/objects")).unwrap();
+
+        write_objects_alternates(&source, &dest);
+
+        let alternates = dest.join(".git/objects/info/alternates");
+        let body = std::fs::read_to_string(&alternates).expect("alternates should be written");
+        let line = body.lines().next().expect("one alternate line");
+        assert!(
+            line.contains("objects") || Path::new(line).join("..").exists(),
+            "alternate should point at source objects, got {body:?}"
+        );
+        // Source objects dir must exist and be referenced.
+        let source_objects = source.join(".git/objects");
+        assert!(source_objects.is_dir());
+        let canon = dunce::canonicalize(&source_objects)
+            .unwrap_or(source_objects)
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(
+            body.replace('\\', "/").contains(&canon)
+                || body.contains("objects"),
+            "expected source objects path in alternates: {body}"
+        );
+    }
+
+    #[test]
+    fn test_objects_alternates_skipped_for_linked_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join(".git"), "gitdir: /main/.git/worktrees/wt").unwrap();
+
+        write_objects_alternates(&source, &dest);
+
+        assert!(!dest.join(".git/objects/info/alternates").exists());
     }
 }

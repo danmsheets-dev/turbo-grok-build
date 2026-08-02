@@ -283,6 +283,7 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&grok_build::WorkflowTool).into(),
             // Required by Agent Boot Card / Auto Developer Log policy (RC10).
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
         ],
         behavior_preset: None,
     }
@@ -305,6 +306,7 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
         ],
         behavior_preset: None,
     }
@@ -336,6 +338,7 @@ pub fn grok_build_hashline_toolset(
         (&grok_build::UpdateGoalTool).into(),
         (&grok_build::WorkflowTool).into(),
         (&grok_build::DeveloperLogTool).into(),
+        (&grok_build::FeatureRequestLogTool).into(),
     ]);
     ToolServerConfig {
         tools,
@@ -374,6 +377,7 @@ fn explore_toolset() -> ToolServerConfig {
             (&grok_build::GrepTool).into(),
             // Read-only product-issue filing (is_read_only = true).
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
         ],
         behavior_preset: None,
     }
@@ -392,6 +396,7 @@ fn plan_toolset() -> ToolServerConfig {
             // (&grok_build::SkillTool).into(),
             (&grok_build::TodoWriteTool).into(),
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
             // search_replace + run_terminal_command intentionally omitted (read-only)
         ],
         behavior_preset: None,
@@ -425,6 +430,7 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
             // Plan mode tools
             (&grok_build::EnterPlanModeTool).into(),
             (&grok_build::ExitPlanModeTool).into(),
@@ -463,6 +469,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
             // Scheduling and monitoring
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),
@@ -512,6 +519,7 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
             // Plan mode tools
             (&grok_build::EnterPlanModeTool).into(),
             (&grok_build::ExitPlanModeTool).into(),
@@ -546,6 +554,7 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
             // Ask user tool (without plan mode)
             (&grok_build::AskUserQuestionTool).into(),
         ],
@@ -2503,6 +2512,10 @@ description: Test default tool config
                 .any(|id| id.contains("developer_log") || id == "GrokBuild:developer_log"),
             "default toolset must expose developer_log for boot card policy; got {ids:?}"
         );
+        assert!(
+            ids.iter().any(|id| id.contains("feature_request_log")),
+            "default toolset must expose feature_request_log; got {ids:?}"
+        );
         // Explore (RO) also gets it so deepaudit children can file incidents.
         let explore = explore_toolset();
         let explore_ids: Vec<String> = explore.tools.iter().map(|t| t.id.clone()).collect();
@@ -2511,6 +2524,12 @@ description: Test default tool config
                 .iter()
                 .any(|id| id.contains("developer_log") || id == "GrokBuild:developer_log"),
             "explore toolset must include developer_log; got {explore_ids:?}"
+        );
+        assert!(
+            explore_ids
+                .iter()
+                .any(|id| id.contains("feature_request_log")),
+            "explore toolset must include feature_request_log; got {explore_ids:?}"
         );
     }
     #[test]

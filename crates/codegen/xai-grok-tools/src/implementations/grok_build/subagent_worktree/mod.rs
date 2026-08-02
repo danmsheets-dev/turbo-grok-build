@@ -663,9 +663,12 @@ mod allowlist_tests {
             status: None,
             worktree_path: None,
             snapshot_ref: None,
+            baseline_ref: None,
             patch_path: None,
             worktree_state: None,
             child_cwd: None,
+            diffstat: None,
+            changed_paths: None,
             allowed_paths: Some(vec!["crates/a/".into(), "docs".into()]),
         };
         let paths = vec![
