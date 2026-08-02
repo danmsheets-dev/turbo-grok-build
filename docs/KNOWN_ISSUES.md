@@ -22,10 +22,15 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
 | Worktree naming | low | Not always `git worktree list` | Implementation may still use clone/linked sandbox; recovery is via snapshot ref / patch |
-| Path allowlists | deferred | `allowed_paths` for parallel land | RC9 |
 | Ultracode keyword | deferred | Auto-workflow on keyword | RC9; use `/deepaudit` or `/workflow` |
 | Fan-out `spawn_many` | deferred | Single-call matrix spawn | Coordinator queue already max 4 |
 | Nightly NVIDIA matrix CI | deferred | Live conformance | Unit fixtures shipped |
+
+## Implemented (pre-r8 residual)
+
+| ID | Topic | Notes |
+|----|--------|--------|
+| R2 | Path allowlists | Optional `allowed_paths` on `task` spawn → `SubagentRequest` / `meta.json`. Non-empty allowlist: `land_subagent` refuses any path outside the prefixes (fail closed); `diff_subagent` filters shown files/diff. Paths normalized (`/` , strip `./`, reject `..` escape / absolute). Omit = unrestricted (prior behavior). |
 
 ## Fixed in v0.2.109
 

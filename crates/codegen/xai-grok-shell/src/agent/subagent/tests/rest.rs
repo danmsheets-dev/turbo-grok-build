@@ -350,6 +350,7 @@ fn resumed_from_field_in_meta_roundtrips() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -401,6 +402,7 @@ fn resumed_from_none_not_serialized_in_meta() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -452,6 +454,7 @@ fn snapshot_ref_field_in_meta_roundtrips() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -506,6 +509,7 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     }
 }
@@ -778,6 +782,7 @@ fn subagent_session_metadata_roundtrip() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
@@ -842,6 +847,7 @@ fn subagent_session_metadata_non_forked() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
@@ -910,6 +916,7 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let spawn_gcs = SubagentSessionMetadata::from_meta(
@@ -997,6 +1004,7 @@ fn upload_lifecycle_failure_preserves_error() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
@@ -1049,6 +1057,7 @@ fn session_metadata_session_kind_for_resumed() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
@@ -1374,6 +1383,7 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: Some("grok-3".into()),
     };
     write_subagent_meta(&dir, &meta);
@@ -1417,6 +1427,7 @@ fn durable_fallback_rejects_running_status() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     };
     write_subagent_meta(&parent_dir, &meta);
@@ -1503,6 +1514,7 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: None,
     }
 }
@@ -1783,6 +1795,7 @@ fn durable_meta_roundtrips_effective_model_id() {
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: None,
         effective_model_id: Some("grok-3".into()),
     };
     write_subagent_meta(&dir, &meta);

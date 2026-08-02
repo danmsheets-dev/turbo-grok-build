@@ -2080,6 +2080,9 @@ mod tests {
             isolation_fallback: false,
             snapshot_ref: None,
             worktree_state: None,
+            patch_path: None,
+            diffstat: None,
+            error_class: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2123,6 +2126,9 @@ mod tests {
             isolation_fallback: false,
             snapshot_ref: None,
             worktree_state: None,
+            patch_path: None,
+            diffstat: None,
+            error_class: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2154,6 +2160,9 @@ mod tests {
             isolation_fallback: false,
             snapshot_ref: None,
             worktree_state: None,
+            patch_path: None,
+            diffstat: None,
+            error_class: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2181,6 +2190,9 @@ mod tests {
             isolation_fallback: false,
             snapshot_ref: None,
             worktree_state: None,
+            patch_path: None,
+            diffstat: None,
+            error_class: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-abc-123");
@@ -2461,6 +2473,9 @@ mod tests {
             isolation_fallback: false,
             snapshot_ref: None,
             worktree_state: None,
+            patch_path: None,
+            diffstat: None,
+            error_class: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-xyz");

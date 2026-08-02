@@ -409,6 +409,18 @@ impl xai_tool_runtime::Tool for TaskTool {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            allowed_paths: input.allowed_paths.clone().and_then(|paths| {
+                let cleaned: Vec<String> = paths
+                    .into_iter()
+                    .map(|p| p.trim().to_owned())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                if cleaned.is_empty() {
+                    None
+                } else {
+                    Some(cleaned)
+                }
+            }),
             cancel_token: child_cancellation,
         };
 
@@ -658,8 +670,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -694,8 +706,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -731,8 +743,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -765,8 +777,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -826,8 +838,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -885,8 +897,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -931,8 +943,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -1034,6 +1046,7 @@ mod tests {
             model: None,
             timeout_ms: None,
             retain_worktree: None,
+            allowed_paths: None,
             task_id: None,
         }
     }
@@ -1410,6 +1423,7 @@ mod tests {
             model: Some("test-model".into()),
             timeout_ms: None,
             retain_worktree: None,
+            allowed_paths: None,
             task_id: Some("task-123".into()),
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1683,6 +1697,7 @@ mod tests {
             model: None,
             timeout_ms: None,
             retain_worktree: None,
+            allowed_paths: None,
             task_id: None,
         })
         .unwrap();
@@ -1733,8 +1748,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -1773,6 +1788,7 @@ mod tests {
             model: None,
             timeout_ms: None,
             retain_worktree: None,
+            allowed_paths: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1820,8 +1836,8 @@ mod tests {
                 cwd: None,
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -1890,6 +1906,7 @@ mod tests {
                     model: None,
                     timeout_ms: None,
                     retain_worktree: None,
+                    allowed_paths: None,
                     task_id: None,
                 },
             )
@@ -1938,6 +1955,7 @@ mod tests {
             model: None,
             timeout_ms: None,
             retain_worktree: None,
+            allowed_paths: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1967,8 +1985,8 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2024,8 +2042,8 @@ mod tests {
                 cwd: Some("".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2077,8 +2095,8 @@ mod tests {
                 cwd: Some("null".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2130,8 +2148,8 @@ mod tests {
                 cwd: Some("  ".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2186,8 +2204,8 @@ mod tests {
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2223,8 +2241,8 @@ mod tests {
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2282,6 +2300,7 @@ mod tests {
                     model: None,
                     timeout_ms: None,
                     retain_worktree: None,
+                    allowed_paths: None,
                     task_id: None,
                 },
             )
@@ -2336,8 +2355,8 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2396,8 +2415,8 @@ mod tests {
                 cwd: Some("\"/tmp".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2451,8 +2470,8 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )
@@ -2502,8 +2521,8 @@ mod tests {
                 cwd: Some("/tmp/some-dir".into()),
                 model: None,
                 timeout_ms: None,
-                stall_timeout_ms: None,
                 retain_worktree: None,
+                allowed_paths: None,
                 task_id: None,
             },
         )

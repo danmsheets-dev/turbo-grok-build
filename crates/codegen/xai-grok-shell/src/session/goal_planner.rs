@@ -360,6 +360,7 @@ impl ChannelSpawner {
             await_to_completion: false,
             fork_context: true,
             owner: SubagentOwner::Task,
+            allowed_paths: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());

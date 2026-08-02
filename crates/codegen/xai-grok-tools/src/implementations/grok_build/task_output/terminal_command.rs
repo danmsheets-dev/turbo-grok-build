@@ -120,8 +120,6 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["tc-1".into()],
                 timeout_ms: None,
-                retain_worktree: None,
-                stall_timeout_ms: None,
             },
         )
         .await
@@ -146,8 +144,6 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["tc-2".into()],
                 timeout_ms: None,
-                retain_worktree: None,
-                stall_timeout_ms: None,
             },
         )
         .await

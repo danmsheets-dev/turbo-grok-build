@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     LandMode, LiveWorktreeApplyBackend, apply_file_content, git_capture, git_capture_status,
-    git_show_blob, parse_name_status, resolve_subagent_work, to_apply_mode,
-    update_meta_land_status,
+    git_show_blob, parse_name_status, refuse_land_outside_allowlist, resolve_subagent_work,
+    to_apply_mode, update_meta_land_status,
 };
 use crate::implementations::grok_build::task::TaskTool;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -109,7 +109,9 @@ Resolves `subagents/<subagent_id>/meta.json` and lands from (priority order):
 - `merge` — fail closed on conflict: if the parent file diverged from the spawn base while the child also changed it, land aborts with a clear conflict list and does **not** silently overwrite
 - `overwrite` — replace parent files with child content for all changed paths
 
-Use `diff_subagent` first to review. Do not land untrusted or unreviewed work."#
+Use `diff_subagent` first to review. Do not land untrusted or unreviewed work.
+
+When the subagent was spawned with `allowed_paths`, land refuses (error) if any changed path falls outside those relative prefixes — fail closed like merge conflicts."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -171,6 +173,10 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
 
         // 1) Live worktree
         if let Some(ref wt) = work.live_worktree {
+            // Pre-check allowlist against worktree change set before any apply.
+            if let Ok(paths) = collect_live_worktree_paths(wt, &work.parent_git_root).await {
+                refuse_land_outside_allowlist(&work.meta, &paths)?;
+            }
             let wt_str = wt.to_string_lossy().into_owned();
             // Prefer host-injected apply_worktree backend when present.
             let backend = {
@@ -217,6 +223,28 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
             "no live worktree, snapshot_ref, or patch available to land",
         ))
     }
+}
+
+/// Collect relative paths changed in a live worktree vs parent HEAD (+ untracked).
+async fn collect_live_worktree_paths(
+    wt: &std::path::Path,
+    parent: &std::path::Path,
+) -> Result<Vec<String>, String> {
+    let parent_head = git_capture(parent, &["rev-parse", "HEAD"]).await?;
+    let parent_head = parent_head.trim().to_owned();
+    let name_status = git_capture(wt, &["diff", "--name-status", &parent_head]).await?;
+    let mut paths = parse_name_status(&name_status);
+    if let Ok(untracked) = git_capture(wt, &["ls-files", "--others", "--exclude-standard"]).await {
+        for line in untracked.lines() {
+            let p = line.trim();
+            if !p.is_empty() {
+                paths.push(p.to_owned());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 async fn map_apply_response(
@@ -345,6 +373,8 @@ async fn land_live_worktree_inprocess(
             ),
         });
     }
+
+    refuse_land_outside_allowlist(&work.meta, &paths)?;
 
     let mut plan: Vec<(String, Option<String>)> = Vec::new(); // path, theirs
     let mut conflicts = Vec::new();
@@ -495,6 +525,8 @@ async fn land_snapshot_ref(
         });
     }
 
+    refuse_land_outside_allowlist(&work.meta, &paths)?;
+
     let mut plan: Vec<(String, Option<String>)> = Vec::new();
     let mut conflicts = Vec::new();
 
@@ -576,6 +608,11 @@ async fn land_patch(
     let parent = &work.parent_git_root;
     let patch_str = patch.to_string_lossy().into_owned();
 
+    // Refuse before apply when patch touches paths outside allowlist.
+    let patch_body = tokio::fs::read_to_string(patch).await.unwrap_or_default();
+    let patch_files = super::diff::files_from_patch(&patch_body);
+    refuse_land_outside_allowlist(&work.meta, &patch_files)?;
+
     // Always check first so we can fail closed without partial apply.
     let check_args: Vec<&str> = if mode == LandMode::Merge {
         vec!["apply", "--check", "--3way", "--unsafe-paths", &patch_str]
@@ -638,9 +675,7 @@ async fn land_patch(
         });
     }
 
-    // Best-effort file list from the patch text
-    let patch_body = tokio::fs::read_to_string(patch).await.unwrap_or_default();
-    let files = super::diff::files_from_patch(&patch_body);
+    let files = patch_files;
 
     update_meta_land_status(&work.meta_path, "landed").await;
     Ok(LandSubagentOutput {

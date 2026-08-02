@@ -707,6 +707,11 @@ pub(crate) async fn run_shell_child(
         patch_path: None,
         diffstat: None,
         land_status: None,
+        allowed_paths: request
+            .allowed_paths
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .cloned(),
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);

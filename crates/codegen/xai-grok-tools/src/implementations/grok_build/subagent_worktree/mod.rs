@@ -39,6 +39,10 @@ pub struct SubagentMetaView {
     pub worktree_state: Option<String>,
     #[serde(default)]
     pub child_cwd: Option<String>,
+    /// Relative path prefixes the child may write / parent may land.
+    /// When non-empty, land refuses paths outside these prefixes.
+    #[serde(default)]
+    pub allowed_paths: Option<Vec<String>>,
 }
 
 /// Resolved artifacts for a subagent after reading meta + probing the filesystem.
@@ -422,5 +426,223 @@ pub async fn update_meta_land_status(meta_path: &Path, land_status: &str) {
         return;
     };
     let _ = tokio::fs::write(meta_path, pretty).await;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Path allowlists (`allowed_paths` on spawn / meta.json)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Normalize a relative path for allowlist matching.
+///
+/// - Converts `\` → `/`
+/// - Strips leading `./` segments
+/// - Collapses `.` and resolves `..` (rejects escape above the root)
+/// - Rejects absolute paths (Unix `/…`, Windows drive `C:…`, UNC `//…`)
+///
+/// Returns `None` when the path cannot be safely treated as a relative
+/// in-repo path.
+pub fn normalize_allowlist_path(path: &str) -> Option<String> {
+    let mut s = path.trim().replace('\\', "/");
+    if s.is_empty() {
+        return None;
+    }
+    // Absolute / drive / UNC
+    if s.starts_with('/') || s.starts_with("//") {
+        return None;
+    }
+    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        // Windows drive letter
+        return None;
+    }
+    while s.starts_with("./") {
+        s = s[2..].to_owned();
+    }
+    if s == "." {
+        return None;
+    }
+    // Drop trailing slash for segment processing (prefix matching re-adds as needed)
+    let trailing_slash = s.ends_with('/') && s.len() > 1;
+    if trailing_slash {
+        s.pop();
+    }
+    let mut stack: Vec<&str> = Vec::new();
+    for part in s.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                if stack.is_empty() {
+                    return None; // escapes root
+                }
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    if stack.is_empty() {
+        return None;
+    }
+    Some(stack.join("/"))
+}
+
+/// Effective allowlist from meta: non-empty cleaned prefixes, or `None` (unrestricted).
+pub fn effective_allowed_paths(meta: &SubagentMetaView) -> Option<Vec<String>> {
+    let raw = meta.allowed_paths.as_ref()?;
+    let mut out = Vec::new();
+    for p in raw {
+        if let Some(n) = normalize_allowlist_path(p) {
+            out.push(n);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// True when `path` is under any allowlist prefix (exact file or directory prefix).
+///
+/// Prefix `"crates/foo"` matches `crates/foo`, `crates/foo/bar.rs`, but not
+/// `crates/foobar`. Empty / missing allowlist is unrestricted (always true).
+pub fn path_is_allowed(path: &str, allowed: &[String]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let Some(norm) = normalize_allowlist_path(path) else {
+        return false;
+    };
+    for pref in allowed {
+        if norm == *pref || norm.starts_with(&format!("{pref}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Partition paths into (allowed, denied) under the given allowlist.
+/// When `allowed` is empty, every path is allowed.
+pub fn partition_by_allowlist(
+    paths: &[String],
+    allowed: &[String],
+) -> (Vec<String>, Vec<String>) {
+    if allowed.is_empty() {
+        return (paths.to_vec(), Vec::new());
+    }
+    let mut ok = Vec::new();
+    let mut denied = Vec::new();
+    for p in paths {
+        if path_is_allowed(p, allowed) {
+            ok.push(p.clone());
+        } else {
+            denied.push(p.clone());
+        }
+    }
+    (ok, denied)
+}
+
+/// If meta has a non-empty allowlist and `paths` contains anything outside it,
+/// return a clear land-refusal error. Otherwise `Ok(())`.
+pub fn refuse_land_outside_allowlist(
+    meta: &SubagentMetaView,
+    paths: &[String],
+) -> Result<(), xai_tool_runtime::ToolError> {
+    let Some(allowed) = effective_allowed_paths(meta) else {
+        return Ok(());
+    };
+    let (_ok, denied) = partition_by_allowlist(paths, &allowed);
+    if denied.is_empty() {
+        return Ok(());
+    }
+    let preview: Vec<&str> = denied.iter().take(8).map(String::as_str).collect();
+    let more = if denied.len() > 8 {
+        format!(" (+{} more)", denied.len() - 8)
+    } else {
+        String::new()
+    };
+    Err(xai_tool_runtime::ToolError::custom(
+        "path_allowlist_violation",
+        format!(
+            "land refused: {} path(s) outside allowed_paths {:?}: {}{more}. \
+             Re-spawn with a wider allowlist, land only in-allowlist changes, \
+             or omit allowed_paths for unrestricted land.",
+            denied.len(),
+            allowed,
+            preview.join(", "),
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_dot_slash_and_backslashes() {
+        assert_eq!(
+            normalize_allowlist_path(r".\crates\foo\bar.rs").as_deref(),
+            Some("crates/foo/bar.rs")
+        );
+        assert_eq!(
+            normalize_allowlist_path("./docs/a.md").as_deref(),
+            Some("docs/a.md")
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_escape_and_absolute() {
+        assert!(normalize_allowlist_path("../secret").is_none());
+        assert!(normalize_allowlist_path("a/../../b").is_none());
+        assert!(normalize_allowlist_path("/etc/passwd").is_none());
+        assert!(normalize_allowlist_path("C:\\Windows").is_none());
+    }
+
+    #[test]
+    fn normalize_resolves_internal_dotdot() {
+        assert_eq!(
+            normalize_allowlist_path("crates/foo/../bar/x.rs").as_deref(),
+            Some("crates/bar/x.rs")
+        );
+    }
+
+    #[test]
+    fn path_is_allowed_prefix_not_partial_name() {
+        let allowed = vec!["crates/foo".to_string()];
+        assert!(path_is_allowed("crates/foo/src/lib.rs", &allowed));
+        assert!(path_is_allowed("crates/foo", &allowed));
+        assert!(!path_is_allowed("crates/foobar/x.rs", &allowed));
+        assert!(!path_is_allowed("docs/a.md", &allowed));
+    }
+
+    #[test]
+    fn partition_and_refuse() {
+        let meta = SubagentMetaView {
+            subagent_id: "s".into(),
+            parent_session_id: None,
+            status: None,
+            worktree_path: None,
+            snapshot_ref: None,
+            patch_path: None,
+            worktree_state: None,
+            child_cwd: None,
+            allowed_paths: Some(vec!["crates/a/".into(), "docs".into()]),
+        };
+        let paths = vec![
+            "crates/a/mod.rs".into(),
+            "crates/b/other.rs".into(),
+            "docs/readme.md".into(),
+        ];
+        let allowed = effective_allowed_paths(&meta).unwrap();
+        let (ok, denied) = partition_by_allowlist(&paths, &allowed);
+        assert_eq!(ok, vec!["crates/a/mod.rs", "docs/readme.md"]);
+        assert_eq!(denied, vec!["crates/b/other.rs"]);
+        assert!(refuse_land_outside_allowlist(&meta, &paths).is_err());
+        assert!(refuse_land_outside_allowlist(&meta, &ok).is_ok());
+
+        let unrestricted = SubagentMetaView {
+            allowed_paths: None,
+            ..meta.clone()
+        };
+        assert!(refuse_land_outside_allowlist(&unrestricted, &paths).is_ok());
+    }
 }
 

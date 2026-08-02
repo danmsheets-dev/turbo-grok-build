@@ -2798,6 +2798,10 @@ pub(crate) struct SubagentMeta {
     /// tools overwrite with a terminal status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub land_status: Option<String>,
+    /// Relative path prefixes the child may write / parent may land.
+    /// When non-empty, land/diff tools refuse or filter paths outside these prefixes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_paths: Option<Vec<String>>,
     /// Effective model ID used by the child session. Persisted for
     /// durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]

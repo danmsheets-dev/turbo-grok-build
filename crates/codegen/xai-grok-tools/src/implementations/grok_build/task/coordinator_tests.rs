@@ -176,6 +176,7 @@ fn request(id: &str, background: bool) -> SubagentRequest {
         await_to_completion: false,
         fork_context: false,
         owner: SubagentOwner::Task,
+        allowed_paths: None,
         cancel_token: CancellationToken::new(),
     }
 }

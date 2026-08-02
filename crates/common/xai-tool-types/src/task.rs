@@ -137,6 +137,21 @@ pub struct TaskToolInput {
     )]
     pub retain_worktree: Option<bool>,
 
+    /// Relative path prefixes the child may write / the parent may land.
+    ///
+    /// When set and non-empty, `land_subagent` refuses any apply that would
+    /// touch files outside these prefixes, and `diff_subagent` only shows
+    /// in-allowlist paths. Omit (or empty) for unrestricted land/diff
+    /// (current default behavior).
+    #[schemars(
+        description = "Relative path prefixes the child may write / the parent may land \
+            (e.g. [\"crates/foo/\", \"docs/api\"]). When set, land refuses paths outside \
+            these prefixes; diff only shows in-allowlist files. Omit for unrestricted \
+            land/diff (current behavior)."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_paths: Option<Vec<String>>,
+
     /// Server-injected before execution. Becomes the subagent's session ID.
     #[schemars(skip)]
     #[serde(default)]
@@ -1470,6 +1485,7 @@ mod tests {
             model: None,
             timeout_ms: None,
             retain_worktree: None,
+            allowed_paths: None,
             task_id: None,
         };
         let value = serde_json::to_value(&input).unwrap();
@@ -1493,6 +1509,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(as_string.retain_worktree, Some(true));
+    }
+
+    #[test]
+    fn task_tool_input_allowed_paths_deserializes() {
+        let omitted: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        assert!(omitted.allowed_paths.is_none());
+
+        let explicit: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "allowed_paths": ["crates/foo/", "docs"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.allowed_paths.as_deref(),
+            Some(["crates/foo/".to_string(), "docs".to_string()].as_slice())
+        );
+
+        let empty: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "allowed_paths": []}"#,
+        )
+        .unwrap();
+        assert_eq!(empty.allowed_paths.as_deref(), Some([].as_slice()));
     }
 
     #[test]

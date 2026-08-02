@@ -276,8 +276,6 @@ mod tests {
                 task_ids: vec![],
                 mode: WaitMode::WaitAll,
                 timeout_ms: None,
-                retain_worktree: None,
-                stall_timeout_ms: None,
             },
         )
         .await
@@ -300,8 +298,6 @@ mod tests {
                 task_ids: ids,
                 mode: WaitMode::WaitAll,
                 timeout_ms: Some(1000),
-                retain_worktree: None,
-                stall_timeout_ms: None,
             },
         )
         .await

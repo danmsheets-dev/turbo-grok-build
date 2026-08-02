@@ -99,6 +99,9 @@ pub struct SubagentRequest {
     /// `prompt`. Not on TaskToolInput. Successful `resume_from` takes precedence.
     pub fork_context: bool,
     pub owner: SubagentOwner,
+    /// Relative path prefixes the child may write / parent may land.
+    /// Persisted into `meta.json` as `allowed_paths`. `None` / empty = unrestricted.
+    pub allowed_paths: Option<Vec<String>>,
     pub cancel_token: CancellationToken,
 }
 

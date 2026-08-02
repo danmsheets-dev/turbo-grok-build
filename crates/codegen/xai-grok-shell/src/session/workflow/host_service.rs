@@ -443,6 +443,7 @@ impl HostService {
                     await_to_completion: true,
                     fork_context,
                     owner: SubagentOwner::workflow(&self.params.run_id),
+                    allowed_paths: None,
                     cancel_token: cancel_token.clone(),
                 }
             };

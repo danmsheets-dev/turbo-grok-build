@@ -6,7 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    git_capture, git_capture_status, parse_name_status, resolve_subagent_work, truncate_diff_text,
+    effective_allowed_paths, git_capture, git_capture_status, parse_name_status,
+    partition_by_allowlist, path_is_allowed, resolve_subagent_work, truncate_diff_text,
 };
 use crate::implementations::grok_build::task::TaskTool;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -89,7 +90,9 @@ Resolves `subagents/<subagent_id>/meta.json` and diffs in priority order:
 2. **snapshot_ref** (e.g. `refs/grok/subagents/<id>`) — `git diff HEAD <snapshot_ref>`
 3. **patch_path** / `changes.patch` — returns the exported unified patch
 
-Returns unified diff text plus a file list. Use this before `land_subagent` to review multi-agent work without git archaeology. Read-only — does not modify the parent tree."#
+Returns unified diff text plus a file list. Use this before `land_subagent` to review multi-agent work without git archaeology. Read-only — does not modify the parent tree.
+
+When the subagent was spawned with `allowed_paths`, only in-allowlist paths are listed and shown in the diff (out-of-allowlist paths are filtered, with a count note)."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -177,6 +180,15 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
             files.sort();
             files.dedup();
 
+            let allow = effective_allowed_paths(&work.meta);
+            let (files, filtered_out) = match &allow {
+                Some(prefixes) => {
+                    let (ok, denied) = partition_by_allowlist(&files, prefixes);
+                    (ok, denied.len())
+                }
+                None => (files, 0),
+            };
+
             let mut diff = git_capture(wt, &["diff", &parent_head])
                 .await
                 .unwrap_or_default();
@@ -188,6 +200,11 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                     let p = line.trim();
                     if p.is_empty() {
                         continue;
+                    }
+                    if let Some(ref prefixes) = allow {
+                        if !path_is_allowed(p, prefixes) {
+                            continue;
+                        }
                     }
                     let path = wt.join(p);
                     if let Ok(body) = tokio::fs::read_to_string(&path).await {
@@ -209,13 +226,22 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 }
             }
 
+            if let Some(ref prefixes) = allow {
+                diff = filter_unified_diff_by_allowlist(&diff, prefixes);
+            }
+
             let (diff, truncated) = truncate_diff_text(&diff);
-            let message = format!(
+            let mut message = format!(
                 "Diff for subagent `{}` from live worktree {} ({} file(s) vs parent HEAD).",
                 work.subagent_id,
                 wt.display(),
                 files.len()
             );
+            if filtered_out > 0 {
+                message.push_str(&format!(
+                    " Filtered {filtered_out} path(s) outside allowed_paths."
+                ));
+            }
             return Ok(DiffSubagentOutput {
                 subagent_id: work.subagent_id,
                 source: "live_worktree".into(),
@@ -255,18 +281,34 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
             .map_err(|e| {
                 xai_tool_runtime::ToolError::custom("git_error", format!("diff name-status: {e}"))
             })?;
-            let files = parse_name_status(&name_status);
-            let raw_diff = git_capture(parent, &["diff", "HEAD", snap])
+            let all_files = parse_name_status(&name_status);
+            let allow = effective_allowed_paths(&work.meta);
+            let (files, filtered_out) = match &allow {
+                Some(prefixes) => {
+                    let (ok, denied) = partition_by_allowlist(&all_files, prefixes);
+                    (ok, denied.len())
+                }
+                None => (all_files, 0),
+            };
+            let mut raw_diff = git_capture(parent, &["diff", "HEAD", snap])
                 .await
                 .map_err(|e| {
                     xai_tool_runtime::ToolError::custom("git_error", format!("diff: {e}"))
                 })?;
+            if let Some(ref prefixes) = allow {
+                raw_diff = filter_unified_diff_by_allowlist(&raw_diff, prefixes);
+            }
             let (diff, truncated) = truncate_diff_text(&raw_diff);
-            let message = format!(
+            let mut message = format!(
                 "Diff for subagent `{}` from snapshot_ref `{snap}` ({} file(s) vs parent HEAD).",
                 work.subagent_id,
                 files.len()
             );
+            if filtered_out > 0 {
+                message.push_str(&format!(
+                    " Filtered {filtered_out} path(s) outside allowed_paths."
+                ));
+            }
             return Ok(DiffSubagentOutput {
                 subagent_id: work.subagent_id,
                 source: "snapshot_ref".into(),
@@ -291,7 +333,15 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                     format!("failed to read {}: {e}", patch.display()),
                 )
             })?;
-            let files = files_from_patch(&raw);
+            let all_files = files_from_patch(&raw);
+            let allow = effective_allowed_paths(&work.meta);
+            let (files, filtered_out) = match &allow {
+                Some(prefixes) => {
+                    let (ok, denied) = partition_by_allowlist(&all_files, prefixes);
+                    (ok, denied.len())
+                }
+                None => (all_files, 0),
+            };
             // Optional: check whether patch still applies cleanly (informational)
             let (_ok, _stdout, check_err) = git_capture_status(
                 parent,
@@ -304,13 +354,22 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
             )
             .await
             .unwrap_or((false, String::new(), String::new()));
-            let (diff, truncated) = truncate_diff_text(&raw);
+            let filtered_raw = match &allow {
+                Some(prefixes) => filter_unified_diff_by_allowlist(&raw, prefixes),
+                None => raw,
+            };
+            let (diff, truncated) = truncate_diff_text(&filtered_raw);
             let mut message = format!(
                 "Diff for subagent `{}` from patch {} ({} file(s)).",
                 work.subagent_id,
                 patch.display(),
                 files.len()
             );
+            if filtered_out > 0 {
+                message.push_str(&format!(
+                    " Filtered {filtered_out} path(s) outside allowed_paths."
+                ));
+            }
             if !check_err.trim().is_empty() {
                 message.push_str(&format!(
                     "\nNote: `git apply --check` reports: {}",
@@ -361,6 +420,40 @@ pub(crate) fn files_from_patch(patch: &str) -> Vec<String> {
     files.sort();
     files.dedup();
     files
+}
+
+/// Keep only unified-diff file sections whose `b/` path is under `allowed`.
+fn filter_unified_diff_by_allowlist(diff: &str, allowed: &[String]) -> String {
+    if allowed.is_empty() {
+        return diff.to_owned();
+    }
+    let mut out = String::new();
+    let mut keep = true;
+    let mut first_hunk = true;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            // Extract b/ path
+            let path = line
+                .strip_prefix("diff --git ")
+                .and_then(|rest| rest.find(" b/").map(|i| &rest[i + 3..]))
+                .unwrap_or("");
+            keep = path_is_allowed(path, allowed);
+            if keep {
+                if !first_hunk && !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(line);
+                out.push('\n');
+                first_hunk = false;
+            }
+            continue;
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
