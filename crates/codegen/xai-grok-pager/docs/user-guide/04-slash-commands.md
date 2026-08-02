@@ -302,11 +302,11 @@ The command returns right away — follow progress in `/workflows`, and the fina
 
 ### `/deepaudit [scope] [--size small|medium|large]`
 
-Kick off a **codebase deep audit** workflow (Ultracode-style): investigate in parallel, adversarially verify each claim, then report only findings that survive verification. Agents run **read-only**. Alias: `/deep-audit`.
+Kick off a **codebase deep audit** workflow (Ultracode-style): investigate in parallel, adversarially verify each claim, then report only findings that survive verification. Agents run **read-only**. Aliases: `/deep-audit`, `/ultracode`, `/ultra-code`.
 
 ```
 /deepaudit
-/deepaudit nvidia subagent tool path
+/ultracode nvidia subagent tool path
 /deepaudit --size large src/agent/subagent
 ```
 

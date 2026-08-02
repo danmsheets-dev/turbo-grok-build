@@ -204,7 +204,8 @@ pub fn select_role<'a>(
 ///
 /// Isolation is applied via [`DefinitionRuntimeDefaults`] inside
 /// `resolve_subagent_spec` / [`resolve_runtime_config`] so it participates in
-/// the full cascade (explicit > role > persona > definition > worktree).
+/// the full cascade (explicit > role > persona > definition > residual R3
+/// default: worktree, or none for RO research types / read-only capability).
 /// This helper only fills capability mode and effort when still unset.
 pub fn apply_definition_runtime_defaults(
     runtime: &mut EffectiveRuntimeConfig,
@@ -252,9 +253,9 @@ pub fn resolve_runtime_config(
         capability_mode: definition.capability_mode,
         isolation: definition.isolation.map(Into::into),
     };
-    // Full cascade including definition isolation; residual helper fills any
-    // capability/effort edge cases and is a no-op for isolation when defaults
-    // already applied.
+    // Full cascade including definition isolation; residual R3 helper picks
+    // isolation=none for explore/plan/oracle and read-only capability when no
+    // layer set isolation. Capability/effort residual is a no-op when already set.
     let mut runtime = crate::resolve_subagent_spec(
         overrides,
         role,
@@ -263,6 +264,7 @@ pub fn resolve_runtime_config(
         role_name,
         config_effort_pin,
         definition_defaults,
+        Some(subagent_type),
     );
     apply_definition_runtime_defaults(&mut runtime, definition);
     runtime
@@ -417,6 +419,72 @@ mod tests {
             None,
         );
         assert_eq!(runtime.isolation, SubagentIsolationMode::None);
+    }
+
+    #[test]
+    fn r3_explore_plan_oracle_default_isolation_none_when_omitted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        for ty in ["explore", "plan", "oracle"] {
+            let definition =
+                resolve_agent_definition(ty, &context(cwd.path(), &toggles)).unwrap();
+            assert!(
+                definition.isolation.is_none(),
+                "{ty} definition should leave isolation unset so residual applies"
+            );
+            let runtime = resolve_runtime_config(
+                ty,
+                &SubagentRuntimeOverrides::default(),
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                &definition,
+                None,
+            );
+            assert_eq!(
+                runtime.isolation,
+                SubagentIsolationMode::None,
+                "{ty} residual isolation"
+            );
+        }
+    }
+
+    #[test]
+    fn r3_general_purpose_still_defaults_worktree() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let definition =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        let runtime = resolve_runtime_config(
+            "general-purpose",
+            &SubagentRuntimeOverrides::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &definition,
+            None,
+        );
+        assert_eq!(runtime.isolation, SubagentIsolationMode::Worktree);
+    }
+
+    #[test]
+    fn r3_explicit_worktree_not_overridden_for_explore() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let definition =
+            resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
+        let mut overrides = SubagentRuntimeOverrides::default();
+        overrides.isolation = Some(SubagentIsolationMode::Worktree);
+        let runtime = resolve_runtime_config(
+            "explore",
+            &overrides,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &definition,
+            None,
+        );
+        assert_eq!(runtime.isolation, SubagentIsolationMode::Worktree);
     }
     #[test]
     fn full_prompt_uses_production_subagent_template_and_body() {

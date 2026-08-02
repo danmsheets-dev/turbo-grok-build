@@ -28,9 +28,9 @@ pub struct DefinitionRuntimeDefaults {
 /// Resolved effective runtime configuration for a child agent.
 ///
 /// Model, effort, and isolation use explicit > role > persona > definition >
-/// parent inheritance (isolation falls back to worktree). Capability mode is
-/// the safe intersection of the explicit request, role ceiling, and definition
-/// ceiling.
+/// residual default (isolation: worktree, or none for RO research types /
+/// read-only capability — R3). Capability mode is the safe intersection of the
+/// explicit request, role ceiling, and definition ceiling.
 #[derive(Debug, Clone)]
 pub struct EffectiveRuntimeConfig {
     /// Resolved model ID override (if any).
@@ -53,7 +53,8 @@ pub struct EffectiveRuntimeConfig {
     /// Unlike role prompts, persona errors are fatal: spawn is aborted.
     pub persona_error: Option<String>,
     /// Isolation mode for the child execution environment.
-    /// Defaults to worktree so children do not share the parent workspace.
+    /// Residual default is worktree for write-capable agents; explore/plan/
+    /// oracle and read-only capability residual to none (R3).
     pub isolation: xai_tool_types::SubagentIsolationMode,
 }
 

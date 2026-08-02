@@ -4,14 +4,22 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`/ultracode`** (and `/ultra-code`): slash aliases for `/deepaudit`.
+- **RO isolation residual (R3):** when spawn omits `isolation`, explore/plan/
+  oracle and `capability_mode=read-only` default to `isolation=none` (skip
+  worktree cost). Explicit isolation is never overridden; write agents still
+  default to worktree.
+
 ## [0.2.114-r8] - 2026-08-01
 
 RC8 reliability + deep-audit release (full plan): NVIDIA agent path, worktree
 recovery, land/diff tools, stall detection, and multi-agent workflows.
 
 ### Added
-- **`/deepaudit`** (alias `/deep-audit`): Ultracode-style codebase audit —
-  Scope → Investigate → Verify → Report. Size `small|medium|large`.
+- **`/deepaudit`** (aliases `/deep-audit`, `/ultracode`, `/ultra-code`):
+  Ultracode-style codebase audit — Scope → Investigate → Verify → Report.
+  Size `small|medium|large`.
 - **`continuous-improve`** builtin workflow: research → plan → implement
   (worktree) → verify → report.
 - **`timeout_ms` / `stall_timeout_ms` / `retain_worktree` on spawn**: hard

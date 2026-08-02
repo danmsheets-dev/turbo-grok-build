@@ -37,6 +37,38 @@ pub fn intersect_capability_modes(
     }
 }
 
+/// Read-only research agent types that skip worktree isolation by default
+/// (R3). When spawn omits `isolation`, these resolve to `isolation=none` so
+/// pure research does not pay sandbox clone cost. Explicit `isolation`
+/// (spawn / role / persona / definition) is never overridden.
+pub fn is_ro_research_subagent_type(subagent_type: &str) -> bool {
+    matches!(
+        subagent_type.to_ascii_lowercase().as_str(),
+        "explore" | "plan" | "oracle"
+    )
+}
+
+/// Residual isolation when no cascade layer set one (R3).
+///
+/// - `explore` / `plan` / `oracle` → `none` (RO research; skip worktree cost)
+/// - else if effective `capability_mode` is `read-only` → `none`
+/// - else → `worktree` (preserve isolation for write-capable agents)
+///
+/// Callers that **explicitly** set isolation must not use this helper as an
+/// override — only as the final cascade fallback.
+pub fn resolve_default_isolation(
+    subagent_type: Option<&str>,
+    capability_mode: Option<SubagentCapabilityMode>,
+) -> SubagentIsolationMode {
+    if subagent_type.is_some_and(is_ro_research_subagent_type) {
+        return SubagentIsolationMode::None;
+    }
+    if matches!(capability_mode, Some(SubagentCapabilityMode::ReadOnly)) {
+        return SubagentIsolationMode::None;
+    }
+    SubagentIsolationMode::Worktree
+}
+
 /// Resolve effective runtime config from explicit overrides, role defaults,
 /// and persona defaults.
 ///
@@ -45,7 +77,8 @@ pub fn intersect_capability_modes(
 /// 2. Role default (from `SubagentRole` in config)
 /// 3. Persona default (looked up by name from the personas map)
 /// 4. Agent-definition default
-/// 5. Isolation defaults to **worktree**; model falls through to parent
+/// 5. Isolation residual via [`resolve_default_isolation`] (worktree unless
+///    RO research type or read-only capability); model falls through to parent
 ///    inheritance (handled downstream in the shell)
 ///
 /// Capability modes are security ceilings rather than ordinary defaults: the
@@ -76,6 +109,7 @@ pub fn resolve_effective_overrides(
         role_name,
         None,
         DefinitionRuntimeDefaults::default(),
+        None,
     )
 }
 
@@ -83,6 +117,9 @@ pub fn resolve_effective_overrides(
 /// catalog credential materialization, worktree creation, and session spawning
 /// remain downstream, but effort/capability/isolation no longer get reopened
 /// after this function returns.
+///
+/// `subagent_type` is only used for the residual isolation default (R3:
+/// explore/plan/oracle → none). Explicit isolation layers still win.
 pub fn resolve_subagent_spec(
     overrides: &SubagentRuntimeOverrides,
     role: Option<&SubagentRole>,
@@ -94,6 +131,7 @@ pub fn resolve_subagent_spec(
     // `[subagents.models]` pin ranks below role/persona model overrides.
     config_effort_pin: Option<SubagentReasoningEffort>,
     definition_defaults: DefinitionRuntimeDefaults,
+    subagent_type: Option<&str>,
 ) -> EffectiveRuntimeConfig {
     // ── Model resolution ─────────────────────────────────────────
     let model_from_override_or_role = overrides
@@ -166,8 +204,10 @@ pub fn resolve_subagent_spec(
     });
 
     // ── Isolation resolution ─────────────────────────────────────
-    // Default is worktree so parallel writers cannot collide with the parent
-    // or each other. Opt out with isolation="none" (spawn/role/persona/def).
+    // Cascade: explicit spawn > role > persona > definition > residual (R3).
+    // Residual is worktree for write-capable agents so parallel writers cannot
+    // collide with the parent; RO research types and read-only capability skip
+    // the worktree sandbox. Explicit isolation is never overridden.
     let isolation = overrides
         .isolation
         .or_else(|| {
@@ -180,7 +220,7 @@ pub fn resolve_subagent_spec(
                 .and_then(parse_enum_from_str::<SubagentIsolationMode>)
         })
         .or(definition_defaults.isolation)
-        .unwrap_or(SubagentIsolationMode::Worktree);
+        .unwrap_or_else(|| resolve_default_isolation(subagent_type, capability_mode));
 
     EffectiveRuntimeConfig {
         model,
@@ -296,7 +336,6 @@ mod tests {
             timeout_ms: None,
             stall_timeout_ms: None,
             retain_worktree: None,
-            stall_timeout_ms: None,
         }
     }
 
@@ -484,6 +523,7 @@ mod tests {
             None,
             None,
             defaults,
+            None,
         );
 
         assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::High));
@@ -517,6 +557,7 @@ mod tests {
             None,
             None,
             defaults,
+            None,
         );
 
         assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::Low));
@@ -545,6 +586,7 @@ mod tests {
             None,
             Some(SubagentReasoningEffort::Ultra),
             defaults,
+            None,
         );
         assert_eq!(
             result.reasoning_effort,
@@ -573,6 +615,7 @@ mod tests {
             None,
             Some(SubagentReasoningEffort::Ultra),
             DefinitionRuntimeDefaults::default(),
+            None,
         );
         assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::Low));
 
@@ -586,6 +629,7 @@ mod tests {
             None,
             Some(SubagentReasoningEffort::Ultra),
             DefinitionRuntimeDefaults::default(),
+            None,
         );
         assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::High));
     }
@@ -657,6 +701,134 @@ mod tests {
         overrides.isolation = Some(SubagentIsolationMode::None);
         let result = resolve_effective_overrides(&overrides, None, &empty_personas(), None, None);
         assert_eq!(result.isolation, SubagentIsolationMode::None);
+    }
+
+    // ── R3 residual isolation defaults ───────────────────────────
+
+    #[test]
+    fn resolve_default_isolation_ro_research_types_are_none() {
+        for ty in ["explore", "plan", "oracle", "Explore", "PLAN"] {
+            assert_eq!(
+                resolve_default_isolation(Some(ty), None),
+                SubagentIsolationMode::None,
+                "type={ty}"
+            );
+            // Type rule wins even when capability is not read-only.
+            assert_eq!(
+                resolve_default_isolation(Some(ty), Some(SubagentCapabilityMode::All)),
+                SubagentIsolationMode::None,
+                "type={ty} with All capability"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_default_isolation_read_only_capability_is_none() {
+        assert_eq!(
+            resolve_default_isolation(Some("general-purpose"), Some(SubagentCapabilityMode::ReadOnly)),
+            SubagentIsolationMode::None
+        );
+        assert_eq!(
+            resolve_default_isolation(None, Some(SubagentCapabilityMode::ReadOnly)),
+            SubagentIsolationMode::None
+        );
+    }
+
+    #[test]
+    fn resolve_default_isolation_write_agents_stay_worktree() {
+        assert_eq!(
+            resolve_default_isolation(Some("general-purpose"), None),
+            SubagentIsolationMode::Worktree
+        );
+        assert_eq!(
+            resolve_default_isolation(
+                Some("general-purpose"),
+                Some(SubagentCapabilityMode::All)
+            ),
+            SubagentIsolationMode::Worktree
+        );
+        assert_eq!(
+            resolve_default_isolation(None, None),
+            SubagentIsolationMode::Worktree
+        );
+        assert!(!is_ro_research_subagent_type("general-purpose"));
+        assert!(is_ro_research_subagent_type("oracle"));
+    }
+
+    #[test]
+    fn ro_research_type_residual_none_when_spawn_omits_isolation() {
+        let overrides = make_overrides(None, None, None, None, None);
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            None,
+            DefinitionRuntimeDefaults::default(),
+            Some("explore"),
+        );
+        assert_eq!(result.isolation, SubagentIsolationMode::None);
+    }
+
+    #[test]
+    fn read_only_capability_residual_none_when_spawn_omits_isolation() {
+        let overrides = make_overrides(
+            None,
+            None,
+            Some(SubagentCapabilityMode::ReadOnly),
+            None,
+            None,
+        );
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            None,
+            DefinitionRuntimeDefaults::default(),
+            Some("general-purpose"),
+        );
+        assert_eq!(result.isolation, SubagentIsolationMode::None);
+    }
+
+    #[test]
+    fn explicit_worktree_honored_for_explore() {
+        let overrides = make_overrides(
+            None,
+            None,
+            None,
+            Some(SubagentIsolationMode::Worktree),
+            None,
+        );
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            None,
+            DefinitionRuntimeDefaults::default(),
+            Some("explore"),
+        );
+        assert_eq!(result.isolation, SubagentIsolationMode::Worktree);
+    }
+
+    #[test]
+    fn write_agent_still_defaults_to_worktree() {
+        let overrides = make_overrides(None, None, None, None, None);
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            None,
+            DefinitionRuntimeDefaults::default(),
+            Some("general-purpose"),
+        );
+        assert_eq!(result.isolation, SubagentIsolationMode::Worktree);
     }
 
     // ── Persona instruction loading ──────────────────────────────

@@ -1180,7 +1180,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - The resumed agent must use the same subagent_type as the source.\n\
          - If the user changed that agent type's model configuration or asks for a fresh restart, do not use {resume_from_param}; start a new child and hand over the needed context in its prompt.\n\n\
          Isolation mode:\n\
-         - Use {isolation_param} to control the child's execution environment. Default is \"worktree\": the child runs in an isolated git worktree so its edits do not touch the parent workspace. On completion the worktree is snapshotted and removed (path may appear in output while it exists). Pass \"none\" only when the child must share the parent workspace."
+         - Use {isolation_param} to control the child's execution environment. Default is \"worktree\" for write-capable agents (isolated git worktree so edits do not touch the parent workspace; on completion the worktree is snapshotted and removed). explore/plan/oracle and capability_mode=read-only default to \"none\" (skip worktree cost for pure research). Explicit isolation is never overridden."
     );
 
     out

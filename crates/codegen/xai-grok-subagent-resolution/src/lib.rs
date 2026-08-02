@@ -41,7 +41,8 @@ pub use definition::{
     validate_agent_name,
 };
 pub use overrides::{
-    intersect_capability_modes, resolve_effective_overrides, resolve_subagent_spec,
+    intersect_capability_modes, is_ro_research_subagent_type, resolve_default_isolation,
+    resolve_effective_overrides, resolve_subagent_spec,
 };
 pub use resume::{ResumeValidationError, validate_resume_identity};
 pub use types::{

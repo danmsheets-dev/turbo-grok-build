@@ -250,7 +250,9 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "deepaudit",
         description: "Deep codebase audit: investigate → verify → report (read-only, verified findings only)",
         argument_hint: Some("<scope or topic> [--size small|medium|large]"),
-        aliases: &["deep-audit"],
+        // /ultracode and /ultra-code are slash aliases only (R5). Free-text
+        // keyword auto-trigger and `/effort ultracode` session mode are RC9.
+        aliases: &["deep-audit", "ultracode", "ultra-code"],
         gate: BuiltinGate::WorkflowLaunches,
         resolve: |args| {
             let (query, size) = parse_deepaudit_args(args);
@@ -3049,6 +3051,23 @@ mod tests {
             .command_name(),
             "deepaudit"
         );
+    }
+
+    #[test]
+    fn ultracode_alias_routes_to_deepaudit() {
+        // R5: /ultracode and /ultra-code are aliases of /deepaudit.
+        for alias in ["ultracode", "ultra-code", "deep-audit"] {
+            let blocks = vec![text_block(&format!("/{alias} --size small auth"))];
+            let outcome =
+                resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err();
+            match outcome {
+                SlashCommandOutcome::Builtin(BuiltinAction::DeepAudit { query, size }) => {
+                    assert_eq!(query, "auth", "alias={alias}");
+                    assert_eq!(size, "small", "alias={alias}");
+                }
+                other => panic!("expected DeepAudit via /{alias}, got {other:?}"),
+            }
+        }
     }
 
     // ── GoalTracker handler-level interaction tests ──────────────
