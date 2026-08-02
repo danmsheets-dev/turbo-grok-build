@@ -34,8 +34,9 @@ pub(crate) use model::probe_requires_live_tui;
 pub(crate) use model::{
     CLIPBOARD_DELIVERY_UNAVAILABLE_ID, CLIPBOARD_DELIVERY_UNVERIFIED_ID,
     FOCUS_TRACKING_UNAVAILABLE_ID, ITERM2_CLIPBOARD_PERMISSION_ID, NEWLINE_FALLBACK_ID,
-    NOTIFICATION_PROTOCOL_FALLBACK_ID, ORACLE_MODEL_SAME_AS_SESSION_ID, ORACLE_MODEL_UNPINNED_ID,
-    SANDBOX_PROFILE_CONFLICT_ID, VOICE_NO_INPUT_DEVICE_ID, VSCODE_SSH_NON_ASCII_ID,
+    NOTIFICATION_PROTOCOL_FALLBACK_ID, ORACLE_MODEL_NOT_AGENT_READY_ID,
+    ORACLE_MODEL_SAME_AS_SESSION_ID, ORACLE_MODEL_UNPINNED_ID, SANDBOX_PROFILE_CONFLICT_ID,
+    VOICE_NO_INPUT_DEVICE_ID, VSCODE_SSH_NON_ASCII_ID,
 };
 pub use model::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
@@ -163,30 +164,62 @@ pub(crate) fn oracle_model_pin_findings(
             ),
         });
     }
-    // NVIDIA Ultra (and other chat-only pins) cannot run the tool-using oracle path
-    // until agent_ready + deser are proven for that model.
-    let pin_l = pin.to_ascii_lowercase();
-    if pin_l.contains("nemotron-3-ultra")
-        || pin_l.contains("nemotron-3-super")
-        || pin_l.contains("550b-a55b")
-    {
+    // Chat-only / non-agent-ready pins cannot run the tool-using oracle path.
+    // Heuristic names (Ultra/Super) plus catalog `agent_ready=false`.
+    if oracle_pin_is_not_agent_ready(pin) {
         findings.push(DiagnosticFinding {
-            id: DiagnosticId::new("oracle", "model-not-agent-ready"),
+            id: ORACLE_MODEL_NOT_AGENT_READY_ID,
             disposition: FindingDisposition::Recommendation,
             message: format!(
-                "Oracle is pinned to `{pin}`, which is chat/planning-oriented on NVIDIA Integrate \
-                 and is not agent-ready for tool-using code investigation."
+                "Oracle is pinned to `{pin}`, which is not agent-ready for tool-using code \
+                 investigation (chat/planning-oriented or catalog `agent_ready=false`)."
             ),
             remediation: None,
             automatic_remediation: None,
             note: Some(
-                "Pin oracle to a proven agent model (e.g. Grok 4.5 or Codex Terra) until NVIDIA \
-                 tool loops are certified agent_ready. See docs/design-oracle.md and RC8 notes."
+                "Pin oracle to a proven agent model (e.g. Grok 4.5 or Codex Terra) until the pin \
+                 is certified agent_ready. See docs/design-oracle.md and RC8 notes."
                     .to_owned(),
             ),
         });
     }
     findings
+}
+
+/// Whether an oracle pin slug is known-not-agent-ready.
+///
+/// True when the pin name matches NVIDIA Ultra/Super heuristics, or when a
+/// platform catalog row resolves with Chat Completions `agent_ready=false`.
+fn oracle_pin_is_not_agent_ready(pin: &str) -> bool {
+    let pin_l = pin.to_ascii_lowercase();
+    if pin_l.contains("nemotron-3-ultra")
+        || pin_l.contains("nemotron-3-super")
+        || pin_l.contains("550b-a55b")
+    {
+        return true;
+    }
+    catalog_agent_ready(pin) == Some(false)
+}
+
+/// Look up `agent_ready` for a pin against the offline platform catalog.
+///
+/// Returns `Some(false)` when a matching Chat Completions row declares
+/// non-agent-ready; `Some(true)` when ready; `None` when the pin is not in
+/// the catalog or uses a protocol without the flag.
+fn catalog_agent_ready(pin: &str) -> Option<bool> {
+    let pin = pin.trim();
+    if pin.is_empty() {
+        return None;
+    }
+    let models = xai_grok_models::platform_builtin_models();
+    let row = models.iter().find(|m| {
+        m.catalog_key().eq_ignore_ascii_case(pin)
+            || m.model.eq_ignore_ascii_case(pin)
+            || format!("{}/{}", m.provider.as_str(), m.model).eq_ignore_ascii_case(pin)
+    })?;
+    row.request_compat
+        .chat_completions()
+        .map(|c| c.agent_ready)
 }
 
 /// Broad classification of a startup warning.
@@ -3172,5 +3205,40 @@ mod tests {
         let findings = oracle_model_pin_findings(&pins, Some("grok-4.5"));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, ORACLE_MODEL_SAME_AS_SESSION_ID);
+    }
+
+    #[test]
+    fn oracle_pin_findings_flag_nemotron_ultra_heuristic() {
+        let pins = std::collections::HashMap::from([(
+            "oracle".to_string(),
+            "nvidia/nemotron-3-ultra-253b".to_string(),
+        )]);
+        let findings = oracle_model_pin_findings(&pins, Some("grok-4.5"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == ORACLE_MODEL_NOT_AGENT_READY_ID),
+            "expected not-agent-ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn oracle_pin_is_not_agent_ready_detects_catalog_flag() {
+        // Prefer a real catalog row known agent_ready=false when present.
+        let not_ready = xai_grok_models::platform_builtin_models().iter().find(|m| {
+            m.request_compat
+                .chat_completions()
+                .is_some_and(|c| !c.agent_ready)
+        });
+        if let Some(row) = not_ready {
+            assert!(
+                oracle_pin_is_not_agent_ready(&row.catalog_key()),
+                "catalog row {} should be not agent-ready",
+                row.catalog_key()
+            );
+        }
+        // Heuristic still works without catalog match.
+        assert!(oracle_pin_is_not_agent_ready("nemotron-3-ultra-demo"));
+        assert!(!oracle_pin_is_not_agent_ready("openai/gpt-5.6"));
     }
 }

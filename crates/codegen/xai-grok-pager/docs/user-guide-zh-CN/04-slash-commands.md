@@ -300,6 +300,24 @@ shell 还支持子命令（`/plugins list`、`/plugins install <source>`、`/plu
 
 命令立即返回 —— 在 `/workflows` 中跟踪进度，最终报告会自行出现在对话中。
 
+### `/deepaudit [scope] [--size small|medium|large]`
+
+启动**代码库深度审计**工作流（Ultracode 风格）：并行调查、对抗式验证每条声明，仅报告通过验证的发现。子智能体以**只读**运行，且不会通过 Task 再嵌套可写子代理。别名：`/deep-audit`。
+
+```
+/deepaudit
+/deepaudit nvidia subagent tool path
+/deepaudit --size large src/agent/subagent
+```
+
+| 规模 | 意图 |
+|------|------|
+| `small` | 窄模块 / 冒烟（少量智能体） |
+| `medium`（默认） | 子系统审计 |
+| `large` | 宽多 crate 审计（token 成本更高） |
+
+命令立即返回 —— 在 `/workflows` 中跟踪进度。最终报告进入对话：正文为已验证发现，附录为未验证声明。
+
 模型启动的工作流可在 `workflow` 工具上设置 `agent_budget`。这是逻辑子智能体调用的绝对累计上限：每次 `agent()` 调用与 `parallel()` 面板中的每一项各占一槽，schema 修正重试不计入。默认 128，显式值为 1–1,024；会越过剩余预算的面板在启动子项前被拒绝。`budget()` 将上限报告为 `total`，已接纳调用为 `spent`，`reserved`（恒为 0）与 `remaining`。具名斜杠启动使用默认预算。
 
 ### `/workflow`

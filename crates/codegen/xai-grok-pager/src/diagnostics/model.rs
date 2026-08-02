@@ -60,6 +60,9 @@ pub(crate) const ORACLE_MODEL_UNPINNED_ID: DiagnosticId =
     DiagnosticId::new("agents", "oracle-model-unpinned");
 pub(crate) const ORACLE_MODEL_SAME_AS_SESSION_ID: DiagnosticId =
     DiagnosticId::new("agents", "oracle-model-same-as-session");
+/// Oracle pin is a known non-agent-ready / chat-only model (RC8).
+pub(crate) const ORACLE_MODEL_NOT_AGENT_READY_ID: DiagnosticId =
+    DiagnosticId::new("agents", "oracle-model-not-agent-ready");
 
 impl DiagnosticReport {
     pub fn issue_count(&self) -> usize {

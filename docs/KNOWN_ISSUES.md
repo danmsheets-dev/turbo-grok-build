@@ -80,7 +80,9 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 | Shared `~/.grok` | Config, auth, sessions, and leader IPC live under the upstream home. Binary install root is `~/.hyper`. |
 | Shared Kimi + Codex proxy | Catalog id (`kimi-code/*` vs `openai-codex/*`) selects credentials; ambiguous URL alone does not guess a family. |
 | Hyper Modes | **Deferred** — Amp four-tier modes will not ship as designed; see [design-modes.md](./design-modes.md) §0. |
-| Oracle upgrade | Design in [design-oracle.md](./design-oracle.md); pin + trigger not yet productized. |
+| Oracle upgrade | Design in [design-oracle.md](./design-oracle.md); pin + trigger productized (Phase 0/1); Phase 2 harness signals not scheduled. Do **not** pin Oracle to NVIDIA Ultra until `agent_ready`. |
+| Read-only children cannot nest Task | `capability_mode: read-only` strips `ToolKind::Task` so explore/oracle/`/deepaudit` cannot spawn write-capable nested agents. |
+| Worktree implementation | May still be clone/linked sandbox rather than always `git worktree list`; recovery is via `snapshot_ref` / `changes.patch`. |
 | Sticky refresh cache | In-process only (not shared across processes); multi-process still uses flock + compare/adopt. |
 | Logout `--all` vs BYOK | Platform API keys under `platform/*` scopes stay until `/logout provider` / `/providers clear`. |
 
