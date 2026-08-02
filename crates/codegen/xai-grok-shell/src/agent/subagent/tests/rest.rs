@@ -346,6 +346,10 @@ fn resumed_from_field_in_meta_roundtrips() {
         child_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -393,6 +397,10 @@ fn resumed_from_none_not_serialized_in_meta() {
         child_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -440,6 +448,10 @@ fn snapshot_ref_field_in_meta_roundtrips() {
         child_cwd: None,
         worktree_path: Some("/tmp/grok-wt/sa-snap".into()),
         snapshot_ref: Some("refs/grok/subagent-snapshots/sa-snap".into()),
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -490,6 +502,10 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         child_cwd: None,
         worktree_path: Some("/tmp/grok-wt/subagent-x".into()),
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     }
 }
@@ -532,6 +548,67 @@ fn update_subagent_meta_snapshot_ref_reports_failure_when_meta_missing() {
             "refs/grok/subagents/sa-missing",
             "completed"
         ));
+}
+
+/// Dispose with snapshot/patch artifacts stamps `land_status=pending`.
+#[test]
+fn dispose_with_artifacts_sets_land_status_pending() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(write_subagent_meta(dir.path(), &snapshot_test_meta("sa-land")));
+    assert!(update_subagent_meta_dispose(
+        dir.path(),
+        &SubagentMetaDisposeUpdate {
+            snapshot_ref: Some("refs/grok/subagents/sa-land".into()),
+            status: Some("completed".into()),
+            worktree_state: Some("preserved".into()),
+            patch_path: Some("changes.patch".into()),
+            diffstat: Some("1 file, +1/-0".into()),
+            land_status: Some("pending".into()),
+            clear_worktree_path: false,
+        },
+    ));
+    let data = std::fs::read_to_string(dir.path().join("meta.json")).unwrap();
+    let reread: SubagentMeta = serde_json::from_str(&data).unwrap();
+    assert_eq!(reread.land_status.as_deref(), Some("pending"));
+    assert_eq!(
+        reread.snapshot_ref.as_deref(),
+        Some("refs/grok/subagents/sa-land")
+    );
+    assert_eq!(reread.patch_path.as_deref(), Some("changes.patch"));
+}
+
+/// Land/discard terminal statuses must not be clobbered by a later dispose write.
+#[test]
+fn dispose_does_not_overwrite_terminal_land_status() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut meta = snapshot_test_meta("sa-landed");
+    meta.land_status = Some("landed".into());
+    assert!(write_subagent_meta(dir.path(), &meta));
+    assert!(update_subagent_meta_dispose(
+        dir.path(),
+        &SubagentMetaDisposeUpdate {
+            snapshot_ref: Some("refs/grok/subagents/sa-landed".into()),
+            land_status: Some("pending".into()),
+            ..Default::default()
+        },
+    ));
+    let data = std::fs::read_to_string(dir.path().join("meta.json")).unwrap();
+    let reread: SubagentMeta = serde_json::from_str(&data).unwrap();
+    assert_eq!(
+        reread.land_status.as_deref(),
+        Some("landed"),
+        "terminal land_status must survive dispose rewrites"
+    );
+}
+
+#[test]
+fn land_status_is_terminal_covers_known_dispositions() {
+    assert!(land_status_is_terminal(Some("landed")));
+    assert!(land_status_is_terminal(Some("landed_empty")));
+    assert!(land_status_is_terminal(Some("discarded")));
+    assert!(land_status_is_terminal(Some("conflict")));
+    assert!(!land_status_is_terminal(Some("pending")));
+    assert!(!land_status_is_terminal(None));
 }
 /// A stale non-terminal record (e.g. completed-status write failed) is
 /// promoted to terminal alongside the snapshot_ref, so the durable resume
@@ -697,6 +774,10 @@ fn subagent_session_metadata_roundtrip() {
         child_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
@@ -757,6 +838,10 @@ fn subagent_session_metadata_non_forked() {
         child_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
@@ -821,6 +906,10 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         child_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let spawn_gcs = SubagentSessionMetadata::from_meta(
@@ -904,6 +993,10 @@ fn upload_lifecycle_failure_preserves_error() {
         child_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
@@ -952,6 +1045,10 @@ fn session_metadata_session_kind_for_resumed() {
         child_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
@@ -1273,6 +1370,10 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         child_cwd: Some("/workspace/project".into()),
         worktree_path: Some("/tmp/grok-wt/sa-dur".into()),
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: Some("grok-3".into()),
     };
     write_subagent_meta(&dir, &meta);
@@ -1312,6 +1413,10 @@ fn durable_fallback_rejects_running_status() {
         child_cwd: Some("/workspace".into()),
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     };
     write_subagent_meta(&parent_dir, &meta);
@@ -1394,6 +1499,10 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
         child_cwd: Some("/workspace".into()),
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: None,
     }
 }
@@ -1670,6 +1779,10 @@ fn durable_meta_roundtrips_effective_model_id() {
         child_cwd: Some("/workspace".into()),
         worktree_path: None,
         snapshot_ref: None,
+        worktree_state: None,
+        patch_path: None,
+        diffstat: None,
+        land_status: None,
         effective_model_id: Some("grok-3".into()),
     };
     write_subagent_meta(&dir, &meta);

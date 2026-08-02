@@ -705,6 +705,16 @@ pub enum SessionUpdate {
         tools_used: Vec<String>,
         /// Number of errors encountered so far.
         error_count: u32,
+        /// Most recently first-seen tool name (`tools_used` last entry).
+        /// Absent when no tools have been called yet or the field is omitted
+        /// by an older server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_tool: Option<String>,
+        /// Milliseconds since the progress signature last changed.
+        /// `0` when the signature just changed (or on older servers that omit
+        /// the field — deserializes as default `0`).
+        #[serde(default)]
+        last_progress_age_ms: u64,
     },
     /// A subagent session has finished (success, failure, or cancellation).
     ///
@@ -1496,6 +1506,8 @@ mod tests {
             context_usage_pct: 35,
             tools_used: vec!["bash".into(), "grep".into()],
             error_count: 1,
+            last_tool: Some("grep".into()),
+            last_progress_age_ms: 0,
         };
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "subagent_progress");
@@ -1512,6 +1524,8 @@ mod tests {
         assert_eq!(json["context_usage_pct"], 35);
         assert_eq!(json["tools_used"], serde_json::json!(["bash", "grep"]));
         assert_eq!(json["error_count"], 1);
+        assert_eq!(json["last_tool"], "grep");
+        assert_eq!(json["last_progress_age_ms"], 0);
     }
 
     #[test]
@@ -1528,10 +1542,65 @@ mod tests {
             context_usage_pct: 1,
             tools_used: vec![],
             error_count: 0,
+            last_tool: None,
+            last_progress_age_ms: 2500,
         };
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(update, parsed);
+    }
+
+    #[test]
+    fn subagent_progress_backward_compat_missing_new_fields() {
+        // Older servers omit last_tool / last_progress_age_ms.
+        let json = r#"{
+            "sessionUpdate": "subagent_progress",
+            "subagent_id": "s",
+            "parent_session_id": "p",
+            "child_session_id": "c",
+            "duration_ms": 10,
+            "turn_count": 1,
+            "tool_call_count": 0,
+            "tokens_used": 0,
+            "context_window_tokens": 0,
+            "context_usage_pct": 0,
+            "tools_used": [],
+            "error_count": 0
+        }"#;
+        let parsed: SessionUpdate = serde_json::from_str(json).unwrap();
+        match parsed {
+            SessionUpdate::SubagentProgress {
+                last_tool,
+                last_progress_age_ms,
+                ..
+            } => {
+                assert!(last_tool.is_none());
+                assert_eq!(last_progress_age_ms, 0);
+            }
+            other => panic!("expected SubagentProgress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subagent_progress_omits_none_last_tool() {
+        let update = SessionUpdate::SubagentProgress {
+            subagent_id: "s".into(),
+            parent_session_id: "p".into(),
+            child_session_id: "c".into(),
+            duration_ms: 1,
+            turn_count: 0,
+            tool_call_count: 0,
+            tokens_used: 0,
+            context_window_tokens: 0,
+            context_usage_pct: 0,
+            tools_used: vec![],
+            error_count: 0,
+            last_tool: None,
+            last_progress_age_ms: 0,
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert!(json.get("last_tool").is_none());
+        assert_eq!(json["last_progress_age_ms"], 0);
     }
 
     #[test]
@@ -1569,6 +1638,8 @@ mod tests {
             context_usage_pct: 0,
             tools_used: vec![],
             error_count: 0,
+            last_tool: None,
+            last_progress_age_ms: 0,
         })
         .unwrap();
         let finished = serde_json::to_value(SessionUpdate::SubagentFinished {

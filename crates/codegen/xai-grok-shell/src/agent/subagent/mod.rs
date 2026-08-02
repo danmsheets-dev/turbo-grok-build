@@ -2646,6 +2646,9 @@ fn spawn_progress_publisher(
         interval.tick().await;
         let mut last_signature: ProgressSignature = (0, 0, 0, 0, 0);
         let mut last_emit_at = tokio::time::Instant::now();
+        // Wall clock of the last signature change. Reset when the signature
+        // moves; heartbeats that re-emit the same signature keep the age.
+        let mut last_progress_change_at = tokio::time::Instant::now();
         let heartbeat_max = tokio::time::Duration::from_secs(8);
         loop {
             tokio::select! {
@@ -2667,9 +2670,14 @@ fn spawn_progress_publisher(
             if !progress_tick_should_emit(last_signature, sig, heartbeat_due) {
                 continue;
             }
+            if sig != last_signature {
+                last_progress_change_at = tokio::time::Instant::now();
+            }
+            let last_progress_age_ms = last_progress_change_at.elapsed().as_millis() as u64;
             last_signature = sig;
             last_emit_at = tokio::time::Instant::now();
             let duration_ms = started_at.elapsed().as_millis() as u64;
+            let last_tool = signals.tools_used.last().cloned();
             let update = SessionUpdate::SubagentProgress {
                 subagent_id: subagent_id.clone(),
                 parent_session_id: parent_session_id.clone(),
@@ -2682,6 +2690,8 @@ fn spawn_progress_publisher(
                 context_usage_pct: signals.context_window_usage,
                 tools_used: signals.tools_used,
                 error_count: signals.error_count,
+                last_tool,
+                last_progress_age_ms,
             };
             let notification = SessionNotification {
                 session_id: acp::SessionId::new(parent_session_id.clone()),
@@ -2782,6 +2792,12 @@ pub(crate) struct SubagentMeta {
     /// Compact diffstat summary vs snapshot base (e.g. `2 files, +40/-12`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diffstat: Option<String>,
+    /// Land disposition for worktree artifacts after dispose:
+    /// `pending` | `landed` | `landed_empty` | `discarded` | `conflict`.
+    /// Set to `pending` when snapshot/patch artifacts are written; land/discard
+    /// tools overwrite with a terminal status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub land_status: Option<String>,
     /// Effective model ID used by the child session. Persisted for
     /// durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2989,8 +3005,23 @@ struct SubagentMetaDisposeUpdate {
     worktree_state: Option<String>,
     patch_path: Option<String>,
     diffstat: Option<String>,
+    /// When set, write `land_status` unless the existing value is already a
+    /// terminal land disposition (`landed` / `landed_empty` / `discarded` /
+    /// `conflict`). Dispose paths pass `"pending"` when snapshot/patch
+    /// artifacts are present.
+    land_status: Option<String>,
     /// When true, clear `worktree_path` so a deleted tree is not presented as live.
     clear_worktree_path: bool,
+}
+
+/// Whether `land_status` is already a terminal disposition that dispose must
+/// not overwrite (land/discard tools own the terminal write).
+fn land_status_is_terminal(status: Option<&str>) -> bool {
+    match status {
+        Some("landed" | "landed_empty" | "discarded" | "conflict") => true,
+        Some(s) if s.starts_with("landed") => true,
+        _ => false,
+    }
 }
 
 /// Persist the durable worktree `snapshot_ref` into the on-disk `meta.json`
@@ -3043,6 +3074,11 @@ fn update_subagent_meta_dispose(dir: &Path, update: &SubagentMetaDisposeUpdate) 
     }
     if let Some(ref diffstat) = update.diffstat {
         meta.diffstat = Some(diffstat.clone());
+    }
+    if let Some(ref land_status) = update.land_status
+        && !land_status_is_terminal(meta.land_status.as_deref())
+    {
+        meta.land_status = Some(land_status.clone());
     }
     if update.clear_worktree_path {
         meta.worktree_path = None;

@@ -706,6 +706,7 @@ pub(crate) async fn run_shell_child(
         worktree_state: None,
         patch_path: None,
         diffstat: None,
+        land_status: None,
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);
@@ -2023,7 +2024,9 @@ pub(crate) async fn run_shell_child(
                     }
 
                     // Persist snapshot_ref + patch first (resume-critical). Path
-                    // cleanup and final worktree_state happen after.
+                    // cleanup and final worktree_state happen after. Mark
+                    // land_status=pending so list/land tooling can see artifacts
+                    // awaiting parent action (won't clobber landed/discarded).
                     let persisted = update_subagent_meta_dispose(
                         &subagent_meta_dir,
                         &SubagentMetaDisposeUpdate {
@@ -2032,6 +2035,7 @@ pub(crate) async fn run_shell_child(
                             worktree_state: Some("preserved".to_string()),
                             patch_path: patch_path.clone(),
                             diffstat: diffstat_summary.clone(),
+                            land_status: Some("pending".to_string()),
                             clear_worktree_path: false,
                         },
                     );
