@@ -8,7 +8,7 @@
 - Four Grok 4.5 research passes (loop reliability, worktree lifecycle, NVIDIA provider, HCIL architecture)
 - Claude Code Ultracode / dynamic-workflow docs + live screenshot audit (`nemotron-ultra-subagent-audit`, 91 agents / 7.4M tokens)
 
-**Positioning:** r7 shipped isolation-by-default (snapshot then delete). RC8 is the **reliability + supervisor ergonomics + deep-audit** release: make multi-agent development and multi-hour improvement loops safe, recoverable, and timeout-bounded â€” especially with NVIDIA Integrate â€” and ship a first-class **`/deepaudit`** workflow (Hyperâ€™s Ultracode-style adversarial repo audit).
+**Positioning:** r7 shipped isolation-by-default (snapshot then delete). RC8 is the **reliability + supervisor ergonomics + deep-audit** release: make multi-agent development and multi-hour improvement loops safe, recoverable, and timeout-bounded Ã¢â‚¬â€ especially with NVIDIA Integrate Ã¢â‚¬â€ and ship a first-class **`/deepaudit`** workflow (HyperÃ¢â‚¬â„¢s Ultracode-style adversarial repo audit).
 
 ---
 
@@ -23,11 +23,11 @@
 | NVIDIA tools | Deser / request quirks break agent path | Null-tolerant deser + platform defaults + catalog hygiene |
 | Land pipeline | Manual `git show` archaeology | `land` / `diff` / `open` tools + CLI |
 | Multi-hour loops | Bones exist (queue=4, workflow, resume) | Stock improve workflow + checkpoint + reliability substrate |
-| **Deep audit (`/deepaudit`)** | Only `/deep-research` + ad-hoc branch review workflow | Bundled **investigate â†’ verify â†’ report** audit; slash + size guidelines |
+| **Deep audit (`/deepaudit`)** | Only `/deep-research` + ad-hoc branch review workflow | Bundled **investigate Ã¢â€ â€™ verify Ã¢â€ â€™ report** audit; slash + size guidelines |
 
-**Controls already prove the stack works:** Grok 4.5 and Codex Terra complete multi-tool coding in worktrees. NVIDIA failures are **provider + deser + policy**, not â€œsubagents broken.â€
+**Controls already prove the stack works:** Grok 4.5 and Codex Terra complete multi-tool coding in worktrees. NVIDIA failures are **provider + deser + policy**, not Ã¢â‚¬Å“subagents broken.Ã¢â‚¬Â
 
-**Ultracode parity note:** Claudeâ€™s Ultracode is not â€œone smarter modelâ€ â€” it is a **scripted fan-out** (investigate â†’ hypothesis explosion â†’ independent verify â†’ filtered report). Hyper already has the runtime (`xai-workflow` Rhai, `/deep-research`, `/workflows` UI). RC8 productizes that pattern as **`/deepaudit`**.
+**Ultracode parity note:** ClaudeÃ¢â‚¬â„¢s Ultracode is not Ã¢â‚¬Å“one smarter modelÃ¢â‚¬Â Ã¢â‚¬â€ it is a **scripted fan-out** (investigate Ã¢â€ â€™ hypothesis explosion Ã¢â€ â€™ independent verify Ã¢â€ â€™ filtered report). Hyper already has the runtime (`xai-workflow` Rhai, `/deep-research`, `/workflows` UI). RC8 productizes that pattern as **`/deepaudit`**.
 ---
 
 ## 2. Codebase audit (as-is)
@@ -37,13 +37,13 @@
 | Capability | Location | Notes |
 |------------|----------|-------|
 | Isolation default = worktree | `xai-grok-subagent-resolution`, r7 CHANGELOG | Fail-closed if create fails |
-| Snapshot â†’ `refs/grok/subagents/<id>` | `handle_request.rs` dispose ~1918â€“1984 | Transfer into parent main repo |
+| Snapshot Ã¢â€ â€™ `refs/grok/subagents/<id>` | `handle_request.rs` dispose ~1918Ã¢â‚¬â€œ1984 | Transfer into parent main repo |
 | Resume rehydrate from snapshot | `ResumeWorktreeAction` in `subagent/mod.rs` | Works if ref persisted |
 | Slot pool max 4 + FIFO queue | Coordinator (`DEFAULT_MAX_CONCURRENT_SUBAGENTS`) | Env/config override |
 | Progress publisher (2s / 8s) | Subagent progress ACP | No auto-cancel |
 | Agent-def budgets | `AgentDefinition.timeout_secs` | **Only oracle** has defaults (180s / 40 tools) |
 | Workflow Rhai | `xai-workflow` | `agent`/`parallel`/`pause`/`journal`; same-process resume |
-| `/deep-research` builtin | `session/workflows/deep_research.rhai` + slash | Plan â†’ research â†’ verify â†’ cited report (web-oriented) |
+| `/deep-research` builtin | `session/workflows/deep_research.rhai` + slash | Plan Ã¢â€ â€™ research Ã¢â€ â€™ verify Ã¢â€ â€™ cited report (web-oriented) |
 | Branch multi-review workflow | `.grok/workflows/review-current-branch.rhai` | Parallel reviewers + dual verification (code-oriented) |
 | `/workflows` progress UI | `xai-grok-pager` views | Phase / agent roster / pause-stop |
 | `prompt_cache_key` strip gate | `client.rs` + per-model TOML | Partially mitigated; not platform-wide |
@@ -54,7 +54,7 @@
 |-------------|---------------|-----|
 | Deser `null, expected u32` | `Usage` / `ChatChunkChoice.index` / `ToolCallDelta.index` as bare `u32` in `xai-grok-sampling-types/src/types.rs` | NVIDIA nulls crash client after successful tokens |
 | Worktree deleted; hard to find work | Dispose snapshots then **removes** tree; `SubagentCompletedOutput` has **no** `snapshot_ref` | Parent sees dead path or nothing |
-| No hard timeout | `TaskToolInput` has no `timeout_ms`; GP `timeout_secs: None` | NVIDIA stalls 10â€“27+ min |
+| No hard timeout | `TaskToolInput` has no `timeout_ms`; GP `timeout_secs: None` | NVIDIA stalls 10Ã¢â‚¬â€œ27+ min |
 | No structured land/diff | No `land_subagent` tool; completion is text blob | Supervisors cannot merge multi-agent work |
 
 | Feedback P1 | Evidence | Gap |
@@ -63,18 +63,18 @@
 | Token overflow Nano 9B | Catalog `max_completion_tokens=131072` vs API `max_model_len=128000` | 400 on tools |
 | Single tool-call Llama 70B | No `parallel_tool_calls` on request; no `max_parallel_tool_calls` | Multi-tool 400 |
 | EOL catalog | step-3.5, mistral-*, kimi-k2.6 still listed | Bad picker UX |
-| Oracle â†’ Ultra | User `[subagents.models] oracle = ultra`; product has no pin | Tool oracle broken until deser fixed |
+| Oracle Ã¢â€ â€™ Ultra | User `[subagents.models] oracle = ultra`; product has no pin | Tool oracle broken until deser fixed |
 | Heartbeats / error_class | Progress exists; `error: Option<String>` opaque | Cannot smart-retry |
 
 ### 2.3 Ideal worktree machine vs actual
 
 ```text
 ACTUAL (r7 default):
-  SPAWN â†’ RUNNING â†’ SNAPSHOT+DELETE â†’ meta keeps tombstone path + snapshot_ref
+  SPAWN Ã¢â€ â€™ RUNNING Ã¢â€ â€™ SNAPSHOT+DELETE Ã¢â€ â€™ meta keeps tombstone path + snapshot_ref
   Parent tool text: answer + <subagent_meta>  (NO snapshot_ref)
 
-IDEAL (Â§3.5):
-  SPAWN â†’ RUNNING â†’ SNAPSHOTTED â†’ LAND | DISCARD | TTL â†’ CLEANED
+IDEAL (Ã‚Â§3.5):
+  SPAWN Ã¢â€ â€™ RUNNING Ã¢â€ â€™ SNAPSHOTTED Ã¢â€ â€™ LAND | DISCARD | TTL Ã¢â€ â€™ CLEANED
   Never DELETE_WITHOUT_SNAPSHOT; structured worktree block always
 ```
 
@@ -82,7 +82,7 @@ IDEAL (Â§3.5):
 
 **Have:** coordinator slots, wait/kill, workflow phases, progress ticks, snapshot refs, resume_from (completed only).
 
-**Missing for â€œresearch â†’ plan â†’ implement â†’ check â†’ optimize â†’ repeat for hoursâ€:**
+**Missing for Ã¢â‚¬Å“research Ã¢â€ â€™ plan Ã¢â€ â€™ implement Ã¢â€ â€™ check Ã¢â€ â€™ optimize Ã¢â€ â€™ repeat for hoursÃ¢â‚¬Â:**
 1. Hard child lifetime + stall eviction  
 2. Always-recoverable artifacts (patch + structured ref)  
 3. Land tools (parent-controlled merge)  
@@ -96,7 +96,7 @@ IDEAL (Â§3.5):
 |------|--------------------------|
 | Rhai workflows + `agent()` / `parallel()` | Bundled **codebase audit** script (not only web research) |
 | `/deep-research` slash + builtin registry | **`/deepaudit` slash** + `deep-audit` builtin name |
-| Dual-verify pattern in branch review | Generic **find â†’ explode claims â†’ verify each** for any scope |
+| Dual-verify pattern in branch review | Generic **find Ã¢â€ â€™ explode claims Ã¢â€ â€™ verify each** for any scope |
 | `agent_budget` (default 128, max 1024) | **Size guidelines** (small/medium/large) + cost caution in UI |
 | `/workflows` dashboard | Docs for audit cost, size, when to use vs single agent |
 
@@ -106,39 +106,39 @@ Observed Claude Ultracode audit (reference): 91 agents, 7.4M tokens, Investigate
 
 ## 3. Release themes (RC8)
 
-### Theme A â€” NVIDIA Integrate reliability
+### Theme A Ã¢â‚¬â€ NVIDIA Integrate reliability
 Unblock tool-using NVIDIA models; stop 400s from client mistakes; honest catalog.
 
-### Theme B â€” Worktree never loses work
+### Theme B Ã¢â‚¬â€ Worktree never loses work
 MVP recovery + structured completion; path toward land/retain.
 
-### Theme C â€” Subagent reliability (timeouts + stalls)
+### Theme C Ã¢â‚¬â€ Subagent reliability (timeouts + stalls)
 Bounded agents; free slots; classify failures.
 
-### Theme D â€” Supervisor land path
+### Theme D Ã¢â‚¬â€ Supervisor land path
 Parent can diff/land/open without git archaeology.
 
-### Theme E â€” Continuous improvement loop substrate
+### Theme E Ã¢â‚¬â€ Continuous improvement loop substrate
 Stock workflow + checkpoint + docs so multi-hour loops are productized, not hand-rolled.
 
-### Theme F â€” `/deepaudit` (Ultracode-style deep audit)
-Bundled adversarial codebase audit: investigate fan-out â†’ independent verification â†’ filtered report. Slash command, size guidelines, RO-by-default agents. Depends on Theme C timeouts so large runs do not zombie slots.
+### Theme F Ã¢â‚¬â€ `/deepaudit` (Ultracode-style deep audit)
+Bundled adversarial codebase audit: investigate fan-out Ã¢â€ â€™ independent verification Ã¢â€ â€™ filtered report. Slash command, size guidelines, RO-by-default agents. Depends on Theme C timeouts so large runs do not zombie slots.
 
 **Out of RC8 (defer to RC9+):** real `git worktree list` force-migration, full path allowlists, pre-land hooks as first-class product, fan-out `spawn_many` tool, full subagent panel UI, cross-process workflow journal, Claude-style **`ultracode` keyword auto-trigger** and `/effort ultracode` session mode, dynamic model-authored workflow JS (Hyper stays Rhai).
 ---
 
 ## 4. Work packages (implementation order)
 
-### WP0 â€” Release scaffolding
+### WP0 Ã¢â‚¬â€ Release scaffolding
 | Item | Detail |
 |------|--------|
-| Version | Bump `VERSION` â†’ `0.2.114-r8` when shipping (keep Unreleased until merge) |
+| Version | Bump `VERSION` Ã¢â€ â€™ `0.2.114-r8` when shipping (keep Unreleased until merge) |
 | Docs | This plan + update `KNOWN_ISSUES.md` + CHANGELOG |
 | Feedback | Keep `HYPER_DEVELOPER_FEEDBACK.md` as source audit; link from CHANGELOG |
 
 ---
 
-### WP1 â€” P0 NVIDIA deserialization (Theme A)
+### WP1 Ã¢â‚¬â€ P0 NVIDIA deserialization (Theme A)
 
 **Problem:** Stream/response parse dies on `null` for fields typed `u32`.
 
@@ -146,9 +146,9 @@ Bundled adversarial codebase audit: investigate fan-out â†’ independent ver
 1. Null-tolerant deser for Chat Completions:
    - `Usage.{prompt,completion,total}_tokens`
    - `ChatChoice.index`, `ChatChunkChoice.index`
-   - `ToolCallDelta.index` (default + null â†’ 0)
+   - `ToolCallDelta.index` (default + null Ã¢â€ â€™ 0)
    - Nested usage detail `u32`s
-2. Prefer `deserialize_null_default` / `Option<u32>` â†’ map to 0 in `TokenUsage` conversion.
+2. Prefer `deserialize_null_default` / `Option<u32>` Ã¢â€ â€™ map to 0 in `TokenUsage` conversion.
 3. Fixtures from NVIDIA-shaped payloads (usage nulls, index null, tool_calls null regression).
 4. On residual serialize fail: classify `error_class=serialize`; keep raw snippet in logs (already partially present).
 
@@ -164,16 +164,16 @@ Bundled adversarial codebase audit: investigate fan-out â†’ independent ver
 
 ---
 
-### WP2 â€” P0 worktree recovery MVP (Theme B)
+### WP2 Ã¢â‚¬â€ P0 worktree recovery MVP (Theme B)
 
 **Problem:** Snapshot ref exists but parent/UI cannot see it; tree deleted; no patch.
 
 **Dispose order (new):**
 ```text
-snapshot â†’ write changes.patch + diffstat â†’ persist meta
+snapshot Ã¢â€ â€™ write changes.patch + diffstat Ã¢â€ â€™ persist meta
   (snapshot_ref, snapshot_sha, worktree_state, patch_path)
-â†’ remove dir (if not retain) â†’ clear live path in result
-â†’ structured worktree block on completion
+Ã¢â€ â€™ remove dir (if not retain) Ã¢â€ â€™ clear live path in result
+Ã¢â€ â€™ structured worktree block on completion
 ```
 
 **Changes:**
@@ -199,7 +199,7 @@ snapshot â†’ write changes.patch + diffstat â†’ persist meta
 
 ---
 
-### WP3 â€” P0 hard timeout + cancelâ†’snapshot (Theme C)
+### WP3 Ã¢â‚¬â€ P0 hard timeout + cancelÃ¢â€ â€™snapshot (Theme C)
 
 **Problem:** GP subagents unbounded; kill mid-stall can leave empty recovery.
 
@@ -217,8 +217,8 @@ pub timeout_ms: Option<u64>,  // hard wall-clock; distinct from get_task_output 
 5. Unbounded only if `allow_unbounded = true`
 
 **Plumbing:**
-- `SubagentExecutionBudget.timeout_secs` already drives budget monitor â€” map spawn override into it  
-- Hard timeout â†’ `status=timed_out`, `error_class=timeout`, **always** run WP2 dispose  
+- `SubagentExecutionBudget.timeout_secs` already drives budget monitor Ã¢â‚¬â€ map spawn override into it  
+- Hard timeout Ã¢â€ â€™ `status=timed_out`, `error_class=timeout`, **always** run WP2 dispose  
 - Workflow `AgentOpts.timeout_ms` same field  
 
 **Files:**
@@ -229,21 +229,21 @@ pub timeout_ms: Option<u64>,  // hard wall-clock; distinct from get_task_output 
 - Config types for defaults
 
 **Acceptance:**
-- Spawn with `timeout_ms=5000` dies â‰¤ ~6s with timed_out  
+- Spawn with `timeout_ms=5000` dies Ã¢â€°Â¤ ~6s with timed_out  
 - Snapshot/patch written on timeout when dirty  
 - NVIDIA default 10 min documented and applied for nvidia/* unless overridden  
 
 ---
 
-### WP4 â€” P0/P1 stall detector (Theme C / loop)
+### WP4 Ã¢â‚¬â€ P0/P1 stall detector (Theme C / loop)
 
 **Problem:** Agent alive but no progress holds a slot for 27+ minutes.
 
 **Policy:**
 ```text
-progress = tool_call_countâ†‘ OR tokens_usedâ†‘ OR turn_countâ†‘
+progress = tool_call_countÃ¢â€ â€˜ OR tokens_usedÃ¢â€ â€˜ OR turn_countÃ¢â€ â€˜
          OR active shell task progress (optional)
-if idle > stall_timeout_ms â†’ fail error_class=stall, free slot, snapshot
+if idle > stall_timeout_ms Ã¢â€ â€™ fail error_class=stall, free slot, snapshot
 ```
 
 **Defaults:**
@@ -251,7 +251,7 @@ if idle > stall_timeout_ms â†’ fail error_class=stall, free slot, snapshot
 |---------|------------------|
 | NVIDIA / smoke | 180_000 (3 min) |
 | Default agent | 600_000 (10 min) |
-| Multi-hour loop (explicit) | 900_000â€“1_800_000 |
+| Multi-hour loop (explicit) | 900_000Ã¢â‚¬â€œ1_800_000 |
 
 **Implementation:**
 - Share sampling with existing progress publisher (2s)  
@@ -269,7 +269,7 @@ if idle > stall_timeout_ms â†’ fail error_class=stall, free slot, snapshot
 
 ---
 
-### WP5 â€” P0 structured completion + land/diff/open (Themes B/D)
+### WP5 Ã¢â‚¬â€ P0 structured completion + land/diff/open (Themes B/D)
 
 **Structured worktree block (completion):**
 ```json
@@ -306,8 +306,8 @@ hyper subagent prune --older-than 24h
 ```
 
 **Spawn flags:**
-- `retain_worktree: bool` â€” skip delete after snapshot; state=live  
-- Default for RC8: **export patch always**; retain dirty success **or** keep delete-after-patch for disk (product call â€” recommend **retain dirty success + 24h GC** to match Â§3.5)
+- `retain_worktree: bool` Ã¢â‚¬â€ skip delete after snapshot; state=live  
+- Default for RC8: **export patch always**; retain dirty success **or** keep delete-after-patch for disk (product call Ã¢â‚¬â€ recommend **retain dirty success + 24h GC** to match Ã‚Â§3.5)
 
 **Files:**
 - New tool modules under `xai-grok-tools`
@@ -322,13 +322,13 @@ hyper subagent prune --older-than 24h
 
 ---
 
-### WP6 â€” P1 NVIDIA platform defaults + catalog (Theme A)
+### WP6 Ã¢â‚¬â€ P1 NVIDIA platform defaults + catalog (Theme A)
 
 | Fix | Action |
 |-----|--------|
 | `prompt_cache_key` | NVIDIA `fallback_request_compat`: `supports_prompt_cache_key=false`; stamp only when compat true (opt-in) |
 | Other NVIDIA quirks | `supports_store=false`, `supports_developer_role=false`, `supports_strict_mode=false`, `max_tokens` field |
-| Token clamp | Runtime `min(requested, catalog.max, context_window)`; fix Nano 9B catalog (â‰¤128000, sane max out) |
+| Token clamp | Runtime `min(requested, catalog.max, context_window)`; fix Nano 9B catalog (Ã¢â€°Â¤128000, sane max out) |
 | Parallel tools | `parallel_tool_calls: false` when `max_parallel_tool_calls=1`; set for Llama 3.1 70B NVIDIA |
 | EOL/404 | Hide or `supported_in_api=false`: step-3.5-flash, mistral-small-4, mistral-large-3, kimi-k2.6 |
 | `agent_ready` | Catalog flag; default NVIDIA false; allowlist carefully after WP1 |
@@ -351,7 +351,7 @@ oracle = "xai/grok-4.5"   # or current Grok agent slug
 
 ---
 
-### WP7 â€” P1 error_class + heartbeats (Themes C/E)
+### WP7 Ã¢â‚¬â€ P1 error_class + heartbeats (Themes C/E)
 
 **ErrorClass enum:**
 `Serialize | Provider400 | Provider5xx | Stall | Timeout | Eol | Auth | Budget | Cancelled | Conflict | Unknown`
@@ -368,19 +368,19 @@ oracle = "xai/grok-4.5"   # or current Grok agent slug
 
 ---
 
-### WP8 â€” Continuous improvement loop (Theme E)
+### WP8 Ã¢â‚¬â€ Continuous improvement loop (Theme E)
 
-**HCIL = Hyper Continuous Improvement Loop** (compose, donâ€™t replace).
+**HCIL = Hyper Continuous Improvement Loop** (compose, donÃ¢â‚¬â„¢t replace).
 
 ```text
 Outer: parent agent OR scheduler_create interval
 Inner: stock workflow continuous-improve.rhai
-  phase research  â†’ explore RO (isolation none preferred)
-  phase plan      â†’ plan RO
-  phase implement â†’ parallel implementers (worktree, timeout, retain)
-  phase verify    â†’ reviewer RO on diffs + optional tests
-  phase land      â†’ land_subagent serial
-  on stall        â†’ free slot, checkpoint, replan or pause(no_progress)
+  phase research  Ã¢â€ â€™ explore RO (isolation none preferred)
+  phase plan      Ã¢â€ â€™ plan RO
+  phase implement Ã¢â€ â€™ parallel implementers (worktree, timeout, retain)
+  phase verify    Ã¢â€ â€™ reviewer RO on diffs + optional tests
+  phase land      Ã¢â€ â€™ land_subagent serial
+  on stall        Ã¢â€ â€™ free slot, checkpoint, replan or pause(no_progress)
   loop until stop criteria (max iters / hours / budget)
 ```
 
@@ -395,7 +395,7 @@ Inner: stock workflow continuous-improve.rhai
 
 ---
 
-### WP9 â€” Docs, known issues, release notes
+### WP9 Ã¢â‚¬â€ Docs, known issues, release notes
 
 | Doc | Update |
 |-----|--------|
@@ -405,11 +405,11 @@ Inner: stock workflow continuous-improve.rhai
 | `docs/design-oracle.md` | Anti-pin Ultra until agent_ready |
 | NVIDIA agent-ready vs chat-ready | Badge semantics |
 | CHANGELOG | RC8 section including `/deepaudit` |
-| Honest naming | â€œsandbox / ephemeral clone-or-linkedâ€; not always `git worktree list` |
+| Honest naming | Ã¢â‚¬Å“sandbox / ephemeral clone-or-linkedÃ¢â‚¬Â; not always `git worktree list` |
 
 ---
 
-### WP10 â€” `/deepaudit` Ultracode-style deep audit (Theme F) â€” **RC8 product feature**
+### WP10 Ã¢â‚¬â€ `/deepaudit` Ultracode-style deep audit (Theme F) Ã¢â‚¬â€ **RC8 product feature**
 
 **Problem:** Users want Claude Ultracode-class repo audits (dozens of agents, adversarial verify, one report) without hand-rolling Rhai or burning the parent context window. Hyper has `/deep-research` (web) and branch review, but **no first-class deep codebase audit command**.
 
@@ -419,19 +419,19 @@ Inner: stock workflow continuous-improve.rhai
 /deepaudit
 /deepaudit nvidia subagent tool path
 /deepaudit --size medium src/agent/subagent
-/deepaudit {"scope":"â€¦","focus":"bugs|security|nvidia|subagents|all","size":"small|medium|large"}
+/deepaudit {"scope":"Ã¢â‚¬Â¦","focus":"bugs|security|nvidia|subagents|all","size":"small|medium|large"}
 ```
 
-Also launchable as `/workflow deep-audit {â€¦}` once registered.
+Also launchable as `/workflow deep-audit {Ã¢â‚¬Â¦}` once registered.
 
 **Quality pattern (must match Ultracode screenshots):**
 
 ```text
-Scope        â†’ map args + repo into investigation targets
-Investigate  â†’ parallel find:* explore agents (RO)
-             â†’ each emits falsifiable claims (id, file, claim, evidence hint)
-Verify       â†’ one agent per claim (or batch small); confirm | refute | unverified
-Report       â†’ Markdown: verified findings only + unverified appendix + coverage gaps
+Scope        Ã¢â€ â€™ map args + repo into investigation targets
+Investigate  Ã¢â€ â€™ parallel find:* explore agents (RO)
+             Ã¢â€ â€™ each emits falsifiable claims (id, file, claim, evidence hint)
+Verify       Ã¢â€ â€™ one agent per claim (or batch small); confirm | refute | unverified
+Report       Ã¢â€ â€™ Markdown: verified findings only + unverified appendix + coverage gaps
 ```
 
 **Size guidelines (advice + hard caps):**
@@ -440,16 +440,16 @@ Report       â†’ Markdown: verified findings only + unverified appendix + c
 |------|---------------|----------------|------|
 | `small` | &lt; 5 | 16 | One module / smoke |
 | `medium` (default) | &lt; 15 | 48 | Feature / subsystem |
-| `large` | &lt; 50 | 128 | Broad subsystem (closer to Claude mediumâ€“large) |
-| (script max) | never exceed budget | â‰¤1024 runtime max | Runaway guard |
+| `large` | &lt; 50 | 128 | Broad subsystem (closer to Claude mediumÃ¢â‚¬â€œlarge) |
+| (script max) | never exceed budget | Ã¢â€°Â¤1024 runtime max | Runaway guard |
 
-**Cost caution:** If planned agents &gt; 25 or projected large, log/UI advisory (mirror Claude â€œLarge workflowâ€ warning). Do not hard-block; user opted into `/deepaudit`.
+**Cost caution:** If planned agents &gt; 25 or projected large, log/UI advisory (mirror Claude Ã¢â‚¬Å“Large workflowÃ¢â‚¬Â warning). Do not hard-block; user opted into `/deepaudit`.
 
 **Agent defaults for audit children:**
 - `capability_mode: read-only` (no parent tree edits)
-- Prefer `isolation: none` for pure RO (skip worktree clone cost) â€” once RO skip-sandbox lands; until then isolation=none is fine for RO
-- Per-agent `timeout_ms` via WP3 (e.g. 10â€“15 min find, 5â€“10 min verify)
-- Labels: `find:â€¦` / `verify:â€¦` for `/workflows` readability
+- Prefer `isolation: none` for pure RO (skip worktree clone cost) Ã¢â‚¬â€ once RO skip-sandbox lands; until then isolation=none is fine for RO
+- Per-agent `timeout_ms` via WP3 (e.g. 10Ã¢â‚¬â€œ15 min find, 5Ã¢â‚¬â€œ10 min verify)
+- Labels: `find:Ã¢â‚¬Â¦` / `verify:Ã¢â‚¬Â¦` for `/workflows` readability
 
 **Implementation steps:**
 
@@ -459,9 +459,9 @@ Report       â†’ Markdown: verified findings only + unverified appendix + c
    - Args: `scope`, `focus`, `size`, optional `paths[]`, optional `objective`
 2. **Registry** add to `BUILTIN_WORKFLOWS` in `session/workflow/registry.rs`
 3. **Slash** `/deepaudit` in `slash_commands.rs` (same path as `/deep-research`)
-   - Parse free text â†’ `args.scope` / `args.objective`
+   - Parse free text Ã¢â€ â€™ `args.scope` / `args.objective`
    - Optional flags: `--size small|medium|large`
-4. **Pager empty-state copy** update `views/workflows.rs` (â€œStart with `/deep-research` or `/deepaudit`â€¦â€)
+4. **Pager empty-state copy** update `views/workflows.rs` (Ã¢â‚¬Å“Start with `/deep-research` or `/deepaudit`Ã¢â‚¬Â¦Ã¢â‚¬Â)
 5. **User-guide** `04-slash-commands.md` + optional `docs/deepaudit.md` short design
 6. **Report sink:** write to session artifact + emit final report into conversation (same as deep-research)
 7. **Smoke test:** `validate_only` workflow path + unit test that registry resolves `deep-audit`
@@ -480,7 +480,7 @@ Report       â†’ Markdown: verified findings only + unverified appendix + c
 - Keyword `ultracode` auto-trigger in composer
 - `/effort ultracode` session mode
 - Model-authored dynamic Rhai for arbitrary tasks (user can still ask agent to write a workflow)
-- 90+ agent default (Claude-scale) â€” opt-in large only, never default
+- 90+ agent default (Claude-scale) Ã¢â‚¬â€ opt-in large only, never default
 
 ---
 
@@ -488,22 +488,22 @@ Report       â†’ Markdown: verified findings only + unverified appendix + c
 
 | Order | WP | Priority | Risk | Est. scope |
 |------|-----|----------|------|------------|
-| 1 | WP1 NVIDIA deser | P0 | Medium (serde surface) | Smallâ€“med |
+| 1 | WP1 NVIDIA deser | P0 | Medium (serde surface) | SmallÃ¢â‚¬â€œmed |
 | 2 | WP2 Patch + structured recovery | P0 | Medium | Medium |
-| 3 | WP3 timeout_ms | P0 | Lowâ€“med | Medium |
+| 3 | WP3 timeout_ms | P0 | LowÃ¢â‚¬â€œmed | Medium |
 | 4 | WP4 stall detector | P0/P1 | Med (false stalls) | Medium |
 | 5 | WP5 land/diff/open + retain | P0/P1 | Med (land safety) | Large |
 | 6 | WP6 NVIDIA platform/catalog | P1 | Low | Medium |
 | 7 | WP10 `/deepaudit` | **P1 product** | Med (cost / scale) | Medium |
 | 8 | WP7 error_class + heartbeats | P1 | Low | Medium |
 | 9 | WP8 HCIL workflow + checkpoint | P1/P2 | Med | Medium |
-| 10 | WP9 docs/release | â€” | Low | Small |
+| 10 | WP9 docs/release | Ã¢â‚¬â€ | Low | Small |
 
 **Suggested RC8 cut lines:**
 
 | Tier | Include |
 |------|---------|
-| **RC8-must** | WP1â€“WP3, WP2 full, WP5 tools at least `diff`+`land`, WP6 critical catalog/clamp/cache_key, **WP10 `/deepaudit` medium default** |
+| **RC8-must** | WP1Ã¢â‚¬â€œWP3, WP2 full, WP5 tools at least `diff`+`land`, WP6 critical catalog/clamp/cache_key, **WP10 `/deepaudit` medium default** |
 | **RC8-should** | WP4 stall, WP5 retain/CLI, WP7, WP8 stock improve workflow, WP10 large size + cost caution UI |
 | **RC8-nice / RC9** | spawn_many, path allowlists, real git worktree force, panel UI, pre-land hooks, nightly NVIDIA matrix CI, ultracode keyword / effort mode |
 
@@ -566,7 +566,7 @@ Docs
 - Budget timeout resolution order  
 
 ### Integration (local)
-- Spawn worktree agent â†’ complete â†’ patch exists â†’ land into temp parent  
+- Spawn worktree agent Ã¢â€ â€™ complete Ã¢â€ â€™ patch exists Ã¢â€ â€™ land into temp parent  
 - timeout_ms enforces kill + snapshot  
 - Stall synthetic child  
 - Isolation probe: parent file stays buggy, child fixed  
@@ -597,7 +597,7 @@ Docs
 | False stall on long compile | Count shell activity as progress; longer stall for multi-hour profile |
 | Disk pressure from retain | 24h GC; patch-only archive after land; sparse/copy filters later |
 | Land overwrites parent | Merge mode only default; no land_on_complete for multi-agent |
-| Deser change breaks strict providers | Nullâ†’0 only; fixtures for OpenAI+NVIDIA |
+| Deser change breaks strict providers | NullÃ¢â€ â€™0 only; fixtures for OpenAI+NVIDIA |
 | timeout confuses with wait timeout | Docs + distinct field names; schema descriptions |
 | Workflow multi-hour process death | LoopCheckpoint JSON (not only Rhai journal) |
 | Windows linked worktree issues | Keep clone/standalone path; fix UX first (WP2) |
@@ -609,33 +609,33 @@ Docs
 
 ## 9. Research agent findings (summary)
 
-Four Grok 4.5 passes (exploreÃ—3 + oracle) converged:
+Four Grok 4.5 passes (exploreÃƒâ€”3 + oracle) converged:
 
-1. **Timeout + snapshot honesty first** â€” unblocks everything else  
-2. **Land tools wrap existing apply_worktree** â€” no second merge engine  
-3. **Slot pool already exists (4)** â€” loop driver must refill, not reimplement  
-4. **Stall = progress signature flat** â€” reuse Running snapshot fields  
+1. **Timeout + snapshot honesty first** Ã¢â‚¬â€ unblocks everything else  
+2. **Land tools wrap existing apply_worktree** Ã¢â‚¬â€ no second merge engine  
+3. **Slot pool already exists (4)** Ã¢â‚¬â€ loop driver must refill, not reimplement  
+4. **Stall = progress signature flat** Ã¢â‚¬â€ reuse Running snapshot fields  
 5. **HCIL should be workflow + checkpoint**, not a new orchestrator actor  
-6. **NVIDIA deser is types.rs null u32** â€” highest confidence root cause  
-7. **Oracle Ultra pin is user config** â€” doctor + docs, not code pin to Ultra  
-8. **`/deepaudit` is productized Ultracode** â€” reuse Rhai + verify pattern; default medium, never 90-agent by default  
+6. **NVIDIA deser is types.rs null u32** Ã¢â‚¬â€ highest confidence root cause  
+7. **Oracle Ultra pin is user config** Ã¢â‚¬â€ doctor + docs, not code pin to Ultra  
+8. **`/deepaudit` is productized Ultracode** Ã¢â‚¬â€ reuse Rhai + verify pattern; default medium, never 90-agent by default  
 
 ---
 
 ## 10. Ideal multi-hour loop (product target)
 
 ```text
-1. Parent plans feature â†’ checklist â†’ LoopCheckpoint
+1. Parent plans feature Ã¢â€ â€™ checklist Ã¢â€ â€™ LoopCheckpoint
 2. spawn explore (RO, no/light worktree, timeout 15m)
-3. spawn implementer A/B (worktree, allow paths later, timeout 15â€“45m)
-4. Heartbeats â†’ parent logs; stall/timeout free slots
-5. Complete â†’ structured diffs + patches + optional tests in sandbox
+3. spawn implementer A/B (worktree, allow paths later, timeout 15Ã¢â‚¬â€œ45m)
+4. Heartbeats Ã¢â€ â€™ parent logs; stall/timeout free slots
+5. Complete Ã¢â€ â€™ structured diffs + patches + optional tests in sandbox
 6. spawn reviewer (RO on snapshots)
-7. parent land A, land B (serial; conflict â†’ hold)
-8. parent verifies main tree â†’ replan â†’ hours of iteration
+7. parent land A, land B (serial; conflict Ã¢â€ â€™ hold)
+8. parent verifies main tree Ã¢â€ â€™ replan Ã¢â€ â€™ hours of iteration
 ```
 
-**RC8 ships the substrate (1â€“7 reliability).** Full path allowlists and auto-reviewer chain can land as follow-ups once land+timeout are green.
+**RC8 ships the substrate (1Ã¢â‚¬â€œ7 reliability).** Full path allowlists and auto-reviewer chain can land as follow-ups once land+timeout are green.
 
 ---
 
@@ -665,7 +665,7 @@ Ship these before packaging r8. Supervisors may parallelize with worktree agents
 - [x] **R1** WP7 residual: `last_tool` + `last_progress_age_ms` on `SubagentProgress` ACP ticks; ensure completion meta `land_status=pending` when worktree artifacts exist  
 - [x] **R2** Path allowlists: `allowed_paths` on spawn + land/diff filter (refuse out-of-allowlist)  
 - [x] **R3** RO / explore|plan|oracle default `isolation=none` when spawn omits isolation (explicit worktree still honored)  
-- [ ] **R4** `spawn_many` tool (or Task multi-spawn) + barrier wait respecting max concurrency  
+- [x] **R4** `spawn_many` tool (or Task multi-spawn) + barrier wait respecting max concurrency  
 - [x] **R5** `/ultracode` slash alias → deep-audit (full `/effort ultracode` mode can follow)  
 - [ ] **R6** Durable LoopCheckpoint under session `loops/<id>/` (cross-process readable) when continuous-improve runs  
 - [ ] **R7** NVIDIA conformance unit fixtures expanded + optional CI job (live key optional)  
@@ -685,14 +685,14 @@ Ship these before packaging r8. Supervisors may parallelize with worktree agents
 
 | PR | Title | Depends |
 |----|-------|---------|
-| PR1 | fix(sampler): null-tolerant Chat Completions deser (NVIDIA) | â€” |
-| PR2 | feat(subagents): patch export + structured snapshot completion | â€” |
+| PR1 | fix(sampler): null-tolerant Chat Completions deser (NVIDIA) | Ã¢â‚¬â€ |
+| PR2 | feat(subagents): patch export + structured snapshot completion | Ã¢â‚¬â€ |
 | PR3 | feat(subagents): timeout_ms + platform defaults | PR2 (dispose path) |
 | PR4 | feat(subagents): land/diff tools | PR2 |
 | PR5 | fix(models): NVIDIA platform compat, clamp, EOL catalog | PR1 |
 | PR6 | feat(subagents): stall detector + error_class | PR3 |
 | **PR7** | **feat(workflows): `/deepaudit` builtin + slash (Ultracode-style)** | **PR3 preferred** |
-| PR8 | feat(loop): continuous-improve workflow + checkpoint | PR3â€“PR4 |
+| PR8 | feat(loop): continuous-improve workflow + checkpoint | PR3Ã¢â‚¬â€œPR4 |
 | PR9 | docs: RC8 release notes + recovery + deepaudit guide | all |
 
 Can parallelize PR1 and PR2 immediately. Draft PR7 script early from `deep_research.rhai`; advertise `large` only after PR3 timeouts land.
@@ -704,7 +704,7 @@ Can parallelize PR1 and PR2 immediately. Draft PR7 script early from `deep_resea
 1. **NVIDIA tool smoke** on at least one Nemotron model completes without client serialize error (or model honestly `agent_ready=false` and tools gated).  
 2. **No silent work loss:** every completed/failed/timed-out worktree agent leaves patch and/or snapshot_ref visible to parent.  
 3. **No 27-minute zombie:** default or explicit timeout/stall frees slots.  
-4. **Parent can land** child work with one tool/CLI without knowing `refs/grok/subagents/â€¦`.  
+4. **Parent can land** child work with one tool/CLI without knowing `refs/grok/subagents/Ã¢â‚¬Â¦`.  
 5. **Grok/Terra control paths** remain green (isolation + coding).  
 6. **`/deepaudit` works:** medium audit runs in background, shows Investigate/Verify/Report in `/workflows`, returns a verified-findings report without mutating the parent tree.  
 7. **Docs** explain recovery, NVIDIA chat vs agent readiness, and `/deepaudit` cost/size.  
@@ -714,32 +714,32 @@ Can parallelize PR1 and PR2 immediately. Draft PR7 script early from `deep_resea
 
 ## 14. Immediate next actions
 
-1. âœ… Feedback read + full audit + research agents + this plan  
-2. âœ… `/deepaudit` productized into RC8 plan (Theme F / WP10)  
+1. Ã¢Å“â€¦ Feedback read + full audit + research agents + this plan  
+2. Ã¢Å“â€¦ `/deepaudit` productized into RC8 plan (Theme F / WP10)  
 3. **Start PR1** (NVIDIA deser) and **PR2** (patch + structured completion) in parallel  
-4. Then PR3 (`timeout_ms`) â€” highest field-impact for multi-agent **and** safe deep audits  
+4. Then PR3 (`timeout_ms`) Ã¢â‚¬â€ highest field-impact for multi-agent **and** safe deep audits  
 5. Wire land tools (PR4) so multi-agent feature development is possible  
 6. Catalog/platform NVIDIA (PR5)  
-7. **PR7 `/deepaudit`** â€” bundled workflow + slash (draft script early; ship with/after PR3)  
+7. **PR7 `/deepaudit`** Ã¢â‚¬â€ bundled workflow + slash (draft script early; ship with/after PR3)  
 8. Stall + HCIL stock workflow as capacity allows  
 
 ---
 
 ## 15. `/deepaudit` detailed design (Theme F / WP10)
 
-Canonical implementation checklist lives in **Â§4 WP10**. This section is the design reference.
+Canonical implementation checklist lives in **Ã‚Â§4 WP10**. This section is the design reference.
 
 ### 15.1 Reference: Claude Ultracode behavior
 
-Observed run: `nemotron-ultra-subagent-audit-wf_â€¦` â€” **91 agents**, **7.4M tokens**, **56m15s**.
+Observed run: `nemotron-ultra-subagent-audit-wf_Ã¢â‚¬Â¦` Ã¢â‚¬â€ **91 agents**, **7.4M tokens**, **56m15s**.
 
 | Phase | Pattern | Purpose |
 |-------|---------|---------|
 | **Investigate** (~7 agents) | `find:*` parallel map | Partition problem space |
-| **Verify** (~80+ agents) | `verify:<hypothesis-slug>` | One agent per claim â€” adversarial confirm/refute |
+| **Verify** (~80+ agents) | `verify:<hypothesis-slug>` | One agent per claim Ã¢â‚¬â€ adversarial confirm/refute |
 | **Report** | synthesize survivors | Verified only; unverified appendix |
 
-Not â€œone smarter model.â€ Script holds plan â†’ investigate fan-out â†’ hypothesis explosion â†’ verify fan-out â†’ filter â†’ report. Background; `/workflows` progress.
+Not Ã¢â‚¬Å“one smarter model.Ã¢â‚¬Â Script holds plan Ã¢â€ â€™ investigate fan-out Ã¢â€ â€™ hypothesis explosion Ã¢â€ â€™ verify fan-out Ã¢â€ â€™ filter Ã¢â€ â€™ report. Background; `/workflows` progress.
 
 ### 15.2 UX & args
 
@@ -747,7 +747,7 @@ Not â€œone smarter model.â€ Script holds plan â†’ investigate fan-
 /deepaudit
 /deepaudit nvidia subagent tool path
 /deepaudit --size large src/agent/subagent
-/workflow deep-audit {"scope":"â€¦","focus":"nvidia","size":"medium"}
+/workflow deep-audit {"scope":"Ã¢â‚¬Â¦","focus":"nvidia","size":"medium"}
 ```
 
 | Arg | Values | Default |
@@ -755,7 +755,7 @@ Not â€œone smarter model.â€ Script holds plan â†’ investigate fan-
 | `scope` / free text | path, crate, topic | workspace |
 | `focus` | `bugs` \| `security` \| `nvidia` \| `subagents` \| `all` | `all` |
 | `size` | `small` \| `medium` \| `large` | `medium` |
-| `paths` | optional string array | â€” |
+| `paths` | optional string array | Ã¢â‚¬â€ |
 | `objective` | free-text goal | from free text |
 
 | Size | Agents (guide) | `agent_budget` |
@@ -767,7 +767,7 @@ Not â€œone smarter model.â€ Script holds plan â†’ investigate fan-
 ### 15.3 Phase machine
 
 ```text
-Scope â†’ Investigate (find:*) â†’ Verify (verify:*) â†’ Report â†’ complete
+Scope Ã¢â€ â€™ Investigate (find:*) Ã¢â€ â€™ Verify (verify:*) Ã¢â€ â€™ Report Ã¢â€ â€™ complete
 ```
 
 - RO children; labels readable in `/workflows`
@@ -787,7 +787,7 @@ Scope â†’ Investigate (find:*) â†’ Verify (verify:*) â†’ Report �
 
 ### 15.5 Related: pasted image preview blur
 
-Model receives sharp PNGs; Windows Hyper preview often uses half-block raster resized to cell grid (`halfblock.rs`) â†’ looks blurry. Separate UX polish, not WP10-blocking.
+Model receives sharp PNGs; Windows Hyper preview often uses half-block raster resized to cell grid (`halfblock.rs`) Ã¢â€ â€™ looks blurry. Separate UX polish, not WP10-blocking.
 
 ---
 

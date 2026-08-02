@@ -97,7 +97,10 @@ Optional unit verification before ship:
 
 ```powershell
 cargo test -p xai-grok-sampling-types --lib null
+# NVIDIA Chat Completions deser fixtures (null usage/index/tool_calls):
+cargo test -p xai-grok-sampling-types --lib test_chat_completion_response_nvidia_null_fields
 cargo test -p xai-tool-types --lib task_tool
+cargo test -p xai-grok-tools --lib spawn_many
 cargo check -p xai-grok-shell --lib
 cargo check -p xai-grok-tools --lib
 ```

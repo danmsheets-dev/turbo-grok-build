@@ -601,6 +601,7 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::DiffSubagent(_)
         | ToolOutput::LandSubagent(_)
         | ToolOutput::DiscardSubagent(_)
+        | ToolOutput::SpawnMany(_)
         | ToolOutput::ImageGen(_)
         | ToolOutput::ImageToVideo(_)
         | ToolOutput::ReferenceToVideo(_)

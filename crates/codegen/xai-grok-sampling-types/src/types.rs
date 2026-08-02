@@ -1903,6 +1903,52 @@ mod tests {
         assert_eq!(usage.total_tokens, 0);
     }
 
+    /// Second NVIDIA-shaped fixture: multi-choice + null tool_call index in the
+    /// function-call path (Nemotron / Llama tool gateways).
+    #[test]
+    fn test_chat_completion_response_nvidia_null_tool_call_index() {
+        let json = r#"{
+            "id": "chatcmpl-nvidia-2",
+            "object": "chat.completion",
+            "created": 1700000001,
+            "model": "nvidia/llama-3.1-nemotron-70b-instruct",
+            "choices": [{
+                "index": null,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_nvidia_1",
+                        "type": "function",
+                        "index": null,
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": null,
+                "completion_tokens": 12,
+                "total_tokens": null
+            }
+        }"#;
+        let resp: ChatCompletionResponse = serde_json::from_str(json)
+            .expect("NVIDIA tool_calls with null index should deserialize");
+        assert_eq!(resp.choices[0].index, 0);
+        assert_eq!(resp.choices[0].message.tool_calls.len(), 1);
+        assert_eq!(
+            resp.choices[0].message.tool_calls[0].function.name,
+            "read_file"
+        );
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 12);
+        assert_eq!(usage.total_tokens, 0);
+    }
+
     /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse.
     ///
     /// The blanket `impl<T: Clone + ...> TraceContext for T` applies to

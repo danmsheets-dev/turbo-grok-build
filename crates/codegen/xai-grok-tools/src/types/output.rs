@@ -659,6 +659,7 @@ pub enum ToolOutput {
     DiscardSubagent(
         crate::implementations::grok_build::subagent_worktree::discard::DiscardSubagentOutput,
     ),
+    SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
     /// Generic text output for tools that produce simple formatted text
@@ -706,6 +707,7 @@ impl ToolOutput {
             ToolOutput::GrepSearch(g) => g.exit_code > 1,
             ToolOutput::LandSubagent(o) => !o.success,
             ToolOutput::DiscardSubagent(o) => !o.success,
+            ToolOutput::SpawnMany(o) => o.tasks.iter().any(|t| t.status == "failed"),
             _ => false,
         }
     }
@@ -1070,6 +1072,7 @@ impl ToolOutput {
                 text
             }
             ToolOutput::DiscardSubagent(o) => o.message.clone(),
+            ToolOutput::SpawnMany(o) => o.message.clone(),
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
             ToolOutput::ImageGen(m) => m.prompt_text("Image generated"),

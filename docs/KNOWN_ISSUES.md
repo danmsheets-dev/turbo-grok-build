@@ -11,7 +11,7 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 |-------|-----|
 | NVIDIA stream deser `null` vs `u32` | Null-tolerant Chat Completions usage/index/tool_calls |
 | Subagent hang without timeout | `timeout_ms` + budget monitor; stall on no progress |
-| Worktree â€œdisappearedâ€ | `changes.patch` + `snapshot_ref` + `worktree_state` on completion; `retain_worktree` |
+| Worktree Ã¢â‚¬Å“disappearedÃ¢â‚¬Â | `changes.patch` + `snapshot_ref` + `worktree_state` on completion; `retain_worktree` |
 | Parent cannot merge child work | `diff_subagent` / `land_subagent` tools or `hyper subagent land` |
 | NVIDIA `prompt_cache_key` 400s | Platform defaults + opt-in stamp only |
 | Catalog EOL / Nano token overflow | Hide EOL; clamp Nano 9B; `agent_ready` / max_parallel on compat |
@@ -22,15 +22,15 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
 | Worktree naming | low | Not always `git worktree list` | Implementation may still use clone/linked sandbox; recovery is via snapshot ref / patch |
-| Ultracode free-text keyword | deferred | Auto-workflow on keyword | RC9; slash /ultracode / /deepaudit already ship |
-| Fan-out `spawn_many` | deferred | Single-call matrix spawn | Coordinator queue already max 4 |
+| Ultracode free-text keyword | deferred | Auto-workflow on keyword | RC9; slash `/ultracode` / `/deepaudit` already ship |
+| Fan-out `spawn_many` | done (pre-r8 residual) | `spawn_many` tool + optional wait barrier | Composes Task; coordinator max 4 FIFO queue |
 | Nightly NVIDIA matrix CI | deferred | Live conformance | Unit fixtures shipped |
 
 ## Implemented (pre-r8 residual)
 
 | ID | Topic | Notes |
 |----|--------|--------|
-| R2 | Path allowlists | Optional `allowed_paths` on `task` spawn â†’ `SubagentRequest` / `meta.json`. Non-empty allowlist: `land_subagent` refuses any path outside the prefixes (fail closed); `diff_subagent` filters shown files/diff. Paths normalized (`/` , strip `./`, reject `..` escape / absolute). Omit = unrestricted (prior behavior). |
+| R2 | Path allowlists | Optional `allowed_paths` on `task` spawn Ã¢â€ â€™ `SubagentRequest` / `meta.json`. Non-empty allowlist: `land_subagent` refuses any path outside the prefixes (fail closed); `diff_subagent` filters shown files/diff. Paths normalized (`/` , strip `./`, reject `..` escape / absolute). Omit = unrestricted (prior behavior). |
 
 ## Fixed in v0.2.109
 
@@ -44,14 +44,14 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
-| Modes | deferred | Amp-style lowâ€“ultra agent modes | **ç¼“åœ** â€” [design-modes.md](./design-modes.md) Â§0ã€‚çŽ°æœ‰æ¨¡åž‹é…ç½®å·²å¤Ÿï¼›ä¸ä½œä¸ºå‘å¸ƒç¼ºå£ã€‚ |
-| Oracle | done (Phase 0/1) | Stronger-model pin + trigger UX | spawn åŒæ¨¡åž‹ toastã€`/doctor` pin æ£€æŸ¥ã€`spawn_subagent` è§¦å‘æ–‡æ¡ˆå·²è½åœ° â€” [design-oracle.md](./design-oracle.md)ã€‚Phase 2 harness ä¿¡å·æœªæŽ’æœŸã€‚ |
-| Flaky test | low | `scrollback::entry::tests::test_truncated_height_cache_hits_when_key_unchanged` | ä»…å…¨é‡å¹¶è¡Œè·‘æ—¶å¶è´¥ï¼ˆçº¦ 1/5 æ¦‚çŽ‡ï¼‰ï¼Œå•è·‘å¿…è¿‡ï¼›ç–‘ä¼¼å¹¶è¡Œæµ‹è¯•é—´å…¨å±€å¤–è§‚/ä¸»é¢˜çŠ¶æ€æ±¡æŸ“ï¼Œå±žæ—¢æœ‰éš”ç¦»ç¼ºå£ï¼ŒéžåŠŸèƒ½å›žå½’ã€‚ |
+| Modes | deferred | Amp-style lowÃ¢â‚¬â€œultra agent modes | **Ã§Â¼â€œÃ¥ÂÅ“** Ã¢â‚¬â€ [design-modes.md](./design-modes.md) Ã‚Â§0Ã£â‚¬â€šÃ§Å½Â°Ã¦Å“â€°Ã¦Â¨Â¡Ã¥Å¾â€¹Ã©â€¦ÂÃ§Â½Â®Ã¥Â·Â²Ã¥Â¤Å¸Ã¯Â¼â€ºÃ¤Â¸ÂÃ¤Â½Å“Ã¤Â¸ÂºÃ¥Ââ€˜Ã¥Â¸Æ’Ã§Â¼ÂºÃ¥ÂÂ£Ã£â‚¬â€š |
+| Oracle | done (Phase 0/1) | Stronger-model pin + trigger UX | spawn Ã¥ÂÅ’Ã¦Â¨Â¡Ã¥Å¾â€¹ toastÃ£â‚¬Â`/doctor` pin Ã¦Â£â‚¬Ã¦Å¸Â¥Ã£â‚¬Â`spawn_subagent` Ã¨Â§Â¦Ã¥Ââ€˜Ã¦â€“â€¡Ã¦Â¡Ë†Ã¥Â·Â²Ã¨ÂÂ½Ã¥Å“Â° Ã¢â‚¬â€ [design-oracle.md](./design-oracle.md)Ã£â‚¬â€šPhase 2 harness Ã¤Â¿Â¡Ã¥ÂÂ·Ã¦Å“ÂªÃ¦Å½â€™Ã¦Å“Å¸Ã£â‚¬â€š |
+| Flaky test | low | `scrollback::entry::tests::test_truncated_height_cache_hits_when_key_unchanged` | Ã¤Â»â€¦Ã¥â€¦Â¨Ã©â€¡ÂÃ¥Â¹Â¶Ã¨Â¡Å’Ã¨Â·â€˜Ã¦â€”Â¶Ã¥ÂÂ¶Ã¨Â´Â¥Ã¯Â¼Ë†Ã§ÂºÂ¦ 1/5 Ã¦Â¦â€šÃ§Å½â€¡Ã¯Â¼â€°Ã¯Â¼Å’Ã¥Ââ€¢Ã¨Â·â€˜Ã¥Â¿â€¦Ã¨Â¿â€¡Ã¯Â¼â€ºÃ§â€“â€˜Ã¤Â¼Â¼Ã¥Â¹Â¶Ã¨Â¡Å’Ã¦Âµâ€¹Ã¨Â¯â€¢Ã©â€”Â´Ã¥â€¦Â¨Ã¥Â±â‚¬Ã¥Â¤â€“Ã¨Â§â€š/Ã¤Â¸Â»Ã©Â¢ËœÃ§Å Â¶Ã¦â‚¬ÂÃ¦Â±Â¡Ã¦Å¸â€œÃ¯Â¼Å’Ã¥Â±Å¾Ã¦â€”Â¢Ã¦Å“â€°Ã©Å¡â€Ã§Â¦Â»Ã§Â¼ÂºÃ¥ÂÂ£Ã¯Â¼Å’Ã©ÂÅ¾Ã¥Å Å¸Ã¨Æ’Â½Ã¥â€ºÅ¾Ã¥Â½â€™Ã£â‚¬â€š |
 | Non-Darwin Unix process ID | low | BSD without libproc | `is_grok_process` falls back to liveness-only on non-Linux non-macOS Unix. Rare for Hyper targets (we ship Linux/macOS/Windows). |
 
 ## Fixed in tree
 
-### S0 â€” coexistence / branding / Messages URLs
+### S0 Ã¢â‚¬â€ coexistence / branding / Messages URLs
 
 | ID | Topic | Fix |
 |----|--------|-----|
@@ -60,7 +60,7 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 | F-3 | Branding | `community-build` (default on the Hyper binary) makes `--version` and `completions` emit `hyper`. |
 | F-9 | Local builds without community-build | `xai-grok-pager-bin` defaults include `community-build`. |
 
-### S1 â€” OAuth refresh storms + oracle discoverability
+### S1 Ã¢â‚¬â€ OAuth refresh storms + oracle discoverability
 
 | ID | Topic | Fix |
 |----|--------|-----|
@@ -69,7 +69,7 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 | F-7 | Child Task tool text omitted `oracle` | Nested `CHILD_TASK_DESCRIPTION` and `TaskToolInput` schema list `oracle`. |
 | F-1-linux | Leader argv false positives | Linux classification uses **argv0 only** (not later args like `sleep hyper`). |
 
-### S2 â€” macOS process identity + logout UX
+### S2 Ã¢â‚¬â€ macOS process identity + logout UX
 
 | ID | Topic | Fix |
 |----|--------|-----|
@@ -81,10 +81,10 @@ Last reviewed: 2026-08-01 (RC8 reliability + deep audit package).
 | Topic | Behavior |
 |--------|----------|
 | Shell confine is not an OS sandbox | `--confine` is path-prefix + fail-closed program classifier (`confineShellEnforcement: fail-closed`). Windows AppContainer / Linux Landlock / bwrap are **out of scope** for this package; set `GROK_CONFINE_SHELL_MODE=operand` only for the legacy write-operand scan. |
-| Ecosystem / MCP verify plan trust | Clone-and-delegate baseline verify RCE and `delegate_run.verify` live in the **bridge plugin**, not this Hyper tree â€” tracked separately. |
+| Ecosystem / MCP verify plan trust | Clone-and-delegate baseline verify RCE and `delegate_run.verify` live in the **bridge plugin**, not this Hyper tree Ã¢â‚¬â€ tracked separately. |
 | Shared `~/.grok` | Config, auth, sessions, and leader IPC live under the upstream home. Binary install root is `~/.hyper`. |
 | Shared Kimi + Codex proxy | Catalog id (`kimi-code/*` vs `openai-codex/*`) selects credentials; ambiguous URL alone does not guess a family. |
-| Hyper Modes | **Deferred** â€” Amp four-tier modes will not ship as designed; see [design-modes.md](./design-modes.md) Â§0. |
+| Hyper Modes | **Deferred** Ã¢â‚¬â€ Amp four-tier modes will not ship as designed; see [design-modes.md](./design-modes.md) Ã‚Â§0. |
 | Oracle upgrade | Design in [design-oracle.md](./design-oracle.md); pin + trigger productized (Phase 0/1); Phase 2 harness signals not scheduled. Do **not** pin Oracle to NVIDIA Ultra until `agent_ready`. |
 | Read-only children cannot nest Task | `capability_mode: read-only` strips `ToolKind::Task` so explore/oracle/`/deepaudit` cannot spawn write-capable nested agents. |
 | Worktree implementation | May still be clone/linked sandbox rather than always `git worktree list`; recovery is via `snapshot_ref` / `changes.patch`. |
