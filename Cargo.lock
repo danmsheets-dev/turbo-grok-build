@@ -15833,6 +15833,7 @@ dependencies = [
  "tokio",
  "tracing",
  "xai-grok-config",
+ "xai-grok-developer-log",
  "xai-grok-extension-api",
  "xai-grok-hooks",
  "xai-grok-sampling-types",
