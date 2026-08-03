@@ -2538,6 +2538,11 @@ impl crate::session::mcp_restart::RestartActions for SessionRestartActions {
     fn unregister_server_tools(&self, server: &str) {
         self.session.unregister_server_tools(server);
     }
+    async fn refresh_server_tools(&self, server: &str) -> Result<(), String> {
+        self.session
+            .refresh_server_tools_from_list_changed(server)
+            .await
+    }
     fn push_status(&self, payload: &crate::session::mcp_dispatcher::McpServerStatusPayload) {
         crate::session::mcp_restart::forward_status(&self.session.notifications.gateway, payload);
     }

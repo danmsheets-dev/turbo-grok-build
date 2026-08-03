@@ -2003,6 +2003,7 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             wire_source: McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }],
         ),
     );

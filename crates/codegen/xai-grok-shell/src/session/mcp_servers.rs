@@ -4,8 +4,9 @@ pub use xai_grok_mcp::servers::{
     AcpServerEntry, HttpConfig, MCP_TOOL_NAME_DELIMITER, McpClient, McpClientTimeoutOverrides,
     McpConfigDiff, McpError, McpInitStrategy, McpMetaConfigMap, McpServerMetaConfig, McpServerName,
     McpService, McpSpawnCtx, McpState, McpTool, McpToolRegistration, OauthInteractivity,
-    SharedMcpPool, mcp_server_name, mcp_target_str, mcp_transport_str, parse_mcp_meta_config,
-    parse_mcp_tool_name, sanitize_descriptor_segment, validate_tool_name,
+    SharedMcpPool, make_qualified_mcp_tool_name, mcp_server_name, mcp_target_str, mcp_transport_str,
+    parse_mcp_meta_config, parse_mcp_tool_name, sanitize_descriptor_segment,
+    sanitize_mcp_name_segment, validate_tool_name,
 };
 
 use std::collections::HashMap;
@@ -26,12 +27,18 @@ fn resolve_overrides(
     // Fall back to the globally-resolved startup timeout so servers without a
     // per-server `startup_timeout_sec` (e.g. `~/.claude.json` imports) still get it.
     let global_startup = crate::util::config::resolved_mcp_startup_timeout_secs();
+    // Default tool timeout when unset: match xai-grok-mcp DEFAULT (120s) so
+    // sparse configs / Claude imports don't hang for 6000s (RC12 / C6).
+    // Per-server tool_timeout_sec still wins when set.
     Some(inner::McpClientTimeoutOverrides {
         startup_timeout_sec: config
             .as_ref()
             .and_then(|c| c.startup_timeout_sec)
             .or(Some(global_startup)),
-        tool_timeout_sec: config.as_ref().and_then(|c| c.tool_timeout_sec),
+        tool_timeout_sec: config
+            .as_ref()
+            .and_then(|c| c.tool_timeout_sec)
+            .or(Some(120)),
         tool_timeouts: config.as_ref().and_then(|c| c.tool_timeouts.clone()),
         expose_image_base64: config.as_ref().and_then(|c| c.expose_image_base64),
     })

@@ -32,6 +32,7 @@ use crate::implementations::grok_build::web_search::WebSearchInput;
 use crate::implementations::lsp::LspToolInput;
 use crate::implementations::memory::types::{MemoryGetInput, MemorySearchInput};
 use crate::implementations::opencode::write::WriteInput;
+use crate::implementations::mcp_server_health::McpServerHealthInput;
 use crate::implementations::search_tool::SearchToolInput;
 use crate::implementations::skills::skill::SkillInput;
 use crate::implementations::use_tool::UseToolInput;
@@ -85,6 +86,7 @@ pub enum ToolInput {
     MemorySearch(MemorySearchInput),
     MemoryGet(MemoryGetInput),
     SearchTool(SearchToolInput),
+    McpServerHealth(McpServerHealthInput),
     UseTool(UseToolInput),
     EnterPlanMode(EnterPlanModeInput),
     ExitPlanMode(ExitPlanModeInput),

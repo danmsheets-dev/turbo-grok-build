@@ -269,7 +269,13 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
             }
         }
     });
-    let mutated = patch_server_row(servers, &payload.name, display_status, new_tools);
+    let mutated = patch_server_row(
+        servers,
+        &payload.name,
+        display_status,
+        new_tools,
+        payload.detail,
+    );
     mutated && is_active
 }
 

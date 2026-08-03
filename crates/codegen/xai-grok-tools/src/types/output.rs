@@ -917,14 +917,35 @@ impl ToolOutput {
             ToolOutput::SearchTool(out) => out.content.clone(),
             ToolOutput::SubagentCompleted(sub) => {
                 let mut text = sub.output.clone();
-                if let Some(ref wt) = sub.worktree_path {
-                    text.push_str(&format!("\n\n<worktree_path>{wt}</worktree_path>"));
-                }
+                // Hard isolation signal for supervisors (FR: label worktree vs parent).
                 if sub.isolation_fallback {
                     text.push_str(
-                        "\n\n<isolation_fallback>true</isolation_fallback> — this run was NOT \
-                         isolated; edits may have touched the parent workspace.",
+                        "\n\n<isolation>shared_fallback</isolation>\n\
+                         <isolation_fallback>true</isolation_fallback> — this run was NOT \
+                         isolated; edits may have touched the parent workspace. Commits (if any) \
+                         are on the parent tree, not a disposable worktree.",
                     );
+                } else if sub.worktree_path.is_some()
+                    || sub.snapshot_ref.is_some()
+                    || sub.worktree_state.as_deref() == Some("preserved")
+                    || sub.worktree_state.as_deref() == Some("cleaned")
+                {
+                    text.push_str(
+                        "\n\n<isolation>worktree</isolation>\n\
+                         IMPORTANT: Child cwd was an **isolated git worktree**. Any commits, \
+                         gate-green claims, or file SHAs apply only to that worktree until you \
+                         explicitly `land_subagent` / `turbo subagent land`. They are **not** on \
+                         parent main until landed.",
+                    );
+                }
+                if let Some(ref wt) = sub.worktree_path {
+                    text.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
+                }
+                if let Some(ref st) = sub.worktree_state {
+                    text.push_str(&format!("\n<worktree_state>{st}</worktree_state>"));
+                }
+                if let Some(ref snap) = sub.snapshot_ref {
+                    text.push_str(&format!("\n<snapshot_ref>{snap}</snapshot_ref>"));
                 }
                 text.push_str("\n\n");
                 text.push_str(&sub.resume_footer());
@@ -2183,6 +2204,10 @@ mod tests {
         assert!(
             rendered.contains("<worktree_path>/tmp/grok-worktree/wt-agent</worktree_path>"),
             "worktree_path preserved"
+        );
+        assert!(
+            rendered.contains("<isolation>worktree</isolation>"),
+            "isolation worktree label required for supervisors"
         );
         assert!(
             rendered.contains("resume_from=\"wt-agent\""),

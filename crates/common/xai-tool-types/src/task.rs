@@ -393,6 +393,26 @@ impl SubagentCompletedOutput {
         if let Some(ref class) = self.error_class {
             text.push_str(&format!("\n\n<error_class>{class}</error_class>"));
         }
+        // Hard isolation signal: supervisors must not treat worktree commits as main.
+        if self.isolation_fallback {
+            text.push_str(
+                "\n\n<isolation>shared_fallback</isolation>\n\
+                 <isolation_fallback>true</isolation_fallback> — this run was NOT \
+                 isolated; edits may have touched the parent workspace. Commits (if any) \
+                 are on the parent tree, not a disposable worktree.",
+            );
+        } else if self.worktree_path.is_some()
+            || self.snapshot_ref.is_some()
+            || self.worktree_state.as_deref() == Some("preserved")
+            || self.worktree_state.as_deref() == Some("cleaned")
+        {
+            text.push_str(
+                "\n\n<isolation>worktree</isolation>\n\
+                 IMPORTANT: Child cwd was an **isolated git worktree**. Any commits, \
+                 gate-green claims, or file SHAs apply only to that worktree until you \
+                 explicitly land. They are **not** on parent main until landed.",
+            );
+        }
         if let Some(ref path) = self.worktree_path {
             text.push_str(&format!("\n\n<worktree_path>{path}</worktree_path>"));
         }
@@ -430,12 +450,6 @@ impl SubagentCompletedOutput {
                 }
                 text.push_str("</changed_paths>");
             }
-        }
-        if self.isolation_fallback {
-            text.push_str(
-                "\n\n<isolation_fallback>true</isolation_fallback> — this run was NOT \
-                 isolated; edits may have touched the parent workspace.",
-            );
         }
         text
     }

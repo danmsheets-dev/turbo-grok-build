@@ -26,6 +26,14 @@ pub struct ToolSearchResult {
     pub input_schema: serde_json::Value,
 }
 
+/// A configured MCP server that failed handshake / spawn (model-visible).
+#[derive(Debug, Clone)]
+pub struct FailedServerInfo {
+    pub name: String,
+    /// Short reason (auth, timeout, connection failed, …).
+    pub reason: String,
+}
+
 /// Result of a composite search — results + index metadata from a single
 /// consistent snapshot.
 #[derive(Debug, Clone)]
@@ -35,6 +43,8 @@ pub struct SearchSnapshot {
     /// `true` when the index reflects all available tools. `false` when the
     /// index source is still warming up (results may be incomplete).
     pub is_ready: bool,
+    /// Servers that failed to connect (auth/handshake/spawn). Empty when none.
+    pub failed_servers: Vec<FailedServerInfo>,
 }
 
 /// A summary of an MCP server available for tool search.

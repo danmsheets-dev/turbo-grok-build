@@ -1,63 +1,101 @@
-//! Procedural 8-bit sprites for Game Mode (pure Rust).
+//! SNES / SimCity-style procedural sprites for Game Mode (16-bit pixel look).
+//!
+//! Visual goals:
+//! - Saturated but readable palettes (city-builder office vibe)
+//! - 1px dark outlines, soft dither / edge highlights
+//! - Smaller base sprites so the office feels larger
+//! - Floor tiles that match the teal office carpet (no diagonal green mask)
 
 use image::{Rgba, RgbaImage};
 
-/// Developer palette: shirt + skin + hair accents.
+/// Higher-res compose scale: internal frame is `PIXEL_SCALE` times denser
+/// than one terminal halfblock cell on each axis. paint_halfblock downsamples.
+///
+/// Override with env `GROK_GAME_PIXEL_SCALE` = 2|3|4 (default 3).
+pub fn pixel_scale() -> u32 {
+    static CACHED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("GROK_GAME_PIXEL_SCALE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|n| (2..=4).contains(n))
+            .unwrap_or(3)
+    })
+}
+
+/// Default scale constant (for docs/tests). Prefer [`pixel_scale()`] at runtime.
+pub const PIXEL_SCALE: u32 = 3;
+
+/// Developer palette: shirt + skin + hair + pants + accent.
 #[derive(Debug, Clone, Copy)]
 pub struct DevPalette {
     pub shirt: [u8; 4],
     pub skin: [u8; 4],
     pub hair: [u8; 4],
     pub pants: [u8; 4],
+    pub accent: [u8; 4],
 }
 
 impl DevPalette {
     pub fn by_index(i: u8) -> Self {
+        // SimCity-ish saturated city folk
         match i % 6 {
             0 => Self {
-                shirt: [80, 200, 200, 255],
-                skin: [220, 70, 70, 255],
-                hair: [180, 40, 40, 255],
-                pants: [50, 50, 70, 255],
+                shirt: [56, 176, 188, 255],
+                skin: [232, 168, 128, 255],
+                hair: [72, 48, 40, 255],
+                pants: [48, 64, 104, 255],
+                accent: [255, 220, 96, 255],
             },
             1 => Self {
-                shirt: [60, 180, 90, 255],
-                skin: [90, 150, 220, 255],
-                hair: [200, 140, 60, 255],
-                pants: [50, 60, 120, 255],
+                shirt: [72, 196, 96, 255],
+                skin: [248, 200, 160, 255],
+                hair: [40, 36, 48, 255],
+                pants: [56, 56, 80, 255],
+                accent: [255, 120, 80, 255],
             },
             2 => Self {
-                shirt: [230, 200, 50, 255],
-                skin: [160, 100, 180, 255],
-                hair: [80, 50, 100, 255],
-                pants: [50, 50, 70, 255],
+                shirt: [232, 88, 120, 255],
+                skin: [216, 152, 120, 255],
+                hair: [160, 48, 64, 255],
+                pants: [64, 48, 80, 255],
+                accent: [120, 220, 255, 255],
             },
             3 => Self {
-                shirt: [230, 120, 50, 255],
-                skin: [100, 180, 90, 255],
-                hair: [40, 100, 50, 255],
-                pants: [40, 50, 90, 255],
+                shirt: [255, 176, 48, 255],
+                skin: [240, 184, 136, 255],
+                hair: [96, 64, 32, 255],
+                pants: [48, 72, 120, 255],
+                accent: [88, 200, 160, 255],
             },
             4 => Self {
-                shirt: [100, 80, 180, 255],
-                skin: [120, 140, 200, 255],
-                hair: [40, 40, 60, 255],
-                pants: [90, 70, 40, 255],
+                shirt: [120, 96, 220, 255],
+                skin: [224, 176, 144, 255],
+                hair: [32, 32, 48, 255],
+                pants: [72, 56, 40, 255],
+                accent: [255, 96, 160, 255],
             },
             _ => Self {
-                shirt: [70, 180, 200, 255],
-                skin: [230, 170, 110, 255],
-                hair: [200, 90, 40, 255],
-                pants: [40, 50, 90, 255],
+                shirt: [48, 160, 200, 255],
+                skin: [255, 208, 168, 255],
+                hair: [200, 88, 40, 255],
+                pants: [40, 56, 88, 255],
+                accent: [180, 255, 120, 255],
             },
         }
     }
 }
 
 const CLEAR: [u8; 4] = [0, 0, 0, 0];
-/// Floor teal matching the office mockup (not pure black).
-pub const FLOOR_TEAL: [u8; 4] = [36, 92, 98, 255];
-const FLOOR_TEAL_D: [u8; 4] = [28, 78, 84, 255];
+const OUTLINE: [u8; 4] = [24, 28, 36, 255];
+
+/// SNES office carpet — warm teal tiles (matches mockup floor).
+pub const FLOOR_A: [u8; 4] = [42, 108, 112, 255];
+pub const FLOOR_B: [u8; 4] = [36, 96, 100, 255];
+pub const FLOOR_HI: [u8; 4] = [56, 128, 132, 255];
+pub const FLOOR_LO: [u8; 4] = [28, 80, 84, 255];
+/// Legacy alias used by older call sites.
+pub const FLOOR_TEAL: [u8; 4] = FLOOR_A;
 
 fn px(img: &mut RgbaImage, x: i32, y: i32, c: [u8; 4]) {
     if x < 0 || y < 0 {
@@ -89,7 +127,55 @@ fn outline_rect(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, c: [u8; 4])
     }
 }
 
-/// Opaque floor patch (checker) to clear baked-in mockup characters.
+/// Draw a rounded-ish filled rect with dark outline (SNES sprite language).
+fn filled_body(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, fill: [u8; 4]) {
+    fill_rect(img, x + 1, y, w - 2, h, fill);
+    fill_rect(img, x, y + 1, w, h - 2, fill);
+    outline_rect(img, x, y, w, h, OUTLINE);
+    // top highlight
+    for dx in 1..w - 1 {
+        let p = img.get_pixel((x + dx) as u32, (y + 1) as u32).0;
+        px(
+            img,
+            x + dx,
+            y + 1,
+            [
+                p[0].saturating_add(24),
+                p[1].saturating_add(24),
+                p[2].saturating_add(20),
+                255,
+            ],
+        );
+    }
+}
+
+/// SNES carpet tile (8×8) — diamond-ish checker with edge bevel.
+pub fn floor_tile_at(wx: i32, wy: i32) -> [u8; 4] {
+    let tx = wx.rem_euclid(8);
+    let ty = wy.rem_euclid(8);
+    // Tile index for soft checker of 8×8 cells
+    let tile = ((wx.div_euclid(8)) + (wy.div_euclid(8))).rem_euclid(2);
+    let base = if tile == 0 { FLOOR_A } else { FLOOR_B };
+    // Bevel: light NW, dark SE
+    if tx == 0 || ty == 0 {
+        return FLOOR_HI;
+    }
+    if tx == 7 || ty == 7 {
+        return FLOOR_LO;
+    }
+    // Subtle inner dither for 16-bit texture
+    if (tx + ty) % 5 == 0 {
+        FLOOR_LO
+    } else if (tx * 3 + ty) % 7 == 0 {
+        FLOOR_HI
+    } else {
+        base
+    }
+}
+
+/// Opaque SNES floor patch (replaces the old diagonal green checker).
+/// Prefer [`stamp_floor_patch_sampled`] when a background is available.
+#[allow(dead_code)]
 pub fn stamp_floor_patch(dest: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32) {
     let (dw, dh) = dest.dimensions();
     for dy in 0..h {
@@ -99,231 +185,250 @@ pub fn stamp_floor_patch(dest: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32) {
             if px_ < 0 || py < 0 || px_ as u32 >= dw || py as u32 >= dh {
                 continue;
             }
-            let c = if ((px_ + py) / 3) % 2 == 0 {
-                FLOOR_TEAL
+            dest.put_pixel(px_ as u32, py as u32, Rgba(floor_tile_at(px_, py)));
+        }
+    }
+}
+
+/// Sample-aware floor stamp: prefer real background floor colors when available,
+/// fall back to procedural SNES tiles.
+pub fn stamp_floor_patch_sampled(
+    dest: &mut RgbaImage,
+    bg: Option<&RgbaImage>,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) {
+    let (dw, dh) = dest.dimensions();
+    // Prefer sampling a known-clean floor region (bottom-left of office).
+    let sample = bg.and_then(|img| {
+        let (bw, bh) = img.dimensions();
+        if bw < 8 || bh < 8 {
+            return None;
+        }
+        // Average a few floor pixels from lower-left (usually empty carpet).
+        let sx = (bw as f32 * 0.08) as u32;
+        let sy = (bh as f32 * 0.88) as u32;
+        Some(img.get_pixel(sx.min(bw - 1), sy.min(bh - 1)).0)
+    });
+
+    for dy in 0..h {
+        for dx in 0..w {
+            let px_ = x + dx;
+            let py = y + dy;
+            if px_ < 0 || py < 0 || px_ as u32 >= dw || py as u32 >= dh {
+                continue;
+            }
+            let c = if let Some(base) = sample {
+                // Procedural variation around sampled floor color
+                let tile = floor_tile_at(px_, py);
+                let mix = |a: u8, b: u8| ((u16::from(a) * 2 + u16::from(b)) / 3) as u8;
+                [mix(base[0], tile[0]), mix(base[1], tile[1]), mix(base[2], tile[2]), 255]
             } else {
-                FLOOR_TEAL_D
+                floor_tile_at(px_, py)
             };
             dest.put_pixel(px_ as u32, py as u32, Rgba(c));
         }
     }
 }
 
-/// Square monitor bezel. `active` scrolls code when true; dark when false.
+/// Square monitor bezel. `active` scrolls code when true.
 pub fn sprite_square_monitor(active: bool, frame: u8) -> RgbaImage {
-    // Square: 14×14
-    let mut img = RgbaImage::from_pixel(14, 14, Rgba(CLEAR));
-    let bezel = [28, 30, 36, 255];
-    let edge = [12, 12, 16, 255];
-    fill_rect(&mut img, 0, 0, 14, 14, bezel);
-    outline_rect(&mut img, 0, 0, 14, 14, edge);
-    // stand
-    fill_rect(&mut img, 5, 13, 4, 1, edge);
+    let mut img = RgbaImage::from_pixel(12, 12, Rgba(CLEAR));
+    let bezel = [40, 44, 56, 255];
+    let edge = OUTLINE;
+    filled_body(&mut img, 0, 0, 12, 11, bezel);
+    fill_rect(&mut img, 4, 11, 4, 1, edge); // stand
     if !active {
-        fill_rect(&mut img, 2, 2, 10, 10, [18, 22, 28, 255]);
-        // dim reflection
-        fill_rect(&mut img, 3, 3, 3, 2, [30, 36, 44, 255]);
+        fill_rect(&mut img, 2, 2, 8, 7, [20, 26, 34, 255]);
+        fill_rect(&mut img, 3, 3, 2, 1, [40, 48, 60, 255]);
         return img;
     }
-    // active screen
-    fill_rect(&mut img, 2, 2, 10, 10, [12, 18, 22, 255]);
+    fill_rect(&mut img, 2, 2, 8, 7, [12, 20, 28, 255]);
     let greens = [
-        [40, 220, 100, 255],
-        [60, 200, 80, 255],
-        [30, 180, 90, 255],
-        [80, 240, 120, 255],
+        [64, 232, 120, 255],
+        [80, 200, 255, 255],
+        [255, 200, 80, 255],
+        [200, 120, 255, 255],
     ];
-    let reds = [[200, 60, 60, 255], [180, 40, 40, 255]];
     let scroll = (frame % 4) as i32;
-    for row in 0..5 {
-        let y = 3 + row * 2;
-        let len = 3 + ((row + scroll) % 5);
-        let col = if row % 3 == 0 {
-            reds[(row as usize + frame as usize) % 2]
-        } else {
-            greens[(row as usize + frame as usize) % 4]
-        };
-        fill_rect(&mut img, 3, y, len.min(8), 1, col);
+    for row in 0..4 {
+        let y = 3 + row;
+        let len = 2 + ((row + scroll) % 4);
+        fill_rect(
+            &mut img,
+            3,
+            y,
+            len.min(6),
+            1,
+            greens[(row as usize + frame as usize) % 4],
+        );
     }
-    // caret blink
     if frame % 2 == 0 {
-        px(&mut img, 10, 11, [220, 255, 220, 255]);
+        px(&mut img, 9, 8, [220, 255, 220, 255]);
     }
     img
 }
 
-/// Empty desk + chair + dark square monitor (no developer).
+/// Empty desk + chair + dark square monitor (compact SNES size).
 pub fn sprite_empty_desk() -> RgbaImage {
-    let mut img = RgbaImage::from_pixel(36, 30, Rgba(CLEAR));
-    let wood = [140, 95, 50, 255];
-    let wood_d = [100, 65, 35, 255];
-    let chair = [45, 45, 55, 255];
-    // desk top
-    fill_rect(&mut img, 8, 14, 26, 10, wood);
-    outline_rect(&mut img, 8, 14, 26, 10, wood_d);
-    fill_rect(&mut img, 10, 24, 3, 5, wood_d);
-    fill_rect(&mut img, 28, 24, 3, 5, wood_d);
-    // square monitor (off)
+    let mut img = RgbaImage::from_pixel(28, 24, Rgba(CLEAR));
+    let wood = [176, 120, 64, 255];
+    let wood_d = [120, 76, 40, 255];
+    let chair = [64, 72, 96, 255];
+    // desk top with outline
+    filled_body(&mut img, 6, 12, 20, 7, wood);
+    fill_rect(&mut img, 8, 19, 2, 4, wood_d);
+    fill_rect(&mut img, 22, 19, 2, 4, wood_d);
+    // wood grain ticks
+    for gx in [10, 14, 18] {
+        px(&mut img, gx, 14, wood_d);
+        px(&mut img, gx + 1, 16, wood_d);
+    }
     let mon = sprite_square_monitor(false, 0);
-    blit_local(&mut img, &mon, 16, 0);
-    // empty chair
-    fill_rect(&mut img, 0, 16, 8, 10, chair);
-    fill_rect(&mut img, 1, 26, 5, 3, chair);
+    blit_local(&mut img, &mon, 12, 0);
+    // chair
+    filled_body(&mut img, 0, 13, 7, 7, chair);
+    fill_rect(&mut img, 1, 20, 4, 3, chair);
     img
 }
 
-/// Developer at desk: typing=true animates arms; monitor always square.
+/// Developer at desk: typing=true animates arms; smaller SNES proportions.
 pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> RgbaImage {
-    let mut img = RgbaImage::from_pixel(36, 32, Rgba(CLEAR));
-    let wood = [140, 95, 50, 255];
-    let wood_d = [100, 65, 35, 255];
-    let chair = [45, 45, 55, 255];
-    // desk
-    fill_rect(&mut img, 10, 16, 24, 10, wood);
-    outline_rect(&mut img, 10, 16, 24, 10, wood_d);
-    fill_rect(&mut img, 12, 26, 3, 5, wood_d);
-    fill_rect(&mut img, 28, 26, 3, 5, wood_d);
-    // square monitor (animated when typing / working)
+    let mut img = RgbaImage::from_pixel(28, 26, Rgba(CLEAR));
+    let wood = [176, 120, 64, 255];
+    let wood_d = [120, 76, 40, 255];
+    let chair = [64, 72, 96, 255];
+    filled_body(&mut img, 8, 13, 18, 7, wood);
+    fill_rect(&mut img, 10, 20, 2, 4, wood_d);
+    fill_rect(&mut img, 22, 20, 2, 4, wood_d);
     let mon = sprite_square_monitor(true, if typing { frame } else { 0 });
-    // When idle (not typing), still show content but freeze scroll via frame=0
-    // and slightly dim by not advancing — already handled.
-    blit_local(&mut img, &mon, 18, 0);
+    blit_local(&mut img, &mon, 14, 0);
     // chair
-    fill_rect(&mut img, 0, 16, 9, 10, chair);
+    filled_body(&mut img, 0, 13, 8, 7, chair);
     // body
-    fill_rect(&mut img, 2, 14, 8, 10, pal.shirt);
+    filled_body(&mut img, 1, 11, 7, 8, pal.shirt);
     // head
-    fill_rect(&mut img, 3, 6, 6, 7, pal.skin);
-    fill_rect(&mut img, 3, 5, 6, 2, pal.hair);
-    if pal.skin[0] > 180 && pal.skin[1] < 100 {
-        px(&mut img, 3, 3, pal.hair);
-        px(&mut img, 4, 2, pal.hair);
-        px(&mut img, 8, 3, pal.hair);
-        px(&mut img, 7, 2, pal.hair);
-    }
+    filled_body(&mut img, 2, 4, 6, 7, pal.skin);
+    fill_rect(&mut img, 2, 3, 6, 2, pal.hair);
     // eyes
-    px(&mut img, 4, 8, [30, 30, 30, 255]);
-    px(&mut img, 7, 8, [30, 30, 30, 255]);
+    px(&mut img, 3, 6, OUTLINE);
+    px(&mut img, 6, 6, OUTLINE);
+    // smile
+    px(&mut img, 4, 8, [180, 80, 80, 255]);
+    px(&mut img, 5, 8, [180, 80, 80, 255]);
     // arms
     if typing {
-        let y = 17 + (frame % 2) as i32;
-        fill_rect(&mut img, 9, y, 6, 2, pal.skin);
-        fill_rect(&mut img, 10, y + 1, 5, 1, pal.skin);
+        let y = 14 + (frame % 2) as i32;
+        fill_rect(&mut img, 8, y, 5, 2, pal.skin);
+        outline_rect(&mut img, 8, y, 5, 2, OUTLINE);
     } else {
-        // resting on desk
-        fill_rect(&mut img, 9, 18, 5, 2, pal.skin);
+        fill_rect(&mut img, 8, 15, 4, 2, pal.skin);
     }
     // legs
-    fill_rect(&mut img, 2, 24, 3, 6, pal.pants);
-    fill_rect(&mut img, 6, 24, 3, 6, pal.pants);
+    fill_rect(&mut img, 2, 19, 2, 5, pal.pants);
+    fill_rect(&mut img, 5, 19, 2, 5, pal.pants);
+    // shoe
+    fill_rect(&mut img, 1, 23, 3, 2, OUTLINE);
+    fill_rect(&mut img, 5, 23, 3, 2, OUTLINE);
+    // badge accent
+    px(&mut img, 3, 13, pal.accent);
     img
 }
 
 /// Developer walking (optionally carrying a packet).
 pub fn sprite_developer_walk(pal: DevPalette, frame: u8, with_packet: bool) -> RgbaImage {
-    let mut img = RgbaImage::from_pixel(16, 24, Rgba(CLEAR));
-    fill_rect(&mut img, 5, 1, 6, 6, pal.skin);
-    fill_rect(&mut img, 5, 0, 6, 2, pal.hair);
-    fill_rect(&mut img, 5, 7, 6, 8, pal.shirt);
+    let mut img = RgbaImage::from_pixel(14, 20, Rgba(CLEAR));
+    filled_body(&mut img, 4, 1, 6, 6, pal.skin);
+    fill_rect(&mut img, 4, 0, 6, 2, pal.hair);
+    filled_body(&mut img, 4, 7, 6, 7, pal.shirt);
+    px(&mut img, 5, 3, OUTLINE);
+    px(&mut img, 8, 3, OUTLINE);
     if frame % 2 == 0 {
-        fill_rect(&mut img, 3, 8, 2, 5, pal.skin);
-        fill_rect(&mut img, 11, 9, 2, 5, pal.skin);
-        fill_rect(&mut img, 5, 15, 3, 6, pal.pants);
-        fill_rect(&mut img, 9, 16, 3, 6, pal.pants);
+        fill_rect(&mut img, 2, 8, 2, 4, pal.skin);
+        fill_rect(&mut img, 10, 9, 2, 4, pal.skin);
+        fill_rect(&mut img, 4, 14, 2, 5, pal.pants);
+        fill_rect(&mut img, 8, 15, 2, 5, pal.pants);
     } else {
-        fill_rect(&mut img, 3, 9, 2, 5, pal.skin);
-        fill_rect(&mut img, 11, 8, 2, 5, pal.skin);
-        fill_rect(&mut img, 5, 16, 3, 6, pal.pants);
-        fill_rect(&mut img, 9, 15, 3, 6, pal.pants);
+        fill_rect(&mut img, 2, 9, 2, 4, pal.skin);
+        fill_rect(&mut img, 10, 8, 2, 4, pal.skin);
+        fill_rect(&mut img, 4, 15, 2, 5, pal.pants);
+        fill_rect(&mut img, 8, 14, 2, 5, pal.pants);
     }
     if with_packet {
-        fill_rect(&mut img, 11, 11, 4, 4, [240, 220, 120, 255]);
-        outline_rect(&mut img, 11, 11, 4, 4, [160, 120, 40, 255]);
+        filled_body(&mut img, 10, 10, 4, 4, [255, 236, 160, 255]);
+        fill_rect(&mut img, 11, 11, 2, 1, [80, 140, 220, 255]);
     }
     img
 }
 
-/// Supervisor: phase 0 idle (laptop closed + coffee), 1 working (laptop open + typing),
-/// 2 reviewing (laptop open + papers).
+/// Supervisor: phase 0 idle, 1 working, 2 reviewing — boss gold accents.
 pub fn sprite_supervisor(phase: u8, frame: u8) -> RgbaImage {
-    let mut img = RgbaImage::from_pixel(32, 30, Rgba(CLEAR));
-    let gold = [240, 200, 70, 255];
-    let skin = [240, 210, 140, 255];
-    let shirt = [60, 50, 40, 255];
-    let wood = [140, 95, 50, 255];
-    // desk
-    fill_rect(&mut img, 2, 18, 28, 8, wood);
-    // chair
-    fill_rect(&mut img, 11, 14, 10, 6, [80, 50, 30, 255]);
-    // body
-    fill_rect(&mut img, 11, 12, 10, 8, shirt);
-    fill_rect(&mut img, 12, 13, 8, 4, gold);
+    let mut img = RgbaImage::from_pixel(26, 24, Rgba(CLEAR));
+    let gold = [255, 208, 72, 255];
+    let gold_d = [200, 150, 40, 255];
+    let skin = [255, 220, 168, 255];
+    let shirt = [72, 56, 48, 255];
+    let wood = [176, 120, 64, 255];
+    filled_body(&mut img, 1, 15, 24, 6, wood);
+    filled_body(&mut img, 9, 11, 8, 5, [96, 64, 40, 255]); // chair
+    filled_body(&mut img, 9, 10, 8, 7, shirt);
+    // gold vest stripe
+    fill_rect(&mut img, 10, 11, 6, 3, gold);
     // head + horns
-    fill_rect(&mut img, 11, 4, 10, 8, skin);
-    fill_rect(&mut img, 10, 1, 2, 4, gold);
-    fill_rect(&mut img, 20, 1, 2, 4, gold);
-    px(&mut img, 10, 0, gold);
-    px(&mut img, 21, 0, gold);
-    px(&mut img, 13, 7, [40, 40, 40, 255]);
-    px(&mut img, 18, 7, [40, 40, 40, 255]);
-    fill_rect(&mut img, 14, 9, 4, 1, [180, 80, 80, 255]);
+    filled_body(&mut img, 9, 3, 8, 7, skin);
+    fill_rect(&mut img, 8, 0, 2, 4, gold);
+    fill_rect(&mut img, 16, 0, 2, 4, gold);
+    px(&mut img, 8, 0, gold_d);
+    px(&mut img, 17, 0, gold_d);
+    px(&mut img, 11, 5, OUTLINE);
+    px(&mut img, 14, 5, OUTLINE);
+    fill_rect(&mut img, 11, 7, 4, 1, [200, 80, 80, 255]);
 
     match phase {
         1 | 2 => {
-            // Open laptop (clamshell): base + raised screen (square-ish)
-            fill_rect(&mut img, 6, 17, 10, 3, [50, 50, 58, 255]); // base
-            // screen standing
-            fill_rect(&mut img, 7, 8, 10, 10, [30, 32, 40, 255]);
-            outline_rect(&mut img, 7, 8, 10, 10, [12, 12, 16, 255]);
-            fill_rect(&mut img, 8, 9, 8, 8, [14, 20, 24, 255]);
-            // animated code
+            // Open laptop
+            fill_rect(&mut img, 4, 14, 8, 2, [48, 52, 64, 255]);
+            filled_body(&mut img, 5, 6, 8, 8, [36, 40, 52, 255]);
+            fill_rect(&mut img, 6, 7, 6, 6, [16, 24, 32, 255]);
             let f = frame % 3;
-            for row in 0..4 {
-                let y = 10 + row * 2;
-                let len = 2 + ((row + f as i32) % 4);
+            for row in 0..3 {
+                let y = 8 + row * 2;
+                let len = 2 + ((row + f as i32) % 3);
                 fill_rect(
                     &mut img,
-                    9,
+                    7,
                     y,
                     len,
                     1,
                     if row % 2 == 0 {
-                        [50, 220, 100, 255]
+                        [64, 232, 120, 255]
                     } else {
-                        [80, 160, 255, 255]
+                        [96, 180, 255, 255]
                     },
                 );
             }
-            // typing hands
             if phase == 1 {
-                let y = 17 + (frame % 2) as i32;
-                fill_rect(&mut img, 8, y, 3, 2, skin);
-                fill_rect(&mut img, 14, y, 3, 2, skin);
+                let y = 14 + (frame % 2) as i32;
+                fill_rect(&mut img, 6, y, 2, 2, skin);
+                fill_rect(&mut img, 11, y, 2, 2, skin);
             } else {
-                // reviewing: paper beside laptop
-                fill_rect(&mut img, 20, 14, 6, 5, [245, 245, 240, 255]);
-                outline_rect(&mut img, 20, 14, 6, 5, [180, 180, 170, 255]);
-                fill_rect(&mut img, 21, 15, 4, 1, [100, 140, 200, 255]);
+                filled_body(&mut img, 17, 11, 5, 4, [248, 248, 240, 255]);
+                fill_rect(&mut img, 18, 12, 3, 1, [100, 140, 220, 255]);
             }
         }
         _ => {
-            // Idle: closed laptop + coffee
-            fill_rect(&mut img, 8, 16, 10, 3, [50, 50, 58, 255]); // closed lid
-            outline_rect(&mut img, 8, 16, 10, 3, [20, 20, 24, 255]);
-            // coffee mug
-            fill_rect(&mut img, 22, 14, 5, 6, [200, 200, 210, 255]);
-            fill_rect(&mut img, 23, 15, 3, 3, [90, 50, 30, 255]); // coffee
-            // handle
-            px(&mut img, 27, 16, [180, 180, 190, 255]);
-            px(&mut img, 27, 17, [180, 180, 190, 255]);
-            // sip hand near mug
-            fill_rect(&mut img, 20, 15, 2, 3, skin);
-            // steam
+            // Closed laptop + coffee
+            filled_body(&mut img, 5, 13, 8, 3, [48, 52, 64, 255]);
+            filled_body(&mut img, 18, 11, 4, 5, [220, 220, 228, 255]);
+            fill_rect(&mut img, 19, 12, 2, 2, [100, 56, 32, 255]);
+            px(&mut img, 22, 13, [200, 200, 210, 255]);
+            fill_rect(&mut img, 16, 12, 2, 2, skin);
             if frame % 2 == 0 {
-                px(&mut img, 24, 12, [220, 220, 230, 180]);
-                px(&mut img, 25, 11, [220, 220, 230, 140]);
+                px(&mut img, 19, 9, [230, 230, 240, 200]);
             } else {
-                px(&mut img, 25, 12, [220, 220, 230, 180]);
+                px(&mut img, 20, 9, [230, 230, 240, 180]);
             }
         }
     }
@@ -331,11 +436,42 @@ pub fn sprite_supervisor(phase: u8, frame: u8) -> RgbaImage {
 }
 
 pub fn sprite_packet() -> RgbaImage {
-    let mut img = RgbaImage::from_pixel(10, 10, Rgba(CLEAR));
-    fill_rect(&mut img, 1, 1, 8, 8, [250, 245, 230, 255]);
-    outline_rect(&mut img, 1, 1, 8, 8, [160, 140, 100, 255]);
-    fill_rect(&mut img, 3, 3, 4, 1, [80, 120, 200, 255]);
-    fill_rect(&mut img, 3, 5, 4, 1, [80, 120, 200, 255]);
+    let mut img = RgbaImage::from_pixel(8, 8, Rgba(CLEAR));
+    filled_body(&mut img, 0, 0, 8, 8, [255, 244, 200, 255]);
+    fill_rect(&mut img, 2, 2, 4, 1, [80, 140, 220, 255]);
+    fill_rect(&mut img, 2, 4, 4, 1, [80, 140, 220, 255]);
+    img
+}
+
+/// Tiny potted plant (bookshelf / corner ambient prop).
+pub fn sprite_plant() -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(10, 12, Rgba(CLEAR));
+    let pot = [176, 96, 64, 255];
+    let leaf = [64, 176, 88, 255];
+    let leaf_d = [40, 120, 56, 255];
+    filled_body(&mut img, 2, 7, 6, 5, pot);
+    fill_rect(&mut img, 3, 3, 4, 5, leaf);
+    px(&mut img, 2, 4, leaf_d);
+    px(&mut img, 7, 5, leaf);
+    px(&mut img, 4, 1, leaf);
+    px(&mut img, 5, 2, leaf_d);
+    img
+}
+
+/// Coffee mug ambient prop (side table / shelf).
+pub fn sprite_coffee() -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(8, 8, Rgba(CLEAR));
+    let mug = [220, 220, 228, 255];
+    let coffee = [100, 56, 32, 255];
+    filled_body(&mut img, 1, 2, 5, 5, mug);
+    fill_rect(&mut img, 2, 3, 3, 2, coffee);
+    // handle
+    px(&mut img, 6, 3, mug);
+    px(&mut img, 7, 4, mug);
+    px(&mut img, 6, 5, mug);
+    // steam
+    px(&mut img, 2, 0, [230, 230, 240, 180]);
+    px(&mut img, 4, 1, [230, 230, 240, 160]);
     img
 }
 
@@ -404,9 +540,23 @@ mod tests {
         assert!(!sprite_developer_at_desk(DevPalette::by_index(0), true, 1)
             .as_raw()
             .is_empty());
-        assert!(!sprite_square_monitor(true, 2).as_raw().is_empty());
         let mon = sprite_square_monitor(true, 0);
         assert_eq!(mon.width(), mon.height());
+        // Smaller than old 36×32 desk sprites
+        assert!(sprite_empty_desk().width() <= 30);
+        assert!(sprite_developer_at_desk(DevPalette::by_index(0), false, 0).width() <= 30);
+    }
+
+    #[test]
+    fn floor_not_diagonal_green_checker() {
+        let mut img = RgbaImage::new(32, 32);
+        stamp_floor_patch(&mut img, 0, 0, 32, 32);
+        // Should use SNES tile colors, not pure diagonal stripes of 2 fixed colors only
+        let mut colors = std::collections::HashSet::new();
+        for p in img.pixels() {
+            colors.insert(p.0);
+        }
+        assert!(colors.len() >= 3, "floor should have tile bevel variation");
     }
 
     #[test]

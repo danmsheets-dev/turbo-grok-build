@@ -5,6 +5,7 @@ pub mod grok_build;
 pub mod grok_build_concise;
 pub mod grok_build_hashline;
 pub mod lsp;
+pub mod mcp_server_health;
 pub mod memory;
 pub mod opencode;
 pub mod read_file;
@@ -19,6 +20,7 @@ pub use grok_build::{
     ListDirTool, ReadFileTool, SearchReplaceTool, TaskOutputTool, TaskTool, TodoWriteTool,
     WaitTasksTool, WebFetchTool, WebSearchTool,
 };
+pub use mcp_server_health::{McpServerHealthInput, McpServerHealthTool};
 pub use memory::{MemoryGetImpl, MemorySearchImpl};
 pub use opencode::{
     OpenCodeBashTool, OpenCodeEditTool, OpenCodeGlobTool, OpenCodeGrepTool, OpenCodeReadTool,

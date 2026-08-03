@@ -2230,6 +2230,7 @@ mod extensions_action_target_tests {
             wire_source: crate::views::mcps_modal::McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }
     }
 
@@ -2743,6 +2744,7 @@ mod connectors_url_click_tests {
             wire_source: McpWireSource::Managed,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }
     }
 
@@ -2994,6 +2996,7 @@ mod extensions_modal_confirmation_tests {
             wire_source,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }
     }
 

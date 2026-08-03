@@ -3142,25 +3142,42 @@ pub fn render_extensions_modal(
                                     .unwrap_or_else(|| server.name.clone()),
                             );
                             entry_right_labels.push(format!("({})", server.source));
-                            // Summary line: tools count + enabled count.
-                            if server.tools.is_empty() {
-                                entry_desc_lines.push(vec![
-                                    "no tools (server may not be connected)".to_string(),
-                                ]);
+                            // Description lines show when the server row is expanded
+                            // (tools fold). Tools count + optional failure detail.
+                            let mut desc_lines = if server.tools.is_empty() {
+                                vec!["no tools (server may not be connected)".to_string()]
                             } else {
                                 let enabled_count =
                                     server.tools.iter().filter(|t| t.enabled).count();
                                 if enabled_count == server.tools.len() {
-                                    entry_desc_lines
-                                        .push(vec![format!("{} tools", server.tools.len())]);
+                                    vec![format!("{} tools", server.tools.len())]
                                 } else {
-                                    entry_desc_lines.push(vec![format!(
+                                    vec![format!(
                                         "{} tools ({} enabled)",
                                         server.tools.len(),
                                         enabled_count
-                                    )]);
+                                    )]
+                                }
+                            };
+                            // Surface truncated status detail under Unavailable /
+                            // NeedsAuth when the row is expanded (description_lines
+                            // only render when expanded).
+                            if matches!(
+                                server.status,
+                                crate::views::mcps_modal::McpServerDisplayStatus::Unavailable
+                                    | crate::views::mcps_modal::McpServerDisplayStatus::NeedsAuth
+                            ) {
+                                if let Some(ref detail) = server.status_detail {
+                                    if !detail.is_empty() {
+                                        desc_lines.push(
+                                            crate::views::mcps_modal::truncate_status_detail(
+                                                detail,
+                                            ),
+                                        );
+                                    }
                                 }
                             }
+                            entry_desc_lines.push(desc_lines);
                             entry_summary_lines.push(vec![]);
                             entry_fields.push(vec![]);
                             let tools_group_key = format!("mcp-tools:{si}");
@@ -4270,6 +4287,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: Some("acme".into()),
             is_managed_gateway: false,
+            status_detail: None,
         };
         let form = McpSetupFormState::new(&server).unwrap();
         assert_eq!(form.selected_value().as_deref(), Some("us1"));
@@ -4363,6 +4381,7 @@ mod tests {
             wire_source: McpWireSource::Managed,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }]);
         state.entry_data_indices = vec![None, Some(0)];
         state.entry_group_keys = vec![
@@ -4414,6 +4433,7 @@ mod tests {
             wire_source: wire,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }
     }
 
@@ -4506,6 +4526,7 @@ mod tests {
                 wire_source: McpWireSource::Local,
                 plugin_name: Some("alpha".into()),
                 is_managed_gateway: false,
+                status_detail: None,
             },
             McpServerInfo {
                 name: "p2-srv".into(),
@@ -4522,6 +4543,7 @@ mod tests {
                 wire_source: McpWireSource::Local,
                 plugin_name: Some("beta".into()),
                 is_managed_gateway: false,
+                status_detail: None,
             },
         ];
         let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
@@ -4573,6 +4595,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: plugin.map(str::to_string),
             is_managed_gateway: false,
+            status_detail: None,
         };
         let servers = vec![
             server("grok_com_x", None),

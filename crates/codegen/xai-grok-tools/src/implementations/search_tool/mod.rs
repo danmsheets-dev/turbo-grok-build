@@ -322,24 +322,51 @@ impl xai_tool_runtime::Tool for SearchTool {
         } else {
             "partial"
         };
-        let note = if !snapshot.is_ready {
-            Some("Some MCP servers are still connecting. Results may be incomplete.")
+        let mut note = if !snapshot.is_ready {
+            Some("Some MCP servers are still connecting. Results may be incomplete.".to_string())
         } else if snapshot.total_hidden_tools == 0 && result_groups.is_empty() {
             // Ready but empty: help distinguish "MCP not set up / inheritance
             // off" from a query that simply matched nothing. Wording is
             // source-agnostic: search_tool runs in parent and subagent sessions.
             Some(
-                "No MCP tools are available in this session. Connect MCP servers here, or if this is a subagent, check the agent's mcpInheritance.",
+                "No MCP tools are available in this session. Connect MCP servers here, or if this is a subagent, check the agent's mcpInheritance.".to_string(),
             )
         } else {
             None
         };
+        if !snapshot.failed_servers.is_empty() {
+            let failed_line = snapshot
+                .failed_servers
+                .iter()
+                .map(|f| format!("{} ({})", f.name, f.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let extra = format!(
+                "Failed MCP servers (not in results): {failed_line}. Run `grok mcp doctor` or check /mcps."
+            );
+            note = Some(match note {
+                Some(n) => format!("{n} {extra}"),
+                None => extra,
+            });
+        }
+
+        let failed_json: Vec<serde_json::Value> = snapshot
+            .failed_servers
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "server": f.name,
+                    "reason": f.reason,
+                })
+            })
+            .collect();
 
         let response = serde_json::json!({
             "results": result_groups,
             "total_hidden_tools": snapshot.total_hidden_tools,
             "status": status,
             "note": note,
+            "failed_servers": failed_json,
         });
 
         let result_count = snapshot.results.len();
@@ -396,6 +423,7 @@ mod tests {
                     }],
                     total_hidden_tools: 1,
                     is_ready: true,
+                    failed_servers: Vec::new(),
                 },
             })));
         let mut ctx =
@@ -438,6 +466,7 @@ mod tests {
                     results: vec![],
                     total_hidden_tools: 0,
                     is_ready: true,
+                    failed_servers: Vec::new(),
                 },
             })));
         let mut ctx =

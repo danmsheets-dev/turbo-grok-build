@@ -2638,15 +2638,35 @@ impl WorkspaceHandle {
         let session_id_owned = session_id.to_owned();
         let event_writer = self.shared.session_event_writer(session_id);
         let rt_handle = tokio::runtime::Handle::current();
+        // RC12 / C2: resolve timeout + OAuth from disk config (project
+        // `.grok/config.toml` + effective user config) so hub path shares
+        // shell defaults/overrides when present. Always fall back to
+        // 30s startup / 120s tool rather than empty maps.
+        let root_cwd = self.shared.root_cwd.clone();
         let mcp_results: Vec<
             Result<xai_grok_mcp::servers::McpClient, xai_grok_mcp::servers::McpError>,
         > = tokio::task::spawn_blocking(move || {
             use std::collections::HashMap;
-            use xai_grok_mcp::oauth_config::McpOAuthConfigMap;
-            use xai_grok_mcp::servers::{McpClientTimeoutOverrides, McpMetaConfigMap};
-            let overrides_map: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
-            let meta_config_map = McpMetaConfigMap::new();
-            let oauth_config_map = McpOAuthConfigMap::new();
+            use xai_grok_mcp::servers::{McpClientTimeoutOverrides, mcp_server_name};
+            let (disk_timeouts, oauth_config_map) =
+                crate::mcp::load_hub_mcp_config_maps(&root_cwd);
+            let mut overrides_map: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
+            for c in &configs {
+                let name = mcp_server_name(c).to_string();
+                let disk = disk_timeouts.get(&name);
+                overrides_map.insert(
+                    name,
+                    McpClientTimeoutOverrides {
+                        startup_timeout_sec: disk
+                            .and_then(|d| d.startup_timeout_sec)
+                            .or(Some(30)),
+                        tool_timeout_sec: disk.and_then(|d| d.tool_timeout_sec).or(Some(120)),
+                        tool_timeouts: disk.and_then(|d| d.tool_timeouts.clone()),
+                        expose_image_base64: disk.and_then(|d| d.expose_image_base64),
+                    },
+                );
+            }
+            let meta_config_map = xai_grok_mcp::servers::McpMetaConfigMap::new();
             let ctx = xai_grok_mcp::servers::McpSpawnCtx::for_session(
                 &session_id_owned,
                 &event_writer,
@@ -2797,6 +2817,141 @@ impl WorkspaceHandle {
         bridges.clear();
         let mut state = session.mcp_state.lock().await;
         state.owned_clients.clear();
+    }
+
+    /// Re-list tools on each session MCP bridge and re-register hub handlers
+    /// (RC12 / C5 `tools/list_changed` without full reconnect).
+    pub async fn refresh_session_mcp_tools(
+        &self,
+        session_id: &str,
+    ) -> crate::error::WorkspaceResult<()> {
+        use crate::mcp::QualifiedMcpToolHandler;
+        use xai_computer_hub_sdk::ToolServerHandler as _;
+        use xai_grok_mcp::servers::MCP_TOOL_NAME_DELIMITER;
+        use xai_tool_protocol::SessionId;
+
+        let tool_server = {
+            let hub_guard = self.shared.hub_handle.lock().await;
+            let hub = hub_guard
+                .as_ref()
+                .ok_or_else(|| WorkspaceError::HubError("no hub connection".into()))?;
+            hub.server.clone()
+        };
+        let session = self
+            .session(session_id)
+            .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_owned()))?;
+        let sid = SessionId::new(session_id)
+            .map_err(|e| WorkspaceError::HubError(format!("invalid session_id: {e}")))?;
+
+        // Per-server: re-list first; only then swap hub registrations for that
+        // server. Unregister-all-up-front used to leave every server tool-less
+        // when any bridge's list_tools failed mid-refresh.
+        //
+        // Lock order matches start/teardown: tool_ids, then bridges (never
+        // bridges→tool_ids, which can deadlock against teardown).
+        let bridge_count = {
+            let bridges = session.mcp_bridges.lock().await;
+            bridges.len()
+        };
+        for idx in 0..bridge_count {
+            let (server_name, prefix, refresh_ok, handlers) = {
+                let mut bridges = session.mcp_bridges.lock().await;
+                let Some(handle) = bridges.get_mut(idx) else {
+                    break;
+                };
+                let server_name = handle
+                    .bridge
+                    .namespace()
+                    .unwrap_or(handle.server_info.name.as_str())
+                    .to_owned();
+                let prefix = format!("{server_name}{MCP_TOOL_NAME_DELIMITER}");
+                match handle.bridge.refresh_tools().await {
+                    Ok(diff) => {
+                        tracing::info!(
+                            session_id = %session_id,
+                            server = %server_name,
+                            added = ?diff.added,
+                            removed = ?diff.removed,
+                            kept = diff.kept.len(),
+                            "hub MCP bridge tools refreshed"
+                        );
+                        let handlers: Vec<_> = handle.bridge.handlers().to_vec();
+                        (server_name, prefix, true, handlers)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            server = %server_name,
+                            error = %e,
+                            "hub MCP bridge refresh_tools failed; keeping prior hub registrations"
+                        );
+                        (server_name, prefix, false, Vec::new())
+                    }
+                }
+            };
+            if !refresh_ok {
+                continue;
+            }
+
+            // Unregister prior hub tools for this server only.
+            let to_unregister: Vec<xai_tool_protocol::ToolId> = {
+                let mut tool_ids = session.mcp_tool_ids.lock().await;
+                let mut keep = Vec::with_capacity(tool_ids.len());
+                let mut drop_ids = Vec::new();
+                for tid in tool_ids.drain(..) {
+                    if tid.as_str().starts_with(&prefix) {
+                        drop_ids.push(tid);
+                    } else {
+                        keep.push(tid);
+                    }
+                }
+                *tool_ids = keep;
+                drop_ids
+            };
+            for tid in &to_unregister {
+                let _ = tool_server.unregister_tool_dynamic(tid, &sid).await;
+            }
+
+            let mut new_ids = Vec::new();
+            for handler in handlers {
+                let qualified_name = format!(
+                    "{}{}{}",
+                    server_name,
+                    MCP_TOOL_NAME_DELIMITER,
+                    handler.tool_id()
+                );
+                let Some(qualified) =
+                    QualifiedMcpToolHandler::try_new(qualified_name.clone(), handler)
+                else {
+                    continue;
+                };
+                let qualified = Arc::new(qualified);
+                if let Err(e) = tool_server
+                    .register_tool_dynamic(qualified, vec![sid.clone()])
+                    .await
+                {
+                    tracing::warn!(
+                        server = %server_name,
+                        tool = %qualified_name,
+                        error = %e,
+                        "failed to re-register MCP tool on hub after list_changed"
+                    );
+                } else if let Ok(tid) = xai_tool_protocol::ToolId::new(&qualified_name) {
+                    new_ids.push(tid);
+                }
+            }
+            {
+                let mut ids = session.mcp_tool_ids.lock().await;
+                ids.extend(new_ids);
+            }
+        }
+        let _ = self
+            .shared
+            .events
+            .send(xai_grok_workspace_types::WorkspaceEvent::ToolsChanged {
+                session_id: session_id.to_owned(),
+            });
+        Ok(())
     }
     /// Look up an existing session.
     pub fn session(&self, session_id: &str) -> Option<Arc<WorkspaceSession>> {

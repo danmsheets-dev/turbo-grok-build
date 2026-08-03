@@ -62,6 +62,9 @@ pub struct DeskSlot {
     pub anim_t: f32,
     /// Phase started at.
     pub phase_started: Instant,
+    /// One-shot: success finish / handoff sequence already started for this seating.
+    /// Prevents double celebrate→handoff when snapshots re-fire "not running".
+    pub finish_started: bool,
 }
 
 impl Default for DeskSlot {
@@ -79,6 +82,7 @@ impl Default for DeskSlot {
             skin: 0,
             anim_t: 0.0,
             phase_started: Instant::now(),
+            finish_started: false,
         }
     }
 }
@@ -136,6 +140,14 @@ pub struct GameModeState {
     pub(crate) pixel_frame_fp: u64,
     /// Prefer pixel office (mockup + sprites). False falls back to Unicode.
     pub pixel_mode: bool,
+    /// Desk under mouse cursor or keyboard focus (for hover popup), if any.
+    pub hover_desk: Option<usize>,
+    /// Last mouse position in screen coords (for popup placement).
+    pub hover_screen: Option<(u16, u16)>,
+    /// Last painted stage area (for hover hit-testing).
+    pub last_stage: Option<ratatui::layout::Rect>,
+    /// Last desk rects from layout (for hover hit-testing).
+    pub last_desks: [ratatui::layout::Rect; 6],
 }
 
 impl Default for GameModeState {
@@ -167,26 +179,100 @@ impl GameModeState {
             pixel_frame: None,
             pixel_frame_fp: 0,
             pixel_mode: true,
+            hover_desk: None,
+            hover_screen: None,
+            last_stage: None,
+            last_desks: [ratatui::layout::Rect::default(); 6],
         }
     }
 
-    /// Fingerprint for recompose. Uses coarse tick (÷6) so we do not rebuild
-    /// every anim pulse for the wall ribbon alone more than ~2 Hz extras.
+    /// Update hover from terminal mouse coordinates using last paint layout.
+    pub fn update_hover(&mut self, col: u16, row: u16) {
+        self.hover_screen = Some((col, row));
+        self.hover_desk = self.last_desks.iter().enumerate().find_map(|(i, r)| {
+            if r.width == 0 || r.height == 0 {
+                return None;
+            }
+            if col >= r.x
+                && col < r.x.saturating_add(r.width)
+                && row >= r.y
+                && row < r.y.saturating_add(r.height)
+                && self.desks[i].is_occupied()
+            {
+                Some(i)
+            } else {
+                None
+            }
+        });
+    }
+
+    pub fn clear_hover(&mut self) {
+        self.hover_desk = None;
+        self.hover_screen = None;
+    }
+
+    /// Cycle keyboard focus across occupied desks (Tab). Returns true if focus moved.
+    pub fn focus_next_desk(&mut self) -> bool {
+        let occupied: Vec<usize> = (0..DESK_COUNT)
+            .filter(|&i| self.desks[i].is_occupied())
+            .collect();
+        if occupied.is_empty() {
+            self.hover_desk = None;
+            return false;
+        }
+        let next = match self.hover_desk.and_then(|cur| occupied.iter().position(|&i| i == cur))
+        {
+            Some(pos) => occupied[(pos + 1) % occupied.len()],
+            None => occupied[0],
+        };
+        self.hover_desk = Some(next);
+        if let Some(r) = self.last_desks.get(next) {
+            self.hover_screen = Some((r.x.saturating_add(1), r.y.saturating_add(1)));
+        }
+        true
+    }
+
+    /// Cycle keyboard focus backwards (Shift+Tab).
+    pub fn focus_prev_desk(&mut self) -> bool {
+        let occupied: Vec<usize> = (0..DESK_COUNT)
+            .filter(|&i| self.desks[i].is_occupied())
+            .collect();
+        if occupied.is_empty() {
+            self.hover_desk = None;
+            return false;
+        }
+        let next = match self.hover_desk.and_then(|cur| occupied.iter().position(|&i| i == cur))
+        {
+            Some(pos) => occupied[(pos + occupied.len() - 1) % occupied.len()],
+            None => occupied[occupied.len() - 1],
+        };
+        self.hover_desk = Some(next);
+        if let Some(r) = self.last_desks.get(next) {
+            self.hover_screen = Some((r.x.saturating_add(1), r.y.saturating_add(1)));
+        }
+        true
+    }
+
+    /// Fingerprint for recompose. Uses coarse tick (÷4) for walk/blink; includes
+    /// hover focus so the gold selector ring updates without waiting on anim.
     fn visual_fingerprint(&self, cell_w: u16, cell_h: u16) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         cell_w.hash(&mut h);
         cell_h.hash(&mut h);
-        (self.tick / 6).hash(&mut h);
+        // ÷4 ≈ anim frame bucket at ~8–10 Hz tick; smoother walks than ÷6.
+        (self.tick / 4).hash(&mut h);
         self.wall.title().hash(&mut h);
         (self.supervisor as u8).hash(&mut h);
         self.overflow_count.hash(&mut h);
+        self.hover_desk.hash(&mut h);
+        super::sprites_pixel::pixel_scale().hash(&mut h);
         for d in &self.desks {
             d.child_session_id.hash(&mut h);
             (d.phase as u8).hash(&mut h);
             d.skin.hash(&mut h);
-            // Coarse anim position (0..10) — enough for walk smoothness
-            ((d.anim_t * 10.0) as u8).hash(&mut h);
+            // Finer walk position (0..20) for handoff path smoothness
+            ((d.anim_t * 20.0) as u8).hash(&mut h);
         }
         h.finish()
     }
@@ -322,6 +408,7 @@ impl GameModeState {
                         }
                     }
                 } else if !snap.failed
+                    && !self.desks[i].finish_started
                     && matches!(
                         self.desks[i].phase,
                         ActorPhase::AtDeskWorking
@@ -329,9 +416,10 @@ impl GameModeState {
                             | ActorPhase::SpawnWalk
                     )
                 {
-                    // Success finish → celebrate then handoff.
+                    // Success finish → celebrate then handoff (one-shot per seating).
                     self.begin_success_finish(i, tier);
                 } else if snap.failed
+                    && !self.desks[i].finish_started
                     && matches!(
                         self.desks[i].phase,
                         ActorPhase::AtDeskWorking
@@ -339,6 +427,7 @@ impl GameModeState {
                             | ActorPhase::SpawnWalk
                     )
                 {
+                    self.desks[i].finish_started = true;
                     self.desks[i].phase = ActorPhase::FailBeat;
                     self.desks[i].phase_started = Instant::now();
                     self.desks[i].anim_t = 0.0;
@@ -405,17 +494,15 @@ impl GameModeState {
     }
 
     fn begin_success_finish(&mut self, desk: usize, tier: GameTier) {
-        self.had_success = true;
-        if !tier.uses_office_art() {
-            // Compact: instant clear after short celebrate flag.
-            self.desks[desk].phase = ActorPhase::Celebrate;
-            self.desks[desk].phase_started = Instant::now();
-            self.desks[desk].anim_t = 0.0;
+        if self.desks[desk].finish_started {
             return;
         }
+        self.desks[desk].finish_started = true;
+        self.had_success = true;
         self.desks[desk].phase = ActorPhase::Celebrate;
         self.desks[desk].phase_started = Instant::now();
         self.desks[desk].anim_t = 0.0;
+        let _ = tier; // office vs compact share celebrate path; compact clears faster in tick
     }
 
     fn seat_agent(&mut self, idx: usize, snap: &DeskAgentSnapshot, tier: GameTier) {
@@ -439,6 +526,7 @@ impl GameModeState {
             skin,
             anim_t: 0.0,
             phase_started: Instant::now(),
+            finish_started: false,
         };
         self.seat_map.insert(snap.child_session_id.clone(), idx);
     }
@@ -511,17 +599,24 @@ impl GameModeState {
                     if elapsed >= dur {
                         if compact {
                             clear_after.push(i);
-                        } else if !self.handoff_queue.contains(&i)
-                            && !self.desks.iter().any(|d| {
-                                matches!(d.phase, ActorPhase::WalkToBoss | ActorPhase::Handoff)
-                            })
-                        {
-                            // Start walk if no other handoff in flight.
-                            self.desks[i].phase = ActorPhase::WalkToBoss;
-                            self.desks[i].phase_started = Instant::now();
-                            self.desks[i].anim_t = 0.0;
-                        } else if !self.handoff_queue.contains(&i) {
-                            self.handoff_queue.push_back(i);
+                        } else if matches!(self.desks[i].phase, ActorPhase::Celebrate) {
+                            // Transition exactly once out of Celebrate.
+                            if !self.handoff_queue.contains(&i)
+                                && !self.desks.iter().any(|d| {
+                                    matches!(
+                                        d.phase,
+                                        ActorPhase::WalkToBoss | ActorPhase::Handoff
+                                    )
+                                })
+                            {
+                                self.desks[i].phase = ActorPhase::WalkToBoss;
+                                self.desks[i].phase_started = Instant::now();
+                                self.desks[i].anim_t = 0.0;
+                            } else if !self.handoff_queue.contains(&i) {
+                                // Park in a waiting-to-walk phase without re-queue spam:
+                                // stay Celebrate but already finish_started; only enqueue once.
+                                self.handoff_queue.push_back(i);
+                            }
                         }
                     }
                 }
@@ -635,6 +730,21 @@ mod tests {
         s.sync_from_snapshots(&[snap("a", false)], false, GameTier::Comfort);
         assert!(matches!(s.desks[0].phase, ActorPhase::Celebrate));
         assert!(s.had_success);
+        assert!(s.desks[0].finish_started);
+    }
+
+    #[test]
+    fn success_finish_is_one_shot() {
+        let mut s = GameModeState::new();
+        s.sync_from_snapshots(&[snap("a", true)], false, GameTier::Comfort);
+        s.sync_from_snapshots(&[snap("a", false)], false, GameTier::Comfort);
+        assert!(matches!(s.desks[0].phase, ActorPhase::Celebrate));
+        // Second "not running" sync must not re-start celebrate / re-queue.
+        let started = s.desks[0].phase_started;
+        s.sync_from_snapshots(&[snap("a", false)], false, GameTier::Comfort);
+        assert!(matches!(s.desks[0].phase, ActorPhase::Celebrate));
+        assert_eq!(s.desks[0].phase_started, started);
+        assert_eq!(s.handoff_queue.len(), 0);
     }
 
     #[test]

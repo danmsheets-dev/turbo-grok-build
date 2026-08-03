@@ -46,6 +46,17 @@ impl std::fmt::Debug for McpBridgeHandle {
     }
 }
 
+/// Result of [`McpBridge::refresh_tools`] (hub-side `tools/list_changed`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpToolListDiff {
+    /// Tool names present after refresh that were not before.
+    pub added: Vec<String>,
+    /// Tool names present before refresh that are gone now.
+    pub removed: Vec<String>,
+    /// Tool names present both before and after (handlers rebuilt with fresh schemas).
+    pub kept: Vec<String>,
+}
+
 /// Bridges an MCP server's tools into the computer hub.
 ///
 /// On construction the bridge performs the MCP `initialize` handshake,
@@ -53,6 +64,10 @@ impl std::fmt::Debug for McpBridgeHandle {
 /// for each one. Callers wire these handlers into a
 /// [`xai_computer_hub_sdk::ToolServerBuilder`] to register them
 /// with the hub.
+///
+/// After connect, call [`McpBridge::refresh_tools`] when the server
+/// advertises `notifications/tools/list_changed` (or on a manual
+/// re-list) so hub registrations stay in sync without a full reconnect.
 ///
 /// Callers **must** call [`McpBridge::shutdown`] before dropping to
 /// close the underlying MCP transport cleanly. If the bridge is dropped
@@ -62,6 +77,8 @@ pub struct McpBridge {
     transport: Arc<dyn McpTransport>,
     handlers: Vec<Arc<McpToolHandler>>,
     server_info: McpServerInfo,
+    /// Namespace from config (typically the MCP server name).
+    namespace: Option<String>,
 }
 
 impl std::fmt::Debug for McpBridge {
@@ -115,8 +132,30 @@ impl McpBridge {
             "discovered MCP tools"
         );
 
-        let handlers: Vec<Arc<McpToolHandler>> = tools
-            .into_iter()
+        let handlers = Self::build_handlers(&transport, &tools, config.namespace.as_deref());
+
+        crate::metrics::mcp_tools_bridged_set(handlers.len() as i64);
+
+        let bridge = McpBridge {
+            transport,
+            handlers,
+            server_info: server_info.clone(),
+            namespace: config.namespace.clone(),
+        };
+
+        Ok(McpBridgeHandle {
+            bridge,
+            server_info,
+        })
+    }
+
+    fn build_handlers(
+        transport: &Arc<dyn McpTransport>,
+        tools: &[McpToolDefinition],
+        namespace: Option<&str>,
+    ) -> Vec<Arc<McpToolHandler>> {
+        tools
+            .iter()
             .filter_map(|def| {
                 let tool_id = match ToolId::new(&def.name) {
                     Ok(id) => id,
@@ -131,25 +170,12 @@ impl McpBridge {
                 };
                 Some(Arc::new(McpToolHandler {
                     tool_id,
-                    definition: def,
-                    transport: Arc::clone(&transport),
-                    namespace: config.namespace.clone(),
+                    definition: def.clone(),
+                    transport: Arc::clone(transport),
+                    namespace: namespace.map(str::to_owned),
                 }))
             })
-            .collect();
-
-        crate::metrics::mcp_tools_bridged_set(handlers.len() as i64);
-
-        let bridge = McpBridge {
-            transport,
-            handlers,
-            server_info: server_info.clone(),
-        };
-
-        Ok(McpBridgeHandle {
-            bridge,
-            server_info,
-        })
+            .collect()
     }
 
     /// Handlers to register with a [`xai_computer_hub_sdk::ToolServerBuilder`].
@@ -157,6 +183,11 @@ impl McpBridge {
     /// Each handler implements `ToolServerHandler` for one MCP tool.
     pub fn handlers(&self) -> &[Arc<McpToolHandler>] {
         &self.handlers
+    }
+
+    /// Optional namespace (usually the MCP server name used as hub prefix).
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
     }
 
     /// Server metadata from the MCP `initialize` response.
@@ -167,6 +198,55 @@ impl McpBridge {
     /// Number of tools discovered and registered.
     pub fn tool_count(&self) -> usize {
         self.handlers.len()
+    }
+
+    /// Re-list tools from the transport and rebuild handlers (RC12 / C5).
+    ///
+    /// Intended for `notifications/tools/list_changed` or a manual
+    /// catalog refresh. Does **not** re-run `initialize`. Callers must
+    /// unregister/re-register hub tool IDs using the returned
+    /// [`McpToolListDiff`] (or re-register the full handler set).
+    pub async fn refresh_tools(&mut self) -> Result<McpToolListDiff, McpError> {
+        let tools = match self.transport.list_tools().await {
+            Ok(t) => t,
+            Err(e) => {
+                crate::metrics::mcp_error();
+                return Err(e);
+            }
+        };
+
+        let old_names: std::collections::HashSet<String> = self
+            .handlers
+            .iter()
+            .map(|h| h.tool_id.as_str().to_string())
+            .collect();
+        let new_names: std::collections::HashSet<String> =
+            tools.iter().map(|t| t.name.clone()).collect();
+
+        let mut added: Vec<String> = new_names.difference(&old_names).cloned().collect();
+        let mut removed: Vec<String> = old_names.difference(&new_names).cloned().collect();
+        let mut kept: Vec<String> = old_names.intersection(&new_names).cloned().collect();
+        added.sort();
+        removed.sort();
+        kept.sort();
+
+        self.handlers =
+            Self::build_handlers(&self.transport, &tools, self.namespace.as_deref());
+        crate::metrics::mcp_tools_bridged_set(self.handlers.len() as i64);
+
+        info!(
+            server = %self.server_info.name,
+            added = added.len(),
+            removed = removed.len(),
+            kept = kept.len(),
+            "MCP bridge tools refreshed (list_changed / re-list)"
+        );
+
+        Ok(McpToolListDiff {
+            added,
+            removed,
+            kept,
+        })
     }
 
     /// Close the underlying MCP transport.
@@ -233,15 +313,25 @@ impl xai_computer_hub_sdk::ToolServerHandler for McpToolHandler {
     async fn handle_call(&self, _ctx: ToolCallContext, args: Value) -> ToolStream<TypedToolOutput> {
         let _start = std::time::Instant::now();
         let tool_id = self.tool_id.clone();
-        let result = self
-            .transport
-            .call_tool(self.definition.name.as_str(), args)
-            .await;
+        // RC12 / C9: keep a hard safety ceiling so mock/non-client transports
+        // cannot hang forever. Primary per-tool timeout is applied by
+        // `McpClientTransportAdapter` (config `tool_timeout_sec` /
+        // `tool_timeouts`, default 120s). A fixed 120s here previously
+        // overrode longer per-server config values.
+        const HUB_MCP_TOOL_SAFETY_CEILING: std::time::Duration =
+            std::time::Duration::from_secs(7200);
+        let result = tokio::time::timeout(
+            HUB_MCP_TOOL_SAFETY_CEILING,
+            self.transport
+                .call_tool(self.definition.name.as_str(), args),
+        )
+        .await;
         crate::metrics::mcp_call_duration_observe(_start.elapsed().as_secs_f64());
 
         let terminal = match result {
-            Ok(call_result) => {
+            Ok(Ok(call_result)) => {
                 let output = translate_mcp_result(&call_result);
+                let output = truncate_hub_tool_output(output);
                 serde_json::to_value(output)
                     .map(|value| TypedToolOutput::from_value(tool_id, value))
                     .map_err(|e| {
@@ -249,17 +339,56 @@ impl xai_computer_hub_sdk::ToolServerHandler for McpToolHandler {
                         ToolError::execution(self.tool_id.clone(), e.to_string()).with_source(e)
                     })
             }
-            Err(mcp_err) => {
+            Ok(Err(mcp_err)) => {
+                crate::metrics::mcp_error();
+                // RC12 / C19: sanitize model-facing error detail (no raw
+                // transport dumps / host paths).
+                Err(ToolError::execution(
+                    self.tool_id.clone(),
+                    sanitize_mcp_error_for_model(&mcp_err),
+                ))
+            }
+            Err(_elapsed) => {
                 crate::metrics::mcp_error();
                 Err(ToolError::execution(
                     self.tool_id.clone(),
-                    format!("{mcp_err}"),
+                    format!(
+                        "MCP tool call timed out after {}s (hub safety ceiling)",
+                        HUB_MCP_TOOL_SAFETY_CEILING.as_secs()
+                    ),
                 ))
             }
         };
 
         terminal_only(terminal)
     }
+}
+
+/// Cap hub MCP text payloads so large docs results don't inflate hub state
+/// (RC12 / C10). Images/resources left as-is but text is truncated.
+fn truncate_hub_tool_output(output: ToolOutputWire) -> ToolOutputWire {
+    const MAX_TEXT: usize = 20_000;
+    match output {
+        ToolOutputWire::Text(mut text) if text.len() > MAX_TEXT => {
+            let keep = MAX_TEXT.saturating_sub(40);
+            text.truncate(keep);
+            text.push_str("\n…[truncated for hub MCP size budget]");
+            ToolOutputWire::Text(text)
+        }
+        other => other,
+    }
+}
+
+fn sanitize_mcp_error_for_model(err: &McpError) -> String {
+    // Prefer stable class-like strings over full Debug/Display dumps.
+    let raw = err.to_string();
+    if raw.len() <= 200 {
+        return format!("MCP tool error: {raw}");
+    }
+    format!(
+        "MCP tool error: {}…",
+        raw.chars().take(180).collect::<String>()
+    )
 }
 
 /// Convert an [`McpCallResult`] into the wire output format.
@@ -336,7 +465,7 @@ mod tests {
 
     struct MockTransport {
         server_info: McpServerInfo,
-        tools: Vec<McpToolDefinition>,
+        tools: Mutex<Vec<McpToolDefinition>>,
         call_response: Mutex<Option<McpCallResult>>,
         call_error: Mutex<Option<McpError>>,
         closed: AtomicBool,
@@ -347,7 +476,7 @@ mod tests {
         fn new(server_info: McpServerInfo, tools: Vec<McpToolDefinition>) -> Self {
             Self {
                 server_info,
-                tools,
+                tools: Mutex::new(tools),
                 call_response: Mutex::new(None),
                 call_error: Mutex::new(None),
                 closed: AtomicBool::new(false),
@@ -368,6 +497,10 @@ mod tests {
                 ..self
             }
         }
+
+        async fn set_tools(&self, tools: Vec<McpToolDefinition>) {
+            *self.tools.lock().await = tools;
+        }
     }
 
     #[async_trait]
@@ -377,7 +510,7 @@ mod tests {
         }
 
         async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
-            Ok(self.tools.clone())
+            Ok(self.tools.lock().await.clone())
         }
 
         async fn call_tool(&self, name: &str, arguments: Value) -> Result<McpCallResult, McpError> {
@@ -449,6 +582,51 @@ mod tests {
             .collect();
         assert!(ids.contains(&"search".to_string()));
         assert!(ids.contains(&"create".to_string()));
+    }
+
+    #[tokio::test]
+    async fn bridge_refresh_tools_reports_list_changed_diff() {
+        let mock = Arc::new(MockTransport::new(sample_server_info(), sample_tools()));
+        let transport: Arc<dyn McpTransport> = mock.clone();
+        let config = McpBridgeConfig {
+            session_id: SessionId::new("test-session").unwrap(),
+            namespace: Some("github".into()),
+        };
+
+        let mut handle = McpBridge::connect(transport, &config).await.unwrap();
+        assert_eq!(handle.bridge.tool_count(), 2);
+        assert_eq!(handle.bridge.namespace(), Some("github"));
+
+        // Drop create, keep search, add list_issues (list_changed scenario).
+        mock.set_tools(vec![
+            McpToolDefinition {
+                name: "search".into(),
+                description: Some("Search v2".into()),
+                input_schema: None,
+            },
+            McpToolDefinition {
+                name: "list_issues".into(),
+                description: Some("List issues".into()),
+                input_schema: None,
+            },
+        ])
+        .await;
+
+        let diff = handle.bridge.refresh_tools().await.unwrap();
+        assert_eq!(diff.added, vec!["list_issues".to_string()]);
+        assert_eq!(diff.removed, vec!["create".to_string()]);
+        assert_eq!(diff.kept, vec!["search".to_string()]);
+        assert_eq!(handle.bridge.tool_count(), 2);
+
+        let ids: Vec<String> = handle
+            .bridge
+            .handlers()
+            .iter()
+            .map(|h| h.tool_id.as_str().to_string())
+            .collect();
+        assert!(ids.contains(&"search".to_string()));
+        assert!(ids.contains(&"list_issues".to_string()));
+        assert!(!ids.contains(&"create".to_string()));
     }
 
     #[tokio::test]
@@ -636,8 +814,8 @@ mod tests {
                 if e.kind == xai_tool_runtime::ToolErrorKind::Execution =>
             {
                 assert!(
-                    e.detail.contains("connection reset"),
-                    "expected 'connection reset' in: {}",
+                    e.detail.contains("MCP tool error") || e.detail.contains("connection reset"),
+                    "expected sanitized MCP error in: {}",
                     e.detail
                 );
             }

@@ -66,15 +66,58 @@ pub fn format_loop_iteration_prompt(
     human_schedule: &str,
     prior_iteration_summary: Option<&str>,
 ) -> String {
+    format_loop_iteration_prompt_with_parent(
+        prompt,
+        task_id,
+        human_schedule,
+        prior_iteration_summary,
+        None,
+    )
+}
+
+/// Parent-true stamp for scheduled check-loops (cwd + live git HEAD).
+#[derive(Debug, Clone)]
+pub struct LoopParentStamp {
+    pub cwd: String,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+}
+
+/// Like [`format_loop_iteration_prompt`], with optional live parent HEAD stamp
+/// so supervisors do not report stale worktree isolation facts.
+pub fn format_loop_iteration_prompt_with_parent(
+    prompt: &str,
+    task_id: &str,
+    human_schedule: &str,
+    prior_iteration_summary: Option<&str>,
+    parent_stamp: Option<&LoopParentStamp>,
+) -> String {
     let prior = prior_iteration_summary
         .map(|s| format!("\nYour previous iteration ended with:\n{s}\n"))
         .unwrap_or_default();
+    let parent_block = match parent_stamp {
+        Some(s) => {
+            let head = s.head.as_deref().unwrap_or("(unknown)");
+            let branch = s.branch.as_deref().unwrap_or("(detached/unknown)");
+            format!(
+                "\nPARENT WORKSPACE (authoritative — do NOT use isolated worktree state):\n\
+                 - cwd: {cwd}\n\
+                 - branch: {branch}\n\
+                 - HEAD: {head}\n\
+                 - isolation: none (shared parent tree)\n\
+                 Report status from this tree only. If you need tests/asset_check, run them in this cwd.\n",
+                cwd = s.cwd
+            )
+        }
+        None => String::new(),
+    };
     format!(
         "<system-reminder>\n\
          Scheduled task {task_id} ({human_schedule}). Earlier iterations, if any, appear \
          above.\n\
          Run the task below. End with a short status: what changed or needs attention. \
          The status is relayed to the main agent.\n\
+         {parent_block}\
          {prior}\
          </system-reminder>\n\
          \n\
@@ -154,6 +197,27 @@ mod tests {
             "must not add <user_query> — shell does that"
         );
         assert!(out.ends_with("do stuff"));
+    }
+
+    #[test]
+    fn format_loop_with_parent_stamp_includes_head() {
+        let stamp = LoopParentStamp {
+            cwd: "/repo".into(),
+            head: Some("abc1234".into()),
+            branch: Some("main".into()),
+        };
+        let out = format_loop_iteration_prompt_with_parent(
+            "check wave4",
+            "task-loop",
+            "every 8m",
+            None,
+            Some(&stamp),
+        );
+        assert!(out.contains("PARENT WORKSPACE"));
+        assert!(out.contains("HEAD: abc1234"));
+        assert!(out.contains("branch: main"));
+        assert!(out.contains("isolation: none"));
+        assert!(out.contains("check wave4"));
     }
 
     #[test]

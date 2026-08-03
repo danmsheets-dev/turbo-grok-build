@@ -15,11 +15,11 @@ use url::Url;
 
 use crate::rmcp;
 
-/// Ensure credential paths are owner-only (Unix `0o600`).
+/// Ensure credential paths are owner-only (Unix `0o600` / Windows user ACL).
 ///
 /// Local helper (not shell-base): `xai-grok-mcp` sits below `config-types` in the
 /// dep graph, and shell-base pulls shared→config-types→mcp — a cycle if linked.
-/// Windows ACL tightening stays on auth via shell-base; MCP is Unix-first here.
+/// RC12 / C16: Windows now tightens ACL to current user only (was a no-op).
 fn ensure_owner_only_permissions(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -38,10 +38,60 @@ fn ensure_owner_only_permissions(path: &Path) -> std::io::Result<()> {
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match set_windows_secure_permissions(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Ok(())
+    }
+}
+
+/// Restrict a credential file's DACL to the current user via `icacls`
+/// (always present on modern Windows). Equivalent intent to Unix 0600.
+/// Best-effort: logs and returns Ok if icacls is unavailable.
+#[cfg(windows)]
+fn set_windows_secure_permissions(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "credential path missing",
+        ));
+    }
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "%USERNAME%".into());
+    // /inheritance:r removes inherited ACEs; /grant:r replaces grants for user with (F)ull.
+    let grant = format!("{user}:(F)");
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(&grant)
+        .output();
+    match status {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            tracing::warn!(
+                path = %path.display(),
+                code = ?out.status.code(),
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "icacls failed to tighten mcp_credentials.json ACL (continuing)"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "icacls not runnable; mcp_credentials.json ACL left unchanged"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -179,9 +229,23 @@ impl McpCredentialStore {
             // Lock released when lock_file is dropped.
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // No flock on non-unix — best-effort.
+            // RC12 / C17: process-wide named mutex + reload-merge so concurrent
+            // OAuth completions don't last-writer-wins drop tokens. Cross-process
+            // flock is not available; this covers multi-session same-user races.
+            use std::sync::{Mutex, OnceLock};
+            static SAVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            let lock = SAVE_LOCK.get_or_init(|| Mutex::new(()));
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut fresh = Self::load_from(&path).unwrap_or_default();
+            fresh.insert_rmcp(server_name, server_url, creds);
+            fresh.save_to(&path)?;
+            *self = fresh;
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
             self.insert_rmcp(server_name, server_url, creds);
             self.save_to(&path)?;
         }

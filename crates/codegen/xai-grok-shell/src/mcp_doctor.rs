@@ -433,6 +433,69 @@ fn format_mcp_error(label: &str, err: &mcp_servers::McpError) -> Check {
     }
 }
 
+/// Lines of MCP stderr to surface on spawn/handshake failure.
+const STDERR_TAIL_LINES: usize = 40;
+
+/// Sanitize an MCP server name the same way the runtime drain does
+/// (`xai_grok_mcp::servers` private `sanitize_mcp_log_filename`) so
+/// doctor reads the file the session actually writes.
+fn sanitize_mcp_log_filename(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .take(96)
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() => c,
+            '.' | '_' | '-' => c,
+            _ => '_',
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "server".into()
+    } else {
+        sanitized
+    }
+}
+
+/// Path to `~/.grok/logs/mcp/<server>.stderr.log` (respects GROK_HOME).
+fn mcp_stderr_log_path(server_name: &str) -> std::path::PathBuf {
+    xai_grok_tools::util::grok_home::grok_home()
+        .join("logs")
+        .join("mcp")
+        .join(format!(
+            "{}.stderr.log",
+            sanitize_mcp_log_filename(server_name)
+        ))
+}
+
+/// Read the last `max_lines` lines of a server's stderr log, if present
+/// and non-empty.
+fn read_mcp_stderr_tail(server_name: &str, max_lines: usize) -> Option<String> {
+    let path = mcp_stderr_log_path(server_name);
+    if !path.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&path).ok()?;
+    if content.trim().is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    let tail = lines[start..].join("\n");
+    if tail.trim().is_empty() {
+        None
+    } else {
+        Some(tail)
+    }
+}
+
+/// Optional extra Check carrying the stderr log tail after spawn/handshake
+/// failure. Uses the existing [`Check`] shape so doctor JSON stays compatible
+/// (extra array element; no new top-level fields).
+fn stderr_tail_check(server_name: &str) -> Option<Check> {
+    let tail = read_mcp_stderr_tail(server_name, STDERR_TAIL_LINES)?;
+    Some(Check::fail_no_hint("stderr", tail))
+}
+
 // ── Per-server orchestration ────────────────────────────────────
 
 fn describe_server(server: &agent_client_protocol::McpServer) -> (String, String) {
@@ -475,12 +538,20 @@ async fn check_server(
     match check_server_start(server, cwd).await {
         Err(check) => {
             checks.push(check);
+            // Surface last ~40 lines of the stdio server's stderr log when
+            // present (written under ~/.grok/logs/mcp/ by the MCP runtime).
+            if let Some(stderr) = stderr_tail_check(&name) {
+                checks.push(stderr);
+            }
         }
         Ok((client, check)) => {
             checks.push(check);
             match check_handshake(&client).await {
                 Err(check) => {
                     checks.push(check);
+                    if let Some(stderr) = stderr_tail_check(&name) {
+                        checks.push(stderr);
+                    }
                 }
                 Ok((service, check)) => {
                     checks.push(check);
@@ -724,5 +795,40 @@ mod tests {
         let check = format_mcp_error("ignored", &err);
         assert_eq!(check.label, "spawn failed");
         assert!(check.detail.as_deref().unwrap().contains("No such file"));
+    }
+
+    #[test]
+    fn sanitize_mcp_log_filename_matches_runtime() {
+        assert_eq!(sanitize_mcp_log_filename("filesystem"), "filesystem");
+        assert_eq!(sanitize_mcp_log_filename("my server"), "my_server");
+        assert_eq!(sanitize_mcp_log_filename(""), "server");
+    }
+
+    #[test]
+    fn stderr_tail_check_absent_when_log_missing() {
+        // Unique name so we never collide with a real operator log.
+        assert!(stderr_tail_check("___doctor_test_missing_server___").is_none());
+    }
+
+    #[test]
+    fn stderr_tail_check_returns_last_lines() {
+        let server = "___doctor_test_stderr_server___";
+        let path = mcp_stderr_log_path(server);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &body).unwrap();
+        let check = stderr_tail_check(server).expect("stderr check present");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(check.label, "stderr");
+        assert!(!check.passed);
+        let detail = check.detail.as_deref().unwrap_or("");
+        assert!(detail.contains("line 50"), "must include last line");
+        assert!(detail.contains("line 11"), "must include 40th-from-end");
+        assert!(
+            !detail.contains("line 10\n") && !detail.starts_with("line 10"),
+            "must not include lines before the last 40"
+        );
     }
 }

@@ -796,6 +796,16 @@ pub async fn run_dispatcher(
                 }
             }
         }
+        // Catalog refresh candidates (tools/list_changed) before buf is consumed.
+        let tools_changed: Vec<McpServerName> = if restart_actions.is_some() {
+            buf.keys()
+                .filter(|(_, k)| matches!(k, McpClientEventKind::ToolsChanged))
+                .map(|(server, _)| server.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         flush_window(&session_id, buf, &shutdown, &gateway);
         if let Some(actions) = restart_actions.as_ref() {
             for (server, kind) in restart_keys {
@@ -813,6 +823,16 @@ pub async fn run_dispatcher(
                     Rc::clone(actions),
                     server,
                     restart_cancel.clone(),
+                )
+                .await;
+            }
+            // Re-list + re-register on tools/list_changed so search_tool/use_tool
+            // pick up dynamic MCP catalogs (C1 / RC12).
+            for server in tools_changed {
+                let _ = crate::session::mcp_restart::maybe_schedule_tools_refresh(
+                    Rc::clone(actions),
+                    server,
+                    McpClientEventKind::ToolsChanged,
                 )
                 .await;
             }

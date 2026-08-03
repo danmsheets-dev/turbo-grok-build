@@ -24,8 +24,10 @@ pub fn render_game_mode(buf: &mut Buffer, area: Rect, state: &mut GameModeState)
         return;
     }
     let layout = compute(area);
+    state.last_stage = Some(layout.stage);
+    state.last_desks = layout.desks;
 
-    // Pixel path: cell-res compose + direct halfblock paint (no PNG).
+    // Pixel path: high-res compose + halfblock paint (downsamples for sharp SNES look).
     let pixel_area = Rect {
         x: layout.stage.x,
         y: layout.stage.y,
@@ -53,6 +55,155 @@ pub fn render_game_mode(buf: &mut Buffer, area: Rect, state: &mut GameModeState)
     }
 
     paint_status_strip(buf, layout.status_strip, state, layout.tier);
+    paint_hover_popup(buf, area, &layout, state);
+}
+
+/// Floating SNES-style info card when the mouse is over a seated subagent.
+fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &GameModeState) {
+    let Some(idx) = state.hover_desk else {
+        return;
+    };
+    if idx >= state.desks.len() || state.desks[idx].is_empty() {
+        return;
+    }
+    let desk = &state.desks[idx];
+    let phase = match desk.phase {
+        ActorPhase::AtDeskWorking => "working",
+        ActorPhase::AtDeskThinking => "thinking",
+        ActorPhase::SpawnWalk => "arriving",
+        ActorPhase::Celebrate => "done!",
+        ActorPhase::WalkToBoss | ActorPhase::Handoff => "delivering",
+        ActorPhase::ExitDoor => "leaving",
+        ActorPhase::FailBeat => "failed",
+    };
+    let secs = desk.elapsed.as_secs();
+    let lines = [
+        format!(" {}", desk.label),
+        format!(" type  {}", desk.subagent_type),
+        format!(
+            " id    {}",
+            truncate_mid(desk.child_session_id.as_deref().unwrap_or("—"), 22)
+        ),
+        format!(" state {phase}"),
+        format!(
+            " time  {}m{:02}s  tok {}  tools {}",
+            secs / 60,
+            secs % 60,
+            desk.tokens,
+            desk.tool_calls
+        ),
+        format!(" act   {}", truncate_mid(&desk.activity, 28)),
+    ];
+    let width = lines
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.as_str()))
+        .max()
+        .unwrap_or(20)
+        .clamp(24, 48) as u16
+        + 2;
+    let height = lines.len() as u16 + 2;
+
+    // Prefer near cursor; fall back to above desk.
+    let (mut x, mut y) = state.hover_screen.unwrap_or((
+        layout.desks[idx].x,
+        layout.desks[idx].y.saturating_sub(height),
+    ));
+    y = y.saturating_sub(height.saturating_add(1));
+    if x.saturating_add(width) > area.x.saturating_add(area.width) {
+        x = area.x.saturating_add(area.width).saturating_sub(width);
+    }
+    if y < area.y {
+        // Prefer below desk if no room above.
+        y = layout.desks[idx]
+            .y
+            .saturating_add(layout.desks[idx].height)
+            .min(area.y.saturating_add(area.height).saturating_sub(height));
+    }
+    if y.saturating_add(height) > area.y.saturating_add(area.height) {
+        y = area.y.saturating_add(area.height).saturating_sub(height);
+    }
+
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let border = Style::default()
+        .fg(Color::Rgb(255, 220, 96))
+        .bg(Color::Rgb(22, 28, 42));
+    let body = Style::default()
+        .fg(Color::Rgb(220, 236, 255))
+        .bg(Color::Rgb(22, 28, 42));
+    let title = Style::default()
+        .fg(Color::Rgb(120, 255, 180))
+        .bg(Color::Rgb(22, 28, 42))
+        .add_modifier(Modifier::BOLD);
+    // Soft drop shadow (1 cell SE) for popup depth.
+    let shadow = Style::default()
+        .fg(Color::Rgb(8, 10, 16))
+        .bg(Color::Rgb(8, 10, 16));
+    for row in 0..height {
+        for col in 0..width {
+            let cx = popup.x.saturating_add(col).saturating_add(1);
+            let cy = popup.y.saturating_add(row).saturating_add(1);
+            if let Some(cell) = buf.cell_mut((cx, cy)) {
+                if row + 1 == height || col + 1 == width {
+                    cell.set_symbol(" ");
+                    cell.set_style(shadow);
+                }
+            }
+        }
+    }
+
+    // Fill + border
+    for row in 0..height {
+        for col in 0..width {
+            let cx = popup.x.saturating_add(col);
+            let cy = popup.y.saturating_add(row);
+            if let Some(cell) = buf.cell_mut((cx, cy)) {
+                let edge = row == 0 || row + 1 == height || col == 0 || col + 1 == width;
+                cell.set_symbol(if edge {
+                    if row == 0 && col == 0 {
+                        "┌"
+                    } else if row == 0 && col + 1 == width {
+                        "┐"
+                    } else if row + 1 == height && col == 0 {
+                        "└"
+                    } else if row + 1 == height && col + 1 == width {
+                        "┘"
+                    } else if row == 0 || row + 1 == height {
+                        "─"
+                    } else {
+                        "│"
+                    }
+                } else {
+                    " "
+                });
+                cell.set_style(if edge { border } else { body });
+            }
+        }
+    }
+    for (i, line) in lines.iter().enumerate() {
+        let style = if i == 0 { title } else { body };
+        put_line(
+            buf,
+            popup.x.saturating_add(1),
+            popup.y.saturating_add(1 + i as u16),
+            width.saturating_sub(2),
+            line,
+            style,
+        );
+    }
+}
+
+fn truncate_mid(s: &str, max: usize) -> String {
+    let t = s.trim();
+    if t.chars().count() <= max {
+        return t.to_string();
+    }
+    let take = max.saturating_sub(1);
+    format!("{}…", t.chars().take(take).collect::<String>())
 }
 
 fn render_unicode_office(buf: &mut Buffer, layout: &GameLayout, state: &GameModeState) {
@@ -385,7 +536,23 @@ fn paint_status_strip(buf: &mut Buffer, area: Rect, state: &GameModeState, tier:
     }
     let mut dots = String::new();
     for d in &state.desks {
-        dots.push(if d.is_occupied() { '●' } else { '○' });
+        // Phase-aware desk dots (working / walking / fail / empty).
+        let ch = if d.is_empty() {
+            '○'
+        } else if d.failed || matches!(d.phase, ActorPhase::FailBeat) {
+            '✕'
+        } else if matches!(
+            d.phase,
+            ActorPhase::WalkToBoss | ActorPhase::Handoff | ActorPhase::ExitDoor
+        ) {
+            '◎'
+        } else if matches!(d.phase, ActorPhase::Celebrate) {
+            '★'
+        } else {
+            '●'
+        };
+        dots.push(ch);
+        dots.push(' ');
     }
     let sup = match state.supervisor {
         SupervisorPhase::Idle => "Idle",
@@ -394,11 +561,19 @@ fn paint_status_strip(buf: &mut Buffer, area: Rect, state: &GameModeState, tier:
         SupervisorPhase::Waiting => "Wait",
     };
     let mode = if state.pixel_mode { "pixel" } else { "ascii" };
+    let overflow = if state.overflow_count > 0 {
+        format!(" +{}", state.overflow_count)
+    } else {
+        String::new()
+    };
+    let focus = state
+        .hover_desk
+        .map(|i| format!(" focus:{}", i + 1))
+        .unwrap_or_default();
     let text = format!(
-        " {dots}  Active {}/6  Sup:{sup}  {}  Ctrl+G Normal  [{:?}/{mode}]",
-        state.active_desk_count(),
-        state.wall.title(),
-        tier
+        " {dots} {n}/6{overflow}  Sup:{sup}  {wall}{focus}  Tab focus · Ctrl+G exit  [{tier:?}/{mode}]",
+        n = state.active_desk_count(),
+        wall = state.wall.title(),
     );
     put_line(buf, area.x, area.y, area.width, &text, bg);
 }

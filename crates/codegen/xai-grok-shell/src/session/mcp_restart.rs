@@ -256,6 +256,49 @@ pub trait RestartActions {
     /// Drop `server`'s tools from the bridge after stdio restart exhaustion,
     /// so the model stops calling a `not found` server. Default no-op for mocks.
     fn unregister_server_tools(&self, _server: &str) {}
+
+    /// Re-list tools for a live client and re-register them on the ToolBridge
+    /// after `notifications/tools/list_changed`. Default no-op for mocks.
+    async fn refresh_server_tools(&self, _server: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Schedule a catalog refresh when the server reports `tools/list_changed`.
+///
+/// Coalescing already collapses N notifications in the dispatcher window to
+/// one `ToolsChanged` key; this spawns a single LocalSet task to re-list and
+/// re-register that server's tools so `search_tool` / `use_tool` stay current.
+pub async fn maybe_schedule_tools_refresh(
+    actions: Rc<dyn RestartActions>,
+    server: McpServerName,
+    kind: McpClientEventKind,
+) -> bool {
+    if !matches!(kind, McpClientEventKind::ToolsChanged) {
+        return false;
+    }
+    if actions.is_in_shutting_down(&server) {
+        return false;
+    }
+    let actions = Rc::clone(&actions);
+    tokio::task::spawn_local(async move {
+        match actions.refresh_server_tools(&server).await {
+            Ok(()) => {
+                tracing::info!(
+                    server = %server,
+                    "mcp tools/list_changed: refreshed ToolBridge registrations"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    server = %server,
+                    error = %e,
+                    "mcp tools/list_changed: refresh failed"
+                );
+            }
+        }
+    });
+    true
 }
 
 /// Decide whether to schedule an [`auto_restart_stdio`] task for the

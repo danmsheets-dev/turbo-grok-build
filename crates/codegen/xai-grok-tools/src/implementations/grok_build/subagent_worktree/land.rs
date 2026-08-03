@@ -41,6 +41,15 @@ pub struct LandSubagentInput {
         description = "When true, allow landing agent deltas larger than the safety limit (default 50 files). Use only after reviewing `diff_subagent` / `turbo subagent diff`."
     )]
     pub force: Option<bool>,
+
+    /// Only land paths that do **not** already exist on the parent (new files).
+    /// Skips modifications/deletes of existing parent paths. Useful for refill
+    /// snapshots that redo already-landed densify plus a few new stems.
+    #[serde(default)]
+    #[schemars(
+        description = "When true, land only paths missing on the parent tree (new files). Existing parent paths are skipped rather than merged/overwritten."
+    )]
+    pub only_missing: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -118,7 +127,9 @@ Resolves `subagents/<subagent_id>/meta.json` and lands from (priority order):
 
 Use `diff_subagent` first to review. Do not land untrusted or unreviewed work.
 
-When the subagent was spawned with `allowed_paths`, land refuses (error) if any changed path falls outside those relative prefixes — fail closed like merge conflicts."#
+When the subagent was spawned with `allowed_paths`, land refuses (error) if any changed path falls outside those relative prefixes — fail closed like merge conflicts.
+
+**only_missing** (optional): when true, land only paths that do not already exist on the parent (new files). Skips updates to already-present parent paths — useful for stale refill snapshots."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -177,6 +188,7 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
 
         let work = resolve_subagent_work(&ctx, &input.subagent_id).await?;
         let force = input.force.unwrap_or(false);
+        let only_missing = input.only_missing.unwrap_or(false);
         let files_hint = work
             .meta
             .diffstat
@@ -198,7 +210,7 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
             && work.snapshot_ref.is_some();
         if prefer_snapshot {
             if let Some(ref snap) = work.snapshot_ref {
-                return land_snapshot_ref(&work, snap, mode).await;
+                return land_snapshot_ref(&work, snap, mode, only_missing).await;
             }
         }
 
@@ -208,40 +220,43 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
             if let Ok(paths) = collect_live_worktree_paths(wt, &work.parent_git_root).await {
                 refuse_land_outside_allowlist(&work.meta, &paths)?;
             }
-            let wt_str = wt.to_string_lossy().into_owned();
-            // Prefer host-injected apply_worktree backend when present.
-            let backend = {
-                let res = resources.lock().await;
-                res.get::<LiveWorktreeApplyBackend>().map(|b| b.0.clone())
-            };
-            if let Some(apply_fn) = backend {
-                let apply_mode = to_apply_mode(mode);
-                match apply_fn(wt_str.clone(), apply_mode).await {
-                    Ok(resp) => {
-                        return map_apply_response(
-                            &work,
-                            mode,
-                            "live_worktree",
-                            Some(wt.display().to_string()),
-                            resp,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        return Err(xai_tool_runtime::ToolError::custom(
-                            "apply_worktree_failed",
-                            format!("workspace.apply_worktree failed for {wt_str}: {e}"),
-                        ));
+            // Host apply_worktree does not support only_missing filtering — use
+            // in-process path when that flag is set so we can skip existing files.
+            if !only_missing {
+                let wt_str = wt.to_string_lossy().into_owned();
+                let backend = {
+                    let res = resources.lock().await;
+                    res.get::<LiveWorktreeApplyBackend>().map(|b| b.0.clone())
+                };
+                if let Some(apply_fn) = backend {
+                    let apply_mode = to_apply_mode(mode);
+                    match apply_fn(wt_str.clone(), apply_mode).await {
+                        Ok(resp) => {
+                            return map_apply_response(
+                                &work,
+                                mode,
+                                "live_worktree",
+                                Some(wt.display().to_string()),
+                                resp,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            return Err(xai_tool_runtime::ToolError::custom(
+                                "apply_worktree_failed",
+                                format!("workspace.apply_worktree failed for {wt_str}: {e}"),
+                            ));
+                        }
                     }
                 }
             }
             // In-process mirror of apply_worktree Merge/Overwrite.
-            return land_live_worktree_inprocess(&work, wt, mode).await;
+            return land_live_worktree_inprocess(&work, wt, mode, only_missing).await;
         }
 
         // 2) Snapshot ref
         if let Some(ref snap) = work.snapshot_ref {
-            return land_snapshot_ref(&work, snap, mode).await;
+            return land_snapshot_ref(&work, snap, mode, only_missing).await;
         }
 
         // 3) Patch
@@ -360,6 +375,7 @@ async fn land_live_worktree_inprocess(
     work: &super::ResolvedSubagentWork,
     wt: &std::path::Path,
     mode: LandMode,
+    only_missing: bool,
 ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
     let parent = &work.parent_git_root;
     let parent_head = git_capture(parent, &["rev-parse", "HEAD"])
@@ -386,6 +402,10 @@ async fn land_live_worktree_inprocess(
     paths.sort();
     paths.dedup();
 
+    if only_missing {
+        paths.retain(|p| !parent.join(p).exists());
+    }
+
     if paths.is_empty() {
         update_meta_land_status(&work.meta_path, "landed").await;
         return Ok(LandSubagentOutput {
@@ -399,8 +419,13 @@ async fn land_live_worktree_inprocess(
             files_landed: vec![],
             conflicts: vec![],
             message: format!(
-                "Subagent `{}` live worktree has no changes vs parent HEAD — nothing to land.",
-                work.subagent_id
+                "Subagent `{}` live worktree has no {} vs parent HEAD — nothing to land.",
+                work.subagent_id,
+                if only_missing {
+                    "missing (new) paths"
+                } else {
+                    "changes"
+                }
             ),
         });
     }
@@ -426,6 +451,12 @@ async fn land_live_worktree_inprocess(
         } else {
             None // deleted in child
         };
+
+        if only_missing {
+            // Parent path does not exist (filtered above) — always take theirs.
+            plan.push((path.clone(), theirs));
+            continue;
+        }
 
         if mode == LandMode::Overwrite {
             plan.push((path.clone(), theirs));
@@ -506,6 +537,7 @@ async fn land_snapshot_ref(
     work: &super::ResolvedSubagentWork,
     snap: &str,
     mode: LandMode,
+    only_missing: bool,
 ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
     let parent = &work.parent_git_root;
     git_capture(parent, &["rev-parse", "--verify", snap])
@@ -556,7 +588,10 @@ async fn land_snapshot_ref(
         .map_err(|e| {
             xai_tool_runtime::ToolError::custom("git_error", format!("diff name-status: {e}"))
         })?;
-    let paths = parse_name_status(&name_status);
+    let mut paths = parse_name_status(&name_status);
+    if only_missing {
+        paths.retain(|p| !parent.join(p).exists());
+    }
 
     if paths.is_empty() {
         update_meta_land_status(&work.meta_path, "landed").await;
@@ -571,8 +606,13 @@ async fn land_snapshot_ref(
             files_landed: vec![],
             conflicts: vec![],
             message: format!(
-                "Subagent `{}` snapshot `{snap}` has no agent-only diff vs `{base_rev}` — nothing to land.",
-                work.subagent_id
+                "Subagent `{}` snapshot `{snap}` has no {} vs `{base_rev}` — nothing to land.",
+                work.subagent_id,
+                if only_missing {
+                    "missing (new) paths"
+                } else {
+                    "agent-only diff"
+                }
             ),
         });
     }
@@ -584,7 +624,7 @@ async fn land_snapshot_ref(
 
     for path in &paths {
         let theirs = git_show_blob(parent, snap, path).await;
-        if mode == LandMode::Overwrite {
+        if only_missing || mode == LandMode::Overwrite {
             plan.push((path.clone(), theirs));
             continue;
         }

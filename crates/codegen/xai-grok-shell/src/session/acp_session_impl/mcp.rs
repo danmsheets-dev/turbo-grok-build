@@ -862,16 +862,30 @@ impl SessionActor {
     /// Unregister `server`'s tools from the bridge after stdio restart
     /// exhaustion, so the model stops calling a now-absent client.
     pub(crate) fn unregister_server_tools(&self, server: &str) {
-        let prefix = format!(
+        // Match both the raw server id and the sanitized segment used when
+        // `make_qualified_mcp_tool_name` remaps invalid characters.
+        let mut prefixes = vec![format!(
             "{}{}",
             server,
             crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-        );
-        let removed = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .unregister_tools_by_prefix(&prefix);
+        )];
+        let sanitized =
+            xai_grok_mcp::servers::sanitize_mcp_name_segment(server);
+        if sanitized != server {
+            prefixes.push(format!(
+                "{}{}",
+                sanitized,
+                crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+            ));
+        }
+        let mut removed = 0usize;
+        for prefix in &prefixes {
+            removed += self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .unregister_tools_by_prefix(prefix);
+        }
         if removed > 0 {
             tracing::info!(
                 server = %server,
@@ -879,6 +893,61 @@ impl SessionActor {
                 "unregistered tools for MCP server after auto-restart exhaustion",
             );
         }
+    }
+
+    /// Re-list tools for a live MCP client and re-register them on ToolBridge
+    /// after `notifications/tools/list_changed` (RC12 / C1).
+    ///
+    /// Unregisters the previous `server__*` prefix first so removed tools
+    /// disappear from `search_tool` / `use_tool`. Best-effort: failures are
+    /// returned as strings for the dispatcher task to log.
+    pub(crate) async fn refresh_server_tools_from_list_changed(
+        &self,
+        server: &str,
+    ) -> Result<(), String> {
+        let client = {
+            let st = self.mcp_state.lock().await;
+            st.get_client(server)
+                .cloned()
+                .ok_or_else(|| format!("no live MCP client for server '{server}'"))?
+        };
+
+        // Re-list BEFORE unregistering. A failed list_tools used to leave the
+        // server with zero tools (unregister-then-fail hole) until the next
+        // successful list_changed or full re-init.
+        let mcp_state_arc = std::sync::Arc::clone(&self.mcp_state);
+        let registrations = client
+            .get_tool_registrations(mcp_state_arc)
+            .await
+            .map_err(|e| format!("list_tools failed for '{server}': {e}"))?;
+
+        // Drop prior registrations for this server so removals take effect.
+        self.unregister_server_tools(server);
+
+        let tool_count = registrations.len();
+        let mut all_ui_tools: std::collections::HashMap<
+            String,
+            Vec<crate::extensions::mcp::McpToolEntry>,
+        > = std::collections::HashMap::new();
+        let mut mcp_state = self.mcp_state.lock().await;
+        for reg in registrations {
+            self.register_mcp_tool(server, reg, &mut mcp_state, &mut all_ui_tools)
+                .await;
+        }
+        drop(mcp_state);
+
+        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        if !all_ui_tools.is_empty() {
+            self.emit_mcp_tools_changed_notifications(all_ui_tools);
+        }
+
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            server = %server,
+            tool_count,
+            "refresh_server_tools_from_list_changed: re-registered tools"
+        );
+        Ok(())
     }
     /// Re-run [`crate::session::mcp_servers::start_mcp_server`]
     /// against the current config entry for `server`, drive the
@@ -1450,12 +1519,16 @@ impl SessionActor {
                     }
                 });
             }
+            // RC12 progressive: process each handshake as it completes so fast
+            // servers become usable before slow ones finish (batch barrier lifted
+            // for registration; clients still inserted below).
             let mut handle_results = Vec::with_capacity(futs.len());
+            let mut progressive_connected: u32 = 0;
             while let Some(result) = futs.next().await {
-                handle_results.push(result);
+                progressive_connected += 1;
                 if let Ok(params) = serde_json::value::to_raw_value(&serde_json::json!({
                     "total": init_total_bg,
-                    "connected": handle_results.len() as u32,
+                    "connected": progressive_connected,
                     "sessionId": session_id_owned.as_ref(),
                 })) {
                     gateway.forward_fire_and_forget(acp::ExtNotification::new(
@@ -1463,12 +1536,21 @@ impl SessionActor {
                         params.into(),
                     ));
                 }
+                handle_results.push(result);
             }
             drop(futs);
             let mut ui_tools_by_server: std::collections::HashMap<
                 String,
                 Vec<crate::extensions::mcp::McpToolEntry>,
             > = std::collections::HashMap::new();
+            // Map for progressive client insert as each handshake completes.
+            let mut clients_by_name: std::collections::HashMap<
+                String,
+                crate::session::mcp_servers::McpClient,
+            > = mcp_clients
+                .into_iter()
+                .map(|c| (c.server_name().to_string(), c))
+                .collect();
             {
                 let mut mcp_state = mcp_state_bg.lock().await;
                 if mcp_state.generation() != generation {
@@ -1626,6 +1708,34 @@ impl SessionActor {
                             servers_succeeded += 1;
                             total_tools_registered += tool_count;
                             mcp_state.mark_server_ready(&server_name);
+                            // Progressive: insert client + refresh index so this
+                            // server is usable before remaining handshakes finish.
+                            if let Some(client) = clients_by_name.remove(&server_name) {
+                                let arc = std::sync::Arc::new(client);
+                                drop(mcp_state);
+                                let _ = arc
+                                    .arm_liveness_watcher(
+                                        xai_grok_mcp::liveness::DEFAULT_POLL_INTERVAL,
+                                    )
+                                    .await;
+                                {
+                                    let mut st = mcp_state_bg.lock().await;
+                                    st.owned_clients
+                                        .insert(server_name.clone(), std::sync::Arc::clone(&arc));
+                                }
+                                refresh_mcp_snapshot_and_schedule_reminder_with(
+                                    tool_bridge.clone(),
+                                    Arc::clone(&mcp_state_bg),
+                                    managed_mcp_handle.clone(),
+                                    tool_snapshot.clone(),
+                                    Arc::clone(&mcp_reminder_dirty),
+                                    false, // not fully initialized yet
+                                    &disabled_gateway_tools_bg,
+                                    mcps_root_bg.clone(),
+                                )
+                                .await;
+                                mcp_state = mcp_state_bg.lock().await;
+                            }
                         }
                         Err((server_name, ref e, needs_auth, elapsed, timeout_sec)) => {
                             let error_cat = if needs_auth {
@@ -1689,19 +1799,27 @@ impl SessionActor {
                         }
                     }
                 }
-                let inserted_names: Vec<String> = mcp_clients
-                    .iter()
-                    .map(|c| c.server_name().to_string())
-                    .collect();
-                for c in mcp_clients {
-                    let arc = std::sync::Arc::new(c);
-                    let _ = arc
-                        .arm_liveness_watcher(xai_grok_mcp::liveness::DEFAULT_POLL_INTERVAL)
-                        .await;
-                    mcp_state
-                        .owned_clients
-                        .insert(arc.server_name().to_string(), arc);
+                // Insert any clients not already progressive-inserted (e.g. failed
+                // path left them out; success path already inserted).
+                let remaining_names: Vec<String> = clients_by_name.keys().cloned().collect();
+                drop(mcp_state);
+                for name in &remaining_names {
+                    if let Some(c) = clients_by_name.remove(name) {
+                        let arc = std::sync::Arc::new(c);
+                        let _ = arc
+                            .arm_liveness_watcher(xai_grok_mcp::liveness::DEFAULT_POLL_INTERVAL)
+                            .await;
+                        let mut st = mcp_state_bg.lock().await;
+                        st.owned_clients
+                            .insert(arc.server_name().to_string(), arc);
+                    }
                 }
+                let mut mcp_state = mcp_state_bg.lock().await;
+                let inserted_names: Vec<String> = mcp_state
+                    .owned_clients
+                    .keys()
+                    .cloned()
+                    .collect();
                 mcp_state.mark_all_servers_ready();
                 tracing::info!(
                     session_id = %session_id_owned,
@@ -1723,6 +1841,9 @@ impl SessionActor {
                         is_reinit,
                     },
                 );
+                // Force a system-reminder pass so failed servers always surface
+                // even when connected list fingerprints are unchanged.
+                mcp_reminder_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 event_writer.emit(xai_file_utils::events::Event::McpInitCompleted {
                     total_servers: server_count,
                     succeeded: servers_succeeded,

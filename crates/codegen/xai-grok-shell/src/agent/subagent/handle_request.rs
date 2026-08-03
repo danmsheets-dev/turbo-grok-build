@@ -365,6 +365,38 @@ pub(crate) async fn run_shell_child(
                     .join(&request.id)
             }
         };
+        // RC12: prune soft-preserved worktrees (keep-N) + free-space guard so
+        // parallel densify loops don't fill the disk (os error 112).
+        let mut skip_worktree_create = false;
+        if let Some(parent_base) = dest.parent() {
+            prune_soft_preserved_worktrees(parent_base);
+            // Second prune pass if still low: drop to keep-N/2.
+            if ensure_min_free_space_for_worktree(parent_base).is_err() {
+                prune_soft_preserved_worktrees_with_cap(parent_base, soft_preserve_keep_n() / 2);
+            }
+            if let Err(msg) = ensure_min_free_space_for_worktree(parent_base) {
+                if !allow_shared_fallback {
+                    tracing::error!(
+                        subagent_id = %request.id,
+                        error = %msg,
+                        "Pre-spawn disk guard refused worktree create"
+                    );
+                    return child_run_output(
+                        failure_result(&request, &msg),
+                        completion_data,
+                        None,
+                    );
+                }
+                isolation_fallback = true;
+                skip_worktree_create = true;
+                tracing::warn!(
+                    subagent_id = %request.id,
+                    error = %msg,
+                    isolation_fallback,
+                    "Disk guard failed; shared-workspace fallback (opt-in)"
+                );
+            }
+        }
         let source_clone = source_cwd;
         let subagent_id = request.id.clone();
         let creation_mode: xai_fast_worktree::CreationMode = ctx.worktree_type.into();
@@ -380,20 +412,30 @@ pub(crate) async fn run_shell_child(
             _ => xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree,
         };
         let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
-        match tokio::task::spawn_blocking(move || {
-            let mut builder = xai_fast_worktree::WorktreeBuilder::new(&source_clone, &dest)
-                .working_tree_mode(working_tree_mode)
-                .creation_mode(creation_mode)
-                .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
-                .session_id(subagent_id);
-            if let Some(delegate) = btrfs_delegate {
-                builder = builder.btrfs_delegate(delegate);
+        let create_result = if skip_worktree_create {
+            None
+        } else {
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    let mut builder = xai_fast_worktree::WorktreeBuilder::new(&source_clone, &dest)
+                        .working_tree_mode(working_tree_mode)
+                        .creation_mode(creation_mode)
+                        .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
+                        .session_id(subagent_id);
+                    if let Some(delegate) = btrfs_delegate {
+                        builder = builder.btrfs_delegate(delegate);
+                    }
+                    builder.create()
+                })
+                .await,
+            )
+        };
+        match create_result {
+            None => {
+                // Disk guard opted into shared fallback — no worktree path.
+                None
             }
-            builder.create()
-        })
-        .await
-        {
-            Ok(Ok(report)) => {
+            Some(Ok(Ok(report))) => {
                 tracing::info!(
                     subagent_id = %request.id,
                     worktree_path = %report.worktree_path.display(),
@@ -430,7 +472,7 @@ pub(crate) async fn run_shell_child(
                 }
                 Some(report.worktree_path)
             }
-            Ok(Err(e)) => {
+            Some(Ok(Err(e))) => {
                 if !allow_shared_fallback {
                     let msg = format!(
                         "Failed to create isolated worktree for subagent \
@@ -459,7 +501,7 @@ pub(crate) async fn run_shell_child(
                 );
                 None
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 if !allow_shared_fallback {
                     let msg = format!(
                         "Worktree creation task panicked (isolation required): {e}. Set \
@@ -2224,6 +2266,13 @@ pub(crate) async fn run_shell_child(
                                 soft_preserve,
                                 "snapshotted subagent worktree; kept on disk for review"
                             );
+                            // Evict oldest soft-preserved peers so densify waves
+                            // stay within keep-N without waiting for the next spawn.
+                            if soft_preserve {
+                                if let Some(base) = wt_path.parent() {
+                                    prune_soft_preserved_worktrees(base);
+                                }
+                            }
                         } else {
                             match crate::session::worktree::remove_subagent_worktree(wt_path)
                                 .await
@@ -2366,4 +2415,104 @@ pub(crate) async fn run_shell_child(
         })),
     );
     child_run_output(result, completion_data, disposed_snapshot_ref)
+}
+
+// ── RC12 soft-preserve keep-N + free-space pre-spawn guard ──────────────────
+
+/// Default max soft-preserved `subagent-*` trees under a project worktree base.
+/// Override with `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` (0 = no prune by count).
+/// Product default is **6** (densify sessions: ~0.5GB each → ~3GB cap).
+fn soft_preserve_keep_n() -> usize {
+    std::env::var("GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(6)
+}
+
+/// Default minimum free bytes before creating a new worktree (2 GiB).
+/// Override with `GROK_SUBAGENT_MIN_FREE_BYTES`.
+fn min_free_bytes_for_worktree() -> u64 {
+    std::env::var("GROK_SUBAGENT_MIN_FREE_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(2 * 1024 * 1024 * 1024)
+}
+
+fn prune_soft_preserved_worktrees(base: &std::path::Path) {
+    prune_soft_preserved_worktrees_with_cap(base, soft_preserve_keep_n());
+}
+
+/// Delete oldest `subagent-*` directories under `base` until at most `keep` remain.
+/// Best-effort: never panics; logs on failure.
+fn prune_soft_preserved_worktrees_with_cap(base: &std::path::Path, keep: usize) {
+    if keep == 0 || !base.is_dir() {
+        return;
+    }
+    let mut entries: Vec<(std::time::SystemTime, std::path::PathBuf)> = match std::fs::read_dir(base)
+    {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && e.file_name()
+                        .to_string_lossy()
+                        .starts_with("subagent-")
+            })
+            .filter_map(|e| {
+                let meta = e.metadata().ok()?;
+                let mtime = meta.modified().or_else(|_| meta.created()).ok()?;
+                Some((mtime, e.path()))
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    if entries.len() <= keep {
+        return;
+    }
+    // Oldest first.
+    entries.sort_by_key(|(t, _)| *t);
+    let drop_count = entries.len().saturating_sub(keep);
+    for (_, path) in entries.into_iter().take(drop_count) {
+        // Prefer fast-worktree remove (git worktree prune aware); fall back to rm -rf.
+        let _ = xai_fast_worktree::remove_worktree(&path);
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        tracing::info!(
+            worktree = %path.display(),
+            keep,
+            "pruned soft-preserved subagent worktree (keep-N)"
+        );
+    }
+}
+
+fn ensure_min_free_space_for_worktree(base: &std::path::Path) -> Result<(), String> {
+    let min = min_free_bytes_for_worktree();
+    if min == 0 {
+        return Ok(());
+    }
+    // Ensure parent exists for the free-space query.
+    let probe = if base.exists() {
+        base.to_path_buf()
+    } else {
+        base.parent()
+            .unwrap_or(base)
+            .to_path_buf()
+    };
+    let available = fs2::available_space(&probe).map_err(|e| {
+        format!(
+            "Failed to query free disk space under {}: {e}",
+            probe.display()
+        )
+    })?;
+    if available < min {
+        return Err(format!(
+            "not enough free disk space to create isolated worktree \
+             (available {available} bytes, need at least {min}). \
+             Pruned soft-preserved trees if possible; free disk or set \
+             GROK_SUBAGENT_MIN_FREE_BYTES=0 / GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N=N. \
+             Original symptom: os error 112 / StorageFull."
+        ));
+    }
+    Ok(())
 }

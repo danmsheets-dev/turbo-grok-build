@@ -47,6 +47,6 @@ pub(crate) mod metrics;
 pub mod transport;
 pub mod types;
 
-pub use bridge::{McpBridge, McpBridgeConfig, McpBridgeHandle, McpToolHandler};
+pub use bridge::{McpBridge, McpBridgeConfig, McpBridgeHandle, McpToolHandler, McpToolListDiff};
 pub use transport::McpTransport;
 pub use types::{McpCallResult, McpContent, McpError, McpServerInfo, McpToolDefinition};

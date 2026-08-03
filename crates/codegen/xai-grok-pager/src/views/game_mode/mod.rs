@@ -1,7 +1,7 @@
 //! Game Mode — terminal-native office view of Supervisor + subagent desks.
 //!
 //! Spec: `docs/design-game-mode-rc11.md`
-//! Toggle: `Shift+G` (`ActionId::ToggleGameMode`).
+//! Toggle: `Ctrl+G` (`ActionId::ToggleGameMode`).
 
 mod compose;
 mod layout;
@@ -17,7 +17,7 @@ pub use compose::{
 };
 pub use layout::{GameLayout, GameTier, SpriteSet, compute as compute_layout, game_tier};
 pub use render::render_game_mode;
-pub use sprites_pixel::{DevPalette, sprite_developer_at_desk, sprite_developer_walk};
+pub use sprites_pixel::{DevPalette, PIXEL_SCALE, sprite_developer_at_desk, sprite_developer_walk};
 pub use state::{
     ActorPhase, DESK_COUNT, DeskAgentSnapshot, DeskSlot, GameModeState, SupervisorPhase,
 };
@@ -91,9 +91,9 @@ pub fn sync_game_mode(agent: &mut AgentView, stage_width: u16, stage_height: u16
     let tier = layout.tier;
     agent.game_mode.sync_from_snapshots(&snaps, working, tier);
 
-    // ~8–10 Hz is enough for walk/blink; full recompose is cheap at cell res.
+    // ~10–12 Hz walk/blink. Sprite cache + frame fingerprint keep recompose cheap.
     let elapsed = agent.game_mode.last_tick.elapsed();
-    if elapsed >= Duration::from_millis(120) {
+    if elapsed >= Duration::from_millis(90) {
         agent.game_mode.tick_anim(tier);
     }
 }

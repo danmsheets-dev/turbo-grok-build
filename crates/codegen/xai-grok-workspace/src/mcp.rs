@@ -58,7 +58,10 @@ impl McpTransport for McpClientTransportAdapter {
 
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
-        loop {
+        // Same cap as `McpClient::get_tool_registrations` — buggy servers that
+        // never clear next_cursor must not hang hub MCP start/refresh.
+        const MAX_LIST_TOOLS_PAGES: usize = 100;
+        for page in 0..MAX_LIST_TOOLS_PAGES {
             let result = service
                 .list_tools(Some(
                     rmcp::model::PaginatedRequestParams::default().with_cursor(cursor.clone()),
@@ -73,6 +76,13 @@ impl McpTransport for McpClientTransportAdapter {
             }));
 
             match result.next_cursor {
+                Some(next) if cursor.as_ref() == Some(&next) => {
+                    tracing::warn!(
+                        page,
+                        "hub MCP tools/list returned the same next_cursor; stopping pagination"
+                    );
+                    break;
+                }
                 Some(next) => cursor = Some(next),
                 None => break,
             }
@@ -101,13 +111,22 @@ impl McpTransport for McpClientTransportAdapter {
                 Some(wrapper)
             }
         };
-        let result = service
-            .call_tool({
-                let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
-                params.arguments = args_object;
-                params
-            })
+        // Honor per-server / per-tool timeouts from disk config (same source as
+        // shell `McpErasedTool`). Hub bridge used a fixed 120s ceiling that
+        // ignored `tool_timeout_sec` / `tool_timeouts`.
+        let timeout_secs = self.client.tool_timeout_for(name).max(1);
+        let call_fut = service.call_tool({
+            let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
+            params.arguments = args_object;
+            params
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), call_fut)
             .await
+            .map_err(|_| {
+                xai_computer_hub_mcp_adapter::McpError::Transport(format!(
+                    "MCP tool '{name}' timed out after {timeout_secs}s"
+                ))
+            })?
             .map_err(|e| xai_computer_hub_mcp_adapter::McpError::Transport(e.to_string()))?;
 
         Ok(McpCallResult {
@@ -216,6 +235,74 @@ pub(crate) fn make_bridge_config(
         session_id,
         namespace: Some(server_name.to_owned()),
     }
+}
+
+/// Timeout + OAuth maps resolved from disk for hub MCP start (RC12 C2 parity).
+///
+/// Merges (lowest → highest priority):
+/// 1. `xai_grok_config::load_effective_config_disk_only()` (user/managed layers)
+/// 2. `<root_cwd>/.grok/config.toml` when present
+///
+/// Returns empty oauth map / empty timeouts when nothing is configured; callers
+/// still apply 30s/120s defaults.
+pub(crate) fn load_hub_mcp_config_maps(
+    root_cwd: &std::path::Path,
+) -> (
+    std::collections::HashMap<String, xai_grok_mcp::servers::McpClientTimeoutOverrides>,
+    xai_grok_mcp::oauth_config::McpOAuthConfigMap,
+) {
+    use std::collections::HashMap;
+    use xai_grok_config_types::McpServerConfig;
+    use xai_grok_mcp::oauth_config::McpOAuthConfigMap;
+    use xai_grok_mcp::servers::McpClientTimeoutOverrides;
+
+    let mut timeouts: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
+    let mut oauth: McpOAuthConfigMap = McpOAuthConfigMap::new();
+
+    let mut apply_table = |table: &toml::map::Map<String, toml::Value>| {
+        for (name, value) in table {
+            let Ok(cfg) = value.clone().try_into::<McpServerConfig>() else {
+                continue;
+            };
+            timeouts.insert(
+                name.clone(),
+                McpClientTimeoutOverrides {
+                    startup_timeout_sec: cfg.startup_timeout_sec,
+                    tool_timeout_sec: cfg.tool_timeout_sec,
+                    tool_timeouts: cfg.tool_timeouts.clone(),
+                    expose_image_base64: cfg.expose_image_base64,
+                },
+            );
+            if let Some(o) = cfg.oauth_config() {
+                oauth.insert(name.clone(), o);
+            }
+        }
+    };
+
+    // User / managed effective config first.
+    if let Ok(root) = xai_grok_config::load_effective_config_disk_only() {
+        if let Some(table) = root
+            .get("mcp_servers")
+            .and_then(|v| v.as_table())
+            .or_else(|| root.get("mcpServers").and_then(|v| v.as_table()))
+        {
+            apply_table(table);
+        }
+    }
+
+    // Project config overrides user for same server name.
+    let project_path = root_cwd.join(".grok").join("config.toml");
+    if let Ok(raw) = std::fs::read_to_string(&project_path)
+        && let Ok(root) = raw.parse::<toml::Value>()
+        && let Some(table) = root
+            .get("mcp_servers")
+            .and_then(|v| v.as_table())
+            .or_else(|| root.get("mcpServers").and_then(|v| v.as_table()))
+    {
+        apply_table(table);
+    }
+
+    (timeouts, oauth)
 }
 
 #[cfg(test)]

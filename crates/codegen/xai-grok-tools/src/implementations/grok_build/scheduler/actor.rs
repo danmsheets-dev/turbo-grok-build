@@ -6,16 +6,19 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::implementations::grok_build::task::types::{
-    SessionIdResource, SubagentEvent, SubagentEventSender, SubagentLoopUnitActiveRequest,
-    SubagentOwner, SubagentQueryRequest, SubagentRequest, SubagentRuntimeOverrides,
-    SubagentSnapshotStatus, SubagentSpawnRequest,
+    SessionIdResource, SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
+    SubagentEventSender, SubagentLoopUnitActiveRequest, SubagentOwner, SubagentQueryRequest,
+    SubagentRequest, SubagentRuntimeOverrides, SubagentSnapshotStatus, SubagentSpawnRequest,
 };
 use crate::notification::types::ToolNotificationHandle;
 use crate::notification::{
     DurableNotificationTargets, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved,
 };
-use crate::reminders::format_loop_iteration_prompt;
-use crate::types::resources::{SharedResources, State};
+use crate::reminders::{
+    LoopParentStamp, format_loop_iteration_prompt_with_parent,
+};
+use crate::types::resources::{Cwd, SharedResources, State};
+use xai_tool_types::SubagentIsolationMode;
 
 use super::interval::interval_to_human;
 use super::types::{
@@ -41,6 +44,30 @@ enum ExpiryPersistenceOutcome {
 pub(crate) struct PendingDurableRemoval {
     task_id: String,
     reservation: super::types::SchedulerReservation,
+}
+
+/// Snapshot parent git HEAD/branch for check-loop prompts (best-effort, never panics).
+fn capture_loop_parent_stamp(cwd: &std::path::Path) -> LoopParentStamp {
+    let cwd_s = cwd.display().to_string();
+    let head = std::process::Command::new("git")
+        .args(["-C", &cwd_s, "rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let branch = std::process::Command::new("git")
+        .args(["-C", &cwd_s, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty() && s != "HEAD");
+    LoopParentStamp {
+        cwd: cwd_s,
+        head,
+        branch,
+    }
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -635,8 +662,24 @@ impl SchedulerActor {
         };
 
         let subagent_id = uuid::Uuid::now_v7().to_string();
-        let framed_prompt =
-            format_loop_iteration_prompt(prompt, task_id, human_schedule, prior_summary.as_deref());
+        // Parent-true stamp: check-loops must report live parent HEAD/cwd, not a
+        // soft-preserved densify worktree (stale WAVE4 / test counts incident).
+        let (parent_cwd, parent_stamp) = {
+            let res = self.resources.lock().await;
+            let cwd = res
+                .get::<Cwd>()
+                .map(|c| c.0.clone())
+                .or_else(|| std::env::current_dir().ok());
+            let stamp = cwd.as_ref().map(|p| capture_loop_parent_stamp(p));
+            (cwd, stamp)
+        };
+        let framed_prompt = format_loop_iteration_prompt_with_parent(
+            prompt,
+            task_id,
+            human_schedule,
+            prior_summary.as_deref(),
+            parent_stamp.as_ref(),
+        );
         let description = format!(
             "loop: {} ({human_schedule})",
             truncate_chars(prompt.lines().next().unwrap_or(prompt), 60)
@@ -655,20 +698,24 @@ impl SchedulerActor {
         }
 
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let cancel_token = CancellationToken::new();
         let request = SubagentRequest {
             id: subagent_id.clone(),
             prompt: framed_prompt,
             description,
             subagent_type: "general-purpose".to_string(),
-            parent_session_id,
+            parent_session_id: parent_session_id.clone(),
             parent_prompt_id: None,
             resume_from,
-            cwd: None,
+            // Force parent workspace for status truthfulness.
+            cwd: parent_cwd.map(|p| p.display().to_string()),
             runtime_overrides: SubagentRuntimeOverrides {
                 completion_output_cap: Some(LOOP_COMPLETION_OUTPUT_CAP),
                 spawn_depth: Some(0),
                 loop_task_id: Some(task_id.to_string()),
                 timeout_ms: None,
+                // Isolation none: check-loops must see parent main, not densify WTs.
+                isolation: Some(SubagentIsolationMode::None),
                 ..Default::default()
             },
             run_in_background: true,
@@ -677,7 +724,7 @@ impl SchedulerActor {
             fork_context: false,
             owner: SubagentOwner::Task,
             allowed_paths: None,
-            cancel_token: CancellationToken::new(),
+            cancel_token: cancel_token.clone(),
         };
 
         if events
@@ -861,8 +908,21 @@ impl SchedulerActor {
                     let _ = reply.send(Err(SchedulerError::NoDurableNotificationConsumer));
                     return;
                 }
+                // Cancel any in-flight loop subagent so post-delete toasts stop
+                // (queued check-loops firing after cancel incident).
+                let last_sub = state.tasks[index].last_subagent_id.clone();
                 state.tasks.remove(index);
+                let events = res.get::<SubagentEventSender>().cloned();
+                let parent_session = res.get::<SessionIdResource>().map(|s| s.0.clone());
                 drop(res);
+                if let (Some(events), Some(sub_id)) = (events, last_sub) {
+                    let (respond_to, _rx) = tokio::sync::oneshot::channel();
+                    let _ = events.0.send(SubagentEvent::Cancel(SubagentCancelRequest {
+                        parent_session_id: parent_session,
+                        target: SubagentCancelTarget::SubagentId(sub_id),
+                        respond_to,
+                    }));
+                }
                 self.pending_removal = Some(PendingDurableRemoval {
                     task_id: id,
                     reservation: self.clock.prepare_transition(1),

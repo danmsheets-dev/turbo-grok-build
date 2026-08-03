@@ -83,6 +83,108 @@ pub fn validate_tool_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Sanitize one side of a `server__tool` id so it cannot introduce a second
+/// `__` boundary and only uses provider-safe characters.
+pub fn sanitize_mcp_name_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().max(1));
+    let mut prev_us = false;
+    for c in raw.chars() {
+        let ok = c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        if ok {
+            if c == '_' {
+                if prev_us {
+                    continue; // collapse `__` inside a segment
+                }
+                prev_us = true;
+            } else {
+                prev_us = false;
+            }
+            out.push(c);
+        } else if !prev_us {
+            out.push('_');
+            prev_us = true;
+        }
+    }
+    while out.starts_with('-') {
+        out.remove(0);
+    }
+    if out.is_empty() {
+        return "_".to_string();
+    }
+    let first = out.as_bytes()[0];
+    if first.is_ascii_digit() {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Build a provider-valid `server__tool` qualified name.
+///
+/// - Sanitizes each segment (no multi-`__`, no invalid chars, valid start).
+/// - If the joined name exceeds 64 characters, shrinks the longer segment
+///   until it fits (or falls back to a short hash form).
+/// - Never silently drops tools: always returns a name that passes
+///   [`validate_tool_name`] and [`parse_mcp_qualified_name`].
+pub fn make_qualified_mcp_tool_name(server: &str, tool: &str) -> String {
+    const MAX: usize = 64;
+    const DELIM: &str = "__";
+
+    let mut server_s = sanitize_mcp_name_segment(server);
+    let mut tool_s = sanitize_mcp_name_segment(tool);
+    if server_s.is_empty() {
+        server_s = "_".into();
+    }
+    if tool_s.is_empty() {
+        tool_s = "_".into();
+    }
+
+    let mut name = format!("{server_s}{DELIM}{tool_s}");
+    // Shrink until it fits the 64-char provider limit.
+    while name.len() > MAX {
+        if server_s.len() >= tool_s.len() && server_s.len() > 1 {
+            server_s.pop();
+            while server_s.ends_with('-') {
+                server_s.pop();
+            }
+            if server_s.is_empty() {
+                server_s.push('_');
+            }
+        } else if tool_s.len() > 1 {
+            tool_s.pop();
+            while tool_s.ends_with('-') {
+                tool_s.pop();
+            }
+            if tool_s.is_empty() {
+                tool_s.push('_');
+            }
+        } else {
+            break;
+        }
+        name = format!("{server_s}{DELIM}{tool_s}");
+    }
+
+    // Last resort: fixed short form (should always be ≤ 64).
+    if validate_tool_name(&name).is_err() || parse_mcp_qualified_name(&name).is_none() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        server.hash(&mut h);
+        tool.hash(&mut h);
+        let digest = h.finish();
+        name = format!("m{:08x}__t{:08x}", (digest >> 32) as u32, digest as u32);
+    }
+
+    if name != format!("{server}{DELIM}{tool}") {
+        tracing::warn!(
+            original_server = %server,
+            original_tool = %tool,
+            remapped = %name,
+            "remapped MCP tool name to satisfy provider name policy (no silent skip)"
+        );
+    }
+    name
+}
+
 /// Sanitize an MCP server or tool name into a single safe path segment
 /// (e.g. `"user-Hugging Face"` becomes `user-Hugging_Face`). Shared so the
 /// per-server folder advertised in the prompt matches the tool files on disk.
@@ -995,8 +1097,12 @@ pub(crate) fn mcp_servers_equal(a: &[acp::McpServer], b: &[acp::McpServer]) -> b
 /// requirements / remote overrides and injects them via `McpClientTimeoutOverrides`.
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 30;
 
-/// Default timeout for individual tool calls.
-const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 6000;
+/// Default timeout for individual tool calls when no per-server / per-tool
+/// override is configured. 120s is long enough for typical docs/search tools
+/// without pinning an agent turn for ~100 minutes (the previous 6000s default).
+/// Long-running jobs (scrape, rustdoc cache, Blender) must set
+/// `tool_timeout_sec` or `tool_timeouts` explicitly.
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
 /// How long a stdio server gets to exit after its transport closes before
 /// its process group is killed.
@@ -1265,21 +1371,20 @@ impl McpTool {
 
     /// Convert into the data needed for `ToolBridge::register_erased()`.
     ///
-    /// Invalid or ambiguous qualified IDs and provider-invalid names are logged
-    /// and skipped; the upstream connector must provide non-empty `server` and
-    /// `tool` segments separated by exactly one `__` boundary.
+    /// Provider-invalid or multi-`__` names are **remapped** via
+    /// [`make_qualified_mcp_tool_name`] rather than silently skipped, so
+    /// agents still discover the tool under a safe `server__tool` id.
     pub fn into_registration(self) -> Option<McpToolRegistration> {
-        let qualified_name = format!(
-            "{}{}{}",
-            self.server_name, MCP_TOOL_NAME_DELIMITER, self.name
-        );
+        let qualified_name = make_qualified_mcp_tool_name(&self.server_name, &self.name);
 
+        // Remapping is best-effort; only skip if the fallback hash form also fails
+        // (should never happen).
         if parse_mcp_qualified_name(&qualified_name).is_none() {
             tracing::error!(
                 server = %self.server_name,
                 tool = %self.name,
                 qualified = %qualified_name,
-                "Skipping MCP tool with invalid or ambiguous qualified name"
+                "Skipping MCP tool: remapped name still unparseable"
             );
             return None;
         }
@@ -1288,7 +1393,7 @@ impl McpTool {
                 tool_name = %qualified_name,
                 server = %self.server_name,
                 reason = %reason,
-                "Skipping MCP tool with invalid name"
+                "Skipping MCP tool: remapped name still invalid"
             );
             return None;
         }
@@ -1352,14 +1457,16 @@ impl xai_tool_runtime::Tool for McpErasedTool {
     type Output = ToolOutput;
 
     fn id(&self) -> xai_tool_protocol::ToolId {
-        // Use the qualified name (server__tool) so that two MCP servers
-        // exposing the same raw tool name get distinct LocalRegistry entries.
-        let qualified = format!(
-            "{}{}{}",
-            self.tool.server_name, MCP_TOOL_NAME_DELIMITER, self.tool.name
-        );
-        xai_tool_protocol::ToolId::new(&qualified)
-            .unwrap_or_else(|_| xai_tool_protocol::ToolId::new("mcp_tool").expect("valid"))
+        // Must match `into_registration` / `make_qualified_mcp_tool_name` so
+        // remapped provider-safe names stay consistent with ToolBridge keys.
+        // Falling back to a shared `"mcp_tool"` id collided when multiple
+        // invalid raw names remapped poorly under the old format! path.
+        let qualified = make_qualified_mcp_tool_name(&self.tool.server_name, &self.tool.name);
+        xai_tool_protocol::ToolId::new(&qualified).unwrap_or_else(|_| {
+            // Hash form from make_qualified is always valid; this is a last
+            // resort if ToolId rules ever diverge from validate_tool_name.
+            xai_tool_protocol::ToolId::new("mcp_tool").expect("valid")
+        })
     }
 
     fn description(
@@ -1628,10 +1735,20 @@ impl McpErasedTool {
                 )
                 .await
             }
-            Ok(Err(e)) => Err(xai_tool_runtime::ToolError::custom(
-                "process_manager",
-                e.to_string(),
-            )),
+            Ok(Err(e)) => {
+                // RC12 C8: reverse-path / protocol timeouts may surface as
+                // ServiceError text rather than outer tokio timeout.
+                let msg = e.to_string();
+                if msg.to_ascii_lowercase().contains("timed out")
+                    || msg.to_ascii_lowercase().contains("timeout")
+                {
+                    *is_timeout = true;
+                }
+                Err(xai_tool_runtime::ToolError::custom(
+                    "process_manager",
+                    msg,
+                ))
+            }
             Err(_) => {
                 *is_timeout = true;
                 // Reset for the next call but don't retry — a slow side-effecting tool must not run twice.
@@ -3130,7 +3247,7 @@ impl McpClient {
     /// 2. `config.toml [mcp_servers.<server>].tool_timeouts.<tool>`
     /// 3. `_meta.mcpConfig.<server>.toolTimeoutMs`
     /// 4. `config.toml [mcp_servers.<server>].tool_timeout_sec`
-    /// 5. Default (60s)
+    /// 5. Default ([`DEFAULT_TOOL_TIMEOUT_SECS`] = 120s)
     ///
     /// Steps 1–2 are already merged into `self.tool_timeouts` at construction;
     /// steps 3–5 are already resolved into `self.tool_timeout_sec`.
@@ -3465,14 +3582,21 @@ impl McpClient {
                     })
             }
             PendingTransport::Acp { server_id, invoker } => {
-                // Per-reverse-call backstop on `x.ai/mcp/sdk_call`: the larger of the
-                // startup and tool timeouts, so it never undercuts the real outer bound
-                // (the handshake `initialize` is bounded by the serve `timeout` below;
-                // tool calls by `tool_timeout_for` in `try_call_tool`). The bridge
-                // forwards raw JSON-RPC without the tool name, so per-TOOL overrides
-                // aren't applied here in v1; the HTTP path still honors them.
+                // Per-reverse-call backstop on `x.ai/mcp/sdk_call`: use the larger of
+                // startup, default tool, and any per-tool override so long reverse
+                // tools are not cut short (RC12 C7). The bridge still cannot pick
+                // per-request tool names without parsing JSON-RPC; max override is
+                // the honest upper bound.
+                let max_per_tool = self
+                    .tool_timeouts
+                    .values()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
                 let invoke_timeout = std::time::Duration::from_secs(
-                    self.startup_timeout_sec.max(self.tool_timeout_sec),
+                    self.startup_timeout_sec
+                        .max(self.tool_timeout_sec)
+                        .max(max_per_tool),
                 );
                 let transport =
                     crate::acp_transport::acp_bridge_transport(server_id, invoker, invoke_timeout);
@@ -3744,7 +3868,8 @@ impl McpClient {
         // `std::fs` (this runs on every MCP tool-set change, not just startup).
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
         let mut cursor: Option<String> = None;
-        loop {
+        const MAX_LIST_TOOLS_PAGES: usize = 100;
+        for page in 0..MAX_LIST_TOOLS_PAGES {
             let result = mcp_service
                 .list_tools(Some(
                     PaginatedRequestParams::default().with_cursor(cursor.clone()),
@@ -3769,6 +3894,14 @@ impl McpClient {
                 }
             }
             match result.next_cursor {
+                Some(next) if cursor.as_ref() == Some(&next) => {
+                    tracing::warn!(
+                        server = %self.server_name,
+                        page,
+                        "MCP tools/list returned the same next_cursor during descriptor materialization; stopping"
+                    );
+                    break;
+                }
                 Some(next) => cursor = Some(next),
                 None => break,
             }
@@ -3834,9 +3967,12 @@ impl McpClient {
 
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
+        // Cap pagination: a buggy server that always returns next_cursor (or
+        // the same cursor) would otherwise spin forever inside startup/list.
+        const MAX_LIST_TOOLS_PAGES: usize = 100;
 
         let _list_tools_timer = xai_grok_telemetry::instrumentation::timer("mcp_list_tools");
-        loop {
+        for page in 0..MAX_LIST_TOOLS_PAGES {
             let list_tools_result = mcp_service
                 .list_tools(Some(
                     PaginatedRequestParams::default().with_cursor(cursor.clone()),
@@ -3846,8 +3982,24 @@ impl McpClient {
             all_tools.extend(list_tools_result.tools);
 
             match list_tools_result.next_cursor {
+                Some(next) if cursor.as_ref() == Some(&next) => {
+                    tracing::warn!(
+                        server = %self.server_name,
+                        page,
+                        "MCP tools/list returned the same next_cursor; stopping pagination"
+                    );
+                    break;
+                }
                 Some(next) => cursor = Some(next),
                 None => break,
+            }
+            if page + 1 == MAX_LIST_TOOLS_PAGES {
+                tracing::warn!(
+                    server = %self.server_name,
+                    pages = MAX_LIST_TOOLS_PAGES,
+                    tools = all_tools.len(),
+                    "MCP tools/list exceeded max pages; truncating catalog"
+                );
             }
         }
 
@@ -5907,6 +6059,8 @@ mod tests {
             .expect("should register");
         assert_eq!(registration.name, "linear__list_issues");
 
+        // Segments that used to be skipped (extra `__`, empty) are remapped
+        // to a single valid `server__tool` and still registered (RC12 C3/C4).
         for (server, tool) in [
             ("server__part", "tool"),
             ("server", "tool__part"),
@@ -5916,19 +6070,27 @@ mod tests {
             ("", "tool"),
             ("server", ""),
         ] {
+            let reg = make_mcp_tool(server, tool)
+                .into_registration()
+                .unwrap_or_else(|| panic!("expected remap for {server:?}/{tool:?}"));
             assert!(
-                make_mcp_tool(server, tool).into_registration().is_none(),
-                "unexpectedly registered {server:?} and {tool:?}"
+                validate_tool_name(&reg.name).is_ok(),
+                "invalid remapped name {} for {server:?}/{tool:?}",
+                reg.name
             );
+            assert!(parse_mcp_qualified_name(&reg.name).is_some());
         }
     }
 
     #[test]
-    fn into_registration_preserves_provider_name_policy() {
-        for qualified in ["123__lookup", "server:scope__tool"] {
-            assert!(parse_mcp_qualified_name(qualified).is_some());
-            let (server, tool) = qualified.split_once("__").unwrap();
-            assert!(make_mcp_tool(server, tool).into_registration().is_none());
+    fn into_registration_remaps_provider_invalid_names_instead_of_silent_drop() {
+        // Leading digit / colon in server — remapped, not dropped.
+        for (server, tool) in [("123", "lookup"), ("server:scope", "tool")] {
+            let reg = make_mcp_tool(server, tool)
+                .into_registration()
+                .expect("must remap rather than skip");
+            assert!(validate_tool_name(&reg.name).is_ok());
+            assert!(parse_mcp_qualified_name(&reg.name).is_some());
         }
 
         let server_61 = format!("a{}", "b".repeat(60));
@@ -5937,10 +6099,34 @@ mod tests {
         let invalid_65 = format!("{server_62}__b");
         assert_eq!(valid_64.len(), 64);
         assert_eq!(invalid_65.len(), 65);
-        assert!(parse_mcp_qualified_name(&valid_64).is_some());
-        assert!(parse_mcp_qualified_name(&invalid_65).is_some());
         assert!(make_mcp_tool(&server_61, "b").into_registration().is_some());
-        assert!(make_mcp_tool(&server_62, "b").into_registration().is_none());
+        // Over-long: remapped to ≤64, still registered.
+        let long = make_mcp_tool(&server_62, "b")
+            .into_registration()
+            .expect("over-long names remapped, not dropped");
+        assert!(long.name.len() <= 64);
+        assert!(validate_tool_name(&long.name).is_ok());
+    }
+
+    #[test]
+    fn into_registration_collapses_double_underscore_in_tool_segment() {
+        // Tool names containing `__` used to be unparseable as qualified ids.
+        let reg = make_mcp_tool("docs", "get__page")
+            .into_registration()
+            .expect("tool segment with __ remapped");
+        assert!(parse_mcp_qualified_name(&reg.name).is_some());
+        assert!(!reg.name.contains("docs__get__"));
+        assert!(reg.name.starts_with("docs__"));
+    }
+
+    #[test]
+    fn make_qualified_mcp_tool_name_respects_64_char_limit() {
+        let server = format!("server{}", "x".repeat(80));
+        let tool = format!("tool{}", "y".repeat(80));
+        let q = make_qualified_mcp_tool_name(&server, &tool);
+        assert!(q.len() <= 64, "got len={} name={q}", q.len());
+        assert!(validate_tool_name(&q).is_ok());
+        assert!(parse_mcp_qualified_name(&q).is_some());
     }
 
     // ── is_retriable_transport_error tests ───────────────────────────

@@ -12,6 +12,7 @@ use xai_grok_tools::implementations::grok_build;
 use xai_grok_tools::implementations::grok_build_concise;
 use xai_grok_tools::implementations::memory;
 use xai_grok_tools::implementations::opencode;
+use xai_grok_tools::implementations::mcp_server_health;
 use xai_grok_tools::implementations::search_tool;
 use xai_grok_tools::implementations::use_tool;
 use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
@@ -278,6 +279,7 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
+            (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
@@ -334,6 +336,7 @@ pub fn grok_build_hashline_toolset(
         (&grok_build::SchedulerListTool).into(),
         (&grok_build::MonitorTool).into(),
         (&search_tool::SearchTool).into(),
+        (&mcp_server_health::McpServerHealthTool).into(),
         (&use_tool::UseTool).into(),
         (&grok_build::UpdateGoalTool).into(),
         (&grok_build::WorkflowTool).into(),
@@ -357,6 +360,7 @@ fn codex_toolset() -> ToolServerConfig {
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
             (&search_tool::SearchTool).into(),
+            (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
         ],
         behavior_preset: None,
@@ -426,6 +430,7 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
+            (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
@@ -460,6 +465,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             kill_task_tool_config(),
             // Skills and MCP
             (&search_tool::SearchTool).into(),
+            (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
             // Planning and user interaction
             (&grok_build::TodoWriteTool).into(),
@@ -515,6 +521,7 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
+            (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
@@ -550,6 +557,7 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
+            (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),

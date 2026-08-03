@@ -118,6 +118,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::MemorySearch(_)
         | ToolInput::MemoryGet(_)
         | ToolInput::SearchTool(_)
+        | ToolInput::McpServerHealth(_)
         | ToolInput::UseTool(_)
         | ToolInput::EnterPlanMode(_)
         | ToolInput::ExitPlanMode(_)

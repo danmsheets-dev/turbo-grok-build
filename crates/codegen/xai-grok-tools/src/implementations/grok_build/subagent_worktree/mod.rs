@@ -435,6 +435,20 @@ pub async fn apply_file_content(root: &Path, rel: &str, content: Option<&str>) -
                     .await
                     .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
+            // Semantic union-merge for kit manifests (densify parallel land).
+            let data = if is_manifest_json_path(rel) {
+                match tokio::fs::read_to_string(&dest).await {
+                    Ok(parent_text) => {
+                        match union_merge_manifest_json(&parent_text, data) {
+                            Some(merged) => merged,
+                            None => data.to_owned(),
+                        }
+                    }
+                    Err(_) => data.to_owned(),
+                }
+            } else {
+                data.to_owned()
+            };
             tokio::fs::write(&dest, data)
                 .await
                 .map_err(|e| format!("write {}: {e}", dest.display()))
@@ -448,6 +462,53 @@ pub async fn apply_file_content(root: &Path, rel: &str, content: Option<&str>) -
             Ok(())
         }
     }
+}
+
+/// `assets/manifest/<kit>.json` (and nested under that tree).
+pub fn is_manifest_json_path(rel: &str) -> bool {
+    let n = rel.replace('\\', "/");
+    let n = n.trim_start_matches("./");
+    n.starts_with("assets/manifest/") && n.ends_with(".json")
+}
+
+/// Name-keyed union merge for densify kit manifests.
+///
+/// Supports:
+/// - JSON array of objects with a `name` field (preferred)
+/// - JSON object map keyed by stem/name
+///
+/// Child wins on key collision for the same name. Returns `None` when shapes
+/// don't match or parsing fails (caller falls back to overwrite).
+pub fn union_merge_manifest_json(parent: &str, child: &str) -> Option<String> {
+    let parent_v: serde_json::Value = serde_json::from_str(parent).ok()?;
+    let child_v: serde_json::Value = serde_json::from_str(child).ok()?;
+    let merged = match (&parent_v, &child_v) {
+        (serde_json::Value::Array(pa), serde_json::Value::Array(ca)) => {
+            let mut by_name: indexmap::IndexMap<String, serde_json::Value> =
+                indexmap::IndexMap::new();
+            let mut anonymous: Vec<serde_json::Value> = Vec::new();
+            for item in pa.iter().chain(ca.iter()) {
+                match item.get("name").and_then(|n| n.as_str()) {
+                    Some(name) if !name.is_empty() => {
+                        by_name.insert(name.to_owned(), item.clone());
+                    }
+                    _ => anonymous.push(item.clone()),
+                }
+            }
+            let mut out: Vec<serde_json::Value> = by_name.into_values().collect();
+            out.extend(anonymous);
+            serde_json::Value::Array(out)
+        }
+        (serde_json::Value::Object(po), serde_json::Value::Object(co)) => {
+            let mut out = po.clone();
+            for (k, v) in co {
+                out.insert(k.clone(), v.clone());
+            }
+            serde_json::Value::Object(out)
+        }
+        _ => return None,
+    };
+    serde_json::to_string_pretty(&merged).ok()
 }
 
 /// Best-effort update of land_status in meta.json after a land attempt.
@@ -612,6 +673,51 @@ pub fn refuse_land_outside_allowlist(
             preview.join(", "),
         ),
     ))
+}
+
+#[cfg(test)]
+mod manifest_merge_tests {
+    use super::*;
+
+    #[test]
+    fn is_manifest_path_detects_kit_json() {
+        assert!(is_manifest_json_path("assets/manifest/hull.json"));
+        assert!(is_manifest_json_path("assets/manifest/company_prop.json"));
+        assert!(!is_manifest_json_path("assets/models/hull.glb"));
+        assert!(!is_manifest_json_path("src/main.rs"));
+    }
+
+    #[test]
+    fn union_merge_arrays_by_name_child_wins() {
+        let parent = r#"[
+          {"name": "a", "budget_class": "small"},
+          {"name": "b", "budget_class": "mid"}
+        ]"#;
+        let child = r#"[
+          {"name": "b", "budget_class": "large", "built_by": "wave4"},
+          {"name": "c", "budget_class": "tiny"}
+        ]"#;
+        let merged = union_merge_manifest_json(parent, child).expect("merge");
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        let b = arr.iter().find(|x| x["name"] == "b").unwrap();
+        assert_eq!(b["budget_class"], "large");
+        assert_eq!(b["built_by"], "wave4");
+        assert!(arr.iter().any(|x| x["name"] == "a"));
+        assert!(arr.iter().any(|x| x["name"] == "c"));
+    }
+
+    #[test]
+    fn union_merge_objects_shallow() {
+        let parent = r#"{"a": 1, "b": 2}"#;
+        let child = r#"{"b": 9, "c": 3}"#;
+        let merged = union_merge_manifest_json(parent, child).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 9);
+        assert_eq!(v["c"], 3);
+    }
 }
 
 #[cfg(test)]

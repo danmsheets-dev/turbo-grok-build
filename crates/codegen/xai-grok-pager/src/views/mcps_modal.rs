@@ -221,6 +221,10 @@ pub struct McpServerInfo {
     /// Plugin name parsed from `source_label` (`"plugin: …"`).
     pub plugin_name: Option<String>,
     pub is_managed_gateway: bool,
+    /// Human-readable failure detail from `x.ai/mcp/server_status` pushes
+    /// (handshake / transport / auth errors). Shown truncated under
+    /// expanded Unavailable/NeedsAuth rows in the MCPs modal.
+    pub status_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -338,6 +342,7 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 wire_source,
                 plugin_name,
                 is_managed_gateway,
+                status_detail: None,
             }
         })
         .collect::<Vec<_>>();
@@ -363,15 +368,47 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
     servers
 }
 
+/// Max chars of [`McpServerInfo::status_detail`] shown under expanded
+/// Unavailable / NeedsAuth rows. Keeps multi-line transport errors from
+/// blowing out the picker while still surfacing the failure reason.
+pub const STATUS_DETAIL_DISPLAY_CHARS: usize = 160;
+
+/// Flatten and truncate a status-detail string for the MCPs modal.
+///
+/// Collapses internal newlines to ` · ` separators, then hard-caps at
+/// [`STATUS_DETAIL_DISPLAY_CHARS`] with a trailing ellipsis.
+pub fn truncate_status_detail(detail: &str) -> String {
+    let flat: String = detail
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let count = flat.chars().count();
+    if count <= STATUS_DETAIL_DISPLAY_CHARS {
+        flat
+    } else {
+        let truncated: String = flat
+            .chars()
+            .take(STATUS_DETAIL_DISPLAY_CHARS.saturating_sub(1))
+            .collect();
+        format!("{truncated}…")
+    }
+}
+
 /// Patch a single server row in-place from an `x.ai/mcp/server_status`
 /// push.
 ///
-/// Finds the row by `name` and updates its `status` (and optionally its
-/// `tools` list + `tool_count`). When the named server is not present
-/// the call is a silent no-op — the pager may receive a status push
-/// for a server it has not yet fetched (e.g. the modal was just opened
-/// and the cached `mcp/list` response has not landed yet). The cheap
-/// no-op keeps the push subscription side-effect-free in that case.
+/// Finds the row by `name` and updates its `status`, optional
+/// `status_detail`, and optionally its `tools` list + `tool_count`.
+/// When the named server is not present the call is a silent no-op —
+/// the pager may receive a status push for a server it has not yet
+/// fetched (e.g. the modal was just opened and the cached `mcp/list`
+/// response has not landed yet). The cheap no-op keeps the push
+/// subscription side-effect-free in that case.
+///
+/// `status_detail` is always applied (including clearing when `None`)
+/// so a recovery push to Ready drops the prior failure text.
 ///
 /// When duplicate names exist, only the first occurrence is mutated.
 /// In practice `build_mcp_catalog` deduplicates by name before the
@@ -384,11 +421,13 @@ pub fn patch_server_row(
     name: &str,
     new_status: McpServerDisplayStatus,
     new_tools: Option<Vec<McpToolDetail>>,
+    status_detail: Option<String>,
 ) -> bool {
     let Some(row) = servers.iter_mut().find(|s| s.name == name) else {
         return false;
     };
     row.status = new_status;
+    row.status_detail = status_detail;
     if let Some(tools) = new_tools {
         row.tool_count = tools.len();
         row.tools = tools;
@@ -416,6 +455,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }
     }
 
@@ -677,6 +717,7 @@ mod tests {
             "beta",
             McpServerDisplayStatus::Ready,
             Some(new_tools),
+            None,
         );
         assert!(mutated, "named row must be reported as mutated");
         assert_eq!(servers[0].status, McpServerDisplayStatus::Initializing);
@@ -684,6 +725,7 @@ mod tests {
         assert_eq!(servers[1].tool_count, 2);
         assert_eq!(servers[1].tools.len(), 2);
         assert_eq!(servers[1].tools[0].name, "t1");
+        assert!(servers[1].status_detail.is_none());
     }
 
     #[test]
@@ -694,12 +736,14 @@ mod tests {
             "ghost",
             McpServerDisplayStatus::Unavailable,
             None,
+            Some("ignored".into()),
         );
         assert!(!mutated, "missing-name push must be a silent no-op");
         // Existing row must be untouched.
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "alpha");
         assert_eq!(servers[0].status, McpServerDisplayStatus::Ready);
+        assert!(servers[0].status_detail.is_none());
     }
 
     #[test]
@@ -724,18 +768,54 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            status_detail: None,
         }];
         let mutated = patch_server_row(
             &mut servers,
             "alpha",
             McpServerDisplayStatus::Unavailable,
             None,
+            Some("connection refused".into()),
         );
         assert!(mutated);
         assert_eq!(servers[0].status, McpServerDisplayStatus::Unavailable);
+        assert_eq!(
+            servers[0].status_detail.as_deref(),
+            Some("connection refused")
+        );
         // Tools left untouched when caller passes None.
         assert_eq!(servers[0].tool_count, 3);
         assert_eq!(servers[0].tools.len(), 1);
         assert_eq!(servers[0].tools[0].name, "existing");
+    }
+
+    #[test]
+    fn patch_server_row_clears_status_detail_when_none() {
+        let mut servers = vec![make_row("alpha", McpServerDisplayStatus::Unavailable)];
+        servers[0].status_detail = Some("old error".into());
+        let mutated = patch_server_row(
+            &mut servers,
+            "alpha",
+            McpServerDisplayStatus::Ready,
+            None,
+            None,
+        );
+        assert!(mutated);
+        assert_eq!(servers[0].status, McpServerDisplayStatus::Ready);
+        assert!(
+            servers[0].status_detail.is_none(),
+            "recovery push must clear prior failure detail"
+        );
+    }
+
+    #[test]
+    fn truncate_status_detail_flattens_and_caps() {
+        let multi = "line one\n\n  line two  \n";
+        assert_eq!(truncate_status_detail(multi), "line one · line two");
+
+        let long = "x".repeat(STATUS_DETAIL_DISPLAY_CHARS + 20);
+        let out = truncate_status_detail(&long);
+        assert_eq!(out.chars().count(), STATUS_DETAIL_DISPLAY_CHARS);
+        assert!(out.ends_with('…'));
     }
 }

@@ -464,6 +464,7 @@ fn cta_mcp_server(
         wire_source: McpWireSource::Local,
         plugin_name: plugin.map(str::to_string),
         is_managed_gateway: false,
+        status_detail: None,
     }
 }
 fn arm_reconcile(

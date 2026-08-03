@@ -1093,7 +1093,46 @@ impl AgentView {
             && self.line_viewer.is_none()
         {
             self.game_mode.toggle();
+            if !self.game_mode.open {
+                self.game_mode.clear_hover();
+            }
             return InputOutcome::Changed;
+        }
+        // Game Mode: hover popup (mouse) + Tab/Shift+Tab desk focus (keyboard).
+        if self.game_mode.open {
+            if let Event::Mouse(mouse) = ev {
+                match mouse.kind {
+                    MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                        self.game_mode.update_hover(mouse.column, mouse.row);
+                        return InputOutcome::Changed;
+                    }
+                    _ => {}
+                }
+            }
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+            {
+                match key.code {
+                    KeyCode::Tab if key.modifiers.is_empty() => {
+                        if self.game_mode.focus_next_desk() {
+                            return InputOutcome::Changed;
+                        }
+                    }
+                    KeyCode::BackTab
+                    | KeyCode::Tab
+                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                    {
+                        if self.game_mode.focus_prev_desk() {
+                            return InputOutcome::Changed;
+                        }
+                    }
+                    KeyCode::Esc if self.game_mode.hover_desk.is_some() => {
+                        self.game_mode.clear_hover();
+                        return InputOutcome::Changed;
+                    }
+                    _ => {}
+                }
+            }
         }
         let outcome = match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => match self.active_pane {

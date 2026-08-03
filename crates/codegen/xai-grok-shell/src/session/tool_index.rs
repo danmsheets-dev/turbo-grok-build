@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use bm25::{Language, SearchEngineBuilder};
 use xai_grok_tools::types::tool_index::{
-    SearchSnapshot, ServerSummary, ToolSearchIndex, ToolSearchResult,
+    FailedServerInfo, SearchSnapshot, ServerSummary, ToolSearchIndex, ToolSearchResult,
 };
 
 use super::mcp_servers::MCP_TOOL_NAME_DELIMITER;
@@ -132,6 +132,8 @@ pub struct ToolMetadataSnapshot {
     pub tools: Vec<ToolMetadata>,
     pub servers: Vec<ServerMetadata>,
     pub mcp_initialized: bool,
+    /// Failed MCP servers (name, reason) for search_tool / agent digest.
+    pub failed_servers: Vec<(String, String)>,
 }
 
 /// Concrete `ToolSearchIndex` implementation backed by BM25.
@@ -157,34 +159,51 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
 
         let is_ready = snapshot.mcp_initialized;
         let total_hidden_tools = snapshot.tools.len();
+        let failed_servers: Vec<FailedServerInfo> = snapshot
+            .failed_servers
+            .iter()
+            .map(|(name, reason)| FailedServerInfo {
+                name: name.clone(),
+                reason: reason.clone(),
+            })
+            .collect();
 
         if snapshot.tools.is_empty() {
             return SearchSnapshot {
                 results: Vec::new(),
                 total_hidden_tools,
                 is_ready,
+                failed_servers,
             };
         }
 
         // Fast path: exact match on qualified name or bare tool name.
         // When the model already knows the tool name (e.g. "grafana-ai__SearchDashboards"
         // or "SearchDashboards"), skip BM25 entirely and return the match directly.
+        // Return ALL exact bare-name matches across servers (dual search_docs hazard).
         let query_lower = query.trim().to_lowercase();
-        if let Some(exact) = snapshot.tools.iter().find(|t| {
-            t.qualified_name.to_lowercase() == query_lower
-                || t.tool_name.to_lowercase() == query_lower
-        }) {
+        let exact_matches: Vec<ToolSearchResult> = snapshot
+            .tools
+            .iter()
+            .filter(|t| {
+                t.qualified_name.to_lowercase() == query_lower
+                    || t.tool_name.to_lowercase() == query_lower
+            })
+            .map(|exact| ToolSearchResult {
+                tool_name: exact.qualified_name.clone(),
+                server_name: exact.server_name.clone(),
+                description: exact.description.clone(),
+                score: 1.0,
+                parameters: exact.parameters.clone(),
+                input_schema: exact.input_schema.clone(),
+            })
+            .collect();
+        if !exact_matches.is_empty() {
             return SearchSnapshot {
-                results: vec![ToolSearchResult {
-                    tool_name: exact.qualified_name.clone(),
-                    server_name: exact.server_name.clone(),
-                    description: exact.description.clone(),
-                    score: 1.0,
-                    parameters: exact.parameters.clone(),
-                    input_schema: exact.input_schema.clone(),
-                }],
+                results: exact_matches,
                 total_hidden_tools,
                 is_ready,
+                failed_servers,
             };
         }
 
@@ -215,6 +234,7 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
             results,
             total_hidden_tools,
             is_ready,
+            failed_servers,
         }
     }
 
@@ -288,6 +308,7 @@ mod tests {
             tools,
             servers,
             mcp_initialized: true,
+            failed_servers: vec![],
         }))
     }
 
@@ -576,6 +597,7 @@ mod tests {
             }],
             servers: vec![],
             mcp_initialized: false,
+            failed_servers: vec![],
         })));
 
         let snap = index.search_snapshot("grafana", 5);

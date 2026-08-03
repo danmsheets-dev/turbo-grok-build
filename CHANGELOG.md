@@ -4,6 +4,22 @@ All notable changes to **Turbo** (`turbo` binary) are documented here.
 
 ## [Unreleased]
 
+### Game Mode (RC12 track)
+- **SNES / SimCity art pass** — 16-bit outlined sprites, saturated city palettes,
+  smaller desk/agents so the office reads larger.
+- **Higher internal resolution** — compose at `PIXEL_SCALE` (3×) halfblock density;
+  halfblock paint uses Nearest downsample for crisp pixels.
+- **Floor fix** — replaced green diagonal desk mask with SNES carpet tiles +
+  mockup-sampled teal blend (no striped mat over desks).
+- **Hover popup** — mouse over a seated subagent shows label, type, id, phase,
+  elapsed, tokens, tools, activity.
+- **One-shot handoff** — `finish_started` prevents double celebrate→deliver when
+  snapshots re-fire “not running”.
+
+### MCP (RC12 track)
+- See `RC12-MCP-IMPLEMENTATION.md` (catalog hot-reload, name remap, 120s timeout,
+  docs/godot/react/rust server fixes, hub timeout/truncate, Windows credentials).
+
 ## [0.2.114-r11] - 2026-08-02
 
 **Turbo Grok Build RC11** — Game Mode pixel office, Feature Request Log, and

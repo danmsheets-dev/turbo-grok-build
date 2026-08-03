@@ -46,11 +46,22 @@ pub fn paint_halfblock_rgba(buf: &mut Buffer, area: Rect, img: &RgbaImage) -> bo
     let use_direct = src_w == target_w && src_h == target_h;
 
     // Only allocate/resize when dimensions don't match.
+    // Integer-multiple high-res frames (Game Mode PIXEL_SCALE) use Nearest so
+    // SNES pixel art stays sharp instead of Triangle-blurring.
     let owned;
     let pixels: &RgbaImage = if use_direct {
         img
     } else {
-        owned = image::imageops::resize(img, target_w, target_h, FilterType::Triangle);
+        let integer_scale = src_w % target_w == 0
+            && src_h % target_h == 0
+            && src_w / target_w == src_h / target_h
+            && src_w / target_w >= 2;
+        let filter = if integer_scale {
+            FilterType::Nearest
+        } else {
+            FilterType::Triangle
+        };
+        owned = image::imageops::resize(img, target_w, target_h, filter);
         &owned
     };
 

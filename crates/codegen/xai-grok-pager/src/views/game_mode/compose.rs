@@ -1,18 +1,15 @@
-//! Composite office background + sprites at **cell resolution**.
+//! Composite office background + sprites at **high internal resolution**.
 //!
-//! Visual rules (user feedback):
-//! - No brown top bar / no giant WORKING text / no yellow status squares
-//! - Working agents type; idle agents stop typing
-//! - Handoff/walk: empty desk (agent not seated)
-//! - Supervisor: laptop open+type when busy; closed+coffee when idle
-//! - Square monitors; animate when working
+//! - `PIXEL_SCALE` denser than terminal halfblock cells for sharper SNES detail
+//! - Floor clears use SNES carpet tiles (no diagonal green mask)
+//! - Smaller desk sprites relative to the room
 
 use image::imageops::FilterType;
 use image::RgbaImage;
 
 use super::sprites_pixel::{
-    DevPalette, blit, scale_nn, sprite_developer_at_desk, sprite_developer_walk, sprite_empty_desk,
-    sprite_packet, sprite_supervisor, stamp_floor_patch,
+    DevPalette, blit, scale_nn, sprite_coffee, sprite_developer_at_desk, sprite_developer_walk,
+    sprite_empty_desk, sprite_plant, sprite_supervisor, stamp_floor_patch_sampled,
 };
 use super::state::{ActorPhase, GameModeState, SupervisorPhase};
 
@@ -36,10 +33,20 @@ pub fn load_office_background() -> Result<RgbaImage, String> {
         .map_err(|e| format!("decode office bg: {e}"))
 }
 
+/// Scale background to high internal resolution (PIXEL_SCALE × halfblock grid).
+///
+/// Terminal halfblock paint maps `cell_w × cell_h*2` → paint. We compose at
+/// `cell_w*SCALE × cell_h*2*SCALE` so sprites keep crisp SNES detail, then
+/// `paint_halfblock_rgba` box-filters down.
 pub fn scale_bg_to_cells(full: &RgbaImage, cell_w: u16, cell_h: u16) -> RgbaImage {
-    let tw = u32::from(cell_w).max(1);
-    let th = u32::from(cell_h).saturating_mul(2).max(1);
-    image::imageops::resize(full, tw, th, FilterType::Triangle)
+    let scale = super::sprites_pixel::pixel_scale().max(1);
+    let tw = u32::from(cell_w).saturating_mul(scale).max(1);
+    let th = u32::from(cell_h)
+        .saturating_mul(2)
+        .saturating_mul(scale)
+        .max(1);
+    // CatmullRom keeps more mockup sharpness than Triangle at high scale.
+    image::imageops::resize(full, tw, th, FilterType::CatmullRom)
 }
 
 pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
@@ -52,16 +59,76 @@ pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// Smaller sprites: ~7.5% of frame width vs old ~11%.
 fn desk_scale(w: u32) -> u32 {
-    ((w as f32 * 0.11) / 36.0).max(1.0).round().min(4.0) as u32
+    let base = 28.0; // empty desk sprite width
+    ((w as f32 * 0.075) / base).max(1.0).round().min(5.0) as u32
 }
 
-/// Clear baked mockup character + furniture in a desk region, then draw sprite.
-fn clear_desk_area(canvas: &mut RgbaImage, cx: i32, cy: i32, w: u32, h: u32) {
-    let cover_w = (w as f32 * 0.18) as i32;
-    let cover_h = (h as f32 * 0.20) as i32;
-    stamp_floor_patch(
+// Thread-local scaled sprite cache — avoid rebuild+scale every paint (~8–10 Hz).
+thread_local! {
+    static SPRITE_CACHE: std::cell::RefCell<std::collections::HashMap<u64, RgbaImage>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn cache_get_or_insert(key: u64, build: impl FnOnce() -> RgbaImage) -> RgbaImage {
+    SPRITE_CACHE.with(|c| {
+        let mut map = c.borrow_mut();
+        // Cap cache so palette/scale churn cannot grow unbounded.
+        if map.len() > 128 {
+            map.clear();
+        }
+        map.entry(key).or_insert_with(build).clone()
+    })
+}
+
+fn cached_empty_desk(sc: u32) -> RgbaImage {
+    cache_get_or_insert(0xE0u64 << 56 | sc as u64, || {
+        scale_nn(&sprite_empty_desk(), sc.max(1))
+    })
+}
+
+fn cached_dev_at_desk(skin: u8, typing: bool, frame: u8, sc: u32) -> RgbaImage {
+    let key = (0xD1u64 << 56)
+        | ((skin as u64) << 40)
+        | ((typing as u64) << 32)
+        | ((frame as u64) << 24)
+        | sc as u64;
+    cache_get_or_insert(key, || {
+        let pal = DevPalette::by_index(skin);
+        scale_nn(&sprite_developer_at_desk(pal, typing, frame), sc.max(1))
+    })
+}
+
+fn cached_walk(skin: u8, frame: u8, with_packet: bool, sc: u32) -> RgbaImage {
+    let key = (0xD2u64 << 56)
+        | ((skin as u64) << 40)
+        | ((with_packet as u64) << 32)
+        | ((frame as u64) << 24)
+        | sc as u64;
+    cache_get_or_insert(key, || {
+        let pal = DevPalette::by_index(skin);
+        scale_nn(
+            &sprite_developer_walk(pal, frame, with_packet),
+            sc.max(1),
+        )
+    })
+}
+
+fn cached_supervisor(phase: u8, frame: u8, sc: u32) -> RgbaImage {
+    let key = (0xA0u64 << 56) | ((phase as u64) << 32) | ((frame as u64) << 24) | sc as u64;
+    cache_get_or_insert(key, || {
+        scale_nn(&sprite_supervisor(phase, frame), sc.max(1))
+    })
+}
+
+/// Clear baked mockup character + furniture in a desk region with SNES floor.
+fn clear_desk_area(canvas: &mut RgbaImage, bg: &RgbaImage, cx: i32, cy: i32, w: u32, h: u32) {
+    let cover_w = (w as f32 * 0.15) as i32;
+    let cover_h = (h as f32 * 0.17) as i32;
+    stamp_floor_patch_sampled(
         canvas,
+        Some(bg),
         cx - cover_w / 2,
         cy - cover_h / 2,
         cover_w,
@@ -69,63 +136,183 @@ fn clear_desk_area(canvas: &mut RgbaImage, cx: i32, cy: i32, w: u32, h: u32) {
     );
 }
 
+/// Soft boardroom rug under supervisor (burgundy oval).
+fn paint_boss_rug(canvas: &mut RgbaImage, cx: i32, cy: i32, cover_w: i32, cover_h: i32) {
+    let rug: [u8; 4] = [120, 48, 72, 255];
+    let (cw, ch) = canvas.dimensions();
+    for dy in 0..cover_h {
+        for dx in 0..cover_w {
+            let x = cx - cover_w / 2 + dx;
+            let y = cy - cover_h / 4 + dy;
+            if x < 0 || y < 0 || (x as u32) >= cw || (y as u32) >= ch {
+                continue;
+            }
+            let nx = (dx as f32 / cover_w as f32 - 0.5) * 2.0;
+            let ny = (dy as f32 / cover_h as f32 - 0.5) * 2.0;
+            if nx * nx + ny * ny * 1.4 >= 1.0 {
+                continue;
+            }
+            let p = canvas.get_pixel(x as u32, y as u32).0;
+            canvas.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgba([
+                    ((u16::from(p[0]) + u16::from(rug[0]) * 2) / 3) as u8,
+                    ((u16::from(p[1]) + u16::from(rug[1]) * 2) / 3) as u8,
+                    ((u16::from(p[2]) + u16::from(rug[2]) * 2) / 3) as u8,
+                    255,
+                ]),
+            );
+        }
+    }
+}
+
+/// Gold focus ring for keyboard/mouse hover desk (SNES selector).
+fn paint_focus_ring(canvas: &mut RgbaImage, cx: i32, cy: i32, sw: i32, sh: i32, pulse: u8) {
+    let gold = if pulse % 2 == 0 {
+        [255, 220, 96, 255]
+    } else {
+        [255, 200, 48, 255]
+    };
+    let x0 = cx - sw / 2 - 2;
+    let y0 = cy - sh / 2 - 2;
+    let ww = sw + 4;
+    let hh = sh + 4;
+    // Corner brackets only — less noisy than full box.
+    for (dx, dy) in [
+        (0, 0),
+        (1, 0),
+        (2, 0),
+        (0, 1),
+        (0, 2),
+        (ww - 1, 0),
+        (ww - 2, 0),
+        (ww - 3, 0),
+        (ww - 1, 1),
+        (ww - 1, 2),
+        (0, hh - 1),
+        (1, hh - 1),
+        (2, hh - 1),
+        (0, hh - 2),
+        (0, hh - 3),
+        (ww - 1, hh - 1),
+        (ww - 2, hh - 1),
+        (ww - 3, hh - 1),
+        (ww - 1, hh - 2),
+        (ww - 1, hh - 3),
+    ] {
+        let x = x0 + dx;
+        let y = y0 + dy;
+        if x >= 0 && y >= 0 {
+            let (cw, ch) = canvas.dimensions();
+            if (x as u32) < cw && (y as u32) < ch {
+                canvas.put_pixel(x as u32, y as u32, image::Rgba(gold));
+            }
+        }
+    }
+}
+
+/// Celebrate sparkles / fail flash over a seated developer.
+fn paint_fx_celebrate(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
+    let colors = [
+        [255, 220, 96, 255],
+        [120, 255, 180, 255],
+        [120, 200, 255, 255],
+        [255, 120, 180, 255],
+    ];
+    for i in 0..6 {
+        let a = (frame as i32 * 40 + i * 55) % 360;
+        let rad = (a as f32).to_radians();
+        let r = 10 + (frame as i32 % 3);
+        let x = cx + (rad.cos() * r as f32) as i32;
+        let y = cy - 8 + (rad.sin() * r as f32) as i32;
+        if x >= 0 && y >= 0 {
+            let (cw, ch) = canvas.dimensions();
+            if (x as u32) < cw && (y as u32) < ch {
+                canvas.put_pixel(x as u32, y as u32, image::Rgba(colors[(i as usize) % 4]));
+            }
+        }
+    }
+}
+
+fn paint_fx_fail(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
+    if frame % 2 != 0 {
+        return;
+    }
+    // Red alert flash above monitor
+    for dx in -4..5 {
+        for dy in -10..-6 {
+            let x = cx + dx;
+            let y = cy + dy;
+            if x >= 0 && y >= 0 {
+                let (cw, ch) = canvas.dimensions();
+                if (x as u32) < cw && (y as u32) < ch {
+                    let p = canvas.get_pixel(x as u32, y as u32).0;
+                    canvas.put_pixel(
+                        x as u32,
+                        y as u32,
+                        image::Rgba([
+                            p[0].saturating_add(80),
+                            p[1].saturating_sub(20),
+                            p[2].saturating_sub(20),
+                            255,
+                        ]),
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u64) -> RgbaImage {
     let mut canvas = bg_scaled.clone();
     let (w, h) = canvas.dimensions();
     let frame = ((tick / 4) % 4) as u8;
     let sc = desk_scale(w);
+    let walk_sc = ((w as f32 * 0.05) / 14.0).max(1.0).round().min(5.0) as u32;
 
-    // Supervisor (always redraw so laptop/coffee state is correct)
+    // Ambient props (plants / coffee) near room edges — cheap static sprites.
+    {
+        let plant = scale_nn(&sprite_plant(), sc.max(1).min(3));
+        let coffee = scale_nn(&sprite_coffee(), sc.max(1).min(3));
+        blit(&mut canvas, &plant, (w as f32 * 0.06) as i32, (h as f32 * 0.62) as i32);
+        blit(
+            &mut canvas,
+            &plant,
+            (w as f32 * 0.90) as i32,
+            (h as f32 * 0.58) as i32,
+        );
+        blit(
+            &mut canvas,
+            &coffee,
+            (w as f32 * 0.88) as i32,
+            (h as f32 * 0.40) as i32,
+        );
+    }
+
+    // Supervisor
     {
         let (sx, sy) = SUPERVISOR_ANCHOR;
         let cx = (sx * w as f32) as i32;
         let cy = (sy * h as f32) as i32;
-        // Clear boss seat on rug
-        let cover_w = (w as f32 * 0.16) as i32;
-        let cover_h = (h as f32 * 0.16) as i32;
-        stamp_floor_patch(
+        let cover_w = (w as f32 * 0.13) as i32;
+        let cover_h = (h as f32 * 0.14) as i32;
+        stamp_floor_patch_sampled(
             &mut canvas,
+            Some(bg_scaled),
             cx - cover_w / 2,
             cy - cover_h / 2,
             cover_w,
             cover_h,
         );
-        // rug tint under boss
-        let rug = [90, 40, 60, 255];
-        for dy in 0..cover_h {
-            for dx in 0..cover_w {
-                let x = cx - cover_w / 2 + dx;
-                let y = cy - cover_h / 3 + dy;
-                if x >= 0 && y >= 0 {
-                    let (cw, ch) = canvas.dimensions();
-                    if (x as u32) < cw && (y as u32) < ch && ((dx + dy) % 5) < 3 {
-                        let p = canvas.get_pixel(x as u32, y as u32).0;
-                        // blend slightly toward rug
-                        canvas.put_pixel(
-                            x as u32,
-                            y as u32,
-                            image::Rgba([
-                                ((p[0] as u16 * 2 + rug[0] as u16) / 3) as u8,
-                                ((p[1] as u16 * 2 + rug[1] as u16) / 3) as u8,
-                                ((p[2] as u16 * 2 + rug[2] as u16) / 3) as u8,
-                                255,
-                            ]),
-                        );
-                    }
-                }
-            }
-        }
+        paint_boss_rug(&mut canvas, cx, cy, cover_w, cover_h);
         let phase = match state.supervisor {
             SupervisorPhase::Working => 1u8,
             SupervisorPhase::Reviewing => 2,
             SupervisorPhase::Idle | SupervisorPhase::Waiting => 0,
         };
-        let mut spr = sprite_supervisor(phase, frame);
-        let ssc = ((w as f32 * 0.10) / spr.width() as f32)
-            .max(1.0)
-            .round()
-            .min(4.0) as u32;
-        spr = scale_nn(&spr, ssc.max(1));
+        let ssc = ((w as f32 * 0.072) / 26.0).max(1.0).round().min(5.0) as u32;
+        let spr = cached_supervisor(phase, frame, ssc.max(1));
         blit(
             &mut canvas,
             &spr,
@@ -140,12 +327,11 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
         let cx = (ax * w as f32) as i32;
         let cy = (ay * h as f32) as i32;
         let desk = &state.desks[i];
+        let focused = state.hover_desk == Some(i);
 
         if desk.is_empty() {
-            // Idle slot: clear baked person → empty desk
-            clear_desk_area(&mut canvas, cx, cy, w, h);
-            let mut spr = sprite_empty_desk();
-            spr = scale_nn(&spr, sc.max(1));
+            clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+            let spr = cached_empty_desk(sc.max(1));
             blit(
                 &mut canvas,
                 &spr,
@@ -157,26 +343,20 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
 
         match desk.phase {
             ActorPhase::WalkToBoss | ActorPhase::ExitDoor | ActorPhase::Handoff => {
-                // Away from desk
-                clear_desk_area(&mut canvas, cx, cy, w, h);
-                let mut empty = sprite_empty_desk();
-                empty = scale_nn(&empty, sc.max(1));
+                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                let empty = cached_empty_desk(sc.max(1));
                 blit(
                     &mut canvas,
                     &empty,
                     cx - empty.width() as i32 / 2,
                     cy - empty.height() as i32 / 2,
                 );
-                let pal = DevPalette::by_index(desk.skin);
+                // Packet baked into walk sprite — no second packet blit (double handoff fix).
                 let with_packet = matches!(
                     desk.phase,
-                    ActorPhase::WalkToBoss | ActorPhase::Handoff | ActorPhase::Celebrate
+                    ActorPhase::WalkToBoss | ActorPhase::Handoff
                 );
-                let mut walker = sprite_developer_walk(pal, frame, with_packet);
-                let wsc = ((w as f32 * 0.07) / walker.width() as f32)
-                    .max(1.0)
-                    .round() as u32;
-                walker = scale_nn(&walker, wsc.max(1));
+                let walker = cached_walk(desk.skin, frame, with_packet, walk_sc.max(1));
                 let (tx, ty) = SUPERVISOR_ANCHOR;
                 let t = match desk.phase {
                     ActorPhase::Handoff => 1.0,
@@ -191,47 +371,32 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
                     x as i32 - walker.width() as i32 / 2,
                     y as i32 - walker.height() as i32 / 2,
                 );
-                if matches!(desk.phase, ActorPhase::Handoff) {
-                    let pkt = scale_nn(&sprite_packet(), wsc.max(1));
-                    blit(
-                        &mut canvas,
-                        &pkt,
-                        x as i32 + 4,
-                        y as i32 - 4,
-                    );
-                }
             }
             ActorPhase::Celebrate => {
-                // Brief celebrate at desk then they leave (still seated for now)
-                clear_desk_area(&mut canvas, cx, cy, w, h);
-                let pal = DevPalette::by_index(desk.skin);
-                let mut spr = sprite_developer_at_desk(pal, false, frame);
-                spr = scale_nn(&spr, sc.max(1));
+                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                let spr = cached_dev_at_desk(desk.skin, false, frame, sc.max(1));
                 blit(
                     &mut canvas,
                     &spr,
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
+                paint_fx_celebrate(&mut canvas, cx, cy, frame);
             }
             ActorPhase::FailBeat => {
-                clear_desk_area(&mut canvas, cx, cy, w, h);
-                let pal = DevPalette::by_index(desk.skin);
-                let mut spr = sprite_developer_at_desk(pal, false, 0);
-                spr = scale_nn(&spr, sc.max(1));
+                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                let spr = cached_dev_at_desk(desk.skin, false, 0, sc.max(1));
                 blit(
                     &mut canvas,
                     &spr,
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
+                paint_fx_fail(&mut canvas, cx, cy, frame);
             }
             ActorPhase::AtDeskWorking | ActorPhase::SpawnWalk => {
-                // Working: typing + animated square monitor
-                clear_desk_area(&mut canvas, cx, cy, w, h);
-                let pal = DevPalette::by_index(desk.skin);
-                let mut spr = sprite_developer_at_desk(pal, true, frame);
-                spr = scale_nn(&spr, sc.max(1));
+                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                let spr = cached_dev_at_desk(desk.skin, true, frame, sc.max(1));
                 blit(
                     &mut canvas,
                     &spr,
@@ -240,11 +405,8 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
                 );
             }
             ActorPhase::AtDeskThinking => {
-                // Idle at desk: not typing; monitor frozen/dim content
-                clear_desk_area(&mut canvas, cx, cy, w, h);
-                let pal = DevPalette::by_index(desk.skin);
-                let mut spr = sprite_developer_at_desk(pal, false, 0);
-                spr = scale_nn(&spr, sc.max(1));
+                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                let spr = cached_dev_at_desk(desk.skin, false, 0, sc.max(1));
                 blit(
                     &mut canvas,
                     &spr,
@@ -252,6 +414,12 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
                     cy - spr.height() as i32 / 2,
                 );
             }
+        }
+
+        if focused {
+            let ring_w = (w as f32 * 0.12) as i32;
+            let ring_h = (h as f32 * 0.14) as i32;
+            paint_focus_ring(&mut canvas, cx, cy, ring_w, ring_h, frame);
         }
     }
 
@@ -264,15 +432,16 @@ mod tests {
     use crate::views::game_mode::state::GameModeState;
 
     #[test]
-    fn load_and_scale_is_small() {
+    fn load_and_scale_is_high_res() {
         let full = load_office_background().expect("bg");
         let scaled = scale_bg_to_cells(&full, 80, 24);
-        assert_eq!(scaled.width(), 80);
-        assert_eq!(scaled.height(), 48);
+        let s = crate::views::game_mode::sprites_pixel::pixel_scale().max(1);
+        assert_eq!(scaled.width(), 80 * s);
+        assert_eq!(scaled.height(), 48 * s);
     }
 
     #[test]
-    fn compose_cell_frame_is_cheap_size() {
+    fn compose_cell_frame_matches_bg_size() {
         let full = load_office_background().unwrap();
         let bg = scale_bg_to_cells(&full, 60, 20);
         let state = GameModeState::new();

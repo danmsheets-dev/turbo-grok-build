@@ -126,7 +126,7 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
     let servers_with_tools: std::collections::HashSet<&str> =
         mcp_tools.iter().map(|t| t.server_name.as_str()).collect();
 
-    let server_metadata: Vec<ServerMetadata> = {
+    let (server_metadata, failed_servers) = {
         let mcp_state = mcp_state.lock().await;
         let mut metadata = Vec::new();
         for (name, client) in mcp_state.all_clients() {
@@ -137,7 +137,41 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
                 });
             }
         }
-        metadata
+        // Model-visible failure digest for search_tool / system-reminder.
+        //
+        // Progressive insert keeps a client object even after a failed
+        // handshake (`owned_clients` + `init_failed`/`auth_required`). UI
+        // status already treats `init_failed` as Unavailable; the search_tool
+        // digest must do the same — skipping solely because `get_client` is
+        // Some hid failed servers from the model (RC12 failed_servers
+        // regression when clients are retained).
+        let mut failed: Vec<(String, String)> = Vec::new();
+        for cfg in &mcp_state.configs {
+            let name = crate::session::mcp_servers::mcp_server_name(cfg);
+            if mcp_state.is_server_handshaking(name) {
+                continue;
+            }
+            let reason = if mcp_state.auth_required.contains(name) {
+                "auth required".to_string()
+            } else if let Some(d) = mcp_state.init_failed.get(name) {
+                if d.is_empty() {
+                    "connection failed".to_string()
+                } else {
+                    d.clone()
+                }
+            } else if mcp_state.get_client(name).is_some() {
+                // Healthy (or at least not recorded as failed) client present.
+                continue;
+            } else if mcp_initialized {
+                // Configured but never inserted a client after init finished.
+                "connection failed".to_string()
+            } else {
+                continue;
+            };
+            failed.push((name.to_string(), reason));
+        }
+        failed.sort_by(|a, b| a.0.cmp(&b.0));
+        (metadata, failed)
     };
 
     // Scope the synchronous snapshot guard so it is released before the
@@ -148,6 +182,7 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
         snapshot.tools = mcp_tools;
         snapshot.servers = server_metadata;
         snapshot.mcp_initialized = mcp_initialized;
+        snapshot.failed_servers = failed_servers;
     }
 
     tool_bridge

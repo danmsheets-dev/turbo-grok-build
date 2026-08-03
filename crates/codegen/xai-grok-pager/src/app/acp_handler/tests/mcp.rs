@@ -56,6 +56,7 @@
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
                     is_managed_gateway: false,
+                    status_detail: None,
                 },
             ]));
         }
@@ -474,6 +475,49 @@
         assert!(servers[0].tools.is_empty());
     }
 
+    /// `payload.detail` must land on the matched server's `status_detail`
+    /// so the expanded Unavailable/NeedsAuth row can surface the reason.
+    #[test]
+    fn server_status_stores_detail_on_row() {
+        use crate::views::extensions_modal::TabDataState;
+        use crate::views::mcps_modal::McpServerDisplayStatus;
+        use xai_grok_shell::extensions::mcp::{
+            McpServerSource, McpServerStatus, McpServerStatusPayload, McpServerStatusReason,
+        };
+
+        let mut app = make_app_two_agents();
+        seed_owner_agent_with_open_modal(&mut app);
+
+        let payload = McpServerStatusPayload {
+            session_id: "sess-owner".into(),
+            name: "alpha".into(),
+            source: McpServerSource::Local,
+            status: McpServerStatus::Unavailable,
+            reason: McpServerStatusReason::HandshakeFailed,
+            detail: Some("EOF while reading handshake".into()),
+            tools: None,
+        };
+        let raw = serde_json::value::to_raw_value(&payload).unwrap();
+        let notif = acp::ExtNotification::new("x.ai/mcp/server_status", raw.into());
+        let _ = handle_mcp_server_status(&notif, &mut app);
+
+        let modal = app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .extensions_modal
+            .as_ref()
+            .unwrap();
+        let TabDataState::Loaded(ref servers) = modal.mcps_data else {
+            panic!("modal still Loaded");
+        };
+        assert_eq!(servers[0].status, McpServerDisplayStatus::Unavailable);
+        assert_eq!(
+            servers[0].status_detail.as_deref(),
+            Some("EOF while reading handshake")
+        );
+    }
+
     /// Pin that the pager deserializes against the *shell's*
     /// `McpServerStatus` enum, so a future new variant doesn't need a
     /// pager change to be recognized. Round-trip through
@@ -529,6 +573,7 @@
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
                     is_managed_gateway: false,
+                    status_detail: None,
                 },
             ]));
         }
