@@ -227,15 +227,21 @@ fn invalid_inputs_and_all_marker_shapes_are_refused() {
         vec![b'x'; super::source::MAX_CONFIG_BYTES as usize + 1],
     )
     .unwrap();
-    let nul = temp.path().join("nul");
-    fs::write(&nul, b"a\0b").unwrap();
+    // Not named "nul" — on Windows that is a reserved device name and does not
+    // create a normal file for this probe.
+    let with_nul = temp.path().join("with-nul-bytes");
+    fs::write(&with_nul, b"a\0b").unwrap();
     let non_utf8 = temp.path().join("non-utf8");
     fs::write(&non_utf8, [0xff]).unwrap();
-    for path in [&oversize, &nul, &non_utf8] {
-        assert!(matches!(
-            ManagedConfig::plan(request(path, &[("item", "body")])),
-            Err(ManagedConfigError::UnsafePath { .. })
-        ));
+    for path in [&oversize, &with_nul, &non_utf8] {
+        assert!(
+            matches!(
+                ManagedConfig::plan(request(path, &[("item", "body")])),
+                Err(ManagedConfigError::UnsafePath { .. })
+            ),
+            "expected UnsafePath for {}",
+            path.display()
+        );
     }
 
     let cases = [

@@ -18,6 +18,9 @@ fn summary(
         tool_calls: tools,
         turns: 1,
         output: std::sync::Arc::from(format!("the answer for {id}").as_str()),
+        isolation: None,
+        worktree_path: None,
+        worktree_state: None,
     }
 }
 

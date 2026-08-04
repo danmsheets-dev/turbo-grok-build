@@ -11,7 +11,7 @@
 //!
 //! Reference: [IANA IPv4 Special-Purpose Address Registry](https://www.iana.org/assignments/iana-ipv4-special-registry/)
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use url::Url;
 
@@ -86,12 +86,33 @@ fn is_non_public_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_non_public_ipv4(v4);
     }
+    // IPv4-compatible form ::a.b.c.d (deprecated but still seen).
+    if let Some(v4) = ip.to_ipv4() {
+        return is_non_public_ipv4(v4);
+    }
     // Anything not globally routable: loopback, ULA, link-local, unspecified, multicast.
+    // Also documentation 2001:db8::/32 and discarded 0100::/64 (RFC 6666).
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
+        || ipv6_in_prefix(ip, [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 32)
+        || ipv6_in_prefix(ip, [0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 64)
+}
+
+fn ipv6_in_prefix(ip: Ipv6Addr, base: [u8; 16], prefix_bits: u8) -> bool {
+    let ip = ip.octets();
+    let full = (prefix_bits / 8) as usize;
+    let rem = prefix_bits % 8;
+    if ip[..full] != base[..full] {
+        return false;
+    }
+    if rem == 0 {
+        return true;
+    }
+    let mask = 0xffu8 << (8 - rem);
+    (ip[full] & mask) == (base[full] & mask)
 }
 
 /// Loopback including IPv4-mapped forms (`::ffff:127.0.0.1`).
@@ -123,16 +144,21 @@ pub(crate) fn is_blocked_for_host(ip: IpAddr, host: &str, allow_local: bool) -> 
 }
 
 /// Resolve hostname via DNS and verify none of the resolved addresses are
-/// blocked under the SSRF policy.
+/// blocked under the SSRF policy. Returns the validated addresses so the
+/// HTTP client can pin DNS and close rebinding TOCTOU between check and connect.
 ///
 /// `allow_local` comes from tool config (`WebFetchParams::allow_local`); it is
 /// not read from the environment here so the agent cannot flip the policy.
-pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFetchError> {
+pub(crate) async fn resolve_and_check_ssrf(
+    url: &Url,
+    allow_local: bool,
+) -> Result<Vec<SocketAddr>, WebFetchError> {
     let host = url
         .host_str()
         .ok_or_else(|| WebFetchError::SingleLabelHost {
             host: String::new(),
         })?;
+    let port = url.port_or_known_default().unwrap_or(443);
 
     // If the host is already a literal IP, check it directly.
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -142,13 +168,12 @@ pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFe
                 ip,
             });
         }
-        return Ok(());
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
     // DNS resolution.
-    let port = url.port_or_known_default().unwrap_or(443);
     let addr_str = format!("{host}:{port}");
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(&addr_str)
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(&addr_str)
         .await
         .map_err(|e| WebFetchError::DnsResolution {
             host: host.to_string(),
@@ -163,15 +188,21 @@ pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFe
     // Any non-public address blocks the request. When allow_local is on,
     // only *explicit* loopback hosts may use loopback IPs — a rebinding name
     // that resolves to 127.0.0.1 stays blocked.
-    addrs
+    if let Some(addr) = addrs
         .iter()
         .find(|addr| is_blocked_for_host(addr.ip(), host, allow_local))
-        .map_or(Ok(()), |addr| {
-            Err(WebFetchError::SsrfBlocked {
-                host: host.to_string(),
-                ip: addr.ip(),
-            })
-        })
+    {
+        return Err(WebFetchError::SsrfBlocked {
+            host: host.to_string(),
+            ip: addr.ip(),
+        });
+    }
+    Ok(addrs)
+}
+
+/// SSRF check without returning pin addresses (tests / legacy call sites).
+pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFetchError> {
+    resolve_and_check_ssrf(url, allow_local).await.map(|_| ())
 }
 
 #[cfg(test)]

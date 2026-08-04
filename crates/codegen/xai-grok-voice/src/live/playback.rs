@@ -33,13 +33,17 @@
 //! attribution for the borrowed interface in `THIRD-PARTY-NOTICES`.
 
 use std::collections::VecDeque;
-use std::io::Write;
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+// Subprocess player backends (Linux/macOS) only. Windows uses in-process cpal.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io::Write;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::{Child, Command, Stdio};
 
 use crate::error::VoiceError;
 
@@ -479,15 +483,16 @@ pub struct PlaybackStream {
 
 enum Teardown {
     /// A subprocess player (Linux/macOS helper): kill + reap on stop.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Child(Option<Child>),
     /// Windows cpal: the stream is moved into the bridge thread and dropped
     /// when the bridge exits (the sample source drops). The variant carries
     /// no handle but exists so the enum is constructible on Windows.
-    #[allow(dead_code)]
+    #[cfg(target_os = "windows")]
     Cpal,
     /// No external resource (e.g. a stub backend on a platform without a
     /// player available at construction time — playback silently no-ops).
-    #[allow(dead_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     None,
 }
 
@@ -545,6 +550,7 @@ impl PlaybackStream {
         self.queue.stop();
         // Platform teardown.
         match &mut self.teardown {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Teardown::Child(child) => {
                 if let Some(child) = child.as_mut() {
                     // Close stdin first so the player flushes, then kill to
@@ -555,7 +561,12 @@ impl PlaybackStream {
                     let _ = child.wait();
                 }
             }
-            Teardown::Cpal | Teardown::None => {}
+            // cpal stream lifetime is owned by the bridge thread; no handle to kill.
+            #[cfg(target_os = "windows")]
+            Teardown::Cpal => {}
+            // Unsupported-platform backend has nothing to tear down.
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            Teardown::None => {}
         }
         // Bounded join: helper thread + recv_timeout so we never block
         // indefinitely. If the backend thread doesn't exit within
@@ -1440,6 +1451,7 @@ where
 pub(crate) fn run_speaker_play_child(_args: Vec<String>) -> i32 {
     // Never spawned by this build's own backend (Linux uses system players;
     // no-audio builds have no playback). Reachable only by hand.
+    use std::io::Write;
     let _ = writeln!(
         std::io::stdout(),
         "ERR speaker-play helper unavailable in this build"

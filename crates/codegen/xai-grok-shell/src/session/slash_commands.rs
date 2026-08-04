@@ -1212,6 +1212,13 @@ pub(super) fn resolve(
     loop_fire_mode: LoopFireMode,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
+        // Natural-language soft-match: "run a deep audit on X" → DeepAudit
+        // without requiring a leading `/`. Only when workflows are enabled.
+        if availability.allows(BuiltinGate::WorkflowLaunches)
+            && let Some(action) = try_natural_workflow_intent(&prompt_blocks)
+        {
+            return Err(SlashCommandOutcome::Builtin(action));
+        }
         return Ok(prompt_blocks);
     };
 
@@ -1328,6 +1335,198 @@ fn parse_slash_prefix(prompt_blocks: &[acp::ContentBlock]) -> Option<(&str, &str
     }
 
     Some((name, args))
+}
+
+/// Soft-match natural language that clearly intends a stock workflow launch.
+///
+/// Examples that match:
+/// - "Can you run a deep audit on the security app"
+/// - "deep audit crates/foo --size large"
+/// - "please run deep-research on postgres vs mysql"
+/// - "ultracode nvidia subagent path"
+///
+/// Non-matches (pass through to the agent): long briefs, implement/fix talk,
+/// bare "audit this" without deep/ultracode, research without deep-research.
+fn try_natural_workflow_intent(prompt_blocks: &[acp::ContentBlock]) -> Option<BuiltinAction> {
+    let text = prompt_blocks.iter().find_map(|b| {
+        if let acp::ContentBlock::Text(t) = b {
+            Some(t.text.as_str())
+        } else {
+            None
+        }
+    })?;
+    parse_natural_workflow_intent(text)
+}
+
+/// Pure parser for tests and [`try_natural_workflow_intent`].
+pub(crate) fn parse_natural_workflow_intent(text: &str) -> Option<BuiltinAction> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return None;
+    }
+    // Avoid hijacking multi-paragraph task briefs or code-heavy messages.
+    if trimmed.len() > 400 || trimmed.lines().count() > 3 {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    // Development-of-the-feature language → agent, not launch.
+    const DEV_MARKERS: &[&str] = &[
+        "implement",
+        "fix the",
+        "fix deep",
+        "write a",
+        "author",
+        "edit the workflow",
+        "create a workflow",
+        "debug the workflow",
+        "how does deep-audit",
+        "how does deep audit",
+        "explain deep-audit",
+        "explain deep audit",
+    ];
+    if DEV_MARKERS.iter().any(|m| lower.contains(m)) {
+        return None;
+    }
+
+    // Strip polite / imperative wrappers so we match fewer phrase variants.
+    let (core_lower, outer_prefix_len) = strip_polite_wrappers(&lower);
+    let original_core = recover_original_tail(trimmed, outer_prefix_len);
+
+    // deep-research first (more specific than bare "research").
+    if let Some((prefix_len, _rest)) = strip_nl_prefix(
+        core_lower,
+        &[
+            "run a deep research on ",
+            "run deep research on ",
+            "run deep-research on ",
+            "run deep-research ",
+            "start deep research on ",
+            "start deep-research on ",
+            "deep research on ",
+            "deep-research on ",
+            "deep-research ",
+            "deep research ",
+        ],
+    ) {
+        let query = recover_original_tail(original_core, prefix_len)
+            .trim()
+            .to_string();
+        if query.is_empty() {
+            return None;
+        }
+        return Some(BuiltinAction::DeepResearch { query });
+    }
+
+    // deep-audit / ultracode.
+    if let Some((prefix_len, _rest)) = strip_nl_prefix(
+        core_lower,
+        &[
+            "run a deep audit on ",
+            "run a deep-audit on ",
+            "run deep audit on ",
+            "run deep-audit on ",
+            "run a deep audit of ",
+            "run deep audit of ",
+            "run a deep audit for ",
+            "run deep audit for ",
+            "run a deep audit ",
+            "run deep audit ",
+            "run deep-audit ",
+            "run deepaudit ",
+            "start a deep audit on ",
+            "start deep audit on ",
+            "start deep-audit on ",
+            "do a deep audit on ",
+            "do a deep audit of ",
+            "do a deep audit for ",
+            "do a deep audit ",
+            "perform a deep audit on ",
+            "perform a deep audit of ",
+            "perform a deep audit ",
+            "deep audit on ",
+            "deep-audit on ",
+            "deep audit of ",
+            "deep-audit of ",
+            "deep audit for ",
+            "deep-audit for ",
+            "deepaudit on ",
+            "deepaudit ",
+            "deep-audit ",
+            "deep audit ",
+            "deepaudit",
+            "deep-audit",
+            "deep audit",
+            "ultracode on ",
+            "ultracode ",
+            "ultracode",
+            "ultra-code on ",
+            "ultra-code ",
+            "ultra-code",
+        ],
+    ) {
+        let scope_raw = recover_original_tail(original_core, prefix_len);
+        let (query, size, models) = parse_deepaudit_args(scope_raw.trim());
+        return Some(BuiltinAction::DeepAudit {
+            query,
+            size,
+            models,
+        });
+    }
+
+    None
+}
+
+/// Strip leading "can you ", "please ", "could you ", etc. Returns
+/// `(remaining_lower, bytes_stripped_from_full_lower)`.
+fn strip_polite_wrappers(lower: &str) -> (&str, usize) {
+    const WRAPPERS: &[&str] = &[
+        "can you please ",
+        "could you please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "please ",
+        "pls ",
+    ];
+    let mut s = lower;
+    let mut stripped = 0usize;
+    // Allow one polite wrapper.
+    for w in WRAPPERS {
+        if let Some(rest) = s.strip_prefix(w) {
+            stripped += w.len();
+            s = rest;
+            break;
+        }
+    }
+    (s, stripped)
+}
+
+/// If `lower` starts with any of `prefixes`, return `(prefix_len, rest_of_lower)`.
+/// Prefixes are tried longest-first so more specific phrases win.
+fn strip_nl_prefix<'a>(lower: &'a str, prefixes: &[&str]) -> Option<(usize, &'a str)> {
+    let mut best: Option<(usize, &'a str)> = None;
+    for p in prefixes {
+        if let Some(rest) = lower.strip_prefix(p) {
+            let plen = p.len();
+            if best.is_none_or(|(bp, _)| plen > bp) {
+                best = Some((plen, rest));
+            }
+        }
+    }
+    best
+}
+
+/// Map a lowercased suffix back onto the original-cased message using ASCII
+/// prefix length (safe: all match prefixes are ASCII).
+fn recover_original_tail<'a>(original: &'a str, prefix_len: usize) -> &'a str {
+    let orig_trim = original.trim();
+    if prefix_len >= orig_trim.len() {
+        return "";
+    }
+    // prefix_len is in bytes of the lowercased ASCII form; original is the
+    // same UTF-8 for the matched prefix region because prefixes are ASCII and
+    // we only lowercase ASCII letters.
+    &orig_trim[prefix_len..]
 }
 
 /// Build the `/loop` prompt blocks for the shell client.
@@ -3125,6 +3324,79 @@ mod tests {
                 other => panic!("expected DeepAudit via /{alias}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn natural_language_deep_audit_intent() {
+        let cases = [
+            (
+                "Can you run a deep audit on the security app",
+                "the security app",
+            ),
+            ("run a deep audit on crates/foo", "crates/foo"),
+            ("deep audit --size large auth module", "auth module"),
+            ("ultracode nvidia subagent path", "nvidia subagent path"),
+            ("please do a deep audit of web_fetch", "web_fetch"),
+        ];
+        for (msg, want_scope) in cases {
+            match parse_natural_workflow_intent(msg) {
+                Some(BuiltinAction::DeepAudit { query, size, .. }) => {
+                    assert_eq!(query, want_scope, "msg={msg}");
+                    // size default medium unless flags present
+                    if msg.contains("--size large") {
+                        assert_eq!(size, "large", "msg={msg}");
+                    } else {
+                        assert_eq!(size, "medium", "msg={msg}");
+                    }
+                }
+                other => panic!("expected DeepAudit for {msg:?}, got {other:?}"),
+            }
+        }
+
+        // Host resolve path also soft-matches without a leading slash.
+        let blocks = vec![text_block("Can you run a deep audit on the security app")];
+        let outcome =
+            resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err();
+        match outcome {
+            SlashCommandOutcome::Builtin(BuiltinAction::DeepAudit { query, .. }) => {
+                assert_eq!(query, "the security app");
+            }
+            other => panic!("expected DeepAudit from resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn natural_language_deep_research_intent() {
+        match parse_natural_workflow_intent(
+            "please run deep-research on postgres vs mysql migration risks",
+        ) {
+            Some(BuiltinAction::DeepResearch { query }) => {
+                assert_eq!(query, "postgres vs mysql migration risks");
+            }
+            other => panic!("expected DeepResearch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn natural_language_skips_dev_and_vague() {
+        assert!(parse_natural_workflow_intent("implement deep audit workflow").is_none());
+        assert!(parse_natural_workflow_intent("how does deep audit work?").is_none());
+        assert!(parse_natural_workflow_intent("audit the auth module").is_none());
+        assert!(parse_natural_workflow_intent("research postgres indexes").is_none());
+        assert!(parse_natural_workflow_intent("fix the deep-audit trimmed bug").is_none());
+        // Disabled workflows: resolve must pass through.
+        let blocks = vec![text_block("run a deep audit on foo")];
+        let mut availability = all_gated();
+        availability.workflows = false;
+        let passed = resolve(
+            blocks,
+            &[],
+            availability,
+            SkillSlashRewrite::default(),
+            &[],
+        )
+        .expect("should pass through when workflows disabled");
+        assert!(matches!(passed[0], acp::ContentBlock::Text(_)));
     }
 
     // ── GoalTracker handler-level interaction tests ──────────────

@@ -5,13 +5,13 @@
 # and installs the binary as %USERPROFILE%\.turbo\bin\turbo.exe.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.114-r11
 #
 # Environment:
 #   TURBO_SHARE_DIR        install root (default: %USERPROFILE%\.turbo)
 #   TURBO_UPDATE_BASE_URL  GitHub-Releases-shaped API base (default:
-#                          https://api.github.com/repos/danmsheets-dev/hyper-grok-build/releases)
+#                          https://api.github.com/repos/danmsheets-dev/turbo-grok-build/releases)
 
 [CmdletBinding()]
 param(
@@ -40,7 +40,7 @@ function Ensure-SafeDirectory([string]$Path, [string]$Label) {
     }
 }
 
-$Repo = "danmsheets-dev/hyper-grok-build"
+$Repo = "danmsheets-dev/turbo-grok-build"
 $ApiBase = if ($env:TURBO_UPDATE_BASE_URL) { $env:TURBO_UPDATE_BASE_URL } else { "https://api.github.com/repos/$Repo/releases" }
 $TurboHome = if ($env:TURBO_SHARE_DIR) { $env:TURBO_SHARE_DIR } else { Join-Path $env:USERPROFILE ".turbo" }
 $Triple = "x86_64-pc-windows-msvc"

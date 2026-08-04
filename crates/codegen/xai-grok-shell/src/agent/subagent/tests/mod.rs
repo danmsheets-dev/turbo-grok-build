@@ -287,6 +287,98 @@ fn resume_worktree_action_covers_three_outcomes() {
             ResumeWorktreeAction::Shared
         );
 }
+
+/// Deep-audit C1: resume isolation=worktree of a non-worktree source fails closed.
+#[test]
+fn resume_isolation_gate_fail_closed_without_opt_in() {
+    use super::{ResumeIsolationGate, resume_isolation_gate};
+    // isolation requested, no worktree, no opt-in → refuse
+    assert_eq!(
+        resume_isolation_gate(true, false, false),
+        ResumeIsolationGate::Refuse
+    );
+    // opt-in → shared fallback
+    assert_eq!(
+        resume_isolation_gate(true, false, true),
+        ResumeIsolationGate::SharedFallback
+    );
+    // source had worktree → proceed (even without opt-in)
+    assert_eq!(
+        resume_isolation_gate(true, true, false),
+        ResumeIsolationGate::Proceed
+    );
+    // isolation not requested → proceed (shared is intended)
+    assert_eq!(
+        resume_isolation_gate(false, false, false),
+        ResumeIsolationGate::Proceed
+    );
+    assert_eq!(
+        resume_isolation_gate(false, true, false),
+        ResumeIsolationGate::Proceed
+    );
+}
+
+/// P0: keep-N prune must never delete a worktree still marked live (running child).
+#[test]
+fn prune_soft_preserved_skips_live_marked_worktrees() {
+    use super::{
+        clear_live_worktree_marker, is_live_worktree_protected, prune_soft_preserved_worktrees_with_cap,
+        write_live_worktree_marker,
+    };
+    let base = tempfile::TempDir::new().unwrap();
+    // Three soft-preserved trees + one live running tree.
+    for name in ["subagent-old-a", "subagent-old-b", "subagent-old-c"] {
+        let p = base.path().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        // Stagger mtimes so sort is deterministic: write a file after create.
+        std::fs::write(p.join("marker.txt"), name).unwrap();
+    }
+    let live = base.path().join("subagent-live-running");
+    std::fs::create_dir_all(&live).unwrap();
+    write_live_worktree_marker(&live);
+    assert!(is_live_worktree_protected(&live));
+
+    // Keep only 1 non-live tree — live must survive even if over the cap.
+    prune_soft_preserved_worktrees_with_cap(base.path(), 1);
+
+    assert!(
+        live.is_dir(),
+        "live-marked worktree must not be pruned (tombstone root cause)"
+    );
+    assert!(is_live_worktree_protected(&live));
+
+    // After clear, live becomes prunable like any soft-preserved peer.
+    clear_live_worktree_marker(&live);
+    assert!(!is_live_worktree_protected(&live));
+    prune_soft_preserved_worktrees_with_cap(base.path(), 0); // keep=0 means no-op
+    prune_soft_preserved_worktrees_with_cap(base.path(), 1);
+    // With keep=1, at most one subagent-* remains among non-live (all are non-live now).
+    let remaining: Vec<_> = std::fs::read_dir(base.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("subagent-"))
+        .collect();
+    assert!(
+        remaining.len() <= 1,
+        "after clear, keep-N must reclaim: got {}",
+        remaining.len()
+    );
+}
+
+#[test]
+fn live_worktree_marker_roundtrip() {
+    use super::{
+        clear_live_worktree_marker, is_live_worktree_protected, write_live_worktree_marker,
+        LIVE_WORKTREE_MARKER,
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(!is_live_worktree_protected(dir.path()));
+    write_live_worktree_marker(dir.path());
+    assert!(dir.path().join(LIVE_WORKTREE_MARKER).is_file());
+    assert!(is_live_worktree_protected(dir.path()));
+    clear_live_worktree_marker(dir.path());
+    assert!(!is_live_worktree_protected(dir.path()));
+}
 #[test]
 fn subagent_inherits_parent_lsp_via_context() {
     let parent: std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend> = Arc::new(

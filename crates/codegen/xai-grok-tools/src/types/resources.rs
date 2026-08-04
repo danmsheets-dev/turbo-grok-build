@@ -473,6 +473,13 @@ pub struct DenyReadGlobs(pub Vec<String>);
 #[derive(Debug, Clone)]
 pub struct ConfineRoot(pub PathBuf);
 
+/// Write-time path allowlist prefixes (relative, normalized). Empty = unrestricted.
+///
+/// Inserted from spawn `allowed_paths` so tools fail closed at write time (not
+/// only at land). See subagent isolation docs / RC12 land allowlist.
+#[derive(Debug, Clone, Default)]
+pub struct AllowedWritePaths(pub Vec<String>);
+
 /// Resolve a model-provided path, rewriting absolute paths from conversation
 /// history when [`DisplayCwd`] is set.
 ///
@@ -718,6 +725,121 @@ pub fn set_process_confine_root(root: PathBuf) {
 /// Current process confine root, if any.
 pub fn process_confine_root() -> Option<&'static PathBuf> {
     PROCESS_CONFINE_ROOT.get()
+}
+
+// ── RC13 Wave A: fail-closed write roots (cwd / confine tombstones) ─────────
+
+/// Why a write was refused because a root directory is gone.
+///
+/// Used when a session CWD or `--confine` root was deleted out from under the
+/// agent (soft-preserve prune, discard, worktree tombstone). Tools must surface
+/// these as `cwd_missing` / `worktree_tombstone` rather than cascading IO noise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteRootError {
+    /// Session working directory is missing or not a directory.
+    CwdMissing { path: PathBuf },
+    /// Confine / worktree root is missing or not a directory.
+    ConfineRootMissing { path: PathBuf },
+}
+
+impl WriteRootError {
+    /// Stable tool error code (`cwd_missing` or `worktree_tombstone`).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::CwdMissing { .. } => "cwd_missing",
+            Self::ConfineRootMissing { .. } => "worktree_tombstone",
+        }
+    }
+
+    /// Human-readable detail for tool / computer errors.
+    pub fn message(&self) -> String {
+        match self {
+            Self::CwdMissing { path } => format!(
+                "cwd_missing: session working directory is missing or not a directory: `{}` \
+                 (error_class=worktree_tombstone). The worktree may have been pruned, discarded, \
+                 or never created. Do not continue writing; recover via land/diff/open --restore \
+                 or file developer_log.",
+                path.display()
+            ),
+            Self::ConfineRootMissing { path } => format!(
+                "worktree_tombstone: confine root is missing or not a directory: `{}` \
+                 (error_class=worktree_tombstone / cwd_missing). Writes are fail-closed while the \
+                 root is gone. Recover via land/diff/open --restore or file developer_log.",
+                path.display()
+            ),
+        }
+    }
+
+    /// Convert to a runtime [`xai_tool_runtime::ToolError`].
+    pub fn into_tool_error(self) -> xai_tool_runtime::ToolError {
+        xai_tool_runtime::ToolError::custom(self.code(), self.message())
+    }
+
+    /// Convert to a computer-layer IO error (for LocalFs / ConfinedFs).
+    pub fn into_computer_error(self) -> crate::computer::types::ComputerError {
+        crate::computer::types::ComputerError::io_with_kind(
+            self.message(),
+            std::io::ErrorKind::NotFound,
+        )
+    }
+}
+
+/// True when `path` exists and is a directory (symlink-to-dir counts).
+fn path_is_existing_dir(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => m.is_dir(),
+        Err(_) => false,
+    }
+}
+
+/// Fail closed before any write when the session CWD and/or confine root is gone.
+///
+/// - `cwd`: session working directory (required for relative path resolution).
+/// - `confine_root`: optional `--confine` / [`ConfineRoot`] / process root.
+///
+/// Call this from write tools **and** FS choke points so a tombstoned worktree
+/// cannot accept phantom writes that later land empty.
+pub fn enforce_write_roots(
+    cwd: Option<&std::path::Path>,
+    confine_root: Option<&std::path::Path>,
+) -> Result<(), WriteRootError> {
+    if let Some(cwd) = cwd
+        && !path_is_existing_dir(cwd)
+    {
+        return Err(WriteRootError::CwdMissing {
+            path: cwd.to_path_buf(),
+        });
+    }
+    if let Some(root) = confine_root
+        && !path_is_existing_dir(root)
+    {
+        return Err(WriteRootError::ConfineRootMissing {
+            path: root.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Fail closed for a write under `cwd`, consulting the process confine root
+/// when set (and an optional resource-level root that may differ).
+///
+/// Prefer this from tools that already resolved session CWD.
+pub fn enforce_write_path(
+    cwd: &std::path::Path,
+    confine_root: Option<&std::path::Path>,
+) -> Result<(), WriteRootError> {
+    let process_root = process_confine_root().map(|p| p.as_path());
+    // Resource confine wins when present; otherwise process root.
+    let effective = confine_root.or(process_root);
+    enforce_write_roots(Some(cwd), effective)
+}
+
+/// Process-confine-only preflight (LocalFs has no session Cwd resource).
+pub fn enforce_process_confine_root_exists() -> Result<(), WriteRootError> {
+    if let Some(root) = process_confine_root() {
+        return enforce_write_roots(None, Some(root.as_path()));
+    }
+    Ok(())
 }
 
 /// Shell confinement enforcement level active for this process.
@@ -967,9 +1089,24 @@ impl Default for RespectGitignore {
 /// Whether to enrich path-not-found errors with CWD reminders, "dropped repo
 /// folder" correction, and similar-name suggestions.
 ///
-/// Default `false`. Hosts may enable this via remote config or local settings.
-#[derive(Debug, Clone, Copy, Default)]
+/// Default **true** for RC13 (atlas miss recovery). Hosts may disable via
+/// remote config / local settings.
+#[derive(Debug, Clone, Copy)]
 pub struct PathNotFoundHints(pub bool);
+impl Default for PathNotFoundHints {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// Whether `workspace_tree` / `resolve_path` may walk and persist an atlas for
+/// the session CWD (folder-trust gate).
+///
+/// When **absent**, tools allow indexing (unit tests / headless fixtures).
+/// When **present and false**, tools fail with `workspace_tree_untrusted`.
+/// Shell inserts `true` only when `project_scope_allowed` (same as kickoff).
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceTreeIndexingAllowed(pub bool);
 /// Whether scheduled task fires execute in background loop subagents.
 ///
 /// `false` forces every fire onto the legacy main-conversation path.
@@ -1275,6 +1412,42 @@ impl std::fmt::Debug for McpResourceAccess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn enforce_write_roots_accepts_existing_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        enforce_write_roots(Some(dir.path()), Some(dir.path())).expect("both present");
+        enforce_write_roots(Some(dir.path()), None).expect("cwd only");
+        enforce_write_roots(None, Some(dir.path())).expect("root only");
+        enforce_write_roots(None, None).expect("nothing to check");
+    }
+
+    #[test]
+    fn enforce_write_roots_rejects_missing_cwd() {
+        let gone = Path::new("/definitely/not/a/real/cwd-for-rc13-test-xyz");
+        let err = enforce_write_roots(Some(gone), None).expect_err("missing cwd");
+        assert_eq!(err.code(), "cwd_missing");
+        assert!(err.message().contains("cwd_missing"));
+    }
+
+    #[test]
+    fn enforce_write_roots_rejects_missing_confine_root() {
+        let gone = Path::new("/definitely/not/a/real/confine-for-rc13-test-xyz");
+        let err = enforce_write_roots(None, Some(gone)).expect_err("missing root");
+        assert_eq!(err.code(), "worktree_tombstone");
+        assert!(err.message().contains("worktree_tombstone"));
+    }
+
+    #[test]
+    fn enforce_write_path_rejects_file_as_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let err = enforce_write_path(&file, None).expect_err("file is not cwd");
+        assert_eq!(err.code(), "cwd_missing");
+    }
+
     #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct EditConfig {
         skip_read_before_edit: bool,

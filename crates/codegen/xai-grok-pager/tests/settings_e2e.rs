@@ -6089,13 +6089,10 @@ fn mouse_click_on_screen_mode_indicator_opens_picker_in_one_click() {
 }
 
 // ---------------------------------------------------------------------------
-// language (SHELL Enum, Appearance, live-applied, no preview).
-// Catalog [auto, en, zh-CN]; `auto` follows the OS locale. Mirrors the
-// screen_mode enum tests (keyboard ↔ mouse parity).
+// language (SHELL Enum, Appearance) — English-only product.
 // ---------------------------------------------------------------------------
 
-/// Enter on the `language` row opens the picker seeded at the default `auto`
-/// (UiConfig.language is None → canonical auto).
+/// Enter on the `language` row opens the picker seeded at English.
 #[test]
 fn enter_on_language_row_enters_picking_enum() {
     let mut s = make_state();
@@ -6114,8 +6111,8 @@ fn enter_on_language_row_enters_picking_enum() {
             assert_eq!(key, "language");
             assert_eq!(
                 original_value,
-                SettingValue::Enum("auto"),
-                "default UiConfig language=None → original 'auto'"
+                SettingValue::Enum("en"),
+                "default language resolves to English"
             );
         }
         other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -6173,9 +6170,7 @@ fn language_picker_enter_dispatches_set_commit() {
     );
 }
 
-/// The choices catalog is EXACTLY {auto, en, de, es, fr, ja, ko, pt-BR, ru,
-/// zh-CN, zh-TW} in order — contract with `i18n::canonical_language`,
-/// `i18n::SUPPORTED_LOCALES`, and the `locales/*.yml` bundles on disk.
+/// Turbo is English-only — catalog is exactly `{en}`.
 #[test]
 fn language_choices_use_canonical_strings() {
     let reg = SettingsRegistry::defaults();
@@ -6186,16 +6181,10 @@ fn language_choices_use_canonical_strings() {
     };
     assert_eq!(
         canonicals,
-        vec![
-            "auto", "en", "de", "es", "fr", "ja", "ko", "pt-BR", "ru", "zh-CN", "zh-TW"
-        ],
-        "language catalog drift — adding a language requires a new \
-         locales/<id>.yml bundle, an i18n::canonical_language arm, and an \
-         i18n::SUPPORTED_LOCALES entry",
+        vec!["en"],
+        "language catalog drift — Turbo is English-only",
     );
-    // Every non-auto choice must have a matching bundle registered in
-    // `SUPPORTED_LOCALES`.
-    for c in canonicals.iter().skip(1) {
+    for c in &canonicals {
         assert!(
             xai_grok_pager::i18n::SUPPORTED_LOCALES.contains(c),
             "language choice `{c}` has no entry in i18n::SUPPORTED_LOCALES",

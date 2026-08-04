@@ -5,29 +5,33 @@
 <img src="docs/assets/turbo-banner.jpg" alt="Turbo Grok Build — multi-agent terminal coding" width="720">
 
 <p>
-  <a href="https://github.com/danmsheets-dev/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/hyper-grok-build?display_name=tag" alt="Release"></a>
-  <a href="https://github.com/danmsheets-dev/hyper-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
+  <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
+  <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.114--r11%20RC11-blue" alt="RC11">
+  <img src="https://img.shields.io/badge/version-0.2.114--r14%20RC14-blue" alt="RC14">
   <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
-  <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n">
+  <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
 </p>
 
 **Turbo Grok Build** (CLI: **`turbo`**) is a heavily extended multi-agent coding
 CLI forked from [xAI Grok Build](https://github.com/xai-org/grok-build). It keeps
 the Rust TUI core and multi-provider stack, then layers production-grade
-subagent worktrees, recovery tooling, field logging, and agent orientation that
-the upstream product does not ship.
+**folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
+logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **RC11** · wire version **`0.2.114-r11`**.
+Current release line: **RC14** · wire version **`0.2.114-r14`**.
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
 
 [What changed](#what-makes-turbo-different) ·
+[Feature overview](#feature-overview) ·
+[RC history](#community-rc-history) ·
 [Install](#installation) ·
 [Providers](#providers) ·
 [Subagents & worktrees](#subagents--worktrees) ·
+[Workflows & deep audit](#workflows--deep-audit) ·
+[Web fetch](#web-fetch) ·
 [Auto Developer Log](#auto-developer-log) ·
 [Build](#building-from-source) ·
 [Docs](#documentation) ·
@@ -46,37 +50,85 @@ is a multi-agent development runtime** built on that foundation.
 |------|---------------------|----------------------|
 | Product focus | Official agent CLI | Community multi-agent platform |
 | Subagents | Present | Isolation by default, land/diff/discard, soft-preserve, restore |
-| Worktree recovery | Ephemeral / hard to find | Snapshot + baseline agent-only diffs + `turbo subagent …` CLI |
+| Folder worktrees | Optional / fragile | Default `isolation=worktree`, FS confine, baseline agent-only patches |
+| Worktree recovery | Ephemeral / hard to find | Snapshot + baseline refs + `turbo subagent …` CLI |
 | Dirty-parent pollution | Diff vs HEAD can explode | Spawn **baseline** refs → agent-only patches; land fails closed if huge |
-| Agent orientation | System prompt + project rules | **Agent Boot Card** (ops brief, recovery, required field logging) |
-| Product field signal | `/feedback`, crashes | **Auto Developer Log** (`developer_log` tool + `turbo issues`) |
+| Deep audit | — | **`/deepaudit`** recipe (investigate → verify → report) |
+| Workflows | Limited | Rhai recipes + NL soft-match + boot-card routing |
+| Web content | Search / raw HTTP | **`web_fetch`** URL → clean markdown (token-aware) |
+| Agent orientation | System prompt + project rules | **Agent Boot Card** + Workspace Tree atlas |
+| Product field signal | `/feedback`, crashes | **Auto Developer Log** + **Feature Request Log** |
 | Providers | xAI-centric | Multi-provider (Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, …) |
-| Reliability track | Upstream cadence | RC7→RC10→**RC11** community reliability + Game Mode + deep-audit |
+| UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) |
 | Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
-### Highlights (RC11)
+### Highlights (RC14)
 
-RC11 builds on the RC10 multi-agent harness with Game Mode, Feature Request Log,
-and round-2 land/resume safety (see [`CHANGELOG.md`](./CHANGELOG.md) and
-[`docs/RC11_RELEASE_NOTES.md`](docs/RC11_RELEASE_NOTES.md)):
+RC14 focuses on **agent research tools** and **workflow honesty** (full notes:
+[`CHANGELOG.md`](./CHANGELOG.md)):
 
-- **Game Mode** — `Ctrl+G` pixel office for Supervisor + subagent desks
-- **Feature Request Log** — `feature_request_log` tool + `turbo features …`
-- **Land/resume hardening** — allowlist-filtered land/diff; fresh baseline on resume
-- **Isolated worktrees that stay recoverable** — soft-preserve, `turbo subagent open|diff|land|discard`, agent-only baselines
-- **Agent Boot Card** — ops briefing; bugs → ADL, missing capability → Feature Request Log
-- **Auto Developer Log** — structured product issues; `turbo issues file` for humans
-- **`/deepaudit`** — multi-model finders, headless wait, fixed Rhai models/trimmed helpers
+- **`web_fetch`** — fetch any public URL to cleaned markdown (article/full/raw),
+  SSRF-safe, DNS pin, challenge detection, token-aware windowing/links
+- **Workflow routing** — boot card + system prompt teach agents to launch
+  `deep-audit` / `deep-research` instead of inventing dual-subagent “audits”
+- **Natural-language soft-match** — “Can you run a deep audit on the security app”
+  launches the real Rhai workflow without a leading `/`
+- Stock **`/deepaudit`** remains the only recommended deep-audit path
+
+Prior themes still ship: isolation FS jail (RC12), Workspace Tree inject (RC13),
+Game Mode (RC11), baselines + Boot Card + ADL (RC9–10), deep-audit (RC8).
 
 Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 
 ---
 
+## Feature overview
+
+| Feature | What it does | Since |
+|---------|----------------|-------|
+| **Folder worktrees** | Subagents default to isolated git worktrees under `~/.grok/worktrees/…` | RC7 (harden RC6–RC12) |
+| **Land / diff / discard** | Promote or drop child work via tools + `turbo subagent …` | RC8–RC9 |
+| **Agent-only baselines** | Diff/land = `baseline..snapshot`, not dirty parent vs HEAD | RC9 |
+| **Soft-preserve + keep-N** | Live worktrees kept for review; disk guard + prune | RC9 / RC12 |
+| **FS confine (worktree)** | Write path + shell operand jail fail closed | RC12 |
+| **`/deepaudit`** | Parallel investigate → independent verify → verified report | RC8 |
+| **`/deep-research`** | Bounded research with claim cross-check | earlier + RC14 routing |
+| **Workflow tool + NL** | Rhai recipes; free-text maps to stock launches | RC14 |
+| **`web_fetch`** | URL → clean text for the model (tokens down, content up) | RC14 |
+| **Workspace Tree** | `workspace_tree` / `resolve_path` + session inject card | RC12–RC13 |
+| **Agent Boot Card** | Ops brief: tools, isolation, recovery, logging, workflows | RC9 / RC14 |
+| **Auto Developer Log** | Structured product issues (`developer_log` + `turbo issues`) | RC9 |
+| **Feature Request Log** | Missing capability surface (`feature_request_log` + `turbo features`) | RC11 |
+| **Game Mode** | `Ctrl+G` pixel office of supervisor + subagent desks | RC11 |
+| **Multi-provider** | Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, … | r2+ |
+| **Headless honesty** | Streaming-json tool/subagent events, confine, trust gates | RC6 |
+
+---
+
+## Community RC history
+
+| RC | Wire | Theme |
+|----|------|--------|
+| **r1–r5** | `0.2.114-r1` … `r5` | Community fork: providers, extensions, OMP resume, Linux glibc 2.17 floor |
+| **r6** | `0.2.114-r6` | Isolation + headless honesty (confine is a boundary; isolation fails closed) |
+| **r7** | `0.2.114-r7` | **Folder worktrees by default** (`isolation=worktree`) |
+| **r8** | `0.2.114-r8` | **Deep audit**, land/diff/discard tools, NVIDIA harden, continuous-improve |
+| **r9** | `0.2.114-r9` | Baselines, **Boot Card**, **Auto Developer Log**, soft-preserve |
+| **r10** | `0.2.114-r10` | Deep-audit + ADL ship fixes; **Turbo** brand / `turbo` CLI |
+| **r11** | `0.2.114-r11` | **Game Mode** + Feature Request Log |
+| **r12** | `0.2.114-r12` | Isolation **FS jail**, densify lifecycle, MCP harden, Game Mode polish |
+| **r13** | `0.2.114-r13` | **Workspace Tree** inject, densify engines, Game Mode performance |
+| **r14** | `0.2.114-r14` | **`web_fetch`** + **workflow routing** (this release) |
+
+Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
+
+---
+
 ## Screenshots
 
-| English | 简体中文 |
-| ------- | -------- |
-| ![Turbo TUI (English)](docs/assets/screenshot-welcome-en.png) | ![Turbo TUI (中文)](docs/assets/screenshot-welcome-zh.png) |
+| Welcome (English) | Game Mode |
+| ----------------- | --------- |
+| ![Turbo TUI](docs/assets/screenshot-welcome-en.png) | ![Game Mode](docs/assets/screenshot-game-mode.png) |
 
 ---
 
@@ -88,26 +140,26 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **RC11** · `0.2.114-r11` |
+| Release line | upstream cadence | **RC14** · `0.2.114-r14` |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
-Repo folder/history may still say `hyper-grok-build`. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
+GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
 
 ---
 
 ## Installation
 
 Prebuilt binaries (macOS arm64/x86_64, Linux arm64/x86_64 glibc 2.17+, Windows x86_64) on
-[GitHub Releases](https://github.com/danmsheets-dev/hyper-grok-build/releases):
+[GitHub Releases](https://github.com/danmsheets-dev/turbo-grok-build/releases):
 
 ```sh
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex
+irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
 ```
 
 ```sh
@@ -119,35 +171,36 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r11
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r14
 ```
 
 ```powershell
-# Windows — pin RC11
-irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex
+# Windows — pin RC14
+irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
 # or from a clone after a release tag exists:
-# .\install.ps1 -Version v0.2.114-r11
+# .\install.ps1 -Version v0.2.114-r14
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
 (`%USERPROFILE%\.turbo\bin\turbo.exe` on Windows).
 
 > **Note:** Prebuilt install requires a published GitHub Release for
-> `v0.2.114-r11`. Until then, [build from source](#building-from-source) and copy
-> `target/release-dist/turbo` into `~/.turbo/bin`.
+> `v0.2.114-r14`. Until then, [build from source](#building-from-source) and copy
+> `target/release-dist/turbo` into `~/.turbo/bin`.  
+> Repo: [danmsheets-dev/turbo-grok-build](https://github.com/danmsheets-dev/turbo-grok-build).
 
 ### Install with Nix
 
 ```sh
-nix run github:danmsheets-dev/hyper-grok-build#turbo-grok-build -- --version
-nix profile install github:danmsheets-dev/hyper-grok-build#turbo-grok-build
+nix run github:danmsheets-dev/turbo-grok-build#turbo-grok-build -- --version
+nix profile install github:danmsheets-dev/turbo-grok-build#turbo-grok-build
 ```
 
 From a clone:
 
 ```sh
-git clone https://github.com/danmsheets-dev/hyper-grok-build
-cd hyper-grok-build
+git clone https://github.com/danmsheets-dev/turbo-grok-build
+cd turbo-grok-build
 nix run .#turbo-grok-build -- --version
 nix develop
 ```
@@ -174,7 +227,9 @@ Model ids look like `{platform}/{model}`. Config and credentials stay under
 
 ## Subagents & worktrees
 
-Turbo treats subagents as first-class workers with isolation and recovery:
+Turbo treats subagents as first-class workers with **folder worktrees** and
+recovery (isolation-by-default since **RC7**, fail-closed + FS confine through
+**RC12**):
 
 ```text
 spawn (isolation=worktree)
@@ -199,11 +254,56 @@ Optional:
 | Env | Effect |
 |-----|--------|
 | `GROK_SUBAGENT_SOFT_PRESERVE=0` | Delete live tree immediately after snapshot |
+| `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` | Max soft-preserved live trees (default 6) |
+| `GROK_SUBAGENT_MIN_FREE_BYTES` | Free-space floor before create (default 2 GiB) |
 | `GROK_SUBAGENT_WORKTREE_SEED=clean` | HEAD-only sandbox (no parent dirty copy) |
 | `retain_worktree=true` on spawn | Keep path until land/discard |
 
 Details: [`docs/RC9_FEATURES.md`](docs/RC9_FEATURES.md),
-[`docs/HYPER_DEVELOPER_FEEDBACK.md`](docs/HYPER_DEVELOPER_FEEDBACK.md).
+[`CHANGELOG.md`](./CHANGELOG.md) (RC7–RC13).
+
+---
+
+## Workflows & deep audit
+
+Stock Rhai workflows (background; progress in `/workflows`):
+
+| Recipe | Slash / NL | What it does |
+|--------|------------|--------------|
+| **deep-audit** | `/deepaudit`, `/deep-audit`, `/ultracode` · “run a deep audit on …” | Parallel find → independent verify → verified-only report (read-only) |
+| **deep-research** | `/deep-research <query>` · “deep-research on …” | Bounded research shards + claim cross-check + citations |
+| **continuous-improve** | `/workflow continuous-improve` | Research → plan → implement (worktree) → verify loop |
+
+Agents with the `workflow` tool are instructed (Boot Card + system prompt) to
+**launch these recipes** instead of spawning two ad-hoc explore/review
+subagents. Host soft-match also intercepts clear free-text audit/research
+requests when workflows are enabled (`GROK_WORKFLOWS=0` to disable).
+
+```text
+/deepaudit --size medium crates/codegen/xai-grok-tools
+Can you run a deep audit on the security app
+/deep-research Compare Postgres 17 vs MySQL 9 migration risks
+```
+
+User/project recipes: `~/.grok/workflows/*.rhai` and `.grok/workflows/*.rhai`
+(filename should match `meta.name`).
+
+---
+
+## Web fetch
+
+**`web_fetch`** turns a URL into **agent-usable clean text** (HTML → markdown,
+article extract, windowing) with SSRF protection, DNS pin on direct egress,
+challenge detection, and token-aware defaults (links off by default).
+
+```text
+# Agent tool (when enabled — default on)
+web_fetch url=https://example.com/docs extract_mode=article
+```
+
+Disable: `GROK_WEB_FETCH=0` or `[features] web_fetch = false`. Optional
+enterprise allowlist: `[toolset.web_fetch] allowed_domains = […]`. See user
+guide configuration and [`CHANGELOG.md`](./CHANGELOG.md) RC14.
 
 ---
 
@@ -234,14 +334,29 @@ Disable: `GROK_DEVELOPER_LOG=0`. Full writeup: [`docs/AUTO_DEVELOPER_LOG.md`](do
 
 ## Agent Boot Card
 
-On each **new** session, Turbo injects a short system briefing
-(`<hyper_boot_card>`) covering tools, subagent lifecycle, recovery commands,
-land safety, and **required** `developer_log` usage. Subagents get a tiny child
-stub only.
+On each **new** session (and by default on resume), Turbo injects a short system
+briefing (`<turbo_boot_card>`) covering tools, **workflows catalog**, subagent
+lifecycle, recovery commands, land safety, and **required** `developer_log` /
+`feature_request_log` usage. Subagents get a tiny child stub only.
 
 ```text
 GROK_BOOT_CARD=off|short|full    # default short
+GROK_BOOT_CARD_ON_RESUME=0       # disable inject on resume
 ```
+
+Workspace Tree inject (RC13) adds a budgeted `<workspace_tree_card>` atlas after
+the boot card when indexing is enabled.
+
+---
+
+## Game Mode
+
+`Ctrl+G` opens a pixel **office** view of the Supervisor (main agent) and
+subagent desks (added **RC11**, polished RC12–RC13). Chat composer stays
+available. Compact terminals fall back to a simpler layout. Tasks pane:
+`Ctrl+Shift+G`.
+
+![Game Mode](docs/assets/screenshot-game-mode.png)
 
 ---
 
@@ -269,9 +384,10 @@ Community branding / updater: `--features community-build` (default on this tree
 
 ## Changelog & known issues
 
-- [`CHANGELOG.md`](./CHANGELOG.md) — **RC11** (`0.2.114-r11`) is current
-- [`docs/RC11_RELEASE_NOTES.md`](docs/RC11_RELEASE_NOTES.md) — Game Mode + harness disposition
+- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **RC14** (`0.2.114-r14`) is current
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
+- [`docs/workspace-tree.md`](docs/workspace-tree.md) — Workspace Tree (RC12–RC13)
+- [`docs/RC11_RELEASE_NOTES.md`](docs/RC11_RELEASE_NOTES.md) — Game Mode (RC11 base)
 - [`docs/RC9_FEATURES.md`](./docs/RC9_FEATURES.md) — worktrees, Boot Card, ADL (RC9 base)
 - [`docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`](docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md) — RC10 harness matrix
 
@@ -314,16 +430,31 @@ Artifacts ship as `turbo-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 
 | Doc | Content |
 |-----|---------|
-| [User guide (EN)](crates/codegen/xai-grok-pager/docs/user-guide/) | Product how-to (examples may say `grok`; CLI is `turbo`) |
-| [用户指南 (中文)](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/) | Chinese guide |
-| [RC9 features](docs/RC9_FEATURES.md) | Worktrees, Boot Card, copy UI, ADL |
-| [RC10 harness plan](docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md) | RC10 ship blockers + retest matrix |
+| [User guide](crates/codegen/xai-grok-pager/docs/user-guide/) | Product how-to (CLI is `turbo`) |
+| [Changelog](./CHANGELOG.md) | RC14 + pedigree table |
+| [Workspace Tree](docs/workspace-tree.md) | Atlas / inject / CLI |
 | [Auto Developer Log](docs/AUTO_DEVELOPER_LOG.md) | Field logging for maintainers |
-| Upstream | [docs.x.ai/build](https://docs.x.ai/build/overview) |
+| [Feature Request Log](docs/FEATURE_REQUEST_LOG.md) | Missing-capability log |
+| [Archive](docs/archive/) | Historical RC plans / Q&A (not product surface) |
+| Official Grok Build | [docs.x.ai/build](https://docs.x.ai/build/overview) |
 
 `SOURCE_REV` records the last monorepo sync point.
 
-中文 README (may lag brand update): [README.zh-CN.md](README.zh-CN.md)
+### Tracking remotes (for cherry-picks)
+
+| Remote | URL | Use |
+|--------|-----|-----|
+| `origin` | `danmsheets-dev/turbo-grok-build` | Your Turbo fork |
+| `upstream` | `xai-org/grok-build` | Official Grok Build (fetch-only) |
+| `community` | `DaviRain-Su/hyper-grok-build` | Hyper community (fetch-only) |
+
+```sh
+git fetch upstream
+git fetch community
+# Inspect without merging:
+git log --oneline dev..community/dev | head
+git log --oneline dev..upstream/main | head
+```
 
 ---
 

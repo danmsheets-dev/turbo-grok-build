@@ -107,6 +107,8 @@ pub enum ToolInput {
     FeatureRequestLog(
         crate::implementations::grok_build::feature_request_log::FeatureRequestLogInput,
     ),
+    WorkspaceTree(crate::implementations::grok_build::workspace_tree::WorkspaceTreeInput),
+    ResolvePath(crate::implementations::grok_build::resolve_path::ResolvePathInput),
     SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),

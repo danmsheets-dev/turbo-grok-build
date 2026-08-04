@@ -317,69 +317,15 @@ const RENDER_MERMAID_CHOICES: &[EnumChoice] = &[
 // ---------------------------------------------------------------------------
 // UI-language catalog.
 //
-// SHELL-owned, persisted to `[ui].language`. Canonicals match
-// `crate::i18n::SUPPORTED_LOCALES` plus the `auto` meta-choice (follow the OS
-// locale). Applied live via `rust_i18n::set_locale` on commit — no restart.
-// Adding a language requires: (1) a new `locales/<id>.yml` bundle,
-// (2) an `EnumChoice` here, (3) `SUPPORTED_LOCALES` + `os_locale` mapping.
-// Order: `auto`, then English (the fallback), then alphabetical by code.
+// Turbo Grok Build is **English-only**. The setting remains for config
+// compatibility; non-`en` values are coerced to English in `i18n::canonical_language`.
 // ---------------------------------------------------------------------------
 
 const LANGUAGE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
-        canonical: "auto",
-        display: "Auto",
-        description: "Follow the OS locale (falls back to English).",
-    },
-    EnumChoice {
         canonical: "en",
         display: "English",
-        description: "English UI strings.",
-    },
-    EnumChoice {
-        canonical: "de",
-        display: "Deutsch",
-        description: "German UI strings.",
-    },
-    EnumChoice {
-        canonical: "es",
-        display: "Español",
-        description: "Spanish UI strings.",
-    },
-    EnumChoice {
-        canonical: "fr",
-        display: "Français",
-        description: "French UI strings.",
-    },
-    EnumChoice {
-        canonical: "ja",
-        display: "日本語",
-        description: "Japanese UI strings.",
-    },
-    EnumChoice {
-        canonical: "ko",
-        display: "한국어",
-        description: "Korean UI strings.",
-    },
-    EnumChoice {
-        canonical: "pt-BR",
-        display: "Português (Brasil)",
-        description: "Brazilian Portuguese UI strings.",
-    },
-    EnumChoice {
-        canonical: "ru",
-        display: "Русский",
-        description: "Russian UI strings.",
-    },
-    EnumChoice {
-        canonical: "zh-CN",
-        display: "简体中文",
-        description: "Simplified Chinese UI strings.",
-    },
-    EnumChoice {
-        canonical: "zh-TW",
-        display: "繁體中文",
-        description: "Traditional Chinese UI strings.",
+        description: "English UI (only supported language).",
     },
 ];
 
@@ -981,21 +927,16 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // UI display language. SHELL-owned (`[ui].language`); applied live
-        // via `rust_i18n::set_locale` at commit, no restart required.
+        // UI display language. SHELL-owned (`[ui].language`); Turbo is English-only.
         SettingMeta {
             key: "language",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
             label: "Language",
-            description: "UI display language: auto follows the OS locale; \
-                          only strings covered by a translation bundle change.",
-            keywords: &[
-                "language", "locale", "i18n", "chinese", "japanese", "korean", "zh", "中文",
-                "语言", "語言", "言語",
-            ],
+            description: "UI display language. Turbo Grok Build is English-only.",
+            keywords: &["language", "locale", "i18n", "english"],
             kind: SettingKind::Enum {
-                default: "auto",
+                default: "en",
                 choices: LANGUAGE_CHOICES,
                 supports_preview: false,
             },

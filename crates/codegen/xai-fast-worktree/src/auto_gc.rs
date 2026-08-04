@@ -856,17 +856,28 @@ mod tests {
             max_age_secs: 1,
             min_interval_secs: 1,
             include_orphan_snapshots: false,
+            dry_run: false,
             ..AutoGcOptions::default()
         };
         let gc = build_auto_gc_options(&opts, Vec::new());
         assert!(!gc.force, "auto path must never set force=true");
         assert!(gc.skip_kinds.is_empty());
-        assert_eq!(gc.max_age_by_kind.get(&WorktreeKind::Manual), Some(&None));
-        assert_eq!(
-            gc.max_age_by_kind.get(&WorktreeKind::Subagent),
-            Some(&Some(24 * 3600)),
-            "subagent worktrees age out after 24h by default"
-        );
+        // Kind map is only populated when age-expiry is live (CWD scan platform
+        // or dry_run). Windows/FreeBSD leave the map empty for real GC.
+        if age_expiry_allowed(process_cwd_scan_available(), false) {
+            assert_eq!(gc.max_age_by_kind.get(&WorktreeKind::Manual), Some(&None));
+            assert_eq!(
+                gc.max_age_by_kind.get(&WorktreeKind::Subagent),
+                Some(&Some(24 * 3600)),
+                "subagent worktrees age out after 24h by default"
+            );
+        } else {
+            assert!(
+                gc.max_age_by_kind.is_empty(),
+                "no age map when platform cannot safely age-expire"
+            );
+            assert_eq!(gc.max_age_secs, None);
+        }
     }
 
     #[test]

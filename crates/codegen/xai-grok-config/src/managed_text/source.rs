@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use super::{ManagedConfigError, ManagedConfigPlan};
@@ -58,9 +59,18 @@ impl ParentPlan {
                             reason: "parent component is not a directory".to_owned(),
                         });
                     }
+                    #[cfg(windows)]
+                    let identity = FileIdentity::from_path(&current).map_err(|source| {
+                        ManagedConfigError::Read {
+                            path: current.clone(),
+                            source,
+                        }
+                    })?;
+                    #[cfg(not(windows))]
+                    let identity = FileIdentity::from_metadata(&metadata);
                     chain.push(PathIdentity {
                         path: current.clone(),
-                        identity: FileIdentity::from_metadata(&metadata),
+                        identity,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -113,10 +123,15 @@ impl ParentPlan {
         for expected in &self.existing_chain {
             let metadata = fs::symlink_metadata(&expected.path)
                 .map_err(|_| ManagedConfigError::ParentChanged(expected.path.clone()))?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || FileIdentity::from_metadata(&metadata) != expected.identity
-            {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(ManagedConfigError::ParentChanged(expected.path.clone()));
+            }
+            #[cfg(windows)]
+            let identity = FileIdentity::from_path(&expected.path)
+                .map_err(|_| ManagedConfigError::ParentChanged(expected.path.clone()))?;
+            #[cfg(not(windows))]
+            let identity = FileIdentity::from_metadata(&metadata);
+            if identity != expected.identity {
                 return Err(ManagedConfigError::ParentChanged(expected.path.clone()));
             }
         }
@@ -128,7 +143,28 @@ impl ParentPlan {
 pub(super) struct ParentAnchor {
     path: PathBuf,
     identity: FileIdentity,
+    /// Kept open so the parent directory cannot be replaced under us (TOCTOU).
+    #[allow(dead_code)]
     directory: fs::File,
+}
+
+/// Open a directory for read/handle hold. Unix: plain `File::open`. Windows:
+/// requires `FILE_FLAG_BACKUP_SEMANTICS` or open fails with Access Denied (5).
+fn open_directory_handle(path: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS = 0x02000000 — allow opening directories.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::File::open(path)
+    }
 }
 
 impl ParentAnchor {
@@ -140,13 +176,26 @@ impl ParentAnchor {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ManagedConfigError::ParentChanged(path.to_path_buf()));
         }
-        let directory = fs::File::open(path).map_err(|source| ManagedConfigError::Read {
+        // Hold an open handle so the parent directory cannot be replaced under
+        // us (TOCTOU). On Windows, plain File::open(dir) returns ERROR_ACCESS_DENIED
+        // (5) unless FILE_FLAG_BACKUP_SEMANTICS is set — that is also the root
+        // cause of managed_text test hangs (barrier never reached AfterLock).
+        let directory = open_directory_handle(path).map_err(|source| ManagedConfigError::Read {
             path: path.to_path_buf(),
             source,
         })?;
+        #[cfg(windows)]
+        let identity = FileIdentity::from_file(&directory).map_err(|source| {
+            ManagedConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        #[cfg(not(windows))]
+        let identity = FileIdentity::from_metadata(&metadata);
         Ok(Self {
             path: path.to_path_buf(),
-            identity: FileIdentity::from_metadata(&metadata),
+            identity,
             directory,
         })
     }
@@ -188,9 +237,16 @@ pub(super) struct FileIdentity {
     dev: u64,
     #[cfg(unix)]
     ino: u64,
-    #[cfg(not(unix))]
+    /// Windows: volume serial + file index (stable when directory children change).
+    /// Using mtime+len was wrong: parent dir mtime updates when we write config.rc
+    /// inside a temp parent → false ParentChanged / flaky managed_text tests.
+    #[cfg(windows)]
+    volume_serial: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(not(any(unix, windows)))]
     len: u64,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     modified: Option<std::time::SystemTime>,
 }
 
@@ -204,13 +260,64 @@ impl FileIdentity {
                 ino: metadata.ino(),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // Prefer handle-based identity when possible; metadata path is used
+            // only for the parent-chain PathIdentity snapshot (open each path).
+            let _ = metadata;
+            Self {
+                volume_serial: 0,
+                file_index: 0,
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Self {
                 len: metadata.len(),
                 modified: metadata.modified().ok(),
             }
         }
+    }
+
+    #[cfg(windows)]
+    fn from_file(file: &fs::File) -> io::Result<Self> {
+        use std::mem::MaybeUninit;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        // SAFETY: valid process-owned file handle; info filled by Win32.
+        unsafe {
+            let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+            let ok = GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr());
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let info = info.assume_init();
+            let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+            Ok(Self {
+                volume_serial: info.dwVolumeSerialNumber,
+                file_index,
+            })
+        }
+    }
+
+    #[cfg(windows)]
+    fn from_path(path: &Path) -> io::Result<Self> {
+        let file = open_directory_or_file(path)?;
+        Self::from_file(&file)
+    }
+}
+
+/// Open a file or directory for identity probing (Windows directory open needs
+/// BACKUP_SEMANTICS; regular files use a normal read open).
+#[cfg(windows)]
+fn open_directory_or_file(path: &Path) -> io::Result<fs::File> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        open_directory_handle(path)
+    } else {
+        fs::File::open(path)
     }
 }
 
@@ -378,11 +485,20 @@ pub(super) fn read_source(path: &Path) -> Result<SourceState, ManagedConfigError
             reason: "file contains NUL bytes".to_owned(),
         });
     }
+    #[cfg(windows)]
+    let identity = Some(FileIdentity::from_path(path).map_err(|source| {
+        ManagedConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?);
+    #[cfg(not(windows))]
+    let identity = Some(FileIdentity::from_metadata(&metadata));
     Ok(SourceState {
         hash: blake3::hash(&bytes).to_hex().to_string(),
         bytes: Some(bytes),
         mode: file_mode(&metadata),
-        identity: Some(FileIdentity::from_metadata(&metadata)),
+        identity,
     })
 }
 

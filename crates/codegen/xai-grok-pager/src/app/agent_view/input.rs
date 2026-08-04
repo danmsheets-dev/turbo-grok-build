@@ -1103,8 +1103,11 @@ impl AgentView {
             if let Event::Mouse(mouse) = ev {
                 match mouse.kind {
                     MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        self.game_mode.update_hover(mouse.column, mouse.row);
-                        return InputOutcome::Changed;
+                        // Only repaint when desk or cursor cell changes (P0 lag fix).
+                        if self.game_mode.update_hover(mouse.column, mouse.row) {
+                            return InputOutcome::Changed;
+                        }
+                        return InputOutcome::Unchanged;
                     }
                     _ => {}
                 }
@@ -1126,7 +1129,10 @@ impl AgentView {
                             return InputOutcome::Changed;
                         }
                     }
-                    KeyCode::Esc if self.game_mode.hover_desk.is_some() => {
+                    KeyCode::Esc
+                        if self.game_mode.hover_desk.is_some()
+                            || self.game_mode.keyboard_focus.is_some() =>
+                    {
                         self.game_mode.clear_hover();
                         return InputOutcome::Changed;
                     }

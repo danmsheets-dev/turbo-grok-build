@@ -295,7 +295,7 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             ));
         }
 
-        let (cwd, display_cwd, fs, scheme, hints_enabled) = {
+        let (cwd, display_cwd, fs, scheme, hints_enabled, confine_root) = {
             let res = resources.lock().await;
             let cwd = match ctx.extensions.get::<xai_tool_runtime::Cwd>() {
                 Some(dir) => dir.0.clone(),
@@ -312,8 +312,14 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 .build_scheme()
                 .map_err(xai_tool_runtime::ToolError::invalid_arguments)?;
             let hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
-            (cwd, display_cwd, fs, scheme, hints_enabled)
+            let confine_root = res
+                .get::<crate::types::resources::ConfineRoot>()
+                .map(|c| c.0.clone());
+            (cwd, display_cwd, fs, scheme, hints_enabled, confine_root)
         };
+        // RC13 Wave A: fail closed on tombstoned CWD / confine root.
+        crate::types::resources::enforce_write_path(&cwd, confine_root.as_deref())
+            .map_err(|e| e.into_tool_error())?;
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);

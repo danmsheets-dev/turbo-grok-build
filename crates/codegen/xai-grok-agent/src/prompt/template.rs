@@ -109,6 +109,7 @@ mod tests {
             ),
             (ToolKind::KillTaskAction, "kill_command_or_subagent"),
             (ToolKind::WebSearch, "web_search"),
+            (ToolKind::WebFetch, "web_fetch"),
         ]
         .into_iter()
         .map(|(k, v)| (k, v.to_string()))

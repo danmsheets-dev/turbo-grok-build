@@ -92,7 +92,7 @@ pub enum ActionId {
     // Panes
     ToggleTodos,
     ToggleTasks,
-    /// Toggle Game Mode office view (Shift+G). Spectator room + composer.
+    /// Toggle Game Mode office view (Ctrl+G). Spectator room + composer.
     ToggleGameMode,
     ToggleQueue,
     OpenSessions,
@@ -810,7 +810,7 @@ mod tests {
             .find(ActionId::SendToBackground)
             .and_then(|def| def.long_help)
             .expect("fullscreen background help");
-        assert!(fullscreen.contains("tasks pane (Ctrl+G)"));
+        assert!(fullscreen.contains("tasks pane (Ctrl+Shift+G)"));
         assert!(!fullscreen.contains("/tasks"));
 
         let minimal = ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal)
@@ -818,7 +818,7 @@ mod tests {
             .and_then(|def| def.long_help)
             .expect("minimal background help");
         assert!(minimal.contains("/tasks"));
-        assert!(!minimal.contains("tasks pane (Ctrl+G)"));
+        assert!(!minimal.contains("tasks pane (Ctrl+"));
     }
 
     #[test]

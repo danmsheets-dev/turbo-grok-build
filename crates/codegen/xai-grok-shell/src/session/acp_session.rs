@@ -742,6 +742,10 @@ pub(crate) struct SessionActor {
     /// path). Uses `OnceLock` for lock-free reads, set-once semantics, and
     /// `&self` mutability (SessionActor is behind `Arc`).
     pub(crate) display_cwd: std::sync::OnceLock<String>,
+    /// Write-time `allowed_paths` for isolation children. Set via
+    /// [`SessionCommand::SetAllowedWritePaths`]; re-injected into the tool
+    /// bridge after agent rebuild (resources are not durable across rebuild).
+    pub(crate) allowed_write_paths: parking_lot::Mutex<Option<Vec<String>>>,
     /// The active agent type for this session. Initialized from the
     /// `AgentDefinition` at spawn, updated when the session mode changes
     /// via `handle_session_mode()`. Used by the model-switch guard to

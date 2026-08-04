@@ -2190,6 +2190,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 init_tracing_simple("cli");
                 return xai_grok_pager::features_cmd::run(features_args);
             }
+            Command::Tree(tree_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::tree_cmd::run(tree_args);
+            }
             Command::Update {
                 check,
                 json,

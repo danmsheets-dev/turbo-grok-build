@@ -19,6 +19,13 @@ use super::state::{ActorPhase, DeskSlot, GameModeState, SupervisorPhase};
 use super::wall::WallMode;
 
 /// Render game mode into `area` (region above composer).
+///
+/// PERF INVARIANTS (RC13):
+/// - Pixel recompose is gated by `GameModeState::ensure_pixel_frame` fingerprint;
+///   pure tick + hover must not rebuild the scaled BG or sprite composite unless
+///   desk/supervisor visual inputs actually changed.
+/// - Hover focus ring + popup + status strip are **buffer overlays** after the
+///   halfblock blit so hover-only mouse moves stay cheap.
 pub fn render_game_mode(buf: &mut Buffer, area: Rect, state: &mut GameModeState) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -41,26 +48,80 @@ pub fn render_game_mode(buf: &mut Buffer, area: Rect, state: &mut GameModeState)
         && state.ensure_pixel_frame(pixel_area.width, pixel_area.height);
 
     if use_pixel {
-        if let Some(frame) = state.pixel_frame.as_ref() {
-            let painted =
-                crate::render::image_overlay::paint_halfblock_rgba(buf, pixel_area, frame);
-            if !painted {
-                render_unicode_office(buf, &layout, state);
-            }
+        // Prefer precomputed cell cache (HIT skips image sampling). Fallback to
+        // terminal-res RGBA paint buffer, then unicode office.
+        let painted = if let Some(cache) = state.pixel_halfblock.as_ref() {
+            crate::render::image_overlay::paint_halfblock_cells(buf, pixel_area, cache)
+        } else if let Some(frame) = state.pixel_paint_frame() {
+            crate::render::image_overlay::paint_halfblock_rgba(buf, pixel_area, frame)
         } else {
+            false
+        };
+        if !painted {
             render_unicode_office(buf, &layout, state);
         }
     } else {
         render_unicode_office(buf, &layout, state);
     }
 
+    // Overlay-only chrome (never invalidates pixel_frame / scaled BG).
+    paint_focus_ring_overlay(buf, &layout, state);
     paint_status_strip(buf, layout.status_strip, state, layout.tier);
     paint_hover_popup(buf, area, &layout, state);
 }
 
+/// Gold corner brackets on the focused desk — cell overlay so hover does not
+/// recompose the high-res office frame.
+fn paint_focus_ring_overlay(buf: &mut Buffer, layout: &GameLayout, state: &GameModeState) {
+    let Some(idx) = state.focus_desk() else {
+        return;
+    };
+    if idx >= state.desks.len() || state.desks[idx].is_empty() {
+        return;
+    }
+    let r = layout.desks[idx];
+    if r.width == 0 || r.height == 0 {
+        return;
+    }
+    // Pulse via tick without touching the pixel fingerprint.
+    let pulse = (state.tick / 4) % 2 == 0;
+    let style = Style::default().fg(if pulse {
+        Color::Rgb(255, 220, 96)
+    } else {
+        Color::Rgb(255, 200, 48)
+    });
+    let x0 = r.x;
+    let y0 = r.y;
+    let x1 = r.x.saturating_add(r.width.saturating_sub(1));
+    let y1 = r.y.saturating_add(r.height.saturating_sub(1));
+    // Corner brackets only.
+    for (x, y, sym) in [
+        (x0, y0, "┌"),
+        (x0.saturating_add(1), y0, "─"),
+        (x0, y0.saturating_add(1), "│"),
+        (x1, y0, "┐"),
+        (x1.saturating_sub(1), y0, "─"),
+        (x1, y0.saturating_add(1), "│"),
+        (x0, y1, "└"),
+        (x0.saturating_add(1), y1, "─"),
+        (x0, y1.saturating_sub(1), "│"),
+        (x1, y1, "┘"),
+        (x1.saturating_sub(1), y1, "─"),
+        (x1, y1.saturating_sub(1), "│"),
+    ] {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(sym);
+            cell.set_style(style);
+        }
+    }
+}
+
 /// Floating SNES-style info card when the mouse is over a seated subagent.
+///
+/// Buffer-only: never calls `ensure_pixel_frame` / compose. Live labels, tokens,
+/// and elapsed update here without invalidating the scaled BG or sprite cache.
 fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &GameModeState) {
-    let Some(idx) = state.hover_desk else {
+    let Some(idx) = state.focus_desk() else {
         return;
     };
     if idx >= state.desks.len() || state.desks[idx].is_empty() {
@@ -567,7 +628,7 @@ fn paint_status_strip(buf: &mut Buffer, area: Rect, state: &GameModeState, tier:
         String::new()
     };
     let focus = state
-        .hover_desk
+        .focus_desk()
         .map(|i| format!(" focus:{}", i + 1))
         .unwrap_or_default();
     let text = format!(

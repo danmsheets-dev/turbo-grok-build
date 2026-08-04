@@ -12,6 +12,7 @@ pub mod client;
 pub mod config;
 pub mod domain;
 pub mod error;
+mod extract;
 mod http;
 pub(crate) mod overflow;
 mod ssrf;
@@ -28,13 +29,17 @@ pub use error::WebFetchError;
 /// Configuration for the `web_fetch` tool.
 ///
 /// When `Enabled`, the tool is registered and a `WebFetchClient` is injected
-/// into `Resources`. When `Disabled` (default), the tool is not registered.
+/// into `Resources`. When `Disabled`, the tool is not registered.
+///
+/// Product default is **enabled** (open-public + SSRF) via the shell
+/// `resolve_web_fetch` path; this enum's `Default` remains `Disabled` for
+/// safe composition in unit tests that do not opt in.
 #[derive(Debug, Clone, Default)]
 pub enum WebFetchConfig {
     #[default]
     Disabled,
     Enabled {
-        /// Runtime parameters (allowed_domains, proxy_endpoint, timeouts, etc.)
+        /// Runtime parameters (`allowed_domains` optional allowlist, proxy, timeouts, …).
         params: WebFetchParams,
     },
 }
@@ -60,6 +65,30 @@ pub struct WebFetchInput {
     /// The URL to fetch content from.
     #[schemars(description = "The URL to fetch content from.")]
     pub url: String,
+    /// Content extraction mode: `auto` (default), `article` (main content),
+    /// `full` (cleaned whole page), `raw` (minimal stripping), or `headless`
+    /// (unsupported — returns guidance to use a browser MCP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Extraction mode: auto (default), article, full, raw, or headless. \
+                       Use article to prefer main/article content and save tokens."
+    )]
+    pub extract_mode: Option<String>,
+    /// Optional character offset into the cleaned text (Unicode scalars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Start offset into cleaned text (character index, default 0).")]
+    pub start_offset: Option<u32>,
+    /// Optional max characters of cleaned text to return (before overflow cap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Max characters of cleaned text to return (window size).")]
+    pub max_chars: Option<u32>,
+    /// When true, append a short ## Links section from the extracted HTML
+    /// (default **false** to save tokens; opt in when you need outbound links).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Include a short ## Links section from extracted anchors (default false)."
+    )]
+    pub include_links: Option<bool>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -79,13 +108,26 @@ impl crate::types::tool_metadata::ToolMetadata for WebFetchTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Fetch the content of a specific URL and return it as markdown.
+        r#"Fetch the content of a specific URL and return cleaned text as markdown.
 
-IMPORTANT: ${{ tools.by_kind.web_fetch }} WILL FAIL for authenticated or private URLs (e.g. Google Docs, Confluence, Jira, GitHub private repos). Use specialized MCP tools for those instead.
+Use this instead of inventing documentation or pasting raw HTML. Prefer:
+  1) ${{ tools.by_kind.web_search }} to discover sources
+  2) ${{ tools.by_kind.web_fetch }} on specific URLs you need to read
+  3) Cite the final URL you actually fetched
+
+IMPORTANT: ${{ tools.by_kind.web_fetch }} WILL FAIL for authenticated or private URLs (e.g. Google Docs, Confluence, Jira, GitHub private repos). Use specialized MCP tools or `gh` for GitHub instead. SSRF protection blocks private/loopback hosts.
 
 Usage notes:
-  - HTTP URLs will be automatically upgraded to HTTPS
-  - Long pages will be truncated to fit your context window"#
+  - HTTP URLs are upgraded to HTTPS (except explicit localhost when allow_local is on)
+  - HTML is converted to markdown; scripts/styles stripped; default extract_mode=auto prefers main article content
+  - extract_mode: auto|article|full|raw — use article for token-efficient docs reads (headless is not supported)
+  - Optional max_chars / start_offset to window long pages
+  - include_links=true for a short ## Links section (default off; saves tokens)
+  - Same-host and apex↔www redirects are followed (with SSRF/allowlist each hop); other cross-host redirects need a new call
+  - Non-2xx and bot-challenge pages return an error (not silent success)
+  - Long pages are truncated; full content may be saved to a session artifact for chunked reads
+  - Optional domain allowlist may block hosts (`*.example.com` wildcards supported)
+  - DNS is pinned after SSRF checks on direct egress; with a proxy, local DNS is skipped"#
     }
 
     fn versioned_definition(
@@ -187,6 +229,12 @@ impl xai_tool_runtime::Tool for WebFetchTool {
                 session_folder.as_deref(),
                 read_tool_name.as_deref(),
                 execute_tool_name.as_deref(),
+                crate::implementations::grok_build::web_fetch::client::FetchOptions {
+                    extract_mode: input.extract_mode.as_deref(),
+                    start_offset: input.start_offset.map(|n| n as usize),
+                    max_chars: input.max_chars.map(|n| n as usize),
+                    include_links: input.include_links.unwrap_or(false),
+                },
             )
             .await?;
         Ok(output)
@@ -221,6 +269,10 @@ mod tests {
             test_ctx_with_call_id(resources.into_shared(), "test-call"),
             WebFetchInput {
                 url: "https://example.com".into(),
+                extract_mode: None,
+                start_offset: None,
+                max_chars: None,
+                include_links: None,
             },
         )
         .await;

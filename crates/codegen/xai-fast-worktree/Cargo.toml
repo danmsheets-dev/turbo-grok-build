@@ -60,6 +60,13 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# No workspace entry for windows-sys (same pattern as crash-handler / sqlite-journal).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 nix = { version = "0.30", features = ["fs"] }
 

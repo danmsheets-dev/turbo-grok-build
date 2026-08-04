@@ -54,6 +54,101 @@ pub(super) fn task_model_override_error(
     let requested = requested?;
     crate::agent::models::task_model_error_for_catalog(requested, available, is_session_auth)
 }
+
+/// Ensure densify engines (Blender / Godot) resolve on Windows for confined
+/// worktree children. Does not override values already present in the env map
+/// or process environment (parent wins).
+pub(super) fn inject_densify_engine_env(env: &mut std::collections::HashMap<String, String>) {
+    const BLENDER_KEYS: &[&str] = &["BLENDER_PATH", "GROK_BLENDER", "GROK_BLENDER_PATH"];
+    const GODOT_KEYS: &[&str] = &["GODOT_PATH", "GROK_GODOT", "GROK_GODOT_PATH"];
+
+    if !env_map_or_process_has(env, BLENDER_KEYS) {
+        if let Some(path) = discover_blender_exe() {
+            env.insert("BLENDER_PATH".into(), path.clone());
+            env.insert("GROK_BLENDER".into(), path);
+        }
+    }
+    if !env_map_or_process_has(env, GODOT_KEYS) {
+        if let Some(path) = discover_godot_exe() {
+            env.insert("GODOT_PATH".into(), path.clone());
+            env.insert("GROK_GODOT".into(), path);
+        }
+    }
+}
+
+fn env_map_or_process_has(
+    env: &std::collections::HashMap<String, String>,
+    keys: &[&str],
+) -> bool {
+    keys.iter().any(|k| {
+        env.get(*k).is_some_and(|v| !v.trim().is_empty())
+            || std::env::var(k).is_ok_and(|v| !v.trim().is_empty())
+    })
+}
+
+fn discover_blender_exe() -> Option<String> {
+    // Explicit env already handled by caller; probe well-known install paths.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        let base = std::path::PathBuf::from(pf).join("Blender Foundation");
+        // Prefer newest version directory when present.
+        if let Ok(rd) = std::fs::read_dir(&base) {
+            let mut versions: Vec<std::path::PathBuf> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            versions.sort();
+            versions.reverse();
+            for dir in versions {
+                candidates.push(dir.join("blender.exe"));
+                candidates.push(dir.join("blender"));
+            }
+        }
+    }
+    // Common fixed paths (Windows densify machines).
+    candidates.push(std::path::PathBuf::from(
+        r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe",
+    ));
+    candidates.push(std::path::PathBuf::from(
+        r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe",
+    ));
+    candidates.push(std::path::PathBuf::from(
+        r"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe",
+    ));
+    // PATH lookup
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            candidates.push(dir.join("blender.exe"));
+            candidates.push(dir.join("blender"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+}
+
+fn discover_godot_exe() -> Option<String> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        let base = std::path::PathBuf::from(pf).join("Godot");
+        candidates.push(base.join("Godot_v4.exe"));
+        candidates.push(base.join("godot.exe"));
+        candidates.push(base.join("Godot_console.exe"));
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            candidates.push(dir.join("godot.exe"));
+            candidates.push(dir.join("godot"));
+            candidates.push(dir.join("Godot_console.exe"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+}
 /// Runtime adapter for one shell child. Shared lifecycle state is owned by the
 /// `xai-grok-tools` coordinator actor and reached only through `reporter`.
 #[tracing::instrument(
@@ -251,22 +346,65 @@ pub(crate) async fn run_shell_child(
     // Spawn-time worktree baseline ref (agent-only diffs). Set after create.
     let mut spawn_baseline_ref: Option<String> = None;
     let worktree_path = if let Some(ref source) = resume_source {
-        if isolation_requested && source.worktree_path.is_none() {
-            // Resume of a pre-isolation (shared) child cannot invent a prior
-            // worktree; stay shared and surface isolation_fallback so harnesses
-            // do not treat the run as isolated.
-            isolation_fallback = true;
-            tracing::info!(
-                subagent_id = %request.id,
-                isolation_fallback = true,
-                "Resumed source had no worktree; continuing shared (isolation_fallback)"
-            );
+        // Deep-audit C1: resume of non-worktree source must not fail-open when
+        // isolation=worktree was requested.
+        match resume_isolation_gate(
+            isolation_requested,
+            source.worktree_path.is_some(),
+            allow_shared_fallback,
+        ) {
+            ResumeIsolationGate::Proceed => {}
+            ResumeIsolationGate::SharedFallback => {
+                isolation_fallback = true;
+                tracing::warn!(
+                    subagent_id = %request.id,
+                    isolation_fallback = true,
+                    "Resumed source had no worktree; shared-workspace fallback (opt-in ALLOW_SHARED_FALLBACK)"
+                );
+            }
+            ResumeIsolationGate::Refuse => {
+                let msg = format!(
+                    "Cannot resume subagent `{}` with isolation=worktree: source had no \
+                     worktree_path (ran shared or pre-isolation). Set \
+                     GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 to opt into shared-workspace \
+                     resume (emits isolation_fallback; the run is NOT isolated), or \
+                     spawn a fresh isolation=worktree child without resume_from.",
+                    source.subagent_id
+                );
+                tracing::error!(
+                    subagent_id = %request.id,
+                    source_id = %source.subagent_id,
+                    "Resume isolation=worktree of non-worktree source refused (fail-closed)"
+                );
+                return child_run_output(failure_result(&request, &msg), completion_data, None);
+            }
         }
         match source.worktree_path.as_deref() {
             None => None,
             Some(dest) => {
                 match resume_worktree_action(dest.is_dir(), source.snapshot_ref.as_deref()) {
-                    ResumeWorktreeAction::Reuse => Some(dest.to_path_buf()),
+                    ResumeWorktreeAction::Reuse => {
+                        if let Err(health) = validate_subagent_worktree_materialized(dest) {
+                            if isolation_requested && !allow_shared_fallback {
+                                let msg = format!(
+                                    "Resume worktree at {} is empty or incomplete ({health}). \
+                                     Rehydrate from snapshot or spawn fresh isolation=worktree.",
+                                    dest.display()
+                                );
+                                return child_run_output(
+                                    failure_result(&request, &msg),
+                                    completion_data,
+                                    None,
+                                );
+                            }
+                            isolation_fallback = isolation_requested;
+                            None
+                        } else {
+                            // Protect reused tree from keep-N prune while this child runs.
+                            write_live_worktree_marker(dest);
+                            Some(dest.to_path_buf())
+                        }
+                    }
                     ResumeWorktreeAction::Rehydrate => {
                         let snapshot_ref = source.snapshot_ref.clone().unwrap_or_default();
                         let source_repo = resolve_subagent_source_repo(&ctx);
@@ -285,7 +423,25 @@ pub(crate) async fn run_shell_child(
                                     snapshot_ref = %snapshot_ref,
                                     "Rehydrated subagent worktree from snapshot for resume"
                                 );
-                                Some(path)
+                                if let Err(health) = validate_subagent_worktree_materialized(&path)
+                                {
+                                    if isolation_requested && !allow_shared_fallback {
+                                        let msg = format!(
+                                            "Rehydrated worktree at {} is empty or incomplete ({health}).",
+                                            path.display()
+                                        );
+                                        return child_run_output(
+                                            failure_result(&request, &msg),
+                                            completion_data,
+                                            None,
+                                        );
+                                    }
+                                    isolation_fallback = isolation_requested;
+                                    None
+                                } else {
+                                    write_live_worktree_marker(&path);
+                                    Some(path)
+                                }
                             }
                             Err(e) => {
                                 if isolation_requested && !allow_shared_fallback {
@@ -400,16 +556,20 @@ pub(crate) async fn run_shell_child(
         let source_clone = source_cwd;
         let subagent_id = request.id.clone();
         let creation_mode: xai_fast_worktree::CreationMode = ctx.worktree_type.into();
-        // RC9: optional clean-slate seed (HEAD only — no parent dirty/untracked).
-        // GROK_SUBAGENT_WORKTREE_SEED=clean|head|dirty (default dirty/preserve).
+        // RC9: default clean-slate seed (HEAD only) so land/diff are agent-only.
+        // Opt into dirty parent copy: GROK_SUBAGENT_WORKTREE_SEED=dirty|preserve.
+        // Explicit clean: clean|head|head-only (same as default).
         let working_tree_mode = match std::env::var("GROK_SUBAGENT_WORKTREE_SEED")
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase()
             .as_str()
         {
-            "clean" | "head" | "head-only" => xai_fast_worktree::WorkingTreeMode::CleanAll,
-            _ => xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree,
+            "dirty" | "preserve" | "preserve-working-tree" | "working-tree" => {
+                xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree
+            }
+            // default (empty) and clean|head|head-only → CleanAll
+            _ => xai_fast_worktree::WorkingTreeMode::CleanAll,
         };
         let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
         let create_result = if skip_worktree_create {
@@ -463,14 +623,77 @@ pub(crate) async fn run_shell_child(
                         spawn_baseline_ref = Some(baseline_ref);
                     }
                     Err(e) => {
+                        // RC13 Wave D: fail closed by default — land without baseline
+                        // attributes dirty-parent noise to the agent. Opt into soft
+                        // continue with GROK_SUBAGENT_ALLOW_BASELINE_SOFT_FAIL=1.
+                        let allow_soft = std::env::var("GROK_SUBAGENT_ALLOW_BASELINE_SOFT_FAIL")
+                            .map(|v| {
+                                matches!(
+                                    v.trim().to_ascii_lowercase().as_str(),
+                                    "1" | "true" | "yes" | "on"
+                                )
+                            })
+                            .unwrap_or(false);
+                        if !allow_soft {
+                            tracing::error!(
+                                subagent_id = %request.id,
+                                error = %e,
+                                "Failed to snapshot spawn baseline; refusing isolation spawn (RC13)"
+                            );
+                            let _ = xai_fast_worktree::remove_worktree(&report.worktree_path);
+                            let _ = std::fs::remove_dir_all(&report.worktree_path);
+                            let msg = format!(
+                                "Isolated worktree baseline capture failed ({e}). \
+                                 Land would not be agent-only without a baseline. \
+                                 Retry spawn, free disk, or set \
+                                 GROK_SUBAGENT_ALLOW_BASELINE_SOFT_FAIL=1 to continue \
+                                 with land force-required later."
+                            );
+                            return child_run_output(
+                                failure_result(&request, &msg),
+                                completion_data,
+                                None,
+                            );
+                        }
                         tracing::warn!(
                             subagent_id = %request.id,
                             error = %e,
-                            "Failed to snapshot spawn baseline; diff may include dirty-parent files"
+                            "Failed to snapshot spawn baseline; continuing with soft-fail (ALLOW_BASELINE_SOFT_FAIL=1)"
                         );
                     }
                 }
-                Some(report.worktree_path)
+                // Health check: refuse empty / non-materialized trees (overlay
+                // upper only, failed checkout). File tools can still see parent
+                // via DisplayCwd remap while shell CWD is empty — densify P1.
+                if let Err(health) = validate_subagent_worktree_materialized(&report.worktree_path)
+                {
+                    tracing::error!(
+                        subagent_id = %request.id,
+                        worktree = %report.worktree_path.display(),
+                        error = %health,
+                        "Worktree create reported success but tree is not usable"
+                    );
+                    let _ = xai_fast_worktree::remove_worktree(&report.worktree_path);
+                    let _ = std::fs::remove_dir_all(&report.worktree_path);
+                    if !allow_shared_fallback {
+                        let msg = format!(
+                            "Isolated worktree at {} is empty or incomplete after create ({health}). \
+                             Refusing to start. Retry spawn or set \
+                             GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 only if shared parent is OK.",
+                            report.worktree_path.display()
+                        );
+                        return child_run_output(
+                            failure_result(&request, &msg),
+                            completion_data,
+                            None,
+                        );
+                    }
+                    isolation_fallback = true;
+                    None
+                } else {
+                    write_live_worktree_marker(&report.worktree_path);
+                    Some(report.worktree_path)
+                }
             }
             Some(Ok(Err(e))) => {
                 if !allow_shared_fallback {
@@ -531,6 +754,43 @@ pub(crate) async fn run_shell_child(
         }
     } else {
         None
+    };
+
+    // P0 tombstone: isolation worktree path must exist before the child boots.
+    // Without this, every shell/file tool fails with OS error 267 (Windows
+    // "directory name is invalid") when prune/external delete raced spawn.
+    if let Some(ref wt) = worktree_path {
+        if !wt.is_dir() {
+            if isolation_requested && !allow_shared_fallback {
+                let msg = format!(
+                    "Isolated worktree path does not exist (tombstoned or never created): {}. \
+                     Refusing to start with a missing CWD (OS error 267). \
+                     Re-spawn isolation=worktree, restore from snapshot, or set \
+                     GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 only if shared parent writes are acceptable.",
+                    wt.display()
+                );
+                tracing::error!(
+                    subagent_id = %request.id,
+                    worktree = %wt.display(),
+                    "Worktree path missing before child start; fail-closed"
+                );
+                return child_run_output(failure_result(&request, &msg), completion_data, None);
+            }
+            isolation_fallback = isolation_requested;
+            tracing::warn!(
+                subagent_id = %request.id,
+                worktree = %wt.display(),
+                isolation_fallback,
+                "Worktree path missing before child start; shared-workspace fallback (opt-in)"
+            );
+            // Drop invalid path so resolve_child_cwd uses parent.
+            // (worktree_path is not mut here — rebind below)
+        }
+    }
+    // If path was missing and we opted into shared fallback, clear it.
+    let worktree_path = match worktree_path {
+        Some(ref wt) if !wt.is_dir() => None,
+        other => other,
     };
 
     // RC11: resume Reuse/Rehydrate never hit the fresh-create baseline path above.
@@ -854,12 +1114,26 @@ pub(crate) async fn run_shell_child(
         land_status: None,
         // Inherit source allowlist on resume when the caller omits one so land
         // continues to enforce the original spawn boundary (RC11 harness).
-        allowed_paths: request
-            .allowed_paths
-            .as_ref()
-            .filter(|p| !p.is_empty())
-            .cloned()
-            .or_else(|| {
+        // Fail closed: non-empty request that normalizes to nothing is rejected
+        // later (before SetAllowedWritePaths); store only valid prefixes.
+        allowed_paths: {
+            let from_request = request.allowed_paths.as_ref().filter(|p| !p.is_empty());
+            if let Some(raw) = from_request {
+                let norm: Vec<String> = raw
+                    .iter()
+                    .filter_map(|s| {
+                        xai_grok_tools::implementations::grok_build::subagent_worktree::normalize_allowlist_path(
+                            s,
+                        )
+                    })
+                    .collect();
+                if norm.is_empty() {
+                    // Keep raw so meta reflects the caller's intent; spawn aborts below.
+                    Some(raw.clone())
+                } else {
+                    Some(norm)
+                }
+            } else {
                 resume_source.as_ref().and_then(|src| {
                     durable_source_allowed_paths(
                         &src.subagent_id,
@@ -867,9 +1141,26 @@ pub(crate) async fn run_shell_child(
                         &ctx.parent_cwd,
                     )
                 })
-            }),
+            }
+        },
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
+    // C2: non-empty allowed_paths that all fail normalization must not start unrestricted.
+    if let Some(raw) = request.allowed_paths.as_ref().filter(|p| !p.is_empty()) {
+        let any_valid = raw.iter().any(|s| {
+            xai_grok_tools::implementations::grok_build::subagent_worktree::normalize_allowlist_path(
+                s,
+            )
+            .is_some()
+        });
+        if !any_valid {
+            let msg = format!(
+                "allowed_paths has no valid relative prefixes (got {raw:?}). \
+                 Use repo-relative paths like `crates/foo/` — absolute paths and `..` are rejected."
+            );
+            return child_run_output(failure_result(&request, &msg), completion_data, None);
+        }
+    }
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);
     if let (Some(bucket_url), Some(upload_method)) = (&ctx.gcs_bucket_url, &ctx.gcs_upload_method) {
         let gcs_meta = SubagentSessionMetadata::from_meta(
@@ -1007,6 +1298,10 @@ pub(crate) async fn run_shell_child(
         xai_grok_paths::AbsPathBuf::new(std::env::current_dir().unwrap_or_default())
             .expect("current_dir should be absolute")
     });
+    // Densify / asset-kit: ensure Blender/Godot paths are visible to confined
+    // children even when the binary lives outside the worktree (Program Files).
+    let mut child_session_env = (*ctx.session_env).clone();
+    inject_densify_engine_env(&mut child_session_env);
     let mut tool_ctx = ToolContext::with_preloaded_env(
         child_cwd_abs,
         Some(gateway.clone()),
@@ -1014,7 +1309,7 @@ pub(crate) async fn run_shell_child(
         ctx.fs.clone(),
         ctx.terminal.clone(),
         ctx.hunk_tracker_handle.clone(),
-        (*ctx.session_env).clone(),
+        child_session_env,
     )
     .with_hunk_tracking_enabled(ctx.hunk_tracking_enabled);
     tool_ctx.subagent_event_tx = Some(ctx.subagent_event_tx.clone());
@@ -1411,7 +1706,13 @@ pub(crate) async fn run_shell_child(
         ctx.subagents_max_depth,
         ctx.ask_user_question_enabled,
         ctx.client_hooks.clone(),
-        None,
+        // Isolation: model sees parent project path; tools rewrite abs paths onto
+        // the worktree via DisplayCwd (prevents parent-tree writes via absolute paths).
+        worktree_path.as_ref().map(|_| {
+            ctx.parent_cwd
+                .to_string_lossy()
+                .into_owned()
+        }),
         std::collections::HashMap::new(),
         Vec::new(),
         xai_grok_agent::prompt::context::PromptAudience::Subagent,
@@ -1521,6 +1822,26 @@ pub(crate) async fn run_shell_child(
         let _ = child_handle
             .cmd_tx
             .send(SessionCommand::SetToolOverrides { overrides });
+    }
+    // Write-time allowed_paths (same prefixes as land/diff meta). Use the
+    // effective list already written to meta (request or resume-inherited).
+    if let Some(paths) = subagent_meta
+        .allowed_paths
+        .as_ref()
+        .map(|p| {
+            p.iter()
+                .filter_map(|s| {
+                    xai_grok_tools::implementations::grok_build::subagent_worktree::normalize_allowlist_path(
+                        s,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|p| !p.is_empty())
+    {
+        let _ = child_handle
+            .cmd_tx
+            .send(SessionCommand::SetAllowedWritePaths { paths });
     }
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
@@ -2259,6 +2580,9 @@ pub(crate) async fn run_shell_child(
                         result.baseline_ref = baseline_for_export.clone();
                         if keep_live {
                             result.worktree_state = Some("preserved".to_string());
+                            // Child finished: drop live marker so keep-N may reclaim
+                            // this tree on later spawns (never while running).
+                            clear_live_worktree_marker(wt_path);
                             tracing::info!(
                                 subagent_id = %request.id,
                                 worktree_path = %wt_path.display(),
@@ -2417,102 +2741,5 @@ pub(crate) async fn run_shell_child(
     child_run_output(result, completion_data, disposed_snapshot_ref)
 }
 
-// ── RC12 soft-preserve keep-N + free-space pre-spawn guard ──────────────────
-
-/// Default max soft-preserved `subagent-*` trees under a project worktree base.
-/// Override with `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` (0 = no prune by count).
-/// Product default is **6** (densify sessions: ~0.5GB each → ~3GB cap).
-fn soft_preserve_keep_n() -> usize {
-    std::env::var("GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(6)
-}
-
-/// Default minimum free bytes before creating a new worktree (2 GiB).
-/// Override with `GROK_SUBAGENT_MIN_FREE_BYTES`.
-fn min_free_bytes_for_worktree() -> u64 {
-    std::env::var("GROK_SUBAGENT_MIN_FREE_BYTES")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(2 * 1024 * 1024 * 1024)
-}
-
-fn prune_soft_preserved_worktrees(base: &std::path::Path) {
-    prune_soft_preserved_worktrees_with_cap(base, soft_preserve_keep_n());
-}
-
-/// Delete oldest `subagent-*` directories under `base` until at most `keep` remain.
-/// Best-effort: never panics; logs on failure.
-fn prune_soft_preserved_worktrees_with_cap(base: &std::path::Path, keep: usize) {
-    if keep == 0 || !base.is_dir() {
-        return;
-    }
-    let mut entries: Vec<(std::time::SystemTime, std::path::PathBuf)> = match std::fs::read_dir(base)
-    {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                    && e.file_name()
-                        .to_string_lossy()
-                        .starts_with("subagent-")
-            })
-            .filter_map(|e| {
-                let meta = e.metadata().ok()?;
-                let mtime = meta.modified().or_else(|_| meta.created()).ok()?;
-                Some((mtime, e.path()))
-            })
-            .collect(),
-        Err(_) => return,
-    };
-    if entries.len() <= keep {
-        return;
-    }
-    // Oldest first.
-    entries.sort_by_key(|(t, _)| *t);
-    let drop_count = entries.len().saturating_sub(keep);
-    for (_, path) in entries.into_iter().take(drop_count) {
-        // Prefer fast-worktree remove (git worktree prune aware); fall back to rm -rf.
-        let _ = xai_fast_worktree::remove_worktree(&path);
-        if path.exists() {
-            let _ = std::fs::remove_dir_all(&path);
-        }
-        tracing::info!(
-            worktree = %path.display(),
-            keep,
-            "pruned soft-preserved subagent worktree (keep-N)"
-        );
-    }
-}
-
-fn ensure_min_free_space_for_worktree(base: &std::path::Path) -> Result<(), String> {
-    let min = min_free_bytes_for_worktree();
-    if min == 0 {
-        return Ok(());
-    }
-    // Ensure parent exists for the free-space query.
-    let probe = if base.exists() {
-        base.to_path_buf()
-    } else {
-        base.parent()
-            .unwrap_or(base)
-            .to_path_buf()
-    };
-    let available = fs2::available_space(&probe).map_err(|e| {
-        format!(
-            "Failed to query free disk space under {}: {e}",
-            probe.display()
-        )
-    })?;
-    if available < min {
-        return Err(format!(
-            "not enough free disk space to create isolated worktree \
-             (available {available} bytes, need at least {min}). \
-             Pruned soft-preserved trees if possible; free disk or set \
-             GROK_SUBAGENT_MIN_FREE_BYTES=0 / GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N=N. \
-             Original symptom: os error 112 / StorageFull."
-        ));
-    }
-    Ok(())
-}
+// Soft-preserve keep-N + free-space helpers live in `super` (mod.rs) so unit
+// tests can exercise live-marker protection without async spawn.

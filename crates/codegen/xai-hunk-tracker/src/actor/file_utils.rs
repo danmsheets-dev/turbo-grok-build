@@ -318,6 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_read_file_bounded_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real.txt");
@@ -326,5 +327,24 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let state = read_file_bounded(&link).await;
         assert!(matches!(state, FileContentState::Symlink));
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_read_file_bounded_symlink_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, "hello").unwrap();
+        let link = dir.path().join("link.txt");
+        // File symlink requires privilege on some Windows hosts; skip if denied.
+        match std::os::windows::fs::symlink_file(&target, &link) {
+            Ok(()) => {
+                let state = read_file_bounded(&link).await;
+                assert!(matches!(state, FileContentState::Symlink));
+            }
+            Err(e) => {
+                eprintln!("skip symlink test (privilege?): {e}");
+            }
+        }
     }
 }

@@ -333,11 +333,14 @@ impl xai_tool_runtime::Tool for TaskTool {
             SubagentValidateTypeOutcome::ValidationUnavailable => {
                 // `custom` (not `invalid_arguments`) so the model doesn't
                 // retry with a different name on transport faults.
+                // Distinguish busy-timeout (retry) from dead channel (ops).
                 return Err(xai_tool_runtime::ToolError::custom(
                     "validation_unavailable",
                     format!(
-                        "Cannot validate subagent type '{}': the subagent coordinator is \
-                         unreachable. Retry shortly or notify ops.",
+                        "Cannot validate subagent type '{}': the subagent coordinator did not \
+                         respond in time (busy under load, or channel closed). Retry the spawn \
+                         shortly; if this persists after cancel storms, restart the session. \
+                         Env override: XAI_VALIDATE_TYPE_TIMEOUT_MS (default 15000).",
                         input.subagent_type
                     ),
                 ));
@@ -424,34 +427,11 @@ impl xai_tool_runtime::Tool for TaskTool {
             cancel_token: child_cancellation,
         };
 
-        // 4. Background mode: fire-and-forget via backend.spawn().
-        // Coordinator stores the result for TaskOutputTool polling.
-        // Both transport errors and coordinator rejections are logged so
-        // late failures (worktree creation, etc.) remain visible.
+        // 4. Background mode: enqueue on the coordinator *before* returning the
+        // id so get_task_output never races not_found (spawn_background sends
+        // first; result wait is detached). Queue/pending are queryable.
         if input.run_in_background {
-            let bg_backend = backend.clone();
-            let bg_id = id.clone();
-            let bg_type = input.subagent_type.clone();
-            tokio::spawn(async move {
-                match bg_backend.backend().spawn(request).await {
-                    Err(e) => {
-                        tracing::error!(
-                            subagent_id = %bg_id,
-                            subagent_type = %bg_type,
-                            "background spawn transport error: {e:#}",
-                        );
-                    }
-                    Ok(r) if !r.success => {
-                        tracing::error!(
-                            subagent_id = %bg_id,
-                            subagent_type = %bg_type,
-                            error = ?r.error,
-                            "background spawn rejected by coordinator",
-                        );
-                    }
-                    Ok(_) => {}
-                }
-            });
+            backend.backend().spawn_background(request).await?;
 
             // `resolve_tool_name` (not a template render): a missing kind
             // renders as empty-`Ok`, so a `Result` fallback never fires.
@@ -1331,8 +1311,11 @@ mod tests {
         .await;
         let msg = result.expect_err("must error").to_string();
         assert!(
-            msg.contains("subagent coordinator is unreachable")
-                && msg.contains("Cannot validate subagent type"),
+            msg.contains("Cannot validate subagent type")
+                && (msg.contains("did not respond in time")
+                    || msg.contains("coordinator is unreachable")
+                    || msg.contains("Retry the spawn")),
+            "expected validation_unavailable messaging, got: {msg}"
         );
         assert!(!msg.contains("Unknown subagent type"));
     }

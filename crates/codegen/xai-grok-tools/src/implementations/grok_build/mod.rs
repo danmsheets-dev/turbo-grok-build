@@ -24,8 +24,10 @@ pub mod list_dir;
 pub mod lsp;
 pub mod monitor;
 pub mod read_file;
+pub mod resolve_path;
 pub mod scheduler;
 pub mod search_replace;
+pub mod workspace_tree;
 pub mod spawn_many;
 pub(crate) mod storage;
 pub mod subagent_worktree;
@@ -55,6 +57,8 @@ pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
+pub use resolve_path::{RESOLVE_PATH_TOOL_NAME, ResolvePathTool};
+pub use workspace_tree::{WORKSPACE_TREE_TOOL_NAME, WorkspaceTreeTool};
 pub use scheduler::create::{
     LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,
     loop_usage_message,

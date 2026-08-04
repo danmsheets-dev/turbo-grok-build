@@ -1,9 +1,13 @@
 //! `discard_subagent` — drop a live subagent worktree; keep snapshot ref by default.
+//!
+//! RC13 Wave A: discard always leaves meta in a **terminal** disposition:
+//! `land_status=discarded`, `worktree_state=cleaned`, `status` never left as
+//! `running`, and `snapshot_dropped` only when the ref was actually deleted.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{resolve_subagent_work, update_meta_land_status};
+use super::{resolve_subagent_work, update_meta_discarded};
 use crate::implementations::grok_build::task::TaskTool;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -64,9 +68,11 @@ impl crate::types::tool_metadata::ToolMetadata for DiscardSubagentTool {
 
 Resolves `subagents/<subagent_id>/meta.json` and:
 1. Removes the live worktree directory when still present (best-effort)
-2. Marks `land_status=discarded` and clears the live path in meta
+2. Always marks terminal meta: `land_status=discarded`, `worktree_state=cleaned`,
+   clears `worktree_path`, and never leaves `status=running`
 3. Keeps `snapshot_ref` / `changes.patch` by default so recovery remains possible
-4. Optionally drops the snapshot ref when `drop_snapshot=true`
+4. Optionally drops the snapshot ref when `drop_snapshot=true` (`snapshot_dropped`
+   is true only when the ref was actually deleted)
 
 Use after deciding not to `land_subagent`. Isolation is preserved until land;
 discard only cleans local disk / optional refs."#
@@ -127,6 +133,10 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
 
         let mut worktree_removed = false;
         if let Some(ref wt) = work.live_worktree {
+            // Clear live marker first so concurrent keep-N prune cannot race a
+            // half-deleted RUNNING tree (RC13 Wave A).
+            let marker = wt.join(".grok-subagent-live");
+            let _ = tokio::fs::remove_file(&marker).await;
             match tokio::fs::remove_dir_all(wt).await {
                 Ok(()) => {
                     worktree_removed = true;
@@ -136,6 +146,10 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
                         "discard_subagent removed live worktree"
                     );
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already gone — still terminal-clean meta below.
+                    worktree_removed = true;
+                }
                 Err(e) => {
                     return Err(xai_tool_runtime::ToolError::custom(
                         "worktree_remove_failed",
@@ -143,8 +157,12 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
                     ));
                 }
             }
+        } else {
+            // No live path claimed / on disk — discard still terminal-cleans meta.
+            worktree_removed = false;
         }
 
+        // snapshot_dropped is honest: true only when we actually deleted a ref.
         let mut snapshot_dropped = false;
         let snapshot_ref = work.snapshot_ref.clone();
         if drop_snapshot {
@@ -154,6 +172,7 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
                         snapshot_dropped = true;
                     }
                     Err(e) => {
+                        // Keep snapshot_dropped=false — do not claim drop on failure.
                         tracing::warn!(
                             subagent_id = %work.subagent_id,
                             snapshot_ref = %snap,
@@ -163,41 +182,25 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
                     }
                 }
             }
+            // drop_snapshot=true but no snapshot_ref → snapshot_dropped stays false.
         }
 
-        // Best-effort meta update: land_status + clear live path + optional state.
-        if let Ok(raw) = tokio::fs::read_to_string(&work.meta_path).await
-            && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw)
-            && let Some(obj) = value.as_object_mut()
-        {
-            obj.insert(
-                "land_status".to_owned(),
-                serde_json::Value::String("discarded".to_owned()),
-            );
-            if worktree_removed {
-                obj.insert("worktree_path".to_owned(), serde_json::Value::Null);
-                obj.insert(
-                    "worktree_state".to_owned(),
-                    serde_json::Value::String("cleaned".to_owned()),
-                );
-            }
-            if snapshot_dropped {
-                obj.insert("snapshot_ref".to_owned(), serde_json::Value::Null);
-            }
-            if let Ok(pretty) = serde_json::to_string_pretty(&value) {
-                let _ = tokio::fs::write(&work.meta_path, pretty).await;
-            }
-        } else {
-            update_meta_land_status(&work.meta_path, "discarded").await;
-        }
+        // RC13 Wave A: always terminal meta — land_status=discarded,
+        // worktree_state=cleaned, status not left running, clear worktree_path.
+        update_meta_discarded(&work.meta_path, snapshot_dropped).await;
 
         let mut message = format!(
-            "Discarded subagent `{}`: worktree_removed={worktree_removed}, snapshot_dropped={snapshot_dropped}.",
+            "Discarded subagent `{}`: worktree_removed={worktree_removed}, snapshot_dropped={snapshot_dropped}, \
+             land_status=discarded, worktree_state=cleaned.",
             work.subagent_id
         );
         if let Some(ref snap) = snapshot_ref {
             if snapshot_dropped {
                 message.push_str(&format!(" Snapshot ref `{snap}` deleted."));
+            } else if drop_snapshot {
+                message.push_str(&format!(
+                    " Snapshot ref `{snap}` retained (drop failed or ref already absent)."
+                ));
             } else {
                 message.push_str(&format!(
                     " Snapshot ref `{snap}` retained (pass drop_snapshot=true to delete)."
@@ -220,5 +223,63 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
             snapshot_dropped,
             message,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::implementations::grok_build::subagent_worktree::update_meta_discarded;
+
+    #[tokio::test]
+    async fn update_meta_discarded_is_always_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta_path = dir.path().join("meta.json");
+        let initial = serde_json::json!({
+            "subagent_id": "s1",
+            "status": "running",
+            "worktree_path": "/tmp/subagent-s1",
+            "worktree_state": "live",
+            "land_status": "pending",
+            "snapshot_ref": "refs/grok/subagents/s1",
+        });
+        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&initial).unwrap())
+            .await
+            .unwrap();
+
+        update_meta_discarded(&meta_path, false).await;
+
+        let raw = tokio::fs::read_to_string(&meta_path).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["land_status"], "discarded");
+        assert_eq!(v["worktree_state"], "cleaned");
+        assert_eq!(v["status"], "cancelled"); // was running
+        assert!(v["worktree_path"].is_null());
+        // snapshot not dropped → ref retained
+        assert_eq!(v["snapshot_ref"], "refs/grok/subagents/s1");
+    }
+
+    #[tokio::test]
+    async fn update_meta_discarded_clears_snapshot_when_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta_path = dir.path().join("meta.json");
+        let initial = serde_json::json!({
+            "subagent_id": "s2",
+            "status": "completed",
+            "worktree_state": "preserved",
+            "land_status": "pending",
+            "snapshot_ref": "refs/grok/subagents/s2",
+        });
+        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&initial).unwrap())
+            .await
+            .unwrap();
+
+        update_meta_discarded(&meta_path, true).await;
+
+        let raw = tokio::fs::read_to_string(&meta_path).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["land_status"], "discarded");
+        assert_eq!(v["worktree_state"], "cleaned");
+        assert_eq!(v["status"], "completed"); // not running — leave terminal status
+        assert!(v["snapshot_ref"].is_null());
     }
 }

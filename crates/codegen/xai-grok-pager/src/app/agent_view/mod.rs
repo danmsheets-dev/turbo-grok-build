@@ -749,7 +749,7 @@ pub struct AgentView {
     pub tip_typing_dismissed: bool,
     pub todo: TodoPane,
     pub tasks: TasksPane,
-    /// Game Mode office view (Shift+G). Spectator room; composer still routes
+    /// Game Mode office view (Ctrl+G). Spectator room; composer still routes
     /// to the Supervisor (main agent).
     pub game_mode: crate::views::game_mode::GameModeState,
     pub catalog: SubagentCatalogPane,
@@ -1090,9 +1090,9 @@ pub struct AgentView {
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
     /// Still-running watcher cue on the turn-status row (click opens the
-    /// tasks pane, same as `Ctrl+G`).
+    /// tasks pane, same as `Ctrl+Shift+G`).
     pub hit_watching_cue: HitArea,
-    /// One-time Ctrl+G toast already fired for a watching-cue click.
+    /// One-time Ctrl+Shift+G toast already fired for a watching-cue click.
     pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click == `/announcements hide`).
     pub hit_announcement_hide: HitArea,

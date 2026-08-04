@@ -356,13 +356,19 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (cwd, fs, notification_handle);
+        let (cwd, fs, notification_handle, confine_root);
         {
             cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
             let res = resources.lock().await;
             fs = res.require::<FileSystem>()?.0.clone();
             notification_handle = res.require::<NotificationHandle>()?.0.clone();
+            confine_root = res
+                .get::<crate::types::resources::ConfineRoot>()
+                .map(|c| c.0.clone());
         }
+        // RC13 Wave A: fail closed on tombstoned CWD / confine root.
+        crate::types::resources::enforce_write_path(&cwd, confine_root.as_deref())
+            .map_err(|e| e.into_tool_error())?;
         let tool_call_id = ctx.call_id.as_str().to_owned();
 
         // ── Phase 1: Parse ───────────────────────────────────────

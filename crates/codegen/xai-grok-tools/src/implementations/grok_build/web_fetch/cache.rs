@@ -27,10 +27,13 @@ impl FetchCache {
         }
     }
 
-    pub(crate) fn get(&self, url: &str) -> Option<&WebFetchOutput> {
+    /// Return a cached page if present and fresh. Purges expired entries
+    /// opportunistically so long sessions do not accumulate dead keys.
+    pub(crate) fn get(&mut self, url: &str) -> Option<WebFetchOutput> {
+        self.purge_expired();
         self.entries.get(url).and_then(|entry| {
             if entry.inserted.elapsed() < self.ttl {
-                Some(&entry.output)
+                Some(entry.output.clone())
             } else {
                 None
             }
@@ -42,7 +45,11 @@ impl FetchCache {
         if was_truncated {
             return;
         }
-        if self.entries.len() >= self.max_entries {
+        self.purge_expired();
+        if self.max_entries == 0 {
+            return;
+        }
+        while self.entries.len() >= self.max_entries {
             // Evict oldest entry.
             let oldest_key = self
                 .entries
@@ -51,6 +58,8 @@ impl FetchCache {
                 .map(|(k, _)| k.clone());
             if let Some(key) = oldest_key {
                 self.entries.remove(&key);
+            } else {
+                break;
             }
         }
         self.entries.insert(
@@ -60,6 +69,17 @@ impl FetchCache {
                 inserted: Instant::now(),
             },
         );
+    }
+
+    fn purge_expired(&mut self) {
+        let ttl = self.ttl;
+        self.entries
+            .retain(|_, entry| entry.inserted.elapsed() < ttl);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -90,5 +110,19 @@ mod tests {
 
         cache.insert_text(url.to_string(), output("fully inline"), false);
         assert!(cache.get(url).is_some());
+    }
+
+    #[test]
+    fn purge_expired_removes_stale_entries() {
+        let mut cache = FetchCache::new(Duration::from_millis(1), 10);
+        cache.insert_text(
+            "https://example.com/a".into(),
+            output("a"),
+            false,
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        // get() purges expired entries even for a different key.
+        assert!(cache.get("https://example.com/missing").is_none());
+        assert_eq!(cache.len(), 0);
     }
 }

@@ -664,7 +664,7 @@ pub fn current_value_for(
         "screen_mode" => Some(SettingValue::Enum(canonical_screen_mode(
             ui.screen_mode.as_deref(),
         ))),
-        // SHELL — canonicalized from `[ui].language`; None → "auto".
+        // SHELL — English-only (canonical always "en").
         "language" => Some(SettingValue::Enum(crate::i18n::canonical_language(
             ui.language.as_deref(),
         ))),
@@ -1146,18 +1146,14 @@ mod tests {
                     );
                     assert_eq!(*default, "fullscreen");
                 }
-                // language: Option<String>; None → "auto" (follow OS locale).
+                // language: English-only product default.
                 ("language", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(
-                        ui.language, None,
-                        "test assumes UiConfig::default().language is None",
-                    );
                     assert_eq!(
                         *default,
                         crate::i18n::canonical_language(ui.language.as_deref()),
-                        "language default drifts from UiConfig::default()",
+                        "language default drifts from canonical English",
                     );
-                    assert_eq!(*default, "auto");
+                    assert_eq!(*default, "en");
                 }
                 // render_mermaid: Option<String>; None → "auto".
                 ("render_mermaid", SettingKind::Enum { default, .. }) => {

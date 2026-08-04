@@ -37,9 +37,21 @@ pub fn load_office_background() -> Result<RgbaImage, String> {
 ///
 /// Terminal halfblock paint maps `cell_w × cell_h*2` → paint. We compose at
 /// `cell_w*SCALE × cell_h*2*SCALE` so sprites keep crisp SNES detail, then
-/// `paint_halfblock_rgba` box-filters down.
+/// halfblock paints from a terminal-res downsample.
 pub fn scale_bg_to_cells(full: &RgbaImage, cell_w: u16, cell_h: u16) -> RgbaImage {
-    let scale = super::sprites_pixel::pixel_scale().max(1);
+    let scale = super::sprites_pixel::effective_pixel_scale(cell_w, cell_h).max(1);
+    scale_bg_to_cells_with_scale(full, cell_w, cell_h, scale)
+}
+
+/// Same as [`scale_bg_to_cells`] with an explicit scale (must match
+/// [`super::sprites_pixel::effective_pixel_scale`] used by the fingerprint).
+pub fn scale_bg_to_cells_with_scale(
+    full: &RgbaImage,
+    cell_w: u16,
+    cell_h: u16,
+    scale: u32,
+) -> RgbaImage {
+    let scale = scale.max(1);
     let tw = u32::from(cell_w).saturating_mul(scale).max(1);
     let th = u32::from(cell_h)
         .saturating_mul(2)
@@ -65,30 +77,34 @@ fn desk_scale(w: u32) -> u32 {
     ((w as f32 * 0.075) / base).max(1.0).round().min(5.0) as u32
 }
 
-// Thread-local scaled sprite cache — avoid rebuild+scale every paint (~8–10 Hz).
+// Thread-local scaled sprite cache — Arc so blit does not clone every frame.
+//
+// PERF INVARIANT: compose_cell_frame must stay cheap on tick-only frames.
+// Keys are stable per (kind, skin, frame, scale); plant/coffee are static.
+use std::sync::Arc;
 thread_local! {
-    static SPRITE_CACHE: std::cell::RefCell<std::collections::HashMap<u64, RgbaImage>> =
+    static SPRITE_CACHE: std::cell::RefCell<std::collections::HashMap<u64, Arc<RgbaImage>>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-fn cache_get_or_insert(key: u64, build: impl FnOnce() -> RgbaImage) -> RgbaImage {
+fn cache_get_or_insert(key: u64, build: impl FnOnce() -> RgbaImage) -> Arc<RgbaImage> {
     SPRITE_CACHE.with(|c| {
         let mut map = c.borrow_mut();
         // Cap cache so palette/scale churn cannot grow unbounded.
         if map.len() > 128 {
             map.clear();
         }
-        map.entry(key).or_insert_with(build).clone()
+        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(build())))
     })
 }
 
-fn cached_empty_desk(sc: u32) -> RgbaImage {
+fn cached_empty_desk(sc: u32) -> Arc<RgbaImage> {
     cache_get_or_insert(0xE0u64 << 56 | sc as u64, || {
         scale_nn(&sprite_empty_desk(), sc.max(1))
     })
 }
 
-fn cached_dev_at_desk(skin: u8, typing: bool, frame: u8, sc: u32) -> RgbaImage {
+fn cached_dev_at_desk(skin: u8, typing: bool, frame: u8, sc: u32) -> Arc<RgbaImage> {
     let key = (0xD1u64 << 56)
         | ((skin as u64) << 40)
         | ((typing as u64) << 32)
@@ -100,7 +116,7 @@ fn cached_dev_at_desk(skin: u8, typing: bool, frame: u8, sc: u32) -> RgbaImage {
     })
 }
 
-fn cached_walk(skin: u8, frame: u8, with_packet: bool, sc: u32) -> RgbaImage {
+fn cached_walk(skin: u8, frame: u8, with_packet: bool, sc: u32) -> Arc<RgbaImage> {
     let key = (0xD2u64 << 56)
         | ((skin as u64) << 40)
         | ((with_packet as u64) << 32)
@@ -115,10 +131,22 @@ fn cached_walk(skin: u8, frame: u8, with_packet: bool, sc: u32) -> RgbaImage {
     })
 }
 
-fn cached_supervisor(phase: u8, frame: u8, sc: u32) -> RgbaImage {
+fn cached_supervisor(phase: u8, frame: u8, sc: u32) -> Arc<RgbaImage> {
     let key = (0xA0u64 << 56) | ((phase as u64) << 32) | ((frame as u64) << 24) | sc as u64;
     cache_get_or_insert(key, || {
         scale_nn(&sprite_supervisor(phase, frame), sc.max(1))
+    })
+}
+
+fn cached_plant(sc: u32) -> Arc<RgbaImage> {
+    cache_get_or_insert(0xF1u64 << 56 | sc as u64, || {
+        scale_nn(&sprite_plant(), sc.max(1))
+    })
+}
+
+fn cached_coffee(sc: u32) -> Arc<RgbaImage> {
+    cache_get_or_insert(0xC0u64 << 56 | sc as u64, || {
+        scale_nn(&sprite_coffee(), sc.max(1))
     })
 }
 
@@ -167,50 +195,8 @@ fn paint_boss_rug(canvas: &mut RgbaImage, cx: i32, cy: i32, cover_w: i32, cover_
     }
 }
 
-/// Gold focus ring for keyboard/mouse hover desk (SNES selector).
-fn paint_focus_ring(canvas: &mut RgbaImage, cx: i32, cy: i32, sw: i32, sh: i32, pulse: u8) {
-    let gold = if pulse % 2 == 0 {
-        [255, 220, 96, 255]
-    } else {
-        [255, 200, 48, 255]
-    };
-    let x0 = cx - sw / 2 - 2;
-    let y0 = cy - sh / 2 - 2;
-    let ww = sw + 4;
-    let hh = sh + 4;
-    // Corner brackets only — less noisy than full box.
-    for (dx, dy) in [
-        (0, 0),
-        (1, 0),
-        (2, 0),
-        (0, 1),
-        (0, 2),
-        (ww - 1, 0),
-        (ww - 2, 0),
-        (ww - 3, 0),
-        (ww - 1, 1),
-        (ww - 1, 2),
-        (0, hh - 1),
-        (1, hh - 1),
-        (2, hh - 1),
-        (0, hh - 2),
-        (0, hh - 3),
-        (ww - 1, hh - 1),
-        (ww - 2, hh - 1),
-        (ww - 3, hh - 1),
-        (ww - 1, hh - 2),
-        (ww - 1, hh - 3),
-    ] {
-        let x = x0 + dx;
-        let y = y0 + dy;
-        if x >= 0 && y >= 0 {
-            let (cw, ch) = canvas.dimensions();
-            if (x as u32) < cw && (y as u32) < ch {
-                canvas.put_pixel(x as u32, y as u32, image::Rgba(gold));
-            }
-        }
-    }
-}
+// Focus ring is painted as a ratatui cell overlay in `render.rs` so hover-only
+// frames never force a full pixel recompose (see GameModeState::visual_fingerprint).
 
 /// Celebrate sparkles / fail flash over a seated developer.
 fn paint_fx_celebrate(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
@@ -264,27 +250,60 @@ fn paint_fx_fail(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
     }
 }
 
+/// Composite sprites onto a clone of the scaled office background.
+///
+/// Prefer [`compose_cell_frame_into`] with a reused canvas to avoid allocating
+/// a full-frame clone on every compose miss.
+///
+/// PERF INVARIANTS:
+/// - Caller must skip this when `visual_fingerprint` is unchanged.
+/// - Does **not** paint hover focus ring (buffer overlay in `render.rs`).
+/// - Does **not** paint status strip / hover popup (buffer overlays).
+/// - Ambient plant/coffee and character sprites come from the scaled cache.
+/// - Idle/Waiting supervisor uses frame 0 so pure-idle ticks can freeze.
 pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u64) -> RgbaImage {
-    let mut canvas = bg_scaled.clone();
+    let mut canvas = RgbaImage::new(bg_scaled.width(), bg_scaled.height());
+    compose_cell_frame_into(&mut canvas, bg_scaled, state, tick);
+    canvas
+}
+
+/// Composite into `canvas`, reusing its allocation when dimensions match.
+///
+/// Resets from `bg_scaled` via `copy_from` (no full clone when sizes match).
+pub fn compose_cell_frame_into(
+    canvas: &mut RgbaImage,
+    bg_scaled: &RgbaImage,
+    state: &GameModeState,
+    tick: u64,
+) {
+    let (bw, bh) = bg_scaled.dimensions();
+    if canvas.dimensions() != (bw, bh) {
+        *canvas = RgbaImage::new(bw, bh);
+    }
+    // copy_from is O(pixels) but reuses the destination allocation across misses.
+    let _ = image::imageops::replace(canvas, bg_scaled, 0, 0);
     let (w, h) = canvas.dimensions();
     let frame = ((tick / 4) % 4) as u8;
     let sc = desk_scale(w);
     let walk_sc = ((w as f32 * 0.05) / 14.0).max(1.0).round().min(5.0) as u32;
+    let prop_sc = sc.max(1).min(3);
 
-    // Ambient props (plants / coffee) near room edges — cheap static sprites.
+    // Ambient props (plants / coffee) near room edges — cached static sprites.
     {
-        let plant = scale_nn(&sprite_plant(), sc.max(1).min(3));
-        let coffee = scale_nn(&sprite_coffee(), sc.max(1).min(3));
-        blit(&mut canvas, &plant, (w as f32 * 0.06) as i32, (h as f32 * 0.62) as i32);
+        let plant = cached_plant(prop_sc);
+        let coffee = cached_coffee(prop_sc);
         blit(
-            &mut canvas,
-            &plant,
+            canvas,
+            plant.as_ref(), (w as f32 * 0.06) as i32, (h as f32 * 0.62) as i32);
+        blit(
+            canvas,
+            plant.as_ref(),
             (w as f32 * 0.90) as i32,
             (h as f32 * 0.58) as i32,
         );
         blit(
-            &mut canvas,
-            &coffee,
+            canvas,
+            coffee.as_ref(),
             (w as f32 * 0.88) as i32,
             (h as f32 * 0.40) as i32,
         );
@@ -298,43 +317,51 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
         let cover_w = (w as f32 * 0.13) as i32;
         let cover_h = (h as f32 * 0.14) as i32;
         stamp_floor_patch_sampled(
-            &mut canvas,
+            canvas,
             Some(bg_scaled),
             cx - cover_w / 2,
             cy - cover_h / 2,
             cover_w,
             cover_h,
         );
-        paint_boss_rug(&mut canvas, cx, cy, cover_w, cover_h);
+        paint_boss_rug(canvas, cx, cy, cover_w, cover_h);
         let phase = match state.supervisor {
             SupervisorPhase::Working => 1u8,
             SupervisorPhase::Reviewing => 2,
             SupervisorPhase::Idle | SupervisorPhase::Waiting => 0,
         };
+        // Freeze idle/waiting pose so pure tick animation can skip recompose.
+        let sup_frame = if matches!(
+            state.supervisor,
+            SupervisorPhase::Idle | SupervisorPhase::Waiting
+        ) {
+            0
+        } else {
+            frame
+        };
         let ssc = ((w as f32 * 0.072) / 26.0).max(1.0).round().min(5.0) as u32;
-        let spr = cached_supervisor(phase, frame, ssc.max(1));
+        let spr = cached_supervisor(phase, sup_frame, ssc.max(1));
         blit(
-            &mut canvas,
-            &spr,
+            canvas,
+            spr.as_ref(),
             cx - spr.width() as i32 / 2,
             cy - spr.height() as i32 / 2,
         );
     }
 
-    // Six desks
+    // Six desks — no hover ring here (see render::paint_focus_ring_overlay).
     for i in 0..6 {
         let (ax, ay) = DESK_ANCHORS[i];
         let cx = (ax * w as f32) as i32;
         let cy = (ay * h as f32) as i32;
         let desk = &state.desks[i];
-        let focused = state.hover_desk == Some(i);
 
         if desk.is_empty() {
-            clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+            clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
             let spr = cached_empty_desk(sc.max(1));
             blit(
-                &mut canvas,
-                &spr,
+            canvas,
+            spr.as_ref(),
                 cx - spr.width() as i32 / 2,
                 cy - spr.height() as i32 / 2,
             );
@@ -343,11 +370,11 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
 
         match desk.phase {
             ActorPhase::WalkToBoss | ActorPhase::ExitDoor | ActorPhase::Handoff => {
-                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 let empty = cached_empty_desk(sc.max(1));
                 blit(
-                    &mut canvas,
-                    &empty,
+            canvas,
+            empty.as_ref(),
                     cx - empty.width() as i32 / 2,
                     cy - empty.height() as i32 / 2,
                 );
@@ -366,64 +393,77 @@ pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u6
                 let x = cx as f32 + (tx * w as f32 - cx as f32) * t;
                 let y = cy as f32 + (ty * h as f32 - cy as f32) * t;
                 blit(
-                    &mut canvas,
-                    &walker,
+            canvas,
+            walker.as_ref(),
                     x as i32 - walker.width() as i32 / 2,
                     y as i32 - walker.height() as i32 / 2,
                 );
             }
             ActorPhase::Celebrate => {
-                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 let spr = cached_dev_at_desk(desk.skin, false, frame, sc.max(1));
                 blit(
-                    &mut canvas,
-                    &spr,
+            canvas,
+            spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
-                paint_fx_celebrate(&mut canvas, cx, cy, frame);
+                paint_fx_celebrate(canvas, cx, cy, frame);
             }
             ActorPhase::FailBeat => {
-                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 let spr = cached_dev_at_desk(desk.skin, false, 0, sc.max(1));
                 blit(
-                    &mut canvas,
-                    &spr,
+            canvas,
+            spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
-                paint_fx_fail(&mut canvas, cx, cy, frame);
+                paint_fx_fail(canvas, cx, cy, frame);
             }
-            ActorPhase::AtDeskWorking | ActorPhase::SpawnWalk => {
-                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+            ActorPhase::SpawnWalk => {
+                // Slide from door (left) toward desk using anim_t (matches Unicode path).
+                clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
+                let empty = cached_empty_desk(sc.max(1));
+                blit(
+                    canvas,
+                    empty.as_ref(),
+                    cx - empty.width() as i32 / 2,
+                    cy - empty.height() as i32 / 2,
+                );
+                let walker = cached_walk(desk.skin, frame, false, walk_sc.max(1));
+                let t = desk.anim_t.clamp(0.0, 1.0);
+                let door_x = (w as f32 * 0.06) as i32;
+                let x = door_x as f32 + (cx as f32 - door_x as f32) * t;
+                blit(
+                    canvas,
+                    walker.as_ref(),
+                    x as i32 - walker.width() as i32 / 2,
+                    cy - walker.height() as i32 / 2,
+                );
+            }
+            ActorPhase::AtDeskWorking => {
+                clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 let spr = cached_dev_at_desk(desk.skin, true, frame, sc.max(1));
                 blit(
-                    &mut canvas,
-                    &spr,
+                    canvas,
+                    spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
             }
             ActorPhase::AtDeskThinking => {
-                clear_desk_area(&mut canvas, bg_scaled, cx, cy, w, h);
+                clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 let spr = cached_dev_at_desk(desk.skin, false, 0, sc.max(1));
                 blit(
-                    &mut canvas,
-                    &spr,
+                    canvas,
+                    spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
             }
         }
-
-        if focused {
-            let ring_w = (w as f32 * 0.12) as i32;
-            let ring_h = (h as f32 * 0.14) as i32;
-            paint_focus_ring(&mut canvas, cx, cy, ring_w, ring_h, frame);
-        }
     }
-
-    canvas
 }
 
 #[cfg(test)]
@@ -435,7 +475,7 @@ mod tests {
     fn load_and_scale_is_high_res() {
         let full = load_office_background().expect("bg");
         let scaled = scale_bg_to_cells(&full, 80, 24);
-        let s = crate::views::game_mode::sprites_pixel::pixel_scale().max(1);
+        let s = crate::views::game_mode::sprites_pixel::effective_pixel_scale(80, 24).max(1);
         assert_eq!(scaled.width(), 80 * s);
         assert_eq!(scaled.height(), 48 * s);
     }

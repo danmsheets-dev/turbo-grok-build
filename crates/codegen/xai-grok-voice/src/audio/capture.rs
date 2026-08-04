@@ -523,6 +523,7 @@ fn emit_header(line: &str) {
 
 /// What the helper child was asked to do (parsed from its argv).
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)] // DeviceInfo used on some platforms; Capture always constructed
 enum ChildMode {
     Capture { rate: u32 },
     DeviceInfo,

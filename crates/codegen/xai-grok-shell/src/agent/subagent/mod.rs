@@ -923,12 +923,12 @@ fn resolve_model_override_to_config(
     model_id: &str,
     ctx: &SubagentSpawnContext,
 ) -> Option<(xai_grok_sampler::SamplerConfig, acp::ModelId)> {
-    let entry = crate::agent::config::find_model_by_id(&ctx.available_models, model_id).cloned()?;
-    let canonical_model_id = if ctx.available_models.contains_key(model_id) {
-        acp::ModelId::new(model_id)
-    } else {
-        acp::ModelId::new(entry.info().model.clone())
-    };
+    // Accept provider-prefixed aliases (`amazon-bedrock/…`) that agents copy
+    // from the long platform list; canonicalize to the catalog key.
+    let (canonical_key, entry) =
+        crate::agent::models::find_task_model_entry(&ctx.available_models, model_id)?;
+    let entry = entry.clone();
+    let canonical_model_id = acp::ModelId::new(canonical_key);
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
     let has_session_key = session_key.is_some();
     let mut credentials = resolve_credentials(&entry, session_key);
@@ -2284,6 +2284,252 @@ pub(crate) fn isolation_shared_fallback_allowed() -> bool {
         Err(_) => false,
     }
 }
+
+/// Outcome of resuming a source that may lack a worktree while isolation is
+/// requested (deep-audit C1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeIsolationGate {
+    /// Proceed: isolation not requested, or source has a worktree.
+    Proceed,
+    /// Opt-in shared fallback: set isolation_fallback, continue without worktree.
+    SharedFallback,
+    /// Fail closed: refuse spawn.
+    Refuse,
+}
+
+/// Pure gate for resume + isolation=worktree when the source has no worktree.
+///
+/// - isolation not requested → Proceed (shared is fine)
+/// - source had a worktree → Proceed (caller rehydrates/reuses)
+/// - no worktree + allow_shared_fallback → SharedFallback
+/// - no worktree + default → Refuse (fail closed)
+pub(crate) fn resume_isolation_gate(
+    isolation_requested: bool,
+    source_has_worktree: bool,
+    allow_shared_fallback: bool,
+) -> ResumeIsolationGate {
+    if !isolation_requested || source_has_worktree {
+        ResumeIsolationGate::Proceed
+    } else if allow_shared_fallback {
+        ResumeIsolationGate::SharedFallback
+    } else {
+        ResumeIsolationGate::Refuse
+    }
+}
+
+// ── Soft-preserve keep-N + free-space pre-spawn guard (P0 densify disk) ─────
+
+/// Marker file inside a live (running) subagent worktree. Prune must never
+/// delete a directory that still has a fresh marker — that was the densify
+/// tombstone path (OS error 267 while the child was still running).
+pub(crate) const LIVE_WORKTREE_MARKER: &str = ".grok-subagent-live";
+
+/// Live markers older than this are treated as stale (crashed child) and may
+/// be pruned. Override with `GROK_SUBAGENT_LIVE_MARKER_MAX_SECS`.
+fn live_marker_max_age() -> std::time::Duration {
+    let secs = std::env::var("GROK_SUBAGENT_LIVE_MARKER_MAX_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(12 * 60 * 60); // 12h
+    std::time::Duration::from_secs(secs)
+}
+
+/// Default max soft-preserved `subagent-*` trees under a project worktree base.
+/// Override with `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` (0 = no prune by count).
+/// Product default is **6** (densify sessions: large trees → bounded disk).
+pub(crate) fn soft_preserve_keep_n() -> usize {
+    std::env::var("GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(6)
+}
+
+/// Default minimum free bytes before creating a new worktree (2 GiB).
+/// Override with `GROK_SUBAGENT_MIN_FREE_BYTES` (0 = disable guard).
+pub(crate) fn min_free_bytes_for_worktree() -> u64 {
+    std::env::var("GROK_SUBAGENT_MIN_FREE_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(2 * 1024 * 1024 * 1024)
+}
+
+/// Mark a worktree as owned by a running child. Best-effort.
+/// True when a just-created subagent worktree has a real checkout (not an empty
+/// directory). Empty trees cause shell CWD failures while DisplayCwd-remapped
+/// file tools still show parent content.
+pub(crate) fn validate_subagent_worktree_materialized(worktree: &Path) -> Result<(), String> {
+    if !worktree.is_dir() {
+        return Err("path is not a directory".into());
+    }
+    // Linked worktrees have `.git` as a file; normal trees as a directory.
+    let git_marker = worktree.join(".git");
+    if !git_marker.exists() {
+        return Err("missing .git (checkout not registered)".into());
+    }
+    // At least one non-marker entry (source tree files or HEAD-linked content).
+    let mut saw_content = false;
+    let rd = std::fs::read_dir(worktree).map_err(|e| format!("read_dir: {e}"))?;
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name == ".git" || name == LIVE_WORKTREE_MARKER || name.starts_with('.') {
+            // Peek into tracked tree: require something besides dotfiles.
+            continue;
+        }
+        saw_content = true;
+        break;
+    }
+    if !saw_content {
+        // Fallback: `git -C worktree rev-parse --verify HEAD` and ls-tree nonempty.
+        let out = std::process::Command::new("git")
+            .args(["-C", &worktree.to_string_lossy(), "ls-tree", "-r", "--name-only", "HEAD"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                // Content exists in git index even if sparse/empty working tree —
+                // still require a non-empty working tree for shell tools.
+                return Err(
+                    "working tree has no checked-out files (empty checkout / sparse failure)"
+                        .into(),
+                );
+            }
+            Ok(_) => {
+                return Err("git ls-tree HEAD empty or failed (empty worktree)".into());
+            }
+            Err(e) => {
+                return Err(format!("cannot verify worktree content: {e}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_live_worktree_marker(worktree: &Path) {
+    let marker = worktree.join(LIVE_WORKTREE_MARKER);
+    if let Err(e) = std::fs::write(
+        &marker,
+        format!(
+            "pid={} ts={}\n",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ),
+    ) {
+        tracing::debug!(
+            worktree = %worktree.display(),
+            error = %e,
+            "failed to write live worktree marker"
+        );
+    }
+}
+
+/// Clear the live marker so soft-preserved trees become eligible for keep-N prune.
+pub(crate) fn clear_live_worktree_marker(worktree: &Path) {
+    let marker = worktree.join(LIVE_WORKTREE_MARKER);
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// True when the tree still has a non-stale live marker (do not prune).
+pub(crate) fn is_live_worktree_protected(worktree: &Path) -> bool {
+    let marker = worktree.join(LIVE_WORKTREE_MARKER);
+    let Ok(meta) = std::fs::metadata(&marker) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        // Unreadable mtime — treat as protected to avoid killing a live run.
+        return true;
+    };
+    let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+        return true;
+    };
+    age <= live_marker_max_age()
+}
+
+pub(crate) fn prune_soft_preserved_worktrees(base: &Path) {
+    prune_soft_preserved_worktrees_with_cap(base, soft_preserve_keep_n());
+}
+
+/// Delete oldest **non-live** `subagent-*` directories under `base` until at most
+/// `keep` remain. Never deletes a tree with a fresh `.grok-subagent-live` marker.
+/// Best-effort: never panics; logs on failure.
+pub(crate) fn prune_soft_preserved_worktrees_with_cap(base: &Path, keep: usize) {
+    if keep == 0 || !base.is_dir() {
+        return;
+    }
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = match std::fs::read_dir(base) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && e.file_name().to_string_lossy().starts_with("subagent-")
+            })
+            .filter_map(|e| {
+                let path = e.path();
+                // Never prune a still-running child's worktree.
+                if is_live_worktree_protected(&path) {
+                    return None;
+                }
+                let meta = e.metadata().ok()?;
+                let mtime = meta.modified().or_else(|_| meta.created()).ok()?;
+                Some((mtime, path))
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    if entries.len() <= keep {
+        return;
+    }
+    // Oldest first among prunable (non-live) trees.
+    entries.sort_by_key(|(t, _)| *t);
+    let drop_count = entries.len().saturating_sub(keep);
+    for (_, path) in entries.into_iter().take(drop_count) {
+        // Re-check live marker (race with concurrent spawn).
+        if is_live_worktree_protected(&path) {
+            continue;
+        }
+        let _ = xai_fast_worktree::remove_worktree(&path);
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        tracing::info!(
+            worktree = %path.display(),
+            keep,
+            "pruned soft-preserved subagent worktree (keep-N)"
+        );
+    }
+}
+
+/// Fail closed when free space under `base` is below the configured minimum.
+pub(crate) fn ensure_min_free_space_for_worktree(base: &Path) -> Result<(), String> {
+    let min = min_free_bytes_for_worktree();
+    if min == 0 {
+        return Ok(());
+    }
+    let probe = if base.exists() {
+        base.to_path_buf()
+    } else {
+        base.parent().unwrap_or(base).to_path_buf()
+    };
+    let available = fs2::available_space(&probe).map_err(|e| {
+        format!(
+            "Failed to query free disk space under {}: {e}",
+            probe.display()
+        )
+    })?;
+    if available < min {
+        return Err(format!(
+            "not enough free disk space to create isolated worktree \
+             (available {available} bytes, need at least {min}). \
+             Pruned soft-preserved trees if possible; free disk or set \
+             GROK_SUBAGENT_MIN_FREE_BYTES=0 / GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N=N. \
+             Original symptom: os error 112 / StorageFull."
+        ));
+    }
+    Ok(())
+}
+
 /// The parent session's working directory — the source path for a subagent
 /// worktree. Prefers the reconstructed `SessionInfo` cwd, falling back to
 /// `parent_cwd`.

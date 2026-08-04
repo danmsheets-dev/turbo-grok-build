@@ -18,8 +18,9 @@ use crate::types::output::WebFetchOutput;
 /// slashes and dots, remove `www.` prefix, and lowercase.
 pub fn normalize_domain(raw: &str) -> String {
     let s = raw.trim().trim_end_matches('/').trim_end_matches('.');
-    let s = s.strip_prefix("www.").unwrap_or(s);
-    s.to_lowercase()
+    let s = s.to_lowercase();
+    // Lowercase first so WWW.example.com → www.example.com → example.com.
+    s.strip_prefix("www.").unwrap_or(&s).to_string()
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -41,16 +42,22 @@ enum HostEntry {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Precomputed domain allowlist. Built once from the raw allowlist entries,
-/// provides O(1) host lookup + small linear scan over path prefixes.
+/// provides O(1) host lookup + small linear scan over path prefixes and
+/// suffix wildcards (`*.example.com`).
 #[derive(Debug, Clone)]
 pub struct DomainMatcher {
     entries: HashMap<String, HostEntry>,
+    /// Suffix wildcards: host `api.example.com` matches entry `*.example.com`
+    /// (stored as suffix `example.com`).
+    suffix_entries: Vec<(String, HostEntry)>,
 }
 
 impl DomainMatcher {
-    /// Build from raw allowlist entries like `"docs.rs"`, `"vercel.com/docs"`.
+    /// Build from raw allowlist entries like `"docs.rs"`, `"vercel.com/docs"`,
+    /// or `"*.example.com"`.
     pub fn new(raw_entries: &[String]) -> Self {
         let mut entries: HashMap<String, HostEntry> = HashMap::new();
+        let mut suffix_entries: Vec<(String, HostEntry)> = Vec::new();
 
         for raw in raw_entries {
             let normalized = normalize_domain(raw);
@@ -59,50 +66,46 @@ impl DomainMatcher {
             }
 
             // Split on first '/' to separate host from optional path.
-            let (host, path) = match normalized.find('/') {
+            let (mut host, path) = match normalized.find('/') {
                 Some(i) => (normalized[..i].to_owned(), Some(&normalized[i..])),
                 None => (normalized, None),
             };
 
-            match path {
-                None => {
-                    // Host-only → any path allowed. Overrides any existing prefixes.
-                    entries.insert(host, HostEntry::AnyPath);
-                }
+            let wildcard = if let Some(rest) = host.strip_prefix("*.") {
+                host = rest.to_owned();
+                true
+            } else if host.starts_with('.') {
+                host = host.trim_start_matches('.').to_owned();
+                true
+            } else {
+                false
+            };
+
+            let entry = match path {
+                None => HostEntry::AnyPath,
                 Some(raw_path) => {
-                    // Don't downgrade AnyPath to PathPrefixes if a host-only
-                    // entry was already inserted.
-                    if matches!(entries.get(&host), Some(HostEntry::AnyPath)) {
-                        continue;
-                    }
-
-                    // Normalize path: ensure leading '/', strip trailing '/'.
                     let prefix = raw_path.trim_end_matches('/');
-                    let prefix = if prefix.is_empty() || prefix == "/" {
-                        // Entry like "example.com/" → treat as host-only.
-                        entries.insert(host, HostEntry::AnyPath);
-                        continue;
+                    if prefix.is_empty() || prefix == "/" {
+                        HostEntry::AnyPath
                     } else if prefix.starts_with('/') {
-                        prefix.to_owned()
+                        HostEntry::PathPrefixes(vec![prefix.to_owned()])
                     } else {
-                        format!("/{prefix}")
-                    };
-
-                    entries
-                        .entry(host)
-                        .and_modify(|e| {
-                            if let HostEntry::PathPrefixes(v) = e
-                                && !v.contains(&prefix)
-                            {
-                                v.push(prefix.clone());
-                            }
-                        })
-                        .or_insert_with(|| HostEntry::PathPrefixes(vec![prefix]));
+                        HostEntry::PathPrefixes(vec![format!("/{prefix}")])
+                    }
                 }
+            };
+
+            if wildcard {
+                merge_suffix(&mut suffix_entries, host, entry);
+            } else {
+                merge_exact(&mut entries, host, entry);
             }
         }
 
-        Self { entries }
+        Self {
+            entries,
+            suffix_entries,
+        }
     }
 
     /// Returns `None` if the URL is permitted, or `Some(WebFetchOutput::DomainNotAllowed)`
@@ -112,34 +115,144 @@ impl DomainMatcher {
             return Some(WebFetchOutput::DomainNotAllowed(String::new()));
         };
         let host = normalize_domain(raw_host);
+        let url_path = normalize_url_path(url.path());
 
-        match self.entries.get(&host) {
-            Some(HostEntry::AnyPath) => None,
-            Some(HostEntry::PathPrefixes(prefixes)) => {
-                let url_path = url.path().to_lowercase();
-                if prefixes.iter().any(|prefix| {
-                    url_path == *prefix
-                        || (url_path.starts_with(prefix.as_str())
-                            && url_path.as_bytes().get(prefix.len()) == Some(&b'/'))
-                }) {
-                    return None;
+        if let Some(entry) = self.entries.get(&host) {
+            return path_allowed(entry, &host, &url_path);
+        }
+
+        // Prefer the longest (most specific) matching suffix wildcard.
+        let mut best: Option<(usize, &HostEntry)> = None;
+        for (suffix, entry) in &self.suffix_entries {
+            if host == *suffix || host.ends_with(&format!(".{suffix}")) {
+                let score = suffix.len();
+                if best.as_ref().is_none_or(|(s, _)| score > *s) {
+                    best = Some((score, entry));
                 }
-                tracing::debug!(
-                    domain = %host,
-                    path = %url_path,
-                    allowed_prefixes = ?prefixes,
-                    "web_fetch path not in allowlist for domain"
-                );
-                Some(WebFetchOutput::DomainNotAllowed(host))
             }
-            None => {
-                tracing::debug!(
-                    domain = %host,
-                    allowed_count = self.entries.len(),
-                    "web_fetch domain not in allowlist"
-                );
-                Some(WebFetchOutput::DomainNotAllowed(host))
+        }
+        if let Some((_, entry)) = best {
+            return path_allowed(entry, &host, &url_path);
+        }
+
+        tracing::debug!(
+            domain = %host,
+            allowed_count = self.entries.len() + self.suffix_entries.len(),
+            "web_fetch domain not in allowlist"
+        );
+        Some(WebFetchOutput::DomainNotAllowed(host))
+    }
+}
+
+fn merge_exact(entries: &mut HashMap<String, HostEntry>, host: String, entry: HostEntry) {
+    match entry {
+        HostEntry::AnyPath => {
+            entries.insert(host, HostEntry::AnyPath);
+        }
+        HostEntry::PathPrefixes(prefixes) => {
+            if matches!(entries.get(&host), Some(HostEntry::AnyPath)) {
+                return;
             }
+            entries
+                .entry(host)
+                .and_modify(|e| {
+                    if let HostEntry::PathPrefixes(v) = e {
+                        for p in &prefixes {
+                            if !v.contains(p) {
+                                v.push(p.clone());
+                            }
+                        }
+                    }
+                })
+                .or_insert(HostEntry::PathPrefixes(prefixes));
+        }
+    }
+}
+
+fn merge_suffix(suffix_entries: &mut Vec<(String, HostEntry)>, suffix: String, entry: HostEntry) {
+    if let Some((_, existing)) = suffix_entries.iter_mut().find(|(s, _)| *s == suffix) {
+        match (existing, entry) {
+            (HostEntry::AnyPath, _) => {}
+            (existing, HostEntry::AnyPath) => *existing = HostEntry::AnyPath,
+            (HostEntry::PathPrefixes(v), HostEntry::PathPrefixes(prefixes)) => {
+                for p in prefixes {
+                    if !v.contains(&p) {
+                        v.push(p);
+                    }
+                }
+            }
+        }
+    } else {
+        suffix_entries.push((suffix, entry));
+    }
+}
+
+/// Collapse `.` / `..` and lowercase for allowlist path comparison.
+fn normalize_url_path(path: &str) -> String {
+    let decoded = percent_decode_lite(path).to_ascii_lowercase();
+    let mut out: Vec<&str> = Vec::new();
+    for seg in decoded.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// Minimal %XX decode for path segments (best-effort; invalid stays as-is).
+fn percent_decode_lite(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            let hi = hex_nibble(bytes[i + 1]);
+            let lo = hex_nibble(bytes[i + 2]);
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
+}
+
+fn path_allowed(entry: &HostEntry, host: &str, url_path: &str) -> Option<WebFetchOutput> {
+    match entry {
+        HostEntry::AnyPath => None,
+        HostEntry::PathPrefixes(prefixes) => {
+            if prefixes.iter().any(|prefix| {
+                url_path == *prefix
+                    || (url_path.starts_with(prefix.as_str())
+                        && url_path.as_bytes().get(prefix.len()) == Some(&b'/'))
+            }) {
+                return None;
+            }
+            tracing::debug!(
+                domain = %host,
+                path = %url_path,
+                allowed_prefixes = ?prefixes,
+                "web_fetch path not in allowlist for domain"
+            );
+            Some(WebFetchOutput::DomainNotAllowed(host.to_string()))
         }
     }
 }
@@ -184,6 +297,46 @@ mod tests {
         let m = DomainMatcher::new(&["docs.rs".into(), "Example.Com".into()]);
         assert!(m.check(&url("https://docs.rs/reqwest/latest")).is_none());
         assert!(m.check(&url("https://example.com/page")).is_none());
+    }
+
+    #[test]
+    fn wildcard_suffix_matches_subdomains() {
+        let m = DomainMatcher::new(&["*.example.com".into()]);
+        assert!(m.check(&url("https://example.com/")).is_none());
+        assert!(m.check(&url("https://api.example.com/v1")).is_none());
+        assert!(m.check(&url("https://a.b.example.com/")).is_none());
+        assert!(m.check(&url("https://evil.com/")).is_some());
+        assert!(m.check(&url("https://example.com.evil.com/")).is_some());
+    }
+
+    #[test]
+    fn path_dot_segments_cannot_escape_prefix() {
+        let m = DomainMatcher::new(&["example.com/docs".into()]);
+        assert!(m.check(&url("https://example.com/docs/guide")).is_none());
+        assert!(
+            m.check(&url("https://example.com/docs/../admin")).is_some(),
+            "dot-segment escape should be blocked after normalize"
+        );
+    }
+
+    #[test]
+    fn www_prefix_case_insensitive_in_allowlist_entry() {
+        let m = DomainMatcher::new(&["WWW.Example.COM".into()]);
+        assert!(m.check(&url("https://example.com/page")).is_none());
+    }
+
+    #[test]
+    fn most_specific_wildcard_wins() {
+        let m = DomainMatcher::new(&["*.com".into(), "*.example.com/docs".into()]);
+        assert!(m.check(&url("https://api.example.com/docs/x")).is_none());
+        assert!(m.check(&url("https://api.example.com/api")).is_some());
+    }
+
+    #[test]
+    fn wildcard_with_path_prefix() {
+        let m = DomainMatcher::new(&["*.vercel.com/docs".into()]);
+        assert!(m.check(&url("https://docs.vercel.com/docs/x")).is_none());
+        assert!(m.check(&url("https://docs.vercel.com/api")).is_some());
     }
 
     #[test]

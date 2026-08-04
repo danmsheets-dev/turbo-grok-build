@@ -511,6 +511,8 @@ struct LocalTerminalActor {
     /// Whether persistent shell state is enabled.
     persistent_shell: bool,
 
+    /// Reserved for future login-shell env capture on non-persistent backends.
+    #[allow(dead_code)]
     login_shell_capture: bool,
 
     /// Per-backend `find`→`bfs` / `grep`→`ugrep` shadow enable state, resolved
@@ -586,6 +588,18 @@ impl LocalTerminalActor {
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
     ) -> Result<SpawnResult, ComputerError> {
+        // All backends need a real CWD. Missing worktree paths previously
+        // surfaced as opaque OS error 267 on Windows ("directory name is
+        // invalid") on every densify shell call.
+        if !cwd.is_dir() {
+            return Err(ComputerError::io(format!(
+                "working directory does not exist (worktree may have been pruned or \
+                 tombstoned): {}. Re-spawn the subagent with isolation=worktree, or \
+                 restore the worktree from snapshot.",
+                cwd.display()
+            )));
+        }
+
         #[cfg(unix)]
         if self.persistent_shell {
             return self.spawn_persistent_command(command, cwd, env).await;
@@ -3081,6 +3095,21 @@ fn spawn_shell_command(
     search_shadows: SearchShadowConfig,
     shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
 ) -> std::io::Result<(tokio::process::Child, crate::util::ProcessGroup)> {
+    // Fail closed with a clear message when CWD is missing (worktree tombstone /
+    // prune race). Without this Windows surfaces opaque OS error 267
+    // ("The directory name is invalid") on every shell tool call.
+    if !cwd.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "working directory does not exist (worktree may have been pruned or \
+                 tombstoned): {}. Re-spawn the subagent with isolation=worktree, or \
+                 restore the worktree from snapshot. Soft-preserve keep-N never deletes \
+                 trees with a fresh .grok-subagent-live marker.",
+                cwd.display()
+            ),
+        ));
+    }
     // `login_env` and `search_shadows` are only consumed by the `#[cfg(unix)]`
     // shell wrapper below; keep them live on Windows to avoid unused-arg warnings.
     #[cfg(not(unix))]
@@ -4813,8 +4842,13 @@ mod tests {
             panic!("spawn must fail when both directories are missing");
         };
         let msg = err.to_string();
+        // Pre-spawn CWD check (tombstone-aware) names the missing directory
+        // instead of an opaque OS error (e.g. Windows 267).
         assert!(
-            msg.contains("spawn shell in") && msg.contains(&gone_path.display().to_string()),
+            msg.contains(&gone_path.display().to_string())
+                && (msg.contains("working directory does not exist")
+                    || msg.contains("spawn shell in")
+                    || msg.contains("tombstoned")),
             "error must name the spawn directory, got: {msg}"
         );
     }

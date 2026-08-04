@@ -531,6 +531,53 @@ pub async fn update_meta_land_status(meta_path: &Path, land_status: &str) {
     let _ = tokio::fs::write(meta_path, pretty).await;
 }
 
+/// RC13 Wave A: always terminal-clean meta after discard.
+///
+/// Writes:
+/// - `land_status = "discarded"`
+/// - `worktree_state = "cleaned"`
+/// - `worktree_path = null` (never advertise a live tree after discard)
+/// - if `status == "running"` → `status = "cancelled"` (never leave running)
+/// - if `snapshot_dropped` → `snapshot_ref = null` (honest with tool output)
+///
+/// Best-effort: silent on missing/unparseable meta (callers still succeed when
+/// the worktree was already gone).
+pub async fn update_meta_discarded(meta_path: &Path, snapshot_dropped: bool) {
+    let Ok(raw) = tokio::fs::read_to_string(meta_path).await else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "land_status".to_owned(),
+        serde_json::Value::String("discarded".to_owned()),
+    );
+    obj.insert(
+        "worktree_state".to_owned(),
+        serde_json::Value::String("cleaned".to_owned()),
+    );
+    obj.insert("worktree_path".to_owned(), serde_json::Value::Null);
+    // Never leave status=running after discard.
+    let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status.is_empty() || status == "running" {
+        obj.insert(
+            "status".to_owned(),
+            serde_json::Value::String("cancelled".to_owned()),
+        );
+    }
+    if snapshot_dropped {
+        obj.insert("snapshot_ref".to_owned(), serde_json::Value::Null);
+    }
+    let Ok(pretty) = serde_json::to_string_pretty(&value) else {
+        return;
+    };
+    let _ = tokio::fs::write(meta_path, pretty).await;
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Path allowlists (`allowed_paths` on spawn / meta.json)
 // ───────────────────────────────────────────────────────────────────────────

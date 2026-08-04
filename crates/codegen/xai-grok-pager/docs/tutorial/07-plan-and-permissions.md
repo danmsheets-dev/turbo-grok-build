@@ -34,6 +34,6 @@ A good habit: plan mode for "how should we even do this?", normal mode for
 
 A build or test run hogging the turn? **`Ctrl+B`** sends it to the
 background — Grok keeps working and you're notified when it finishes
-(`Ctrl+G` shows the tasks pane).
+(`Ctrl+Shift+G` shows the tasks pane; `Ctrl+G` is Game Mode).
 
 *Go deeper: `/docs Plan Mode` or `/docs Permissions and Safety`*

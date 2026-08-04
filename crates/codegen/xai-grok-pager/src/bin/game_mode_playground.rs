@@ -1,4 +1,4 @@
-//! Fast pixel Game Mode playground — cell-res compose + direct halfblocks.
+//! Fast pixel Game Mode playground — terminal-res paint buffer + halfblocks.
 //!
 //! ```text
 //! cargo run -p xai-grok-pager --bin game-mode-playground
@@ -14,7 +14,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use xai_grok_pager::views::game_mode::{
     ActorPhase, DeskAgentSnapshot, GameModeState, GameTier, compose_cell_frame, load_office_background,
     scale_bg_to_cells,
@@ -25,6 +25,7 @@ struct Scenario {
     name: &'static str,
     agents: Vec<DeskAgentSnapshot>,
     supervisor_working: bool,
+    waiting_on_user: bool,
 }
 
 fn snap(
@@ -54,18 +55,29 @@ fn snap(
 fn scenarios() -> Vec<Scenario> {
     vec![
         Scenario {
-            name: "Idle office (mockup only)",
+            name: "Idle office (empty room)",
             agents: vec![],
             supervisor_working: false,
+            waiting_on_user: false,
         },
         Scenario {
-            name: "3 working (badges only)",
+            name: "Full office: 6 workers + Supervisor",
             agents: vec![
                 snap("a", "explore", "explore", true, false, 45, 12_400, 7, "Reading…"),
                 snap("b", "plan", "plan", true, false, 120, 88_000, 14, "Thinking"),
                 snap("c", "test", "general", true, false, 30, 4_200, 3, "cargo test"),
+                snap("d", "review", "code-reviewer", true, false, 60, 22_000, 9, "Reviewing"),
+                snap("e", "fix", "general", true, false, 15, 1_800, 2, "Editing"),
+                snap("f", "docs", "general", true, false, 80, 9_500, 4, "Writing docs"),
             ],
             supervisor_working: true,
+            waiting_on_user: false,
+        },
+        Scenario {
+            name: "Waiting on you (permission)",
+            agents: vec![],
+            supervisor_working: false,
+            waiting_on_user: true,
         },
         Scenario {
             name: "Handoff walk",
@@ -74,6 +86,16 @@ fn scenarios() -> Vec<Scenario> {
                 snap("d2", "still-going", "plan", true, false, 40, 3_000, 2, "Writing"),
             ],
             supervisor_working: false,
+            waiting_on_user: false,
+        },
+        Scenario {
+            name: "Failed desk attention",
+            agents: vec![
+                snap("bad", "oops", "general", false, true, 20, 1_000, 1, "panic"),
+                snap("ok", "still-going", "plan", true, false, 40, 3_000, 2, "Writing"),
+            ],
+            supervisor_working: false,
+            waiting_on_user: false,
         },
     ]
 }
@@ -109,14 +131,15 @@ impl App {
         let name = self.scenarios[self.active].name;
         let agents = self.scenarios[self.active].agents.clone();
         let supervisor_working = self.scenarios[self.active].supervisor_working;
+        let waiting_on_user = self.scenarios[self.active].waiting_on_user;
         self.state = GameModeState::new();
         self.state.open = true;
         let tier = GameTier::Comfort;
         let running: Vec<_> = agents.iter().filter(|a| a.running).cloned().collect();
         self.state
-            .sync_from_snapshots(&running, supervisor_working, tier);
+            .sync_from_snapshots(&running, supervisor_working, tier, waiting_on_user);
         self.state
-            .sync_from_snapshots(&agents, supervisor_working, tier);
+            .sync_from_snapshots(&agents, supervisor_working, tier, waiting_on_user);
         if name.contains("Handoff") {
             for d in &mut self.state.desks {
                 if d.child_session_id.as_deref() == Some("d1") {
@@ -136,8 +159,9 @@ impl App {
         self.state.tick_anim(tier);
         let agents = self.scenarios[self.active].agents.clone();
         let supervisor_working = self.scenarios[self.active].supervisor_working;
+        let waiting_on_user = self.scenarios[self.active].waiting_on_user;
         self.state
-            .sync_from_snapshots(&agents, supervisor_working, tier);
+            .sync_from_snapshots(&agents, supervisor_working, tier, waiting_on_user);
         self.last_tick = Instant::now();
     }
 }
@@ -161,7 +185,7 @@ fn main() -> io::Result<()> {
 
                 f.render_widget(
                     Paragraph::new(format!(
-                        "Game Mode FAST  {}  n/p scenario  Space pause  q quit",
+                        "Game Mode FAST  {}  n/p scenario  w wait-on-you  Space pause  q quit",
                         app.status
                     ))
                     .style(
@@ -177,7 +201,8 @@ fn main() -> io::Result<()> {
                     .state
                     .ensure_pixel_frame(stage.width, stage.height);
                 if ready {
-                    if let Some(frame) = app.state.pixel_frame.as_ref() {
+                    // Prefer terminal-res paint buffer (use_direct halfblock path).
+                    if let Some(frame) = app.state.pixel_paint_frame() {
                         paint_halfblock_rgba(f.buffer_mut(), stage, frame);
                     }
                 } else {
@@ -189,10 +214,15 @@ fn main() -> io::Result<()> {
 
                 f.render_widget(
                     Paragraph::new(format!(
-                        "desks={} wall={} tick={}  [cell-res / no PNG]",
+                        "desks={} wall={} tick={} paint={}  [cell-res / no PNG]",
                         app.state.active_desk_count(),
                         app.state.wall.title(),
-                        app.state.tick
+                        app.state.tick,
+                        if app.state.pixel_paint_frame().is_some() {
+                            "cached"
+                        } else {
+                            "—"
+                        },
                     ))
                     .style(Style::default().fg(Color::Rgb(160, 170, 180))),
                     chunks[2],
@@ -218,12 +248,21 @@ fn main() -> io::Result<()> {
                             }
                             KeyCode::Char(' ') => app.auto = !app.auto,
                             KeyCode::Char('t') => app.tick_once(),
+                            KeyCode::Char('w') => {
+                                let sc = &mut app.scenarios[app.active];
+                                sc.waiting_on_user = !sc.waiting_on_user;
+                                app.apply_scenario();
+                                app.status = format!(
+                                    "Scenario: {}  waiting_on_user={}",
+                                    app.scenarios[app.active].name,
+                                    app.scenarios[app.active].waiting_on_user
+                                );
+                            }
                             _ => {}
                         }
                     }
                     Event::Resize(_, _) => {
-                        app.state.pixel_bg_scaled = None;
-                        app.state.pixel_frame = None;
+                        app.state.invalidate_pixel_cache();
                     }
                     _ => {}
                 }

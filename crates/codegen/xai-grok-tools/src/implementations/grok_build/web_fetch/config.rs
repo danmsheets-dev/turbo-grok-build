@@ -9,7 +9,14 @@ use crate::register_resource;
 // Safety-boundary constants. Not configurable.
 pub const MAX_URL_LENGTH: usize = 2_000;
 pub const MAX_REDIRECTS: usize = 10;
-pub const USER_AGENT_STRING: &str = "Mozilla/5.0 (compatible; grok-agent/1.0; +https://x.ai)";
+/// Browser-shaped default UA that still identifies Turbo Grok as a research agent.
+/// Configurable via `[toolset.web_fetch] user_agent`.
+pub const USER_AGENT_STRING: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 TurboGrok/1.0 (research agent; +https://x.ai)";
+
+/// Browser-like Accept: HTML first, markdown still preferred when available.
+pub const ACCEPT_HEADER: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,\
+text/markdown;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
 /// Runtime-configurable parameters for the `web_fetch` tool.
 ///
@@ -30,10 +37,12 @@ pub struct WebFetchParams {
     pub max_markdown_length: Option<usize>,
     /// Model context window size in tokens. Used to enforce 3% cap on web content.
     pub context_window_tokens: Option<u64>,
-    /// Domains the tool is allowed to fetch. All other
-    /// domains are rejected before any network I/O.
-    /// Defaults to `DEFAULT_ALLOWED_DOMAINS` if no
-    /// list given.
+    /// Optional domain allowlist. When `None` (default), any public host
+    /// that passes SSRF may be fetched (open-public policy). When `Some(list)`,
+    /// only listed hosts (and optional path prefixes like `vercel.com/docs`)
+    /// are allowed. An explicit empty list is treated as "block all" by the
+    /// shell (tool disabled). See `DEFAULT_ALLOWED_DOMAINS` for a curated
+    /// preset enterprises can copy into config.
     #[serde(default)]
     pub allowed_domains: Option<Vec<String>>,
     /// Optional egress proxy endpoint. When set, all HTTP requests are
@@ -46,6 +55,16 @@ pub struct WebFetchParams {
     /// allow_local = true` or `GROK_WEB_FETCH_ALLOW_LOCAL=1`.
     #[serde(default)]
     pub allow_local: Option<bool>,
+    /// `Accept-Language` header value. Default: `en-US,en;q=0.9`.
+    #[serde(default)]
+    pub accept_language: Option<String>,
+    /// Maximum JavaScript response size in **bytes** before soft truncate.
+    /// Default: 256 KiB. Truncation is applied after decode (char-aware).
+    #[serde(default)]
+    pub max_js_bytes: Option<usize>,
+    /// Override User-Agent. Default: browser-shaped TurboGrok research UA.
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 register_resource!("grok_build", "WebFetch", WebFetchParams);
@@ -81,18 +100,50 @@ impl WebFetchParams {
         self.allow_local.unwrap_or(false)
     }
 
+    pub fn accept_language(&self) -> &str {
+        self.accept_language
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("en-US,en;q=0.9")
+    }
+
+    pub fn max_js_bytes(&self) -> usize {
+        self.max_js_bytes.unwrap_or(256 * 1024)
+    }
+
+    pub fn user_agent(&self) -> &str {
+        self.user_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(USER_AGENT_STRING)
+    }
+
+    /// Returns `Some(list)` when an allowlist is configured, or `None` for
+    /// open-public mode (SSRF still applies).
+    pub fn domain_allowlist(&self) -> Option<&[String]> {
+        self.allowed_domains.as_deref()
+    }
+
+    /// Materialised allowlist for callers that need a concrete list.
+    ///
+    /// - `Some(list)` → that list  
+    /// - `None` (open-public) → **empty** vec (no static grants)  
+    ///
+    /// Prefer [`Self::domain_allowlist`] when you need to distinguish open-public
+    /// (`None`) from an explicit empty block-all list (`Some([])`).
+    ///
+    /// Note: this no longer expands `None` to [`DEFAULT_ALLOWED_DOMAINS`].
     pub fn allowed_domains(&self) -> Vec<String> {
-        match &self.allowed_domains {
-            Some(v) => v.clone(),
-            None => DEFAULT_ALLOWED_DOMAINS
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
-        }
+        self.allowed_domains.clone().unwrap_or_default()
     }
 }
 
-/// Default allowlist for web_fetch tool.
+/// Curated docs-oriented domain preset for enterprises that want a tight
+/// allowlist. Not applied by default — open-public is the product default
+/// (SSRF still blocks private/metadata). Copy into
+/// `[toolset.web_fetch] allowed_domains = [...]` to enforce.
+///
 /// Note: GET-only preapproved domains. Path-scoped entries (e.g. vercel.com/docs) are included as-is.
 pub static DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
     // xAI

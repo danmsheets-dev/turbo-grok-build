@@ -11,7 +11,8 @@ use crate::types::output::{
 use crate::types::requirements::Expr;
 #[allow(unused_imports)]
 use crate::types::resources::{
-    Cwd, DisplayCwd, FileSystem, NotificationHandle, SharedResources, resolve_model_path,
+    ConfineRoot, Cwd, DisplayCwd, FileSystem, NotificationHandle, SharedResources,
+    enforce_write_path, resolve_model_path,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
@@ -99,15 +100,20 @@ impl xai_tool_runtime::Tool for WriteTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (cwd, display_cwd, fs, notification_handle) = {
+        let (cwd, display_cwd, fs, notification_handle, confine_root) = {
             let cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
             let res = resources.lock().await;
             let display_cwd = res.get::<DisplayCwd>().map(|d| d.0.clone());
             let fs = res.require::<FileSystem>()?.0.clone();
             let notification_handle = res.require::<NotificationHandle>()?.0.clone();
-            (cwd, display_cwd, fs, notification_handle)
+            let confine_root = res.get::<ConfineRoot>().map(|c| c.0.clone());
+            (cwd, display_cwd, fs, notification_handle, confine_root)
         };
         let tool_call_id = ctx.call_id.as_str().to_owned();
+
+        // RC13 Wave A: fail closed when session CWD / confine root is gone
+        // (worktree tombstone) before any path resolution or write.
+        enforce_write_path(&cwd, confine_root.as_deref()).map_err(|e| e.into_tool_error())?;
 
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
@@ -454,6 +460,35 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Cwd not available"),
+        );
+    }
+
+    // ── RC13: tombstoned CWD fail-closed ───────────────────────
+
+    #[tokio::test]
+    async fn write_fails_closed_when_cwd_directory_is_gone() {
+        let tmp = TempDir::new().unwrap();
+        let gone = tmp.path().join("deleted-worktree");
+        std::fs::create_dir_all(&gone).unwrap();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(gone.clone()));
+        resources.insert(FileSystem(Arc::new(LocalFs)));
+        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
+        // Tombstone the CWD.
+        std::fs::remove_dir_all(&gone).unwrap();
+
+        let tool = WriteTool;
+        let input = WriteInput {
+            file_path: "x.txt".to_string(),
+            content: "nope".to_string(),
+        };
+        let err = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .expect_err("missing cwd must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cwd_missing") || msg.contains("worktree_tombstone"),
+            "expected cwd_missing/tombstone, got: {msg}"
         );
     }
 

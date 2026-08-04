@@ -34,6 +34,12 @@ impl ConfinedFs {
     }
 
     fn check_write(&self, path: &Path, op: &str) -> Result<(), ComputerError> {
+        // RC13 Wave A: fail closed when the confine root itself is gone
+        // (worktree tombstone / pruned isolation tree). Writing into a missing
+        // root would either recreate a partial tree outside git or succeed on
+        // the wrong volume after path rewrite — never allow that silently.
+        crate::types::resources::enforce_write_roots(None, Some(self.root.as_path()))
+            .map_err(|e| e.into_computer_error())?;
         if path_is_under_confine_root(path, &self.root) {
             return Ok(());
         }
@@ -117,6 +123,25 @@ mod tests {
         let target = root.path().join("ok.txt");
         fs.write_file(&target, b"yes").await.expect("inside write");
         assert_eq!(std::fs::read(&target).unwrap(), b"yes");
+    }
+
+    #[tokio::test]
+    async fn write_fails_closed_when_confine_root_is_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        let target = root.path().join("orphan.txt");
+        let fs = ConfinedFs::new(Arc::new(LocalFs), root_path);
+        // Drop the root directory (tombstone).
+        drop(root);
+        let err = fs
+            .write_file(&target, b"nope")
+            .await
+            .expect_err("missing confine root must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("worktree_tombstone") || msg.contains("cwd_missing"),
+            "expected tombstone error, got: {msg}"
+        );
     }
 
     #[cfg(windows)]

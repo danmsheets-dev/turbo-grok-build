@@ -1893,6 +1893,9 @@ impl xai_tool_runtime::Tool for BashTool {
         let resources = shared_resources(&ctx)?;
 
         let cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
+        // RC13 Wave A: fail closed when session CWD is gone (dead worktree /
+        // tombstone) before spawning shell — clear cwd_missing signal.
+        crate::types::tool_metadata::ensure_cwd_directory(&cwd)?;
         let tool_call_id = ctx.call_id.clone();
 
         // --- Read resources ---

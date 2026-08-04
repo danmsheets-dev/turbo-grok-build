@@ -23,7 +23,8 @@ scrollback gets a selection you can move with the arrow keys.
 
 - **`Ctrl+T`** — toggle the **todos pane**: Grok's live plan for the
   current task.
-- **`Ctrl+G`** — toggle the **tasks pane**: everything running in the
+- **`Ctrl+G`** — toggle **Game Mode** (pixel office spectator view).
+- **`Ctrl+Shift+G`** — toggle the **tasks pane**: everything running in the
   background, with its status.
 
 Prefer vim keys? **`/vim-mode`** switches the scrollback to `j`/`k`,

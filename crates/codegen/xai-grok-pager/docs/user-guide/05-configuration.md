@@ -180,11 +180,17 @@ timeout_secs = 1800                    # seconds to wait when enabled (default: 
 
 [toolset.web_fetch]
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL
-allowed_domains = ["docs.rs", "x.ai"]          # override the built-in allowlist
+# Optional allowlist. When omitted, open-public mode applies (any host that
+# passes SSRF). When set, only listed hosts/path prefixes are allowed.
+# An explicit empty list disables the tool. A curated docs preset is available
+# in the product source as DEFAULT_ALLOWED_DOMAINS for enterprises to copy.
+allowed_domains = ["docs.rs", "x.ai"]
 allow_local = false                            # true = allow localhost / 127.0.0.0/8 / ::1 only
 ```
 
-`allow_local` is off by default (SSRF fail-closed). Turn it on (or set `GROK_WEB_FETCH_ALLOW_LOCAL=1`) and `web_fetch` may reach **explicit** loopback hosts only — private, link-local, and cloud-metadata ranges stay blocked. Resolution: TOML > env > default off.
+The `web_fetch` tool is **on by default**. Disable with `[features] web_fetch = false`, `GROK_WEB_FETCH=0`, remote `web_fetch_enabled = false`, or requirements pin. `allow_local` is off by default (SSRF fail-closed). Turn it on (or set `GROK_WEB_FETCH_ALLOW_LOCAL=1`) and `web_fetch` may reach **explicit** loopback hosts only — private, link-local, and cloud-metadata ranges stay blocked. Resolution: TOML > env > default off.
+
+Agents can pass `extract_mode` on each call: `auto` (default, prefer main article), `article`, `full` (cleaned whole page), or `raw`. Optional: `include_links` (default off), `max_chars` / `start_offset`. Override UA with `[toolset.web_fetch] user_agent`.
 
 `[toolset.ask_user_question]` is honored across **requirements.toml**, **managed config**, and your user **`config.toml`**. Precedence: requirements → env (`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED` / `GROK_ASK_USER_QUESTION_TIMEOUT_SECS`) → user config → managed → defaults. Set `timeout_enabled = false` in your user config to disable the automatic questionnaire timeout for yourself; `timeout_secs` must be a positive integer. You can also toggle `timeout_enabled` from `/settings` → **Ask-Question timeout** (under Agent & Approval); changes apply to newly started sessions.
 
@@ -308,7 +314,7 @@ To pin the model a subagent uses, set its entry under `[subagents.models]`.
 
 `/goal` has two drivers, chosen by the background-workflows setting. With workflows enabled, the host-owned workflow engine evaluates rounds and drives completion verification; with them disabled, `/goal` falls back to the legacy model-facing `update_goal` tool. Whether `/goal` is available at all is a separate switch (the goal feature setting).
 
-Background workflows — the `workflow` tool, named `.grok/workflows/*.rhai` scripts, `/deep-research`, and `/workflow` launches — are **on by default**. Disable with config, env, or remote settings.
+Background workflows — the `workflow` tool, named `.grok/workflows/*.rhai` scripts, `/deep-research`, `/deepaudit`, natural-language soft-match (“run a deep audit on …”), and `/workflow` launches — are **on by default**. The agent boot card injects a workflow catalog and routing policy so free-text requests prefer recipes over DIY multi-subagent audits. Disable with config, env, or remote settings.
 
 ```toml
 [workflows]
@@ -726,7 +732,7 @@ The key ones. See the README for the complete list.
 | `GROK_MEMORY` | Enable (`1`) or disable (`0`) cross-session memory |
 | `GROK_SUBAGENTS` | Enable (`1`) or disable (`0`) subagents |
 | `GROK_WORKFLOWS` | Enable (`1`) or disable (`0`) background workflows and select the `/goal` driver (default on: host-owned workflow driver; off: legacy `update_goal`) |
-| `GROK_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool |
+| `GROK_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool (default on) |
 | `GROK_WEB_FETCH_ALLOW_LOCAL` | Allow `web_fetch` to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`). Same as `[toolset.web_fetch] allow_local`. Default off; private/metadata stay blocked. |
 | `GROK_AGENT` | Custom agent definition path or name |
 | `GROK_SANDBOX` | Sandbox profile (off, workspace, devbox, read-only, strict; or a custom profile name) |

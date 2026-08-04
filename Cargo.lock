@@ -15730,6 +15730,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.59.0",
  "xai-gix-status",
  "xai-grok-paths",
  "xai-sqlite-journal",
@@ -15842,6 +15843,7 @@ dependencies = [
  "xai-token-estimation",
  "xai-tool-types",
  "xai-tty-utils",
+ "xai-workspace-tree",
  "zeroize",
 ]
 
@@ -15904,6 +15906,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "which",
+ "windows-sys 0.59.0",
  "xai-grok-version",
  "xai-tty-utils",
 ]
@@ -16273,11 +16276,12 @@ dependencies = [
  "xai-ratatui-textarea",
  "xai-token-estimation",
  "xai-tty-utils",
+ "xai-workspace-tree",
 ]
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "0.2.114-r11"
+version = "0.2.114-r12"
 dependencies = [
  "anyhow",
  "clap",
@@ -16860,6 +16864,7 @@ dependencies = [
  "dirs 5.0.1",
  "dunce",
  "educe",
+ "encoding_rs",
  "flate2",
  "fs2",
  "futures",
@@ -16922,6 +16927,7 @@ dependencies = [
  "xai-tool-runtime",
  "xai-tool-types",
  "xai-tty-utils",
+ "xai-workspace-tree",
  "zip",
 ]
 
@@ -16969,7 +16975,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "0.2.114-r11"
+version = "0.2.114-r13"
 dependencies = [
  "semver",
 ]
@@ -17358,6 +17364,21 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "xai-workspace-tree"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "dirs 5.0.1",
+ "dunce",
+ "ignore",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

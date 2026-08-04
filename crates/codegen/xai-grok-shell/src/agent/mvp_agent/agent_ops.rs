@@ -1788,21 +1788,23 @@ impl MvpAgent {
     }
     /// Prepare the web fetch configuration based on feature flags.
     ///
-    /// Enabled gate: `disable_web_search` kill-switch > `GROK_WEB_FETCH` env >
-    /// remote settings `web_fetch_enabled` > default (false).
+    /// Enabled gate: `GROK_WEB_FETCH` env > remote settings `web_fetch_enabled`
+    /// > `[features] web_fetch` > default (true).
+    ///
+    /// Note: `disable_web_search` does **not** disable web_fetch (decoupled).
     ///
     /// Params resolution (TOML > env > remote settings > default):
     /// - `proxy_endpoint`: `[toolset.web_fetch] proxy_endpoint` > `GROK_WEB_FETCH_PROXY` > remote settings > None
-    /// - `allowed_domains`: `[toolset.web_fetch] allowed_domains` > remote settings > built-in defaults
+    /// - `allowed_domains`: `[toolset.web_fetch] allowed_domains` > remote settings > open-public (None)
     /// - `allow_local`: `[toolset.web_fetch] allow_local` > `GROK_WEB_FETCH_ALLOW_LOCAL` > false
+    ///
+    /// When `allowed_domains` is unset, any public host that passes SSRF may be
+    /// fetched. An explicit empty list disables the tool (fail closed).
     pub(super) fn prepare_web_fetch_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig {
         use xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig;
         let cfg = self.cfg.borrow();
-        if cfg.disable_web_search {
-            return WebFetchConfig::Disabled;
-        }
         let remote = cfg.remote_settings.as_ref();
         let enabled = cfg.resolve_web_fetch();
         if !enabled.value {
@@ -1821,6 +1823,11 @@ impl MvpAgent {
             tracing::info!("web_fetch disabled: allowed_domains is explicitly empty");
             return WebFetchConfig::Disabled;
         }
+        tracing::debug!(
+            enabled_source = ?enabled.source,
+            allowlist = params.allowed_domains.is_some(),
+            "web_fetch enabled"
+        );
         WebFetchConfig::Enabled { params }
     }
     /// Construct from pre-built components. Use when the caller needs the
@@ -3507,6 +3514,12 @@ impl MvpAgent {
             _ => None,
         };
         let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
+        // Workspace tree atlas: fire-and-forget load on trusted open so first
+        // tool call is a cache hit (never blocks session start). Uses the real
+        // session tool CWD (worktree for isolated children).
+        if project_env_trusted {
+            xai_grok_tools::util::workspace_tree_kickoff_load(cwd.as_path().to_path_buf());
+        }
         let mut session_env = xai_grok_workspace::permission::claude_settings::load_claude_env_with_project(
             cwd.as_path(),
             project_env_trusted,

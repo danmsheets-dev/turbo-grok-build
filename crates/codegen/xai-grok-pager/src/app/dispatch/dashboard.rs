@@ -1381,6 +1381,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             bundle_state: &app.bundle_state,
             screen_mode: app.screen_mode,
             billing_surface_visible: app.usage_visible,
+                session_cwd: None,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
                 yolo_mode: app.default_yolo,

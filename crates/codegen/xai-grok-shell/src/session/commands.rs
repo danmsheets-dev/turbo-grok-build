@@ -155,6 +155,11 @@ pub enum SessionCommand {
     SetToolOverrides {
         overrides: xai_grok_sampling_types::ToolOverrides,
     },
+    /// Write-time `allowed_paths` for isolation children. Inserted into tool
+    /// resources before the first prompt so write/edit tools fail closed.
+    SetAllowedWritePaths {
+        paths: Vec<String>,
+    },
     Prompt {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,

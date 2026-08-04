@@ -450,6 +450,13 @@ fn shell_confine_operands_from_tree(root: Node<'_>, src: &str) -> Vec<String> {
         if program == "git" {
             out.extend(git_write_path_operands(&words));
         }
+        // Densify engines + PowerShell -File script paths (reads + export outs).
+        if densify_engine_is_modelled(&program) {
+            out.extend(densify_engine_path_operands(&program, &words));
+        }
+        if matches!(program.as_str(), "powershell" | "pwsh") {
+            out.extend(powershell_file_path_operands(&words));
+        }
     }
     out
 }
@@ -748,6 +755,16 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
     if program == "git" {
         return git_is_modelled_for_confine(words);
     }
+    // Densify tools: headless Blender / Godot (CLI path operands checked; bpy /
+    // GDScript-internal writes remain residual shell≠OS-jail risk).
+    if densify_engine_is_modelled(program) {
+        return true;
+    }
+    // PowerShell / pwsh: only `-File`/`-f` script form is modelled (script path
+    // is a confine operand). Opaque `-Command` / `-EncodedCommand` stay denied.
+    if matches!(program, "powershell" | "pwsh") {
+        return powershell_file_is_modelled_for_confine(words);
+    }
     // Known readers (ShellFileMode::Read).
     if matches!(shell_file_mode(program), Some(ShellFileMode::Read)) {
         // sed -i is a writer; still modelled (operands extracted).
@@ -788,6 +805,165 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
                 .unwrap_or(false);
     }
     false
+}
+
+/// Blender / Godot console binaries used by densify / asset-kit subagents.
+fn densify_engine_is_modelled(program: &str) -> bool {
+    matches!(
+        program,
+        "blender"
+            | "godot"
+            | "godot4"
+            | "godot64"
+            | "godot_console"
+            | "godot4_console"
+            | "godot.windows.editor.x86_64"
+            | "godot.windows.template_release.x86_64"
+    )
+}
+
+/// Path operands for headless Blender / Godot under confine.
+///
+/// Extracted so write destinations (`-o`, export paths, `.blend` saves) and
+/// script/project inputs stay inside the worktree root. The engine binary itself
+/// may live outside the root (Program Files) — that path is the program word,
+/// not a write operand.
+fn densify_engine_path_operands(program: &str, words: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 1usize;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            // Remaining positionals are blend/project paths.
+            for p in words.iter().skip(i + 1) {
+                if looks_like_path_operand(p) {
+                    out.push(p.clone());
+                }
+            }
+            break;
+        }
+        // Value-taking flags used by densify workflows.
+        let value_flags = [
+            "--python",
+            "-P",
+            "--python-text",
+            "--python-expr", // path-shaped? treat as opaque string; still no free write path
+            "-o",
+            "--render-output",
+            "--path",
+            "--export-release",
+            "--export-debug",
+            "--export-pack",
+            "--main-pack",
+            "--write-movie",
+        ];
+        // `--export-release Preset path` takes two values after the flag.
+        if matches!(
+            w,
+            "--export-release" | "--export-debug" | "--export-pack"
+        ) {
+            // preset name then path
+            if let Some(path) = words.get(i + 2) {
+                out.push(path.clone());
+            }
+            i += 3;
+            continue;
+        }
+        if value_flags.iter().any(|f| *f == w) {
+            if let Some(val) = words.get(i + 1) {
+                // Skip pure expressions that are not path-like for --python-expr.
+                if w != "--python-expr" && looks_like_path_operand(val) {
+                    out.push(val.clone());
+                }
+            }
+            i += 2;
+            continue;
+        }
+        // `--flag=value` form
+        if let Some((flag, val)) = w.split_once('=')
+            && matches!(
+                flag,
+                "--python"
+                    | "--python-text"
+                    | "--render-output"
+                    | "--path"
+                    | "--main-pack"
+                    | "--write-movie"
+                    | "-o"
+            )
+            && looks_like_path_operand(val)
+        {
+            out.push(val.to_owned());
+            i += 1;
+            continue;
+        }
+        // Positionals: .blend / project.godot / .tscn / .glb output hints.
+        if !w.starts_with('-') && looks_like_path_operand(w) {
+            out.push(w.to_owned());
+        }
+        i += 1;
+        let _ = program; // reserved for engine-specific tweaks
+    }
+    out
+}
+
+fn looks_like_path_operand(token: &str) -> bool {
+    if token.is_empty() || token == "-" {
+        return false;
+    }
+    // Absolute or relative path shapes; bare identifiers without separator are
+    // often presets/names (e.g. export preset), not file operands.
+    token.contains('/')
+        || token.contains('\\')
+        || token.contains('.')
+        || token.starts_with("~/")
+        || token.starts_with("~\\")
+}
+
+/// `powershell -File script.ps1` / `pwsh -f tools/verify.ps1` only.
+fn powershell_file_is_modelled_for_confine(words: &[String]) -> bool {
+    // Opaque script bodies must stay fail-closed (`-Command` / `-EncodedCommand`).
+    let lower: Vec<String> = words.iter().map(|w| w.to_ascii_lowercase()).collect();
+    for (i, w) in lower.iter().enumerate() {
+        if matches!(
+            w.as_str(),
+            "-command" | "-c" | "-encodedcommand" | "-ec" | "-commandwithargs"
+        ) {
+            return false;
+        }
+        if matches!(w.as_str(), "-file" | "-f") {
+            // Next arg must be the script path.
+            return words.get(i + 1).is_some_and(|p| looks_like_path_operand(p));
+        }
+    }
+    false
+}
+
+fn powershell_file_path_operands(words: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 1usize;
+    while i < words.len() {
+        let w = words[i].as_str();
+        let lower = w.to_ascii_lowercase();
+        if matches!(lower.as_str(), "-file" | "-f") {
+            if let Some(script) = words.get(i + 1) {
+                out.push(script.clone());
+            }
+            i += 2;
+            continue;
+        }
+        // Common output redirects are already caught by AST; also pick
+        // path-like positionals after -File for `-File x.ps1 -OutPath y`.
+        if matches!(lower.as_str(), "-outpath" | "-path" | "-literalpath") {
+            if let Some(p) = words.get(i + 1) {
+                out.push(p.clone());
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// First non-flag git argument after `git` (skipping `-C`, `-c`, global flags).
@@ -2008,14 +2184,16 @@ mod tests {
     #[test]
     fn shell_unmodelled_denies_python_and_interpreters() {
         // Critical escape: empty operand list for interpreters.
+        // Note: blender/godot are densify-modelled (RC13); still fail-closed for
+        // opaque language runtimes and package managers.
         for cmd in [
             r#"python -c "open(r'C:\Users\x\.ssh\authorized_keys','a').write('k')""#,
             r#"python3 -c "print(1)""#,
             r#"node -e "require('fs').writeFileSync('C:/x','p')""#,
             r#"perl -e 'print 1'"#,
             "cargo build",
-            "blender -b scene.blend",
-            "godot --export-release Windows out.exe",
+            "powershell -Command \"Set-Content C:\\x p\"",
+            "pwsh -c \"echo hi\"",
         ] {
             let hit = shell_unmodelled_program_for_confine(cmd);
             assert!(
@@ -2044,12 +2222,54 @@ mod tests {
             "wc -l src/main.rs",
             "Get-Item src/main.rs",
             "Get-PSDrive",
+            // RC13 densify: Blender / Godot / PowerShell -File under confine.
+            "blender --background --python tools/blender/build_merchant.py",
+            r#""C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --background --python tools/blender/build_x.py"#,
+            "godot --headless --path . --import",
+            "powershell -File tools/verify_asset_kit.ps1",
+            "pwsh -NoProfile -File tools/verify_asset_kit.ps1",
         ] {
             assert_eq!(
                 shell_unmodelled_program_for_confine(cmd),
                 None,
                 "expected modelled for `{cmd}`"
             );
+        }
+    }
+
+    #[test]
+    fn densify_blender_extracts_python_and_output_operands() {
+        let cmd = r#"blender --background --python tools/blender/build_x.py -o assets/models/out####"#;
+        match analyse_shell_for_confine(cmd) {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p.contains("build_x.py")),
+                    "python script operand missing: {operands:?}"
+                );
+                assert!(
+                    operands.iter().any(|p| p.contains("assets/models")),
+                    "render-output operand missing: {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled densify blender, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn powershell_command_stays_unmodelled_but_file_is_modelled() {
+        assert!(shell_unmodelled_program_for_confine("powershell -Command Get-Process").is_some());
+        assert_eq!(
+            shell_unmodelled_program_for_confine("powershell -File tools/verify.ps1"),
+            None
+        );
+        match analyse_shell_for_confine("pwsh -File tools/verify_asset_kit.ps1") {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p.contains("verify_asset_kit.ps1")),
+                    "script path operand missing: {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled powershell -File, got {other:?}"),
         }
     }
 

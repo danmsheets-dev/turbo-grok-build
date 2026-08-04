@@ -69,7 +69,7 @@ pub(crate) fn task_model_error_for_catalog(
 ) -> Option<String> {
     let is_available =
         |entry: &ModelEntry| entry.info.user_selectable && entry.visible_for_auth(is_session_auth);
-    if config::find_model_by_id(available, requested).is_some_and(&is_available) {
+    if find_task_model_entry(available, requested).is_some_and(|(_, entry)| is_available(entry)) {
         return None;
     }
 
@@ -89,6 +89,112 @@ pub(crate) fn task_model_error_for_catalog(
         )
     };
     Some(format!("Unknown Task.model slug '{requested}'. {guidance}"))
+}
+
+/// Resolve a Task.model slug against the catalog, including common provider
+/// prefix aliases agents copy from platform docs (`amazon-bedrock/…`, …).
+///
+/// Exact key / routing-slug match first ([`config::find_model_by_id`]); then:
+/// - strip a known `provider/` prefix and retry
+/// - if bare, try `amazon-bedrock/{requested}` and other common prefixes
+/// - suffix match: catalog key ends with `/{requested}` or equals the bare id
+///
+/// Returns `(catalog_key, entry)` so callers can pin the canonical id. The key
+/// is always borrowed from `available` (never from the request string).
+pub(crate) fn find_task_model_entry<'a>(
+    available: &'a IndexMap<String, ModelEntry>,
+    requested: &str,
+) -> Option<(&'a str, &'a ModelEntry)> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+
+    /// Prefer the map key for `entry`, else `info.model` if it is a key.
+    fn key_for<'a>(
+        available: &'a IndexMap<String, ModelEntry>,
+        entry: &'a ModelEntry,
+        preferred: Option<&str>,
+    ) -> Option<&'a str> {
+        if let Some(p) = preferred
+            && available.contains_key(p)
+        {
+            return available.get_key_value(p).map(|(k, _)| k.as_str());
+        }
+        if let Some((key, _)) = available.iter().find(|(_, e)| std::ptr::eq(*e, entry)) {
+            return Some(key.as_str());
+        }
+        if available.contains_key(entry.info.model.as_str()) {
+            return available
+                .get_key_value(entry.info.model.as_str())
+                .map(|(k, _)| k.as_str());
+        }
+        None
+    }
+
+    if let Some(entry) = config::find_model_by_id(available, requested) {
+        let key = key_for(available, entry, Some(requested))?;
+        return Some((key, entry));
+    }
+
+    const PROVIDER_PREFIXES: &[&str] = &[
+        "amazon-bedrock/",
+        "bedrock/",
+        "azure-openai/",
+        "azure-openai-responses/",
+        "openrouter/",
+        "vercel-ai-gateway/",
+        "github-copilot/",
+        "nvidia/",
+        "openai/",
+        "anthropic/",
+        "google/",
+    ];
+
+    // Strip one known provider prefix and retry exact lookup.
+    for prefix in PROVIDER_PREFIXES {
+        if let Some(rest) = requested.strip_prefix(prefix)
+            && !rest.is_empty()
+        {
+            if let Some(entry) = config::find_model_by_id(available, rest) {
+                if let Some(key) = key_for(available, entry, Some(rest)) {
+                    return Some((key, entry));
+                }
+            }
+            // Full bedrock-style keys often keep the vendor id after the slash:
+            // requested `amazon-bedrock/openai.gpt-5.6-luna` → try suffix match.
+            if let Some((key, entry)) = available.iter().find(|(key, entry)| {
+                let routing = entry.info.model.as_str();
+                *key == requested
+                    || key.ends_with(&format!("/{rest}"))
+                    || key.ends_with(rest)
+                    || routing == rest
+                    || routing == requested
+            }) {
+                return Some((key.as_str(), entry));
+            }
+        }
+    }
+
+    // Bare id → try common provider-prefixed catalog keys.
+    if !requested.contains('/') {
+        for prefix in PROVIDER_PREFIXES {
+            let candidate = format!("{prefix}{requested}");
+            if let Some(entry) = config::find_model_by_id(available, &candidate) {
+                if let Some(key) = key_for(available, entry, Some(candidate.as_str())) {
+                    return Some((key, entry));
+                }
+            }
+        }
+        // Suffix: catalog key ends with /{requested}
+        if let Some((key, entry)) = available.iter().find(|(key, entry)| {
+            key.ends_with(&format!("/{requested}")) || entry.info.model == requested
+        }) {
+            return Some((key.as_str(), entry));
+        }
+    }
+
+    None
 }
 
 /// Thread-safe model manager.

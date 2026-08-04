@@ -700,6 +700,8 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::DiscardSubagentTool>();
         b.register::<grok_build::DeveloperLogTool>();
         b.register::<grok_build::FeatureRequestLogTool>();
+        b.register::<grok_build::WorkspaceTreeTool>();
+        b.register::<grok_build::ResolvePathTool>();
         b.register::<grok_build::SpawnManyTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();

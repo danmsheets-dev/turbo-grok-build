@@ -620,6 +620,19 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
+                        SessionCommand::SetAllowedWritePaths { paths } => {
+                            *session.allowed_write_paths.lock() = if paths.is_empty() {
+                                None
+                            } else {
+                                Some(paths.clone())
+                            };
+                            session
+                                .agent
+                                .borrow()
+                                .tool_bridge()
+                                .set_allowed_write_paths(paths)
+                                .await;
+                        }
                         SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
                             let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
                             let (actor_admitted, task_wake_fallback) = match admission {

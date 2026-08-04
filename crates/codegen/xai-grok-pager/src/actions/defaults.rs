@@ -77,7 +77,7 @@ pub(super) fn default_actions(
     let send_to_background_help = if screen_mode.is_minimal() {
         "Detaches the running foreground Execute so it keeps working in the background while you read, queue prompts, or start something else.\nTrack background work with /tasks.\nOnly meaningful while a foreground Execute is actually running."
     } else {
-        "Detaches the running foreground Execute so it keeps working in the background while you read, queue prompts, or start something else.\nTrack and resume it from the tasks pane (Ctrl+G).\nOnly meaningful while a foreground Execute is actually running."
+        "Detaches the running foreground Execute so it keeps working in the background while you read, queue prompts, or start something else.\nTrack and resume it from the tasks pane (Ctrl+Shift+G).\nOnly meaningful while a foreground Execute is actually running."
     };
 
     let mut actions = vec![

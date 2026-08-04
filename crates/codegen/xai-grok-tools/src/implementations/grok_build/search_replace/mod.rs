@@ -21,8 +21,9 @@ use crate::types::output::{
 use crate::types::requirements::{Expr, ToolParamsRequirement, ToolRequirement};
 #[allow(unused_imports)]
 use crate::types::resources::{
-    Cwd, DisplayCwd, FileSystem, GitignoreFilter, NotificationHandle, Params, PathNotFoundHints,
-    RespectGitignore, SharedResources, display_cwd_or_cwd, resolve_model_path,
+    ConfineRoot, Cwd, DisplayCwd, FileSystem, GitignoreFilter, NotificationHandle, Params,
+    PathNotFoundHints, RespectGitignore, SharedResources, display_cwd_or_cwd, enforce_write_path,
+    resolve_model_path,
 };
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -161,7 +162,7 @@ pub(crate) async fn run_search_replace(
         .get::<xai_tool_runtime::BehaviorVersion>()
         .map(|v| v.0.clone());
     let tool_call_id = ctx.call_id.as_str().to_owned();
-    let (cwd, display_cwd, fs, notification_handle, hints_enabled);
+    let (cwd, display_cwd, fs, notification_handle, hints_enabled, confine_root);
     {
         let res = resources.lock().await;
         cwd = match cwd_override {
@@ -172,7 +173,11 @@ pub(crate) async fn run_search_replace(
         fs = res.require::<FileSystem>()?.0.clone();
         notification_handle = res.require::<NotificationHandle>()?.0.clone();
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
+        confine_root = res.get::<ConfineRoot>().map(|c| c.0.clone());
     }
+    // RC13 Wave A: fail closed when session CWD / confine root is gone
+    // (worktree tombstone) before any read/write.
+    enforce_write_path(&cwd, confine_root.as_deref()).map_err(|e| e.into_tool_error())?;
     let resolved = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
     let path = match crate::util::fs::try_canonicalize(&resolved).await {
         Ok(p) => p,

@@ -136,11 +136,26 @@ if models.len() > 0 {
 
 // Rhai nested functions do not capture outer locals — pass `models` in.
 // Empty list → inherit session model (unit / ()).
+// Normalize common bad prefixes so openai/gpt-5.6-sol → openai-codex/gpt-5.6-sol.
+fn normalize_model_slug(mid) {
+    let s = trimmed(mid);
+    if s == "" {
+        return s;
+    }
+    // GPT-5.6 Sol (and cousins) live under the openai-codex provider prefix.
+    if s.sub_string(0, 7) == "openai/" {
+        let rest = s.sub_string(7, s.len() - 7);
+        if rest.sub_string(0, 6) == "gpt-5." || rest.sub_string(0, 7) == "gpt-5.6" {
+            return "openai-codex/" + rest;
+        }
+    }
+    s
+}
 fn model_for_index(models, idx) {
     if models.len() == 0 {
         ()
     } else {
-        models[idx % models.len()]
+        normalize_model_slug(models[idx % models.len()])
     }
 }
 

@@ -663,6 +663,8 @@ pub enum ToolOutput {
     FeatureRequestLog(
         crate::implementations::grok_build::feature_request_log::FeatureRequestLogOutput,
     ),
+    WorkspaceTree(crate::implementations::grok_build::workspace_tree::WorkspaceTreeOutput),
+    ResolvePath(crate::implementations::grok_build::resolve_path::ResolvePathOutput),
     SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
@@ -1099,6 +1101,8 @@ impl ToolOutput {
             ToolOutput::DiscardSubagent(o) => o.message.clone(),
             ToolOutput::DeveloperLog(o) => o.message.clone(),
             ToolOutput::FeatureRequestLog(o) => o.message.clone(),
+            ToolOutput::WorkspaceTree(o) => o.message.clone(),
+            ToolOutput::ResolvePath(o) => o.message.clone(),
             ToolOutput::SpawnMany(o) => o.message.clone(),
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),

@@ -345,6 +345,8 @@ impl xai_tool_runtime::Tool for BashTool {
         // --- Read resources ---
         let backend = resources.lock().await.require::<Terminal>()?.0.clone();
         let session_cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
+        // RC13 Wave A: fail closed when session CWD is gone (dead worktree).
+        crate::types::tool_metadata::ensure_cwd_directory(&session_cwd)?;
         let tool_call_id = ctx.call_id.as_str().to_owned();
         let session_folder = resources.lock().await.require::<SessionFolder>()?.0.clone();
         let env = resources
@@ -373,6 +375,8 @@ impl xai_tool_runtime::Tool for BashTool {
 
         // --- Resolve working directory ---
         let cwd = Self::resolve_cwd(&session_cwd, input.workdir.as_deref());
+        // Also refuse when an explicit workdir override points at a missing path.
+        crate::types::tool_metadata::ensure_cwd_directory(&cwd)?;
 
         // --- Compute effective timeout ---
         let timeout = Self::effective_timeout(input.timeout);

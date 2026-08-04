@@ -216,6 +216,16 @@ impl SessionActor {
                 bridge
                     .set_display_cwd(std::path::PathBuf::from(display_cwd))
                     .await;
+                // Rebuild drops resource inserts; re-stamp session confine to
+                // the real tool cwd (worktree) when DisplayCwd is active.
+                let root = dunce::canonicalize(self.rebuild_spec.working_directory.as_path())
+                    .unwrap_or_else(|_| self.rebuild_spec.working_directory.clone());
+                bridge.set_confine_root(root).await;
+            }
+            // Write-time allowlist also lives only in tool resources — re-apply
+            // after rebuild so land/write tools stay fail-closed.
+            if let Some(paths) = self.allowed_write_paths.lock().clone() {
+                bridge.set_allowed_write_paths(paths).await;
             }
             bridge
                 .update_resource(

@@ -6,6 +6,7 @@
 //! (half-read connections being returned to the pool and corrupting subsequent
 //! requests).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -53,7 +54,34 @@ impl HttpClient {
         self.inner.store(None);
     }
 
+    /// Build a one-shot client that pins DNS for `domain` to `addrs`.
+    ///
+    /// Used after SSRF validation to prevent rebinding between check and
+    /// connect. Not used when an egress proxy is configured (proxy does DNS).
+    pub(crate) fn build_with_dns_pin(
+        params: &WebFetchParams,
+        domain: &str,
+        addrs: &[SocketAddr],
+    ) -> Result<reqwest::Client, WebFetchError> {
+        let mut builder = Self::base_builder(params)?;
+        // reqwest expects the host label (no port); strip IPv6 brackets if present.
+        let domain = domain
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(domain);
+        if !addrs.is_empty() {
+            builder = builder.resolve_to_addrs(domain, addrs);
+        }
+        builder.build().map_err(WebFetchError::ClientBuildError)
+    }
+
     fn build(params: &WebFetchParams) -> Result<reqwest::Client, WebFetchError> {
+        Self::base_builder(params)?
+            .build()
+            .map_err(WebFetchError::ClientBuildError)
+    }
+
+    fn base_builder(params: &WebFetchParams) -> Result<reqwest::ClientBuilder, WebFetchError> {
         let mut builder = reqwest::Client::builder()
             .timeout(params.timeout_secs())
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -73,8 +101,7 @@ impl HttpClient {
                 .map_err(|e| WebFetchError::ProxyConfigError(e.to_string()))?;
             builder = builder.proxy(proxy);
         }
-
-        builder.build().map_err(WebFetchError::ClientBuildError)
+        Ok(builder)
     }
 }
 

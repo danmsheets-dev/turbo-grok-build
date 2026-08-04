@@ -135,8 +135,14 @@ pub struct PromptContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_path: Option<String>,
     /// Model-facing working directory for the `<user_info>` system prompt block.
+    /// In isolation=worktree this is often the **parent** path (DisplayCwd).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    /// Real tool/session CWD used for filesystem tools and Workspace Tree inject.
+    /// For isolation=worktree this is the worktree path under `~/.grok/worktrees/…`.
+    /// When absent, inject falls back to [`Self::working_directory`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_working_directory: Option<String>,
     /// Current date (`YYYY-MM-DD`) in the user's local timezone, for the
     /// `<user_info>` system prompt block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +199,7 @@ impl Default for PromptContext {
             os_name: None,
             shell_path: None,
             working_directory: None,
+            tool_working_directory: None,
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
@@ -340,6 +347,8 @@ impl PromptContext {
                 );
             }
         }
+        // Workspace tree atlas card (budgeted; fails soft when index not ready).
+        crate::prompt::workspace_tree_card::inject_workspace_tree_card(&mut prompt, self);
         Some(prompt)
     }
 }
@@ -366,6 +375,7 @@ mod tests {
             os_name: None,
             shell_path: None,
             working_directory: None,
+            tool_working_directory: None,
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
@@ -652,6 +662,7 @@ mod tests {
             os_name: None,
             shell_path: None,
             working_directory: None,
+            tool_working_directory: None,
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),

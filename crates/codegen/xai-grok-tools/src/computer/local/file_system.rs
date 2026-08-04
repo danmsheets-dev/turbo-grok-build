@@ -172,6 +172,12 @@ impl AsyncFileSystem for LocalFs {
 
     #[tracing::instrument(name = "fs.write_file", skip_all)]
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
+        // RC13 Wave A: when process confine root is stamped, refuse writes if
+        // that root is gone (worktree tombstone). Session CWD is enforced at
+        // the tool layer via `enforce_write_path`.
+        crate::types::resources::enforce_process_confine_root_exists()
+            .map_err(|e| e.into_computer_error())?;
+
         // implicitly creates the missing directories if any
         if let Some(dir) = path.parent()
             && let Err(e) = fs::create_dir_all(dir).await
@@ -187,14 +193,24 @@ impl AsyncFileSystem for LocalFs {
             }
             return Err(e.into());
         }
-        // RC11 Round-2: never report success until the path is visible on disk
-        // with the expected size (Super concurrent "phantom write" FOOTGUN).
-        if let Err(e) = verify_write_persisted(path, data.len() as u64).await {
+        // RC11 Round-2 / RC13: never report success until the path is visible
+        // on disk with the expected size (Super concurrent "phantom write"
+        // FOOTGUN). Strengthen: brief re-verify, then up to two rewrite cycles.
+        let expected_len = data.len() as u64;
+        if verify_write_persisted(path, expected_len).await.is_ok() {
+            return Ok(());
+        }
+        // Short settle for AV / indexer races before rewriting.
+        sleep(Duration::from_millis(25)).await;
+        if verify_write_persisted(path, expected_len).await.is_ok() {
+            return Ok(());
+        }
+        for attempt in 1..=2u8 {
             tracing::warn!(
                 path = %path.display(),
-                expected_len = data.len(),
-                error = %e,
-                "post-write verify failed; retrying write once"
+                expected_len,
+                attempt,
+                "post-write verify failed; retrying write"
             );
             if let Err(e2) = write_file_with_transient_lock_retries(path, data).await {
                 if is_permission_error(&e2) {
@@ -202,21 +218,34 @@ impl AsyncFileSystem for LocalFs {
                 }
                 return Err(e2.into());
             }
-            if let Err(e3) = verify_write_persisted(path, data.len() as u64).await {
-                tracing::error!(
-                    path = %path.display(),
-                    expected_len = data.len(),
-                    error = %e3,
-                    "write reported OK but file missing or size mismatch after retry"
-                );
-                return Err(ComputerError::io(format!(
-                    "write to {} did not persist on disk (post-write verify failed: {e3}). \
-                     Refusing success so agents do not land empty snapshots.",
-                    path.display()
-                )));
+            if verify_write_persisted(path, expected_len).await.is_ok() {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(50)).await;
+            if verify_write_persisted(path, expected_len).await.is_ok() {
+                return Ok(());
             }
         }
-        Ok(())
+        // Parent vanished mid-write → tombstone-class failure for operators.
+        let parent_gone = path
+            .parent()
+            .is_some_and(|p| !p.as_os_str().is_empty() && !p.is_dir());
+        let tombstone_hint = if parent_gone {
+            " Parent directory is missing (cwd_missing / worktree_tombstone)."
+        } else {
+            ""
+        };
+        tracing::error!(
+            path = %path.display(),
+            expected_len,
+            parent_gone,
+            "write reported OK but file missing or size mismatch after retries"
+        );
+        Err(ComputerError::io(format!(
+            "write to {} did not persist on disk (post-write exist+size verify failed after retries). \
+             Refusing success so agents do not land empty snapshots.{tombstone_hint}",
+            path.display()
+        )))
     }
 
     #[tracing::instrument(name = "fs.delete_file", skip_all)]

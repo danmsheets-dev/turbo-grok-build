@@ -53,7 +53,8 @@ src/
 | `Ctrl+C` | Prompt (with text) | Clear prompt (even while turn running) |
 | `Ctrl+C` | Prompt (empty) + turn running | Cancel running turn |
 | `Ctrl+B` | Agent screen + foreground command running | Send the command to the background |
-| `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
+| `Ctrl+G` | Agent screen (full TUI) | Toggle **Game Mode** (pixel office) |
+| `Ctrl+Shift+G` | Agent screen (full TUI) | Toggle the tasks pane |
 | `Ctrl+G` | Ordinary composer (minimal mode) | Edit the draft externally; use the command-palette entry if the chord is reserved |
 
 ## Docs

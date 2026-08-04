@@ -107,14 +107,22 @@ pub struct WebFetchToolConfig {
     /// Egress proxy endpoint. When set, all HTTP requests are routed through
     /// this URL. Resolution: TOML > `GROK_WEB_FETCH_PROXY` env > remote settings > None.
     pub proxy_endpoint: Option<String>,
-    /// Domains the tool is allowed to fetch. When set, overrides the built-in
-    /// default allowlist. An explicit empty list blocks all fetches.
-    /// Resolution: TOML > remote settings > built-in defaults.
+    /// Domains the tool is allowed to fetch. When unset, open-public mode
+    /// applies (SSRF still blocks private/metadata). When set, only listed
+    /// hosts are allowed. An explicit empty list blocks all fetches (tool off).
+    /// Resolution: TOML > remote settings > open-public (None).
+    /// Curated preset: see `DEFAULT_ALLOWED_DOMAINS` in the web_fetch crate.
     pub allowed_domains: Option<Vec<String>>,
     /// Allow fetches to explicit loopback hosts only (`localhost` / `127.0.0.0/8`
     /// / `::1`). Private and metadata ranges stay blocked. Default off.
     /// Resolution: TOML > `GROK_WEB_FETCH_ALLOW_LOCAL` env > false.
     pub allow_local: Option<bool>,
+    /// `Accept-Language` header override (default `en-US,en;q=0.9`).
+    pub accept_language: Option<String>,
+    /// Max JavaScript body bytes before soft truncate (default 256 KiB).
+    pub max_js_bytes: Option<usize>,
+    /// Override User-Agent (default: browser-shaped TurboGrok research UA).
+    pub user_agent: Option<String>,
 }
 
 impl WebFetchToolConfig {
@@ -153,6 +161,9 @@ impl WebFetchToolConfig {
             allowed_domains,
             context_window_tokens,
             allow_local,
+            accept_language: self.accept_language.clone(),
+            max_js_bytes: self.max_js_bytes,
+            user_agent: self.user_agent.clone(),
             ..Default::default()
         }
     }
@@ -597,6 +608,9 @@ mod tests {
             proxy_endpoint: Some("https://toml-proxy.example.com".to_owned()),
             allowed_domains: Some(vec!["toml.example.com".to_owned()]),
             allow_local: Some(true),
+            accept_language: None,
+            max_js_bytes: None,
+            user_agent: None,
         };
         let params = local.resolve_params(
             Some("https://remote-proxy.example.com"),
@@ -649,6 +663,9 @@ mod tests {
             proxy_endpoint: None,
             allowed_domains: Some(vec![]),
             allow_local: None,
+            accept_language: None,
+            max_js_bytes: None,
+            user_agent: None,
         };
         let params = local.resolve_params(None, Some(&["remote.example.com".to_owned()]), None);
         assert_eq!(params.allowed_domains, Some(vec![]));

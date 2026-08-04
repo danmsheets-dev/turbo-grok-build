@@ -1578,7 +1578,32 @@ pub mod gc {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             pid_alive_from_kill(ret, errno)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // OpenProcess + GetExitCodeProcess (STILL_ACTIVE). pid 0 is invalid.
+            if pid == 0 {
+                return false;
+            }
+            use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+            use windows_sys::Win32::System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            };
+            // STILL_ACTIVE = 259 (not always re-exported under windows-sys 0.59).
+            const STILL_ACTIVE: u32 = 259;
+            // SAFETY: Win32 process query APIs; handle closed on all paths.
+            unsafe {
+                let handle: HANDLE =
+                    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if handle.is_null() {
+                    return false;
+                }
+                let mut code: u32 = 0;
+                let ok = GetExitCodeProcess(handle, &mut code);
+                CloseHandle(handle);
+                ok != 0 && code == STILL_ACTIVE
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = pid;
             false
@@ -1593,6 +1618,7 @@ pub mod gc {
         #[allow(dead_code)]
         Unsupported,
         /// Enumerator failed or unusable — age path fail-closes.
+        #[allow(dead_code)] // constructed on Linux/macOS enumerators; Windows uses Unsupported
         Failed,
     }
 
@@ -1601,6 +1627,7 @@ pub mod gc {
         force || matches!(scan, LiveCwdScan::Ok(_) | LiveCwdScan::Unsupported)
     }
 
+    #[cfg_attr(windows, allow(dead_code))] // used by Linux/macOS live_process_cwds
     fn scan_contains_cwd(cwds: &[PathBuf], path: &Path) -> bool {
         let path_canon = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         cwds.iter().any(|c| {
@@ -1614,6 +1641,7 @@ pub mod gc {
     ///
     /// `current_dir()` errors also fail closed — we cannot confirm this
     /// process is outside every candidate path without knowing CWD.
+    #[cfg_attr(windows, allow(dead_code))] // used by Linux/macOS live_process_cwds
     fn validate_cwd_scan(cwds: Vec<PathBuf>) -> LiveCwdScan {
         match std::env::current_dir() {
             Ok(cwd) if scan_contains_cwd(&cwds, &cwd) => LiveCwdScan::Ok(cwds),
@@ -1955,10 +1983,19 @@ pub mod gc {
             assert!(is_pid_alive(1), "pid 1 must be detected as alive");
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         #[test]
-        fn is_pid_alive_never_false_alive_on_non_unix() {
-            // Safe fallback: never report a pid as alive without a real probe.
+        fn is_pid_alive_true_for_self_on_windows() {
+            assert!(is_pid_alive(std::process::id()));
+            assert!(!is_pid_alive(0));
+            // High unused PID: OpenProcess fails → dead.
+            assert!(!is_pid_alive(u32::MAX));
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        #[test]
+        fn is_pid_alive_never_false_alive_on_unsupported() {
+            // No probe available: never claim alive.
             assert!(!is_pid_alive(std::process::id()));
             assert!(!is_pid_alive(0));
             assert!(!is_pid_alive(u32::MAX));

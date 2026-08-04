@@ -1903,7 +1903,8 @@ impl Default for Config {
             respect_gitignore: false,
             disable_zdr_incompatible_tools: false,
             zdr_video_output_s3: None,
-            path_not_found_hints: false,
+            // RC13 P1 F5: Did-you-mean / atlas miss recovery on by default.
+            path_not_found_hints: true,
             cli_experimental_memory: false,
             cli_no_memory: false,
             cli_subagents: None,
@@ -2571,10 +2572,14 @@ impl Config {
             .remote_settings
             .as_ref()
             .and_then(|s| s.web_fetch_enabled);
+        // Default ON so agents can research without a config dance; kill-switch
+        // via GROK_WEB_FETCH=0, [features] web_fetch = false, requirements, or
+        // remote web_fetch_enabled = false. Empty allowed_domains still disables.
         BoolFlag::env("GROK_WEB_FETCH")
             .requirement(self.requirements.web_fetch.pinned())
             .config(self.features.web_fetch)
             .feature_flag(ff)
+            .default(true)
             .resolve()
     }
     /// `ask_user_question` tool gate; default ON. remote settings
@@ -5492,7 +5497,7 @@ pub struct Features {
     /// MCP tool search/discovery. `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_search: Option<bool>,
-    /// Web fetch tool. `None` = defer to remote settings / env / default (false).
+    /// Web fetch tool. `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_fetch: Option<bool>,
     /// Ask-user-question tool. `None` = defer to remote settings / env / default (true).
@@ -13501,7 +13506,10 @@ hooks = true
             cfg.session_summary_model,
             Some(crate::models::default_session_summary_model().to_owned())
         );
-        assert!(!cfg.path_not_found_hints);
+        assert!(
+            cfg.path_not_found_hints,
+            "RC13: path_not_found_hints defaults on so atlas miss recovery fires"
+        );
     }
     #[test]
     #[serial]

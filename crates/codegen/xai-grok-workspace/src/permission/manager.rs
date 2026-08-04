@@ -1976,18 +1976,28 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
-                    // Confine root (`--confine` / `--workspace-root`): path-prefix
-                    // deny for Edit **and** Bash write/`cd` operands BEFORE YOLO —
-                    // same precedence as managed deny rules. Globs cannot express
-                    // "not under this root" safely on Windows; paths are reduced
-                    // via `canonicalize_for_permission` (ancestor walk for
-                    // non-existent write targets, 8.3 / symlink resolution).
-                    // Fail closed on unparseable shell under confine.
-                    if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+                    // Confine root: process `--confine` / `GROK_CONFINE`, else
+                    // session isolation worktree root on the request. Path-prefix
+                    // deny for Edit **and** Bash write/`cd` operands BEFORE YOLO.
+                    // Session root keeps multi-session parents unconfined while
+                    // isolation=worktree children cannot shell-escape (C1).
+                    let session_confine = edit_path_context
+                        .as_ref()
+                        .and_then(|c| c.confine_root.as_ref())
+                        .map(|p| p.as_path());
+                    let process_confine = xai_grok_tools::types::resources::process_confine_root()
+                        .map(|p| p.as_path());
+                    if let Some(root) = process_confine.or(session_confine) {
+                        // Join relative shell operands against the real session
+                        // cwd (worktree), not the permission actor's global cwd.
+                        let join_cwd = edit_path_context
+                            .as_ref()
+                            .map(|c| c.real_cwd.as_path())
+                            .unwrap_or_else(|| cwd.as_path());
                         let confine_hit = confine_access_outside_root(
                             &access,
                             root,
-                            cwd.as_path(),
+                            join_cwd,
                             edit_path_context.as_ref(),
                         );
                         if let Some(hit) = confine_hit {
@@ -3032,6 +3042,7 @@ mod tests {
                 let context = EditPathContext {
                     real_cwd: child.path().to_path_buf(),
                     display_cwd: Some(display.path().to_path_buf()),
+                    confine_root: Some(child.path().to_path_buf()),
                 };
 
                 for displayed in [

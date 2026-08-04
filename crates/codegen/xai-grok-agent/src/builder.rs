@@ -1196,6 +1196,9 @@ impl AgentBuilder {
             os_name: Some(std::env::consts::OS.to_string()),
             shell_path: Some(resolve_shell_for_prompt()),
             working_directory: Some(display_working_dir),
+            tool_working_directory: Some(
+                self.working_directory.to_string_lossy().into_owned(),
+            ),
             current_date: Some(
                 now.with_timezone(&chrono::Local)
                     .format("%Y-%m-%d")

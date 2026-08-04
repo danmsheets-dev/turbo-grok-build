@@ -6,7 +6,7 @@
 | Release | RC11 |
 | Visual tier | **Primary:** mockup PNG + procedural 8-bit Rust sprites → halfblock paint. **Fallback:** Unicode office / Compact cards |
 | Interaction | Spectator + composer to Supervisor; no desk open/kill/spawn |
-| Toggle | `Shift+G` — Normal View ↔ Game Mode |
+| Toggle | `Ctrl+G` — Normal View ↔ Game Mode (tasks pane: `Ctrl+Shift+G`) |
 | Mockup | `game_mode_mockup.png` (inspiration; not pixel-identical) |
 
 ---
@@ -33,16 +33,16 @@
 
 | Item | Behavior |
 |------|----------|
-| Toggle | `ActionId::ToggleGameMode`, default chord **`Shift+G`**. Toggles Normal ↔ Game for the active agent session. |
+| Toggle | `ActionId::ToggleGameMode`, default chord **`Ctrl+G`**. Toggles Normal ↔ Game for the active agent session. |
 | Composer | Always visible at bottom; same prompt path as Normal View. Sends to Supervisor only. |
-| Exit | `Shift+G` again. Prefer not stealing `Esc` from global overlays unless Game Mode is top-most and no modal is open. |
+| Exit | `Ctrl+G` again. Prefer not stealing `Esc` from global overlays unless Game Mode is top-most and no modal is open. |
 | Scrollback | Hidden while Game Mode is open (room replaces conversation chrome above the composer). |
 | Focus | Spectator: no desk selection required. Optional highlight for polish is out of scope unless free. |
 
 ### 3.1 Keybind notes
 
-- **Ctrl+G** remains tasks / mode-specific action (unchanged).
-- **Shift+G** must not fire when a modal that already uses `Shift+G` (e.g. settings jump-to-last) is focused — follow existing `When` context pattern in `actions/defaults.rs`.
+- **Ctrl+G** opens Game Mode (RC11+). Tasks pane moved to **`Ctrl+Shift+G`**.
+- Minimal mode keeps `Ctrl+G` for external editor; Game Mode is not the Ctrl+G owner there.
 - Register in shortcuts help under Panels / View.
 
 ---
@@ -149,7 +149,7 @@ Large high-contrast banner, center-top (scales with width — §7).
 
 **Occupied monitor:** type/role · elapsed · tokens · tools · activity marquee.
 
-**Status strip (always):** occupancy dots · active count · session-ish token/tool summary · Supervisor chip · `Shift+G` legend.
+**Status strip (always):** occupancy dots · active count · session-ish token/tool summary · Supervisor chip · `Ctrl+G` legend.
 
 ---
 
@@ -304,7 +304,7 @@ Integration points:
 
 ## 10. RC11 acceptance criteria
 
-1. `Shift+G` toggles Normal ↔ Game; composer works in Game Mode → Supervisor.
+1. `Ctrl+G` toggles Normal ↔ Game; composer works in Game Mode → Supervisor.
 2. Up to 6 desks show running subagents; empty = IDLE desk.
 3. Monitors show live elapsed / tokens / tools / activity when space allows.
 4. Wall display shows WORKING / STANDBY / **WORK FINISHED** / attention states correctly.
@@ -313,7 +313,7 @@ Integration points:
 7. **Resize:** Comfort → Normal → Compact does not panic; layout remains readable; no overlapping critical HUD.
 8. Below minimum size, Compact fallback remains informative (not a clipped mess).
 9. Failures do not use success handoff.
-10. Shortcuts help documents `Shift+G`.
+10. Shortcuts help documents `Ctrl+G` (Game Mode) and `Ctrl+Shift+G` (tasks).
 
 ---
 

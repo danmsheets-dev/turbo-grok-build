@@ -460,6 +460,28 @@ impl ToolBridge {
             .insert(crate::types::resources::DisplayCwd(display_cwd));
     }
 
+    /// Session-scoped write confine root (isolation=worktree worktree path, or
+    /// process `--confine` root mirrored into resources).
+    pub async fn set_confine_root(&self, root: std::path::PathBuf) {
+        let registry = &*self.registry;
+        registry
+            .resources
+            .lock()
+            .await
+            .insert(crate::types::resources::ConfineRoot(root));
+    }
+
+    /// Write-time `allowed_paths` prefixes (relative). Empty means unrestricted
+    /// (see [`crate::types::resources::enforce_write_path`]).
+    pub async fn set_allowed_write_paths(&self, paths: Vec<String>) {
+        let registry = &*self.registry;
+        registry
+            .resources
+            .lock()
+            .await
+            .insert(crate::types::resources::AllowedWritePaths(paths));
+    }
+
     /// List all known background tasks from the terminal backend.
     /// Used for context compaction to include task state in summaries.
     pub async fn list_background_tasks(&self) -> Vec<crate::computer::types::TaskSnapshot> {

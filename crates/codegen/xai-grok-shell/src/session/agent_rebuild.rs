@@ -406,6 +406,15 @@ impl AgentRebuildSpec {
                 *path_not_found_hints,
             ))
             .await;
+        // RC13 P1 F9: gate atlas walk/build on the same trust as kickoff.
+        let tree_allowed =
+            crate::agent::folder_trust::project_scope_allowed(working_directory);
+        agent
+            .tool_bridge()
+            .update_resource(
+                xai_grok_tools::types::resources::WorkspaceTreeIndexingAllowed(tree_allowed),
+            )
+            .await;
         if let Some(client) = managed_gateway_tool_client.clone() {
             agent.tool_bridge().update_resource(client).await;
         }
@@ -477,7 +486,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
         respect_gitignore: false,
         scheduler_background_loops: true,
-        path_not_found_hints: false,
+        path_not_found_hints: true,
         mcp_state: Arc::new(tokio::sync::Mutex::new(
             crate::session::mcp_servers::McpState::new(vec![]),
         )),

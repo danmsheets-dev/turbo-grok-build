@@ -682,6 +682,9 @@ pub enum SubagentCancelTarget {
     SubagentId(String),
     ParentPromptId(String),
     WorkflowRunId(String),
+    /// Cancel all children whose `runtime_overrides.loop_task_id` matches
+    /// (scheduler check-loop delete / cancel).
+    LoopTaskId(String),
 }
 
 /// Cancel request sent by `KillTaskTool` or session cancellation paths.
@@ -722,6 +725,13 @@ pub struct SubagentCompletionSummary {
     /// that DO have a polling tool keep the existing metadata-only line +
     /// "Use get_task_output(...)" pointer.
     pub output: Arc<str>,
+    /// Effective isolation for harnesses: `worktree`, `none`, or
+    /// `shared_fallback` (requested worktree but ran on parent).
+    pub isolation: Option<String>,
+    /// Live worktree path when isolation=worktree and the tree is still present.
+    pub worktree_path: Option<String>,
+    /// Dispose lifecycle: `live` | `preserved` | `cleaned`.
+    pub worktree_state: Option<String>,
 }
 
 /// Multi-wait request: block until one or all of the listed subagents finish.
@@ -1554,6 +1564,9 @@ mod tests {
             tool_calls: 7,
             turns: 3,
             output: std::sync::Arc::from("subagent answer"),
+            isolation: None,
+            worktree_path: None,
+            worktree_state: None,
         }];
         req.respond_to.send(summaries).unwrap();
 

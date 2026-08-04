@@ -523,12 +523,16 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
     }
     headers
 }
-/// Build web fetch config. Enabled with default params unless
-/// `GROK_DISABLE_WEB_FETCH=1` is set.
+/// Build web fetch config. Enabled with open-public params by default.
+///
+/// Kill-switch (either): `GROK_WEB_FETCH=0|false` or legacy
+/// `GROK_DISABLE_WEB_FETCH=1|true`.
 fn build_web_fetch_config() -> xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig
 {
     use xai_grok_tools::implementations::grok_build::web_fetch::{WebFetchConfig, WebFetchParams};
-    if std::env::var("GROK_DISABLE_WEB_FETCH").is_ok_and(|v| v == "1" || v == "true") {
+    if xai_grok_config::env_bool("GROK_WEB_FETCH") == Some(false)
+        || std::env::var("GROK_DISABLE_WEB_FETCH").is_ok_and(|v| v == "1" || v == "true")
+    {
         return WebFetchConfig::Disabled;
     }
     let mut params = WebFetchParams::default();

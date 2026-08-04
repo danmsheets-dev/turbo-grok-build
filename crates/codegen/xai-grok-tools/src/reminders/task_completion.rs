@@ -422,6 +422,18 @@ pub fn format_subagent_completion(
         c.tool_calls,
         c.turns,
     );
+    if let Some(ref iso) = c.isolation {
+        out.push_str(&format!("\nIsolation: {iso}"));
+        if iso == "shared_fallback" {
+            out.push_str(" (NOT isolated — ran on parent workspace)");
+        }
+        if let Some(ref wt) = c.worktree_path {
+            out.push_str(&format!(" | worktree: {wt}"));
+        }
+        if let Some(ref st) = c.worktree_state {
+            out.push_str(&format!(" | worktree_state: {st}"));
+        }
+    }
     out.push_str(match task_output_name {
         Some(_) => "\n",
         None => "\n\n",
@@ -603,6 +615,8 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::DiscardSubagent(_)
         | ToolOutput::DeveloperLog(_)
         | ToolOutput::FeatureRequestLog(_)
+        | ToolOutput::WorkspaceTree(_)
+        | ToolOutput::ResolvePath(_)
         | ToolOutput::SpawnMany(_)
         | ToolOutput::ImageGen(_)
         | ToolOutput::ImageToVideo(_)
@@ -1471,6 +1485,9 @@ mod tests {
             tool_calls: 3,
             turns: 2,
             output: std::sync::Arc::from(format!("output for {id}")),
+            isolation: None,
+            worktree_path: None,
+            worktree_state: None,
         }
     }
     #[tokio::test]

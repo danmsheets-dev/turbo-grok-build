@@ -189,20 +189,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             tokio::select! {
                 biased;
                 Some(event) = self.internal_rx.recv() => self.handle_internal(event),
-                Some((id, output)) = self.runs.next(), if !self.runs.is_empty() => {
-                    match output {
-                        Ok(output) => self.finish_child(&id, output),
-                        Err(_) => self.finish_panicked_child(&id),
-                    }
-                }
+                // Prefer draining ValidateType/DescribeType before long child runs so
+                // spawn preflight does not time out during densify cancel storms.
                 Some((respond_to, outcome)) = self.validations.next(), if !self.validations.is_empty() => {
                     let _ = respond_to.send(outcome);
                 }
                 Some((respond_to, outcome)) = self.descriptions.next(), if !self.descriptions.is_empty() => {
                     let _ = respond_to.send(outcome);
-                }
-                Some((seed, target, progress)) = self.progress.next(), if !self.progress.is_empty() => {
-                    self.finish_progress(seed, target, progress);
                 }
                 command = self.commands.recv(), if commands_open => {
                     match command {
@@ -212,6 +205,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         }
                         None => commands_open = false,
                     }
+                }
+                Some((id, output)) = self.runs.next(), if !self.runs.is_empty() => {
+                    match output {
+                        Ok(output) => self.finish_child(&id, output),
+                        Err(_) => self.finish_panicked_child(&id),
+                    }
+                }
+                Some((seed, target, progress)) = self.progress.next(), if !self.progress.is_empty() => {
+                    self.finish_progress(seed, target, progress);
                 }
                 _ = sleep_until(deadline), if deadline.is_some() => self.process_deadlines(),
             }
@@ -322,6 +324,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                             .or_default()
                             .push(request.respond_to);
                     }
+                }
+                SubagentCancelTarget::LoopTaskId(loop_id) => {
+                    self.cancel_loop_task_children(&loop_id, request.parent_session_id.as_deref());
+                    let _ = request.respond_to.send(SubagentCancelOutcome::Cancelled);
                 }
             },
             SubagentEvent::ListActive(request) => {
@@ -503,6 +509,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 }) || self.active.values().any(|child| {
                     child.request.runtime_overrides.loop_task_id.as_deref()
                         == Some(&request.task_id)
+                }) || self.spawn_queue.iter().any(|q| {
+                    q.request.runtime_overrides.loop_task_id.as_deref() == Some(&request.task_id)
                 });
                 let _ = request.respond_to.send(is_active);
             }
@@ -663,6 +671,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         if self.config.buffer_completions
             && request.surface_completion
             && !request.owner.is_workflow()
+            && !explicitly_killed
+            && !output.result.cancelled
         {
             let mut summary = completion_summary(&request, &output.result);
             if let Some(cap) = self.config.buffered_completion_output_cap {
@@ -760,6 +770,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             child.cancellation.cancel();
             return SubagentCancelOutcome::Cancelled;
         }
+        // Still on the concurrency queue — drop before start so densify cancel
+        // storms don't leave phantom ids that never register.
+        if let Some(pos) = self
+            .spawn_queue
+            .iter()
+            .position(|q| q.request.id == id && belongs_to_session(&q.request, parent_session_id))
+        {
+            let queued = self.spawn_queue.remove(pos).expect("position just found");
+            let _ = queued.result_tx.send(SubagentResult {
+                success: false,
+                cancelled: true,
+                error: Some("cancelled while queued for concurrency slot".to_owned()),
+                subagent_id: id.to_owned(),
+                child_session_id: id.to_owned(),
+                ..Default::default()
+            });
+            // Wake any block-waiters with a cancelled-shaped completed snapshot.
+            for waiter in self.waiters.remove(id).unwrap_or_default() {
+                let _ = waiter.respond_to.send(None);
+            }
+            let _ = explicit;
+            return SubagentCancelOutcome::Cancelled;
+        }
         if let Some(child) = self.completed.get(id)
             && belongs_to_session(&child.request, parent_session_id)
         {
@@ -807,6 +840,26 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 cancelled += 1;
             }
         }
+        // Drop concurrency-queued spawns so session close cannot later drain
+        // them as orphans (audit residual).
+        let mut kept = std::collections::VecDeque::new();
+        while let Some(q) = self.spawn_queue.pop_front() {
+            if q.request.parent_session_id == parent_session_id {
+                let id = q.request.id.clone();
+                let _ = q.result_tx.send(SubagentResult {
+                    success: false,
+                    cancelled: true,
+                    error: Some("cancelled: parent session torn down".to_owned()),
+                    subagent_id: id.clone(),
+                    child_session_id: id,
+                    ..Default::default()
+                });
+                cancelled += 1;
+            } else {
+                kept.push_back(q);
+            }
+        }
+        self.spawn_queue = kept;
         if cancelled > 0 {
             tracing::info!(
                 parent_session_id,
@@ -814,6 +867,65 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 "cancelled subagents on session teardown"
             );
         }
+    }
+
+    /// Cancel every in-flight / queued child tagged with a scheduler loop task id.
+    fn cancel_loop_task_children(&mut self, loop_task_id: &str, parent_session_id: Option<&str>) {
+        let mut cancelled = 0u32;
+        for child in self.active.values_mut() {
+            if child.request.runtime_overrides.loop_task_id.as_deref() == Some(loop_task_id)
+                && belongs_to_session(&child.request, parent_session_id)
+            {
+                child.explicitly_killed = true;
+                child.request.surface_completion = false;
+                child.cancellation.cancel();
+                child.control.cancel();
+                cancelled += 1;
+            }
+        }
+        for child in self.pending.values_mut() {
+            if child.request.runtime_overrides.loop_task_id.as_deref() == Some(loop_task_id)
+                && belongs_to_session(&child.request, parent_session_id)
+            {
+                child.explicitly_killed = true;
+                child.request.surface_completion = false;
+                child.cancellation.cancel();
+                cancelled += 1;
+            }
+        }
+        // Drop queued spawns for this loop before they start.
+        let before = self.spawn_queue.len();
+        let mut kept = std::collections::VecDeque::new();
+        while let Some(q) = self.spawn_queue.pop_front() {
+            if q.request.runtime_overrides.loop_task_id.as_deref() == Some(loop_task_id)
+                && belongs_to_session(&q.request, parent_session_id)
+            {
+                let id = q.request.id.clone();
+                let _ = q.result_tx.send(SubagentResult {
+                    success: false,
+                    cancelled: true,
+                    error: Some(format!(
+                        "cancelled: scheduler loop task `{loop_task_id}` was deleted"
+                    )),
+                    subagent_id: id.clone(),
+                    child_session_id: id,
+                    ..Default::default()
+                });
+                cancelled += 1;
+            } else {
+                kept.push_back(q);
+            }
+        }
+        self.spawn_queue = kept;
+        if cancelled > 0 {
+            tracing::info!(
+                loop_task_id,
+                cancelled,
+                queue_dropped = before.saturating_sub(self.spawn_queue.len()),
+                "cancelled subagents for deleted scheduler loop task"
+            );
+        }
+        self.running_count_changed();
     }
 
     fn cancel_workflow_children(&mut self, run_id: &str, parent_session_id: Option<&str>) {

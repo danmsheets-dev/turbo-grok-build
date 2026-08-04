@@ -76,9 +76,21 @@ fn ssrf_recovery_hint(host: &str) -> &'static str {
 }
 
 /// Whether `host` is a GitHub / GitHub Enterprise host (one `gh` can reach).
+///
+/// Exact/suffix match only — avoid false positives like `notgithub.evil.com`
+/// that a bare `contains("github")` would hit.
 fn is_github_host(host: &str) -> bool {
-    let h = host.to_ascii_lowercase();
-    h == "github.com" || h.ends_with(".github.com") || h.contains("github")
+    let h = host
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    h == "github.com"
+        || h.ends_with(".github.com")
+        || h == "github.io"
+        || h.ends_with(".github.io")
+        // GitHub Enterprise Server hostnames often end in these labels.
+        || h.ends_with(".ghe.com")
+        || h.ends_with(".github.enterprise")
 }
 
 /// Whether the `gh` CLI is available on `PATH`, via the same `which` lookup the
@@ -95,7 +107,9 @@ mod tests {
     fn github_host_detection() {
         assert!(is_github_host("github.com"));
         assert!(is_github_host("api.github.com"));
-        assert!(is_github_host("github.ghe.example.com")); // synthetic GHE-style
+        assert!(is_github_host("pages.github.io"));
+        assert!(is_github_host("corp.ghe.com"));
+        assert!(!is_github_host("notgithub.evil.com"));
         assert!(!is_github_host("ghe.example.com"));
         assert!(!is_github_host("internal-wiki.corp.example.com"));
         assert!(!is_github_host("gitlab.example.com"));
@@ -108,7 +122,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No gh in this dir yet.
         assert!(which::which_in("gh", Some(dir.path()), dir.path()).is_err());
-        // Create an executable `gh`.
+        // Create an executable `gh` (Windows requires a PATHEXT suffix).
+        #[cfg(windows)]
+        let gh = dir.path().join("gh.cmd");
+        #[cfg(not(windows))]
         let gh = dir.path().join("gh");
         std::fs::write(&gh, b"#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -136,8 +153,7 @@ mod tests {
     #[test]
     fn ssrf_github_host_hint_follows_gh_availability() {
         let err = WebFetchError::SsrfBlocked {
-            // Synthetic host must contain "github" for is_github_host; IP is RFC1918 example.
-            host: "github.ghe.example.com".to_string(),
+            host: "api.github.com".to_string(),
             ip: "10.0.0.1".parse().unwrap(),
         };
         let msg = err.to_string();
@@ -146,12 +162,21 @@ mod tests {
             assert!(msg.contains("`gh` CLI"), "gh present -> should hint: {msg}");
             assert!(msg.contains("gh pr view") && msg.contains("gh api"));
         } else {
-            // Host names like "github…" contain the substring "gh"; assert on the
-            // hint markers only, not a bare "gh" contains check.
             assert!(
                 !msg.contains("`gh` CLI") && !msg.contains("gh pr view") && !msg.contains("gh api"),
                 "gh absent -> previous behavior, no hint: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn ssrf_non_matching_github_substring_never_hints() {
+        let err = WebFetchError::SsrfBlocked {
+            host: "notgithub.evil.com".to_string(),
+            ip: "10.0.0.9".parse().unwrap(),
+        };
+        let msg = err.to_string();
+        assert!(!msg.contains("`gh` CLI"));
+        assert!(!msg.contains("gh pr view"));
     }
 }

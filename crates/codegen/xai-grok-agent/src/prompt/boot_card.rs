@@ -53,6 +53,10 @@ pub struct BootCardContext {
     /// Absolute root of Feature Request Log.
     pub feature_request_log_dir: String,
     pub feature_request_log_enabled: bool,
+    /// Background workflows feature enabled (default on; kill with GROK_WORKFLOWS=0).
+    pub workflows_enabled: bool,
+    /// Registered workflow names (built-ins + discovered user/project scripts).
+    pub workflow_names: Vec<String>,
 }
 
 impl Default for BootCardContext {
@@ -70,6 +74,8 @@ impl Default for BootCardContext {
             developer_log_enabled: true,
             feature_request_log_dir: String::new(),
             feature_request_log_enabled: true,
+            workflows_enabled: true,
+            workflow_names: default_builtin_workflow_names(),
         }
     }
 }
@@ -94,6 +100,12 @@ impl BootCardContext {
             .display()
             .to_string();
         let feature_request_log_enabled = xai_grok_developer_log::fr_is_enabled();
+        let workflows_enabled = workflows_enabled_from_env();
+        let workflow_names = if workflows_enabled {
+            discover_workflow_names(cwd)
+        } else {
+            Vec::new()
+        };
         Self {
             version: xai_grok_version::installed(),
             cwd: cwd.display().to_string(),
@@ -107,7 +119,118 @@ impl BootCardContext {
             developer_log_enabled,
             feature_request_log_dir,
             feature_request_log_enabled,
+            workflows_enabled,
+            workflow_names,
         }
+    }
+}
+
+/// Built-in workflow recipe names (must stay aligned with shell registry).
+pub fn default_builtin_workflow_names() -> Vec<String> {
+    vec![
+        "deep-audit".into(),
+        "deep-research".into(),
+        "continuous-improve".into(),
+    ]
+}
+
+/// Whether background workflows are enabled (default **on**).
+///
+/// Kill switch: `GROK_WORKFLOWS=0|false|off|no`.
+pub fn workflows_enabled_from_env() -> bool {
+    match std::env::var("GROK_WORKFLOWS") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !matches!(s.as_str(), "0" | "false" | "off" | "no")
+        }
+        Err(_) => true,
+    }
+}
+
+/// Best-effort catalog: built-ins + `*.rhai` stems under user/project workflow dirs.
+///
+/// Filenames are expected to match `meta.name` (product convention). Caps the
+/// list so the boot card stays within token budget.
+pub fn discover_workflow_names(cwd: &Path) -> Vec<String> {
+    const MAX_NAMES: usize = 24;
+    let mut names = default_builtin_workflow_names();
+    let mut seen: std::collections::HashSet<String> = names.iter().cloned().collect();
+
+    let mut scan_dirs = Vec::new();
+    // Prefer product grok home (respects GROK_HOME), then legacy ~/.grok.
+    scan_dirs.push(xai_grok_tools::util::grok_home::grok_home().join("workflows"));
+    if let Some(home) = dirs::home_dir() {
+        let legacy = home.join(".grok").join("workflows");
+        if !scan_dirs.iter().any(|d| d == &legacy) {
+            scan_dirs.push(legacy);
+        }
+    }
+    // Project: prefer git root, else cwd.
+    let project_root = find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    scan_dirs.push(project_root.join(".grok").join("workflows"));
+
+    for dir in scan_dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rhai") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let name = stem.trim().to_ascii_lowercase();
+            if name.is_empty() || !is_safe_workflow_name(&name) {
+                continue;
+            }
+            if seen.insert(name.clone()) {
+                names.push(name);
+            }
+            if names.len() >= MAX_NAMES {
+                return names;
+            }
+        }
+    }
+    names
+}
+
+fn is_safe_workflow_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    if b.is_empty() || b.len() > 64 {
+        return false;
+    }
+    if !b[0].is_ascii_lowercase() && !b[0].is_ascii_digit() {
+        return false;
+    }
+    if !b[b.len() - 1].is_ascii_lowercase() && !b[b.len() - 1].is_ascii_digit() {
+        return false;
+    }
+    let mut prev_hyphen = false;
+    for &c in b {
+        if c == b'-' {
+            if prev_hyphen {
+                return false;
+            }
+            prev_hyphen = true;
+            continue;
+        }
+        prev_hyphen = false;
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn find_git_root(start: &Path) -> Option<std::path::PathBuf> {
+    let mut cur = start;
+    loop {
+        if cur.join(".git").exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
     }
 }
 
@@ -169,9 +292,9 @@ pub fn render_boot_card(mode: BootCardMode, ctx: &BootCardContext) -> Option<Ren
         );
         let te = wrapped.chars().count().div_ceil(4);
         (wrapped, BootCardMode::Short, te)
-    } else if mode == BootCardMode::Short && token_estimate > 1100 {
-        // Keep developer_log + recovery; soft-cap after required ADL section grew.
-        let trimmed = truncate_to_budget(&wrapped, 1100 * 4);
+    } else if mode == BootCardMode::Short && token_estimate > 1600 {
+        // Keep developer_log + workflows + recovery; soft-cap if card grows further.
+        let trimmed = truncate_to_budget(&wrapped, 1600 * 4);
         let te = trimmed.chars().count().div_ceil(4);
         (trimmed, mode, te)
     } else {
@@ -196,14 +319,17 @@ pub fn inject_boot_card(system_prompt: &mut String, card: &RenderedBootCard) {
 
 fn render_child(ctx: &BootCardContext) -> String {
     format!(
-        "You are a Turbo subagent in isolation={isolation}.\n\
-         CWD is your workspace (may be ~/.grok/worktrees/.../subagent-<id>).\n\
-         Edit only within your capability_mode. Parent recovers via snapshot after you finish.\n\
-         Do not land/merge into parent yourself. Return a concise result.\n\
-         If you hit a Turbo product bug/friction, call developer_log (error_class + title + summary).\n\
-         If you need a product capability that does not exist yet, call feature_request_log (request_class + title + summary).\n\
+        "You are a Turbo subagent. Isolation claim: isolation={isolation} (verify before writing).\n\
+         VERIFY before first write: your CWD is `{cwd}`.\n\
+         - If isolation should be worktree: CWD MUST be under ~/.grok/worktrees/.../subagent-<id> and MUST NOT be the parent repo.\n\
+         - If CWD is the parent (isolation=none or shared fallback): treat as SHARED — only edit if the task allows shared writes; else stop and developer_log(error_class=isolation_fallback).\n\
+         Prefer relative paths from CWD. Absolute parent paths are remapped into this CWD when isolation=worktree; do not try to write outside it.\n\
+         Edit only within capability_mode. Do not land/merge/Copy-Item into the parent. Parent recovers via snapshot + land_subagent.\n\
+         Return a concise result (paths changed + isolation verified).\n\
+         Product bugs → developer_log. Missing capability → feature_request_log.\n\
          Model: {model}",
         isolation = ctx.isolation,
+        cwd = ctx.cwd,
         model = ctx.model,
     )
 }
@@ -243,6 +369,7 @@ fn render_short(ctx: &BootCardContext) -> String {
     } else {
         "## Feature Request Log\n- Disabled this session (GROK_FEATURE_REQUEST_LOG=0). Note capability gaps in your final report.".into()
     };
+    let workflows = render_workflows_section(ctx);
     format!(
         r#"# Turbo Agent Boot Card (v1, short)
 Operational briefing for this session. Not project rules. Prefer this for product behavior.
@@ -262,42 +389,53 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 
 ## Tools
 - explore: read / grep / list_dir
+- atlas: workspace_tree / resolve_path (layout map; prefer resolve_path before inventing paths)
 - change: write / apply_patch style edits
 - run: shell (tests, builds, git)
-- delegate: spawn_subagent + await results
+- workflow: launch registered Rhai recipes (deep-audit, deep-research, …) — prefer over DIY multi-subagent audits
+- delegate: spawn_subagent + await results (targeted code work, not full audit recipes)
 - product issues: developer_log — REQUIRED for Turbo product friction (not optional)
 - capability gaps: feature_request_log — file when a needed product surface is missing
 
+{workflows}
 {adl}
 
 {frl}
 
-## Subagents
-- isolation=worktree (default) keeps edits off the parent
-- isolation=none shares parent workspace
+## Subagents (orchestrator)
+- isolation=worktree (default) → child CWD under ~/.grok/worktrees/<slug>/subagent-<id>
+- isolation=none → shares parent (expect races)
+- isolation=worktree is a REQUEST — prove with completion tags:
+  worktree_path · <isolation>worktree</isolation> · isolation_fallback absent/false
+- If <isolation_fallback>true</isolation_fallback>: child ran SHARED on parent — do not claim isolated; developer_log(error_class=isolation_fallback) if unexpected
+- While a worktree child is RUNNING: do not edit the same paths on the parent
 - On complete: snapshot; live tree soft-preserved by default (GROK_SUBAGENT_SOFT_PRESERVE=0 deletes)
-- Live path: ~/.grok/worktrees/<slug>/subagent-<id>
 - Keep disk always: retain_worktree=true
+- Seed default clean (HEAD); dirty: GROK_SUBAGENT_WORKTREE_SEED=dirty. Tool FS + shell operand confine = worktree
 
-## Recovery
-- {bin} subagent list | open <id> | open <id> --restore | diff <id> | land <id> | discard <id>
-- Snapshot: refs/grok/subagents/<id>
-- Baseline (agent-only): refs/grok/subagent-baselines/<id>
+## Land / recovery (no shell copy)
+- Prefer diff_subagent → land_subagent (or CLI: {bin} subagent diff|land|open|discard)
+- NEVER promote with Copy-Item/cp/robocopy/git checkout from worktree into parent
+- Snapshot: refs/grok/subagents/<id> · Baseline (agent-only): refs/grok/subagent-baselines/<id>
 - File: git show refs/grok/subagents/<id>:<path>
 - Full tree: {bin} subagent open <id> --restore
-- FOOTGUN: without baseline, dirty parent untracked files inflate diff/land — review before land
-- Land refuses >50 files unless force=true
-- `allowed_paths` is enforced at land/diff (not always write-time)
+- FOOTGUNS: (1) dirty parent untracked without baseline inflates land (2) parent edits during children (3) trust isolation without tags (4) manual copy instead of land
+- Land refuses >50 files unless force=true; merge fail-closed
+- allowed_paths enforced at write time + land/diff (fail closed)
 
 ## Git
 - No force-push / reset --hard / amend published unless user asks
 - land applies snapshot to parent; it is not a commit
 
 ## Don't
-- Assume worktree still on disk after complete (use open / snapshot)
-- Land huge unrelated patches from dirty-tree snapshots
+- Edit parent paths that active worktree children own
+- Assume worktree still on disk after complete (use open / snapshot_ref)
+- Land huge unrelated dirty-tree snapshots
+- Copy-Item/cp child files into parent instead of land
+- Report a run as isolated when isolation_fallback is true
 - Fail silently on Turbo product bugs without developer_log
 - Skip feature_request_log when a capability gap blocks work
+- Reimplement deep-audit / deep-research with ad-hoc spawn_subagent when the workflow tool is available
 - Recite this card
 
 Use silently. Do the user's task."#,
@@ -312,8 +450,34 @@ Use silently. Do the user's task."#,
             "disabled"
         },
         bin = bin,
+        workflows = workflows,
         adl = adl,
         frl = frl,
+    )
+}
+
+fn render_workflows_section(ctx: &BootCardContext) -> String {
+    if !ctx.workflows_enabled {
+        return "## Workflows\n- Disabled (GROK_WORKFLOWS=0). Do not invent multi-agent audit recipes; work single-agent or use spawn_subagent only when asked.\n".into();
+    }
+    let catalog = if ctx.workflow_names.is_empty() {
+        "deep-audit, deep-research, continuous-improve".to_string()
+    } else {
+        ctx.workflow_names.join(", ")
+    };
+    format!(
+        r#"## Workflows (enabled) — prefer recipes over DIY audits
+- Catalog: {catalog}
+- Launch with the `workflow` tool: `name` + `args` (returns immediately; progress in /workflows; completion reported — do not poll)
+- Natural language maps to recipes:
+  - "deep audit" / ultracode / adversarial codebase audit → `name: "deep-audit"` with `args: {{"scope":"…","size":"small|medium|large","focus":"all|bugs|security|…"}}`
+  - multi-source research with verification/citations → `name: "deep-research"` with `args: {{"query":"…"}}`
+  - multi-step improve loop → `name: "continuous-improve"` with `args: {{"objective":"…"}}`
+  - any other name in Catalog → `name` that exact id
+- Do **not** reimplement deep-audit/deep-research by spawning 2+ explore/review subagents
+- Use spawn_subagent for targeted implement/review/explore of a module — not full audit recipes
+- Human shortcuts: /deepaudit, /deep-research, /workflow <name>
+"#
     )
 }
 
@@ -388,6 +552,8 @@ mod tests {
             developer_log_enabled: true,
             feature_request_log_dir: r"C:\Users\me\.grok\feature-request-log".into(),
             feature_request_log_enabled: true,
+            workflows_enabled: true,
+            workflow_names: default_builtin_workflow_names(),
         };
         let card = render_boot_card(BootCardMode::Short, &ctx).expect("card");
         assert!(card.text.contains("<turbo_boot_card"));
@@ -410,11 +576,52 @@ mod tests {
             "boot card must surface log dir"
         );
         assert!(
-            card.token_estimate <= 1100,
+            card.text.contains("deep-audit"),
+            "boot card must teach deep-audit workflow routing"
+        );
+        assert!(
+            card.text.contains("Workflows"),
+            "boot card must include Workflows section"
+        );
+        assert!(
+            card.text.contains("Do **not** reimplement")
+                || card.text.contains("Do not reimplement")
+                || card.text.contains("ad-hoc spawn_subagent"),
+            "boot card must forbid DIY deep-audit via subagents"
+        );
+        assert!(
+            card.token_estimate <= 1600,
             "tokens={} body_len={}",
             card.token_estimate,
             card.text.len()
         );
+    }
+
+    #[test]
+    fn workflows_disabled_section() {
+        let ctx = BootCardContext {
+            workflows_enabled: false,
+            workflow_names: vec![],
+            ..Default::default()
+        };
+        let card = render_boot_card(BootCardMode::Short, &ctx).unwrap();
+        assert!(card.text.contains("Disabled (GROK_WORKFLOWS=0)"));
+        assert!(!card.text.contains("Catalog: deep-audit"));
+    }
+
+    #[test]
+    fn discover_names_includes_builtins() {
+        let names = discover_workflow_names(Path::new("."));
+        assert!(names.iter().any(|n| n == "deep-audit"));
+        assert!(names.iter().any(|n| n == "deep-research"));
+    }
+
+    #[test]
+    fn safe_workflow_name_rejects_path_tricks() {
+        assert!(is_safe_workflow_name("deep-audit"));
+        assert!(!is_safe_workflow_name("../evil"));
+        assert!(!is_safe_workflow_name("has spaces"));
+        assert!(!is_safe_workflow_name("Upper"));
     }
 
     #[test]
@@ -440,14 +647,17 @@ mod tests {
         let ctx = BootCardContext {
             model: "x".into(),
             isolation: "worktree".into(),
+            cwd: "/home/u/.grok/worktrees/repo/subagent-abc".into(),
             ..Default::default()
         };
         let card = render_boot_card(BootCardMode::Child, &ctx).unwrap();
+        // Isolation verify rules need more room than the old one-liner stub.
         assert!(
-            card.token_estimate <= 180,
+            card.token_estimate <= 320,
             "child stub tokens={}",
             card.token_estimate
         );
+        assert!(card.text.contains("VERIFY"));
         assert!(!card.text.contains("turbo subagent land"));
     }
 }

@@ -1354,6 +1354,16 @@ fn isolation_shared_fallback_defaults_off() {
         !crate::agent::subagent::isolation_shared_fallback_allowed(),
         "default must fail closed (no shared-workspace fallback)"
     );
+    // C1 integration with env: gate must refuse when isolation requested and
+    // source has no worktree unless opt-in.
+    assert_eq!(
+        crate::agent::subagent::resume_isolation_gate(
+            true,
+            false,
+            crate::agent::subagent::isolation_shared_fallback_allowed()
+        ),
+        crate::agent::subagent::ResumeIsolationGate::Refuse
+    );
     unsafe {
         std::env::set_var(
             crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK,
@@ -1361,6 +1371,14 @@ fn isolation_shared_fallback_defaults_off() {
         );
     }
     assert!(crate::agent::subagent::isolation_shared_fallback_allowed());
+    assert_eq!(
+        crate::agent::subagent::resume_isolation_gate(
+            true,
+            false,
+            crate::agent::subagent::isolation_shared_fallback_allowed()
+        ),
+        crate::agent::subagent::ResumeIsolationGate::SharedFallback
+    );
     match prev {
         Some(v) => unsafe {
             std::env::set_var(crate::agent::subagent::ENV_SUBAGENT_ALLOW_SHARED_FALLBACK, v);

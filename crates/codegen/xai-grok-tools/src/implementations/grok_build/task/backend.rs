@@ -33,9 +33,32 @@ pub trait SubagentBackend: Send + Sync + 'static {
     /// Spawn a subagent and await its result.
     ///
     /// For blocking mode the caller awaits the returned future directly.
-    /// For background mode the caller spawns a tokio task around this call
-    /// and drops the receiver immediately.
+    /// Prefer [`Self::spawn_background`] for fire-and-forget so the
+    /// coordinator receives the Spawn event before the tool returns an id.
     async fn spawn(&self, request: SubagentRequest) -> Result<SubagentResult, ToolError>;
+
+    /// Enqueue a spawn on the coordinator and return immediately after the
+    /// channel send succeeds (the child may still be queued on the concurrency
+    /// cap). Detaches result wait so the returned `subagent_id` is queryable
+    /// without racing "not found". Logs transport / rejection errors.
+    async fn spawn_background(&self, request: SubagentRequest) -> Result<(), ToolError> {
+        // Default for mocks/tests: full spawn on a detached task (may race).
+        let result = self.spawn(request).await;
+        match result {
+            Ok(r) if !r.success => {
+                tracing::error!(
+                    subagent_id = %r.subagent_id,
+                    error = ?r.error,
+                    "background spawn rejected by coordinator"
+                );
+            }
+            Err(e) => {
+                tracing::error!("background spawn transport error: {e:#}");
+            }
+            Ok(_) => {}
+        }
+        Ok(())
+    }
 
     /// Query the current state of a subagent by ID.
     ///
@@ -293,6 +316,49 @@ impl SubagentBackend for ChannelBackend {
         })
     }
 
+    async fn spawn_background(&self, mut request: SubagentRequest) -> Result<(), ToolError> {
+        if let Some(parent_session_id) = self.parent_session_id.as_deref() {
+            request.parent_session_id = parent_session_id.to_owned();
+        }
+        let bg_id = request.id.clone();
+        let bg_type = request.subagent_type.clone();
+        let (respond_to, response_rx) = oneshot::channel();
+        // Send *before* returning so Task tool can hand the id to the model
+        // and immediate get_task_output finds pending/queued, not not_found.
+        self.tx
+            .send(SubagentEvent::Spawn(SubagentSpawnRequest {
+                request: Box::new(request),
+                result_tx: respond_to,
+            }))
+            .map_err(|_| {
+                ToolError::custom(
+                    "channel_closed",
+                    "Subagent coordinator channel closed — cannot spawn subagent",
+                )
+            })?;
+        tokio::spawn(async move {
+            match response_rx.await {
+                Ok(r) if !r.success => {
+                    tracing::error!(
+                        subagent_id = %bg_id,
+                        subagent_type = %bg_type,
+                        error = ?r.error,
+                        "background spawn rejected by coordinator",
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        subagent_id = %bg_id,
+                        subagent_type = %bg_type,
+                        "background spawn result channel dropped",
+                    );
+                }
+                Ok(_) => {}
+            }
+        });
+        Ok(())
+    }
+
     async fn query(
         &self,
         id: &str,
@@ -345,9 +411,11 @@ impl SubagentBackend for ChannelBackend {
             }))
             .is_err()
         {
-            tracing::warn!(
+            // Channel closed = coordinator task exited and cannot be recovered
+            // without process restart (rx is take()n once at boot).
+            tracing::error!(
                 subagent_type,
-                "coordinator validation channel closed, treating as ValidationUnavailable",
+                "coordinator validation channel closed (actor dead); ValidationUnavailable",
             );
             return SubagentValidateTypeOutcome::ValidationUnavailable;
         }
@@ -362,10 +430,12 @@ impl SubagentBackend for ChannelBackend {
                 SubagentValidateTypeOutcome::ValidationUnavailable
             }
             Err(_) => {
+                // Busy, not necessarily dead — densify storms hit this arm.
                 tracing::warn!(
                     subagent_type,
                     timeout_ms = timeout.as_millis() as u64,
-                    "coordinator validation timed out, treating as ValidationUnavailable",
+                    "coordinator validation timed out (busy LocalSet / backlog); \
+                     treating as ValidationUnavailable — retry",
                 );
                 SubagentValidateTypeOutcome::ValidationUnavailable
             }
@@ -422,7 +492,12 @@ impl SubagentBackend for ChannelBackend {
 }
 
 /// Default `validate_type` timeout. Override via [`VALIDATE_TYPE_TIMEOUT_ENV_VAR`].
-pub const VALIDATE_TYPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+///
+/// 2s was too tight under densify cancel/spawn storms: the coordinator was
+/// still alive but validation timed out and surfaces as "coordinator
+/// unreachable", blocking keep-N refill. 15s covers LocalSet backlog without
+/// masking a truly dead channel (send-fail still fails immediately).
+pub const VALIDATE_TYPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Env-var override for [`VALIDATE_TYPE_TIMEOUT`] (positive milliseconds).
 pub const VALIDATE_TYPE_TIMEOUT_ENV_VAR: &str = "XAI_VALIDATE_TYPE_TIMEOUT_MS";

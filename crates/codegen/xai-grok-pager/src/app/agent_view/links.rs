@@ -746,7 +746,7 @@ mod link_click_tests {
         );
     }
     /// Clicking the still-running watcher cue toggles the tasks pane like
-    /// Ctrl+G; only the first click that reveals the pane shows the one-time
+    /// Ctrl+Shift+G; only the first click that reveals the pane shows the one-time
     /// shortcut toast.
     #[test]
     fn watching_cue_click_opens_tasks_pane_with_one_time_shortcut_toast() {
@@ -767,7 +767,10 @@ mod link_click_tests {
         assert!(agent.tasks.overlay.visible && agent.tasks.overlay.focused);
         assert_eq!(agent.active_pane, AgentPane::Tasks);
         let toast = agent.toast.clone().map(|(msg, _)| msg);
-        assert_eq!(toast.as_deref(), Some("Tip: Ctrl+G toggles the tasks pane"));
+        assert_eq!(
+            toast.as_deref(),
+            Some("Tip: Ctrl+Shift+G toggles the tasks pane")
+        );
         agent.toast = None;
         draw_banner_frame(&mut agent, &reg, &[], 0);
         let _ = agent.handle_input(&click, &reg);

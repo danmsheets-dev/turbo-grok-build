@@ -184,7 +184,7 @@ When a persona applies, Grok Build resolves the effective model and reasoning ef
 4. Agent-definition default
 5. Parent session
 
-Isolation follows the same first four layers but defaults to **`worktree`** (isolated git worktree) rather than sharing the parent session workspace. Pass `isolation: none` (or role/persona/definition `default_isolation = "none"`) to opt into a shared workspace. On completion, isolated worktrees are snapshotted and removed by default (`GROK_SUBAGENT_WORKTREE_SNAPSHOT=0` preserves them for review). Capability mode is intentionally stricter: the explicit request, role, and agent-definition modes are intersected as security ceilings. A caller can narrow access, but cannot widen an `oracle`, `explore`, or `plan` agent beyond read-only. The clamp runs after default tool assembly, and built-in read-only agents do not inherit unclassified MCP tools; `explore` and `oracle` keep their exact curated toolsets.
+Isolation follows the same first four layers but defaults to **`worktree`** (isolated git worktree) rather than sharing the parent session workspace. Pass `isolation: none` (or role/persona/definition `default_isolation = "none"`) to opt into a shared workspace. On completion, isolated worktrees are **snapshotted and soft-preserved by default** so the live tree stays available for review, land, and recovery (`GROK_SUBAGENT_SOFT_PRESERVE=0` restores immediate delete after snapshot; `retain_worktree` always keeps the tree). Capability mode is intentionally stricter: the explicit request, role, and agent-definition modes are intersected as security ceilings. A caller can narrow access, but cannot widen an `oracle`, `explore`, or `plan` agent beyond read-only. The clamp runs after default tool assembly, and built-in read-only agents do not inherit unclassified MCP tools; `explore` and `oracle` keep their exact curated toolsets.
 
 If a persona is requested but cannot be resolved -- it is not found, has no instructions, or its `instructions_file` is unreadable -- the spawn fails. Reasoning-effort values are parsed into a fixed enum during configuration loading, so misspellings fail early instead of silently reaching a provider.
 
@@ -276,10 +276,10 @@ Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/ses
 Subagents default to an isolated git worktree (`isolation: worktree`). This keeps the child's edits from conflicting with the parent or with sibling subagents:
 
 - The subagent works in its own copy of the working tree.
-- Its changes stay isolated from the parent until you merge them (via `x.ai/git/worktree/apply`).
-- On completion, the worktree is snapshotted and removed by default so children clean up after themselves.
+- Its changes stay isolated from the parent until you merge them (via `x.ai/git/worktree/apply`, `land_subagent`, or `hyper subagent land`).
+- On completion, the worktree is **snapshotted and soft-preserved by default** (live tree kept for review / land). Set `GROK_SUBAGENT_SOFT_PRESERVE=0` to delete after snapshot; use `retain_worktree` to always keep the tree.
+- Soft-preserved peers are pruned by a keep-N / free-space guard (`GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N`, `GROK_SUBAGENT_MIN_FREE_BYTES`) so densify waves do not fill the disk.
 - Set `isolation: none` when the child must edit the shared parent workspace.
-- Set `GROK_SUBAGENT_WORKTREE_SNAPSHOT=0` (or `[features] subagent_worktree_snapshot = false`) to keep finished worktrees on disk for review.
 - Worktree creation fails closed outside a git repo unless `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1` (that path sets `isolation_fallback` on the result — the run is **not** isolated).
 
 Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
@@ -345,7 +345,8 @@ Grok Build also discovers roles from `.grok/roles/*.toml` and personas from `.gr
 
 Grok Build shows running and finished work in side panes on the agent screen:
 
-- Press `Ctrl+G` to toggle the tasks pane, which lists active and completed subagents and background commands with their status.
+- Press `Ctrl+G` to toggle **Game Mode** (pixel office of Supervisor + desks).
+- Press `Ctrl+Shift+G` to toggle the tasks pane, which lists active and completed subagents and background commands with their status.
 - Press `Ctrl+T` to toggle the separate todo pane.
 
 To view the available agent types and personas, open the command palette with `Ctrl+P` and choose **Manage Agents** (`/config-agents`).
@@ -371,9 +372,9 @@ Press **Enter** (or Ctrl-F) on the block to open the subagent's full transcript.
 
 For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in Xs: "..."` block is appended.
 
-### Tasks pane (Ctrl+G)
+### Tasks pane (Ctrl+Shift+G)
 
-As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect.
+As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect. Game Mode is **Ctrl+G**.
 
 ### Fullscreen framed view (the child transcript)
 

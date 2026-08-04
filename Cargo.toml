@@ -76,6 +76,7 @@ members = [
     "crates/codegen/xai-tracing-macros",
     "crates/codegen/xai-tty-utils",
     "crates/codegen/xai-workflow",
+    "crates/codegen/xai-workspace-tree",
     "crates/common/xai-circuit-breaker",
     "crates/common/xai-computer-hub-core",
     "crates/common/xai-computer-hub-mcp-adapter",

@@ -17,6 +17,7 @@ pub mod shell_env_policy;
 pub mod spawn;
 pub mod truncate;
 pub mod unicode_confusables;
+pub mod workspace_tree_cache;
 
 pub use command_display::strip_redundant_session_cd;
 #[cfg(unix)]
@@ -27,6 +28,11 @@ pub use fs::{UnicodePathMatch, canonicalize_with_timeout, try_resolve_unicode_fi
 pub use grok_home::{grok_application, grok_home};
 pub use path_suggestions::format_not_found_error;
 pub use remap::{remap_json_keys, remap_schema_properties, reverse_map};
+pub use workspace_tree_cache::{
+    get_or_load as workspace_tree_get_or_load, kickoff_load as workspace_tree_kickoff_load,
+    refresh as workspace_tree_refresh, try_get as workspace_tree_try_get,
+    try_load_cached as workspace_tree_try_load_cached,
+};
 pub use shell_env_policy::{
     EnvironmentVariablePattern, ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit,
     apply_shell_environment_policy,

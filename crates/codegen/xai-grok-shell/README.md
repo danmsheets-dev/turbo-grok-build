@@ -1347,7 +1347,8 @@ output_byte_limit = 65536              # max output size (64KB)
 
 [toolset.web_fetch]
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL (all requests routed through it)
-allowed_domains = ["docs.rs", "x.ai"]           # override the built-in ~84-domain allowlist
+# Optional hard allowlist (open-public when omitted). Supports *.example.com.
+allowed_domains = ["docs.rs", "x.ai", "*.python.org"]
 
 [shortcuts]
 send = ["Enter"]
@@ -2359,9 +2360,11 @@ disallowedTools:
 
 ### `web_fetch`
 
-Fetch a specific URL and return its content as markdown. **Disabled by default** — enable with `GROK_WEB_FETCH=1`. 
+Fetch a specific URL and return cleaned markdown. **Enabled by default** (open-public + SSRF). Disable with `GROK_WEB_FETCH=0`, `[features] web_fetch = false`, remote `web_fetch_enabled = false`, or `allowed_domains = []`.
 
-When no custom `allowed_domains` is set, the tool permits a default allowlist of useful documentation sites (SpaceXAI, language docs, frameworks, cloud providers, databases, etc.). Domains not on the allowlist prompt the user for approval; `--always-approve` auto-approves all. Domain matching is case-insensitive, strips `www.` prefixes, and supports path-scoped entries (e.g. `x.ai/company`).
+When no `allowed_domains` is set, any host that passes SSRF may be fetched (private/metadata blocked). Set `[toolset.web_fetch] allowed_domains` for a hard allowlist: case-insensitive, strips `www.`, path-scoped entries (e.g. `vercel.com/docs`), and `*.example.com` wildcards. A curated docs preset exists in source (`DEFAULT_ALLOWED_DOMAINS`) for enterprises to copy — it is **not** auto-applied.
+
+Optional tool args: `extract_mode` (`auto`|`article`|`full`|`raw`), `max_chars`, `start_offset`, `include_links`. `extract_mode=headless` is refused (use a browser MCP for JS-rendered pages).
 
 ---
 
@@ -2487,8 +2490,9 @@ The agent persists all session updates automatically. Clients can reconnect and 
 | `GROK_SUBAGENTS`                | Enable (`1`) or disable (`0`) subagent/task tool support                                                 |
 | `GROK_MEMORY`                   | Enable (`1`) or disable (`0`) cross-session memory                                                       |
 | `GROK_AGENT`                    | Custom agent definition path or name (see [Agent Profiles](#agent-profiles))                             |
-| `GROK_WEB_FETCH`                | Enable (`1`) or disable (`0`) the `web_fetch` tool                                                       |
+| `GROK_WEB_FETCH`                | Enable (`1`) or disable (`0`) the `web_fetch` tool (default on)                                          |
 | `GROK_WEB_FETCH_PROXY`          | Egress proxy URL for `web_fetch` requests (overridden by `[toolset.web_fetch] proxy_endpoint`)           |
+| `GROK_WEB_FETCH_ALLOW_LOCAL`    | Allow `web_fetch` only to explicit loopback (`localhost` / `127.0.0.0/8` / `::1`); private/metadata still blocked |
 | `GROK_RESPECT_GITIGNORE`        | Disable `.gitignore` filtering in tools when set to `0`                                                  |
 | `GROK_FEEDBACK_ENABLED`         | Enable (`1`) or disable (`0`) feedback system independently from telemetry                               |
 | `GROK_DEPLOYMENT_KEY`           | Management API key for enterprise deployments                                                            |

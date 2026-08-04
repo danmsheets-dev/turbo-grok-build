@@ -908,20 +908,30 @@ impl SchedulerActor {
                     let _ = reply.send(Err(SchedulerError::NoDurableNotificationConsumer));
                     return;
                 }
-                // Cancel any in-flight loop subagent so post-delete toasts stop
-                // (queued check-loops firing after cancel incident).
+                // Cancel *all* children for this loop task id (not just last),
+                // including concurrency-queued spawns — stops post-delete fires.
+                let deleted_task_id = state.tasks[index].id.clone();
                 let last_sub = state.tasks[index].last_subagent_id.clone();
                 state.tasks.remove(index);
                 let events = res.get::<SubagentEventSender>().cloned();
                 let parent_session = res.get::<SessionIdResource>().map(|s| s.0.clone());
                 drop(res);
-                if let (Some(events), Some(sub_id)) = (events, last_sub) {
+                if let Some(events) = events {
                     let (respond_to, _rx) = tokio::sync::oneshot::channel();
                     let _ = events.0.send(SubagentEvent::Cancel(SubagentCancelRequest {
-                        parent_session_id: parent_session,
-                        target: SubagentCancelTarget::SubagentId(sub_id),
+                        parent_session_id: parent_session.clone(),
+                        target: SubagentCancelTarget::LoopTaskId(deleted_task_id),
                         respond_to,
                     }));
+                    // Belt-and-suspenders: also cancel last id if set.
+                    if let Some(sub_id) = last_sub {
+                        let (respond_to, _rx) = tokio::sync::oneshot::channel();
+                        let _ = events.0.send(SubagentEvent::Cancel(SubagentCancelRequest {
+                            parent_session_id: parent_session,
+                            target: SubagentCancelTarget::SubagentId(sub_id),
+                            respond_to,
+                        }));
+                    }
                 }
                 self.pending_removal = Some(PendingDurableRemoval {
                     task_id: id,

@@ -29,6 +29,13 @@ xai-grok-version = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Directory identity (volume serial + file index) for ParentAnchor TOCTOU.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

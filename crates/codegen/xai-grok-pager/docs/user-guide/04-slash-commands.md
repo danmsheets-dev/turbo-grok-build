@@ -310,6 +310,16 @@ Kick off a **codebase deep audit** workflow (Ultracode-style): investigate in pa
 /deepaudit --size large src/agent/subagent
 ```
 
+Natural language also works when workflows are enabled (host soft-match, no leading `/` required):
+
+```
+Can you run a deep audit on the security app
+run a deep audit on crates/foo --size large
+please deep-research postgres vs mysql migration risks
+```
+
+The agent boot card also teaches the same mapping: if you ask in free text and the host does not intercept, the model should call the `workflow` tool with `name: "deep-audit"` (or `"deep-research"`) instead of inventing a multi-subagent audit.
+
 | Size | Intent |
 |------|--------|
 | `small` | Narrow module / smoke (few agents) |
@@ -317,6 +327,17 @@ Kick off a **codebase deep audit** workflow (Ultracode-style): investigate in pa
 | `large` | Broad multi-crate audit (higher token cost) |
 
 The command returns right away — follow progress in `/workflows`. The final report lands in the conversation with verified findings in the main body and unverified claims in an appendix.
+
+### Workflows vs subagents
+
+| Intent | Use |
+|--------|-----|
+| Full codebase deep audit / ultracode | `/deepaudit` or `workflow` `name=deep-audit` |
+| Multi-source research with verification | `/deep-research` or `workflow` `name=deep-research` |
+| Multi-step improve loop | `/workflow continuous-improve` |
+| Targeted implement / review / explore one module | Subagents (`spawn_subagent`) |
+
+Do **not** reimplement deep-audit by spawning two ad-hoc explore/review subagents — that skips host verification, budgets, and the `/workflows` run dashboard.
 
 Model-launched workflows may set `agent_budget` on the `workflow` tool. It's an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`. Named slash launches use the default budget.
 

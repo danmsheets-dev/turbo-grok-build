@@ -591,7 +591,23 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
             return land_from_snapshot(cwd, snap, &mode, r);
         }
     }
-    // 1) Live worktree
+    // Isolation worktree without baseline: refuse live-tree land (matches tool
+    // land_subagent). Live dirty tree would attribute parent dirt to the agent.
+    let has_baseline = r.meta.baseline_ref.as_ref().is_some_and(|b| !b.is_empty());
+    if r.meta.worktree_path.is_some() && !has_baseline {
+        if let Some(ref snap) = r.meta.snapshot_ref {
+            // Snapshot path still applies its own size/baseline gates.
+            return land_from_snapshot(cwd, snap, &mode, r);
+        }
+        bail!(
+            "land refused: isolation worktree for {} has no baseline_ref \
+             (agent-only land unavailable). Re-spawn the child so a spawn \
+             baseline is captured, land from snapshot_ref if present, or \
+             use the land_subagent tool with force=true for an emergency override.",
+            r.id
+        );
+    }
+    // 1) Live worktree (only when baseline exists, or non-isolation meta)
     if let Some(ref wt) = r.meta.worktree_path {
         let wt = Path::new(wt);
         if wt.is_dir() {
@@ -677,11 +693,29 @@ fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Resul
 
     let pathspecs = allowlist_pathspecs(r);
 
+    // Isolation / any worktree-backed run: no baseline ⇒ refuse (no changed_paths escape).
+    let was_isolation = r.meta.worktree_path.as_ref().is_some_and(|p| !p.is_empty())
+        || r.meta.worktree_state.as_deref() == Some("preserved")
+        || r.meta.worktree_state.as_deref() == Some("cleaned")
+        || r.meta.worktree_state.as_deref() == Some("live");
     let (base, source_label) = if let Some(b) = base_opt {
         (b, "baseline_snapshot")
-    } else if let Some(paths) = r.meta.changed_paths.as_ref().filter(|p| !p.is_empty() && p.len() <= 50)
+    } else if was_isolation {
+        bail!(
+            "refusing land of snapshot `{snap}` for {}: isolation worktree has no \
+             resolvable baseline_ref. Agent-only land is blocked (dirty-parent bulk risk). \
+             Re-spawn the child so a spawn baseline is captured, or: \
+             turbo subagent open {} --restore",
+            r.id,
+            r.id
+        );
+    } else if let Some(paths) = r
+        .meta
+        .changed_paths
+        .as_ref()
+        .filter(|p| !p.is_empty() && p.len() <= 50)
     {
-        // Path-scoped checkout from snap when no baseline (last-resort agent-only).
+        // Non-isolation last resort only: path-scoped checkout when no baseline.
         let mut filtered: Vec<String> = paths.clone();
         if let Some(ref allow) = pathspecs {
             filtered.retain(|p| path_in_allowlist(p, allow));
@@ -703,9 +737,8 @@ fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Resul
     } else {
         bail!(
             "refusing land of snapshot `{snap}` for {}: no baseline_ref and no small \
-             changed_paths list. Agent-only land is blocked because the snapshot is not \
-             baseline-scoped (dirty-parent bulk risk). Re-run with worktree isolation, or: \
-             turbo subagent open {} --restore  then land after a baseline is present.",
+             changed_paths list. Agent-only land is blocked. Re-run with worktree isolation, or: \
+             turbo subagent open {} --restore",
             r.id,
             r.id
         );
@@ -955,9 +988,35 @@ fn cmd_discard(cwd: &Path, r: &Resolved, drop_snapshot: bool) -> Result<()> {
     if let Some(ref wt) = r.meta.worktree_path {
         let wt = Path::new(wt);
         if wt.is_dir() {
-            fs::remove_dir_all(wt).with_context(|| format!("remove {}", wt.display()))?;
+            // Prefer git-aware worktree remove; fall back to recursive delete.
+            match xai_fast_worktree::remove_worktree(wt) {
+                Ok(_) => {
+                    removed = true;
+                    println!("Removed worktree {}", wt.display());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "fast-worktree remove failed ({e}); falling back to remove_dir_all"
+                    );
+                    fs::remove_dir_all(wt).with_context(|| format!("remove {}", wt.display()))?;
+                    removed = true;
+                    println!("Removed worktree {}", wt.display());
+                }
+            }
+            if wt.exists() {
+                let _ = fs::remove_dir_all(wt);
+                if !wt.exists() {
+                    removed = true;
+                }
+            }
+        } else {
+            // Meta still lists the path but disk is already gone (prune/tombstone).
+            // Count as cleaned so worktree_removed is not stuck false.
             removed = true;
-            println!("Removed worktree {}", wt.display());
+            println!(
+                "Worktree path already absent (cleaned): {}",
+                wt.display()
+            );
         }
     }
     let mut snapshot_dropped = false;
@@ -970,7 +1029,7 @@ fn cmd_discard(cwd: &Path, r: &Resolved, drop_snapshot: bool) -> Result<()> {
     } else if let Some(ref snap) = r.meta.snapshot_ref {
         println!("Kept snapshot_ref {snap} (pass --drop-snapshot to delete)");
     }
-    // Update meta
+    // Always advance meta to discarded/cleaned so list does not show preserved forever.
     if let Ok(raw) = fs::read_to_string(&r.meta_path) {
         if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(obj) = v.as_object_mut() {
@@ -978,13 +1037,11 @@ fn cmd_discard(cwd: &Path, r: &Resolved, drop_snapshot: bool) -> Result<()> {
                     "land_status".into(),
                     serde_json::Value::String("discarded".into()),
                 );
-                if removed {
-                    obj.insert("worktree_path".into(), serde_json::Value::Null);
-                    obj.insert(
-                        "worktree_state".into(),
-                        serde_json::Value::String("cleaned".into()),
-                    );
-                }
+                obj.insert("worktree_path".into(), serde_json::Value::Null);
+                obj.insert(
+                    "worktree_state".into(),
+                    serde_json::Value::String("cleaned".into()),
+                );
                 if snapshot_dropped {
                     obj.insert("snapshot_ref".into(), serde_json::Value::Null);
                 }

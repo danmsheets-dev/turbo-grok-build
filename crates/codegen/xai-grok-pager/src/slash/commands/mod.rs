@@ -71,6 +71,7 @@ pub mod timeline;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
+pub mod tree;
 pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
@@ -149,6 +150,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
+        Arc::new(tree::TreeCommand),
         Arc::new(readiness::ReadinessCommand),
         Arc::new(changes::ChangesCommand),
         Arc::new(voice::VoiceCommand),
@@ -227,6 +229,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
+                session_cwd: None,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,

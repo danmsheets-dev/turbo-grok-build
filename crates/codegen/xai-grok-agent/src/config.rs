@@ -286,6 +286,9 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             // Required by Agent Boot Card / Auto Developer Log policy (RC10).
             (&grok_build::DeveloperLogTool).into(),
             (&grok_build::FeatureRequestLogTool).into(),
+            // Workspace tree atlas (Phase 1 MVP).
+            (&grok_build::WorkspaceTreeTool).into(),
+            (&grok_build::ResolvePathTool).into(),
         ],
         behavior_preset: None,
     }
@@ -309,6 +312,9 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
             (&grok_build::FeatureRequestLogTool).into(),
+            // RC13 P2 F17: atlas tools on concise (boot card advertises them).
+            (&grok_build::WorkspaceTreeTool).into(),
+            (&grok_build::ResolvePathTool).into(),
         ],
         behavior_preset: None,
     }
@@ -342,6 +348,9 @@ pub fn grok_build_hashline_toolset(
         (&grok_build::WorkflowTool).into(),
         (&grok_build::DeveloperLogTool).into(),
         (&grok_build::FeatureRequestLogTool).into(),
+        // RC13 P2 F17: atlas tools on hashline toolset.
+        (&grok_build::WorkspaceTreeTool).into(),
+        (&grok_build::ResolvePathTool).into(),
     ]);
     ToolServerConfig {
         tools,
@@ -382,6 +391,9 @@ fn explore_toolset() -> ToolServerConfig {
             // Read-only product-issue filing (is_read_only = true).
             (&grok_build::DeveloperLogTool).into(),
             (&grok_build::FeatureRequestLogTool).into(),
+            // Workspace tree atlas (read-only path intelligence).
+            (&grok_build::WorkspaceTreeTool).into(),
+            (&grok_build::ResolvePathTool).into(),
         ],
         behavior_preset: None,
     }
@@ -401,6 +413,9 @@ fn plan_toolset() -> ToolServerConfig {
             (&grok_build::TodoWriteTool).into(),
             (&grok_build::DeveloperLogTool).into(),
             (&grok_build::FeatureRequestLogTool).into(),
+            // Workspace tree atlas (read-only path intelligence).
+            (&grok_build::WorkspaceTreeTool).into(),
+            (&grok_build::ResolvePathTool).into(),
             // search_replace + run_terminal_command intentionally omitted (read-only)
         ],
         behavior_preset: None,
@@ -476,6 +491,9 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
             (&grok_build::FeatureRequestLogTool).into(),
+            // Workspace tree atlas (path intelligence for orchestration).
+            (&grok_build::WorkspaceTreeTool).into(),
+            (&grok_build::ResolvePathTool).into(),
             // Scheduling and monitoring
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),

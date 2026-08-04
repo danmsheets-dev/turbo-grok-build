@@ -336,8 +336,14 @@ pub(crate) async fn spawn_session_actor(
         let deny_read_globs = handle.deny_read_globs();
         (handle, dummy_rx, deny_read_globs)
     } else {
+        // Open-public (`domain_allowlist() == None`) → empty static permission
+        // list (prompt / session grants; no silent DEFAULT auto-approve).
+        // Explicit Some(list) → static auto-approve those hosts only.
         let web_fetch_allowed_domains = match &web_fetch_config {
-            WebFetchConfig::Enabled { params } => params.allowed_domains(),
+            WebFetchConfig::Enabled { params } => params
+                .domain_allowlist()
+                .map(|d| d.to_vec())
+                .unwrap_or_default(),
             WebFetchConfig::Disabled => vec![],
         };
         let project_trusted =
@@ -722,6 +728,13 @@ pub(crate) async fn spawn_session_actor(
             .warm_shell(tool_context.cwd.as_path())
             .await;
     }
+    // Session confine root for isolation=worktree / DisplayCwd forks: jail
+    // tool FS writes to the real session cwd (worktree) even when the model
+    // still sees the parent path. Canonicalize when possible for path checks.
+    let session_confine_root: Option<std::path::PathBuf> = prompt_display_cwd.as_ref().map(|_| {
+        let raw = tool_context.cwd.as_path();
+        dunce::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf())
+    });
     let fs_backend: std::sync::Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem> =
         if client_fs_capable && tool_context.gateway.is_some() {
             std::sync::Arc::new(xai_grok_workspace::file_system::AcpFsAdapter::new(
@@ -729,11 +742,18 @@ pub(crate) async fn spawn_session_actor(
                 tool_context.session_id.clone().unwrap(),
             ))
         } else {
-            // ConfinedFs choke point when --confine is active: every write
-            // tool is bounded even if permission path extraction misses.
-            xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(std::sync::Arc::new(
-                xai_grok_tools::computer::local::LocalFs,
-            ))
+            // Process --confine choke point, then optional session worktree jail.
+            let process_fs = xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(
+                std::sync::Arc::new(xai_grok_tools::computer::local::LocalFs),
+            );
+            if let Some(ref root) = session_confine_root {
+                std::sync::Arc::new(xai_grok_tools::computer::local::ConfinedFs::new(
+                    process_fs,
+                    root.clone(),
+                ))
+            } else {
+                process_fs
+            }
         };
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
@@ -1661,6 +1681,7 @@ pub(crate) async fn spawn_session_actor(
             }
             lock
         },
+        allowed_write_paths: parking_lot::Mutex::new(None),
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         queue_exit_reminder_on_approved_exit,
         active_skill: parking_lot::Mutex::new(None),
@@ -1877,6 +1898,21 @@ pub(crate) async fn spawn_session_actor(
             .tool_bridge()
             .set_display_cwd(std::path::PathBuf::from(display_cwd))
             .await;
+    }
+    // Mirror session ConfinedFs root into resources so path resolvers and
+    // write tools can fail closed with clear errors (not only at FS choke).
+    if let Some(ref root) = session_confine_root {
+        session
+            .agent
+            .borrow()
+            .tool_bridge()
+            .set_confine_root(root.clone())
+            .await;
+        tracing::info!(
+            session_id = %session_info.id.0,
+            confine_root = %root.display(),
+            "Session ConfineRoot installed (DisplayCwd / isolation worktree)"
+        );
     }
     if let Some(storage) = session.memory.storage() {
         crate::session::memory::init_sqlite_vec();

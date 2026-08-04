@@ -173,6 +173,9 @@ pub struct CommandExecCtx<'a> {
     /// typed `Action::SetX(new)` — the dispatcher remains the single
     /// source of truth for the actual state mutation.
     pub(crate) pager_state: crate::settings::PagerLocalSnapshot,
+    /// Active session workspace CWD when known (RC13: `/tree` atlas root).
+    /// Prefer this over `std::env::current_dir()` for filesystem-scoped cmds.
+    pub session_cwd: Option<&'a std::path::Path>,
 }
 
 /// A slash command.

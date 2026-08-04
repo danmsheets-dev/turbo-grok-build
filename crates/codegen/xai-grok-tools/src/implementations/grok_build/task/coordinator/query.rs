@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use super::super::coordinator_state::{
     BlockingWaiter, CompletedChild, ListRequest, OUTPUT_UNAVAILABLE_PLACEHOLDER, ProgressFuture,
     ProgressTarget, RunningSeed, completed_inspection, completed_snapshot, pending_inspection,
-    pending_snapshot, running_inspection, running_seed,
+    pending_snapshot, queued_snapshot, running_inspection, running_seed,
 };
 use super::super::types::{SubagentInspection, SubagentSnapshot};
 use super::{ChildControl, ChildRunner, SubagentCoordinator, SubagentProgress, belongs_to_session};
@@ -71,6 +71,30 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             return;
         }
+        // Concurrency queue: spawn accepted but not yet pending/active.
+        // Background Task returns the id immediately; keep-N densify then polls
+        // and previously got not_found until a free slot started the child.
+        if let Some(queued) = self
+            .spawn_queue
+            .iter()
+            .find(|q| q.request.id == id)
+            .filter(|q| belongs_to_session(&q.request, parent_session_id.as_deref()))
+        {
+            if queued.request.owner.is_workflow() {
+                let _ = respond_to.send(None);
+                return;
+            }
+            if block {
+                self.waiters.entry(id).or_default().push(BlockingWaiter {
+                    deadline: tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)),
+                    respond_to,
+                });
+            } else {
+                let _ = respond_to.send(Some(queued_snapshot(&queued.request)));
+            }
+            return;
+        }
         let _ = respond_to.send(None);
     }
 
@@ -98,6 +122,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .is_some_and(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
         {
             self.queue_active_progress(&id, ProgressTarget::Inspect(respond_to));
+        } else if let Some(queued) = self
+            .spawn_queue
+            .iter()
+            .find(|q| q.request.id == id)
+            .filter(|q| belongs_to_session(&q.request, parent_session_id.as_deref()))
+        {
+            let _ = respond_to.send(Some(SubagentInspection {
+                snapshot: queued_snapshot(&queued.request),
+                parent_session_id: queued.request.parent_session_id.clone(),
+                child_session_id: String::new(),
+                fork_parent_prompt_id: queued.request.parent_prompt_id.clone(),
+                resumed_from: queued.request.resume_from.clone(),
+            }));
         } else {
             let _ = respond_to.send(None);
         }

@@ -11,9 +11,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    LandMode, LiveWorktreeApplyBackend, apply_file_content, git_capture, git_capture_status,
-    git_show_blob, parse_name_status, refuse_land_outside_allowlist, resolve_subagent_work,
-    to_apply_mode, update_meta_land_status,
+    LandMode, LiveWorktreeApplyBackend, apply_file_content, effective_allowed_paths, git_capture,
+    git_capture_status, git_show_blob, parse_name_status, refuse_land_outside_allowlist,
+    resolve_subagent_work, to_apply_mode, update_meta_land_status,
 };
 use crate::implementations::grok_build::task::TaskTool;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -214,11 +214,48 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
             }
         }
 
+        // Fail closed when this was an isolation worktree run but baseline is
+        // missing — live-tree land would reintroduce dirty-parent inflation.
+        // Operators may pass force=true to override (escape hatch).
+        let was_worktree = work.live_worktree.is_some()
+            || work
+                .meta
+                .worktree_path
+                .as_ref()
+                .is_some_and(|p| !p.is_empty())
+            || work.meta.worktree_state.as_deref() == Some("preserved")
+            || work.meta.worktree_state.as_deref() == Some("cleaned");
+        let baseline_missing = work
+            .meta
+            .baseline_ref
+            .as_ref()
+            .map(|b| b.is_empty())
+            .unwrap_or(true);
+        if was_worktree && baseline_missing && !force {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "land_baseline_missing",
+                "land refused: isolation worktree has no baseline_ref (agent-only delta \
+                 unavailable). Re-run the child with a successful baseline capture, or pass \
+                 force=true to land the live/dirty tree (unsafe — may include parent dirt).",
+            ));
+        }
+
         // 1) Live worktree (no baseline, or snapshot missing)
         if let Some(ref wt) = work.live_worktree {
             // Pre-check allowlist against worktree change set before any apply.
-            if let Ok(paths) = collect_live_worktree_paths(wt, &work.parent_git_root).await {
-                refuse_land_outside_allowlist(&work.meta, &paths)?;
+            // Fail closed when an allowlist is set and path collection fails.
+            match collect_live_worktree_paths(wt, &work.parent_git_root).await {
+                Ok(paths) => refuse_land_outside_allowlist(&work.meta, &paths)?,
+                Err(e) if effective_allowed_paths(&work.meta).is_some() => {
+                    return Err(xai_tool_runtime::ToolError::custom(
+                        "land_allowlist_check_failed",
+                        format!(
+                            "land refused: could not enumerate worktree changes for \
+                             allowed_paths check: {e}"
+                        ),
+                    ));
+                }
+                Err(_) => {}
             }
             // Host apply_worktree does not support only_missing filtering — use
             // in-process path when that flag is set so we can skip existing files.
@@ -570,10 +607,16 @@ async fn land_snapshot_ref(
         {
             base.to_owned()
         } else {
-            git_capture(parent, &["merge-base", "HEAD", snap])
-                .await
-                .map(|s| s.trim().to_owned())
-                .unwrap_or_else(|_| parent_head.clone())
+            // Declared baseline must resolve — do not silently fall back to
+            // merge-base/HEAD (would reintroduce dirty-parent inflation).
+            return Err(xai_tool_runtime::ToolError::custom(
+                "land_baseline_missing",
+                format!(
+                    "land refused: baseline_ref `{base}` does not resolve. \
+                     Re-spawn the child for a fresh baseline, or pass force=true \
+                     only if you accept non-agent-only land."
+                ),
+            ));
         }
     } else {
         git_capture(parent, &["merge-base", "HEAD", snap])
@@ -692,6 +735,38 @@ async fn land_snapshot_ref(
     })
 }
 
+/// Fail closed on absolute / drive / `..` paths in an exported patch (C3).
+fn refuse_patch_paths_in_repo(paths: &[String]) -> Result<(), xai_tool_runtime::ToolError> {
+    let mut bad = Vec::new();
+    for p in paths {
+        let s = p.trim().replace('\\', "/");
+        if s.is_empty() {
+            continue;
+        }
+        if s.starts_with('/')
+            || s.starts_with("//")
+            || (s.len() >= 2 && s.as_bytes()[1] == b':')
+            || s.split('/').any(|part| part == "..")
+            || super::normalize_allowlist_path(p).is_none()
+        {
+            bad.push(p.clone());
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let preview: Vec<&str> = bad.iter().take(6).map(String::as_str).collect();
+    Err(xai_tool_runtime::ToolError::custom(
+        "land_patch_path_escape",
+        format!(
+            "land refused: patch contains {} path(s) outside the repository \
+             (absolute or `..`): {}. Export a repo-relative patch only.",
+            bad.len(),
+            preview.join(", "),
+        ),
+    ))
+}
+
 async fn land_patch(
     work: &super::ResolvedSubagentWork,
     patch: &std::path::Path,
@@ -700,16 +775,19 @@ async fn land_patch(
     let parent = &work.parent_git_root;
     let patch_str = patch.to_string_lossy().into_owned();
 
-    // Refuse before apply when patch touches paths outside allowlist.
+    // Refuse before apply when patch touches paths outside allowlist, or any
+    // absolute / traversal path (host escape via crafted patch).
     let patch_body = tokio::fs::read_to_string(patch).await.unwrap_or_default();
     let patch_files = super::diff::files_from_patch(&patch_body);
+    refuse_patch_paths_in_repo(&patch_files)?;
     refuse_land_outside_allowlist(&work.meta, &patch_files)?;
 
     // Always check first so we can fail closed without partial apply.
+    // Do NOT pass --unsafe-paths: git must refuse absolute / outside-repo paths.
     let check_args: Vec<&str> = if mode == LandMode::Merge {
-        vec!["apply", "--check", "--3way", "--unsafe-paths", &patch_str]
+        vec!["apply", "--check", "--3way", &patch_str]
     } else {
-        vec!["apply", "--check", "--unsafe-paths", &patch_str]
+        vec!["apply", "--check", &patch_str]
     };
     let (ok, _stdout, stderr) = git_capture_status(parent, &check_args)
         .await
@@ -738,9 +816,9 @@ async fn land_patch(
     }
 
     let apply_args: Vec<&str> = if mode == LandMode::Merge {
-        vec!["apply", "--3way", "--unsafe-paths", &patch_str]
+        vec!["apply", "--3way", &patch_str]
     } else {
-        vec!["apply", "--unsafe-paths", &patch_str]
+        vec!["apply", &patch_str]
     };
     let (ok, _stdout, stderr) = git_capture_status(parent, &apply_args)
         .await

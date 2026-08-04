@@ -1191,15 +1191,20 @@ impl SessionActor {
                     self.permissions.set_classifier_transcript(turns);
                 }
             }
+            // Always attach session path context so isolation=worktree children
+            // confine Bash (and Edit) to the real worktree CWD (C1). DisplayCwd
+            // present ⇒ session remaps parent paths; confine_root = tool cwd.
+            let real_cwd = std::path::PathBuf::from(self.session_info.cwd.as_str());
+            let display_cwd = self
+                .display_cwd
+                .get()
+                .map(|cwd| std::path::PathBuf::from(cwd.as_str()));
+            let confine_root = display_cwd.as_ref().map(|_| real_cwd.clone());
             let edit_path_context =
-                matches!(&access_kind, AccessKind::Edit(_) | AccessKind::EditMany(_)).then(|| {
-                    xai_grok_workspace::permission::types::EditPathContext {
-                        real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
-                        display_cwd: self
-                            .display_cwd
-                            .get()
-                            .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
-                    }
+                Some(xai_grok_workspace::permission::types::EditPathContext {
+                    real_cwd,
+                    display_cwd,
+                    confine_root,
                 });
             let decision = {
                 let _pending_guard =

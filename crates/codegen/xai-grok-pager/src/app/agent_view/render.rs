@@ -1596,11 +1596,14 @@ impl AgentView {
         // Game Mode: replace scrollback with the office spectator view.
         // Composer / status bar / panes below still render normally.
         if self.game_mode.open {
-            crate::views::game_mode::sync_game_mode(
-                self,
-                layout.scrollback.width,
-                layout.scrollback.height,
-            );
+            // Tick owns sync; paint only catches up when stale (single-owner).
+            if self.game_mode.needs_paint_sync() {
+                crate::views::game_mode::sync_game_mode(
+                    self,
+                    layout.scrollback.width,
+                    layout.scrollback.height,
+                );
+            }
             crate::views::game_mode::render_game_mode(buf, layout.scrollback, &mut self.game_mode);
             self.clear_scrollback_selection_state();
             // Stale Normal-view hit targets must not fire under the office.

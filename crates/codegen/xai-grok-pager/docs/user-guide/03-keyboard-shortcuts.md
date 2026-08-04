@@ -133,7 +133,8 @@ Actions that affect the agent session, available from the agent screen.
 | `Shift+Tab` | Prompt focused | Cycle mode (Normal → Plan → Always-approve) |
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
 | `Ctrl+T` | Agent screen | Toggle the todos pane |
-| `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
+| `Ctrl+G` | Agent screen (full TUI) | Toggle **Game Mode** (pixel office spectator view of Supervisor + subagent desks). Press again to return to Normal view. |
+| `Ctrl+Shift+G` | Agent screen (full TUI) | Toggle the tasks pane (background tasks / subagents list) |
 | `Ctrl+G` | Ordinary composer (minimal mode) | Edit the current draft in an external editor without sending it. If the terminal reserves this chord, choose **Edit Prompt in External Editor** from the command palette. |
 | `Ctrl+L` | Agent screen | Open the extensions modal (**non–VS Code family only**; on VS Code / Cursor / Windsurf / Zed, `Ctrl+L` is mid-turn **interject** and extensions open via `/plugins` / `/hooks`) |
 | `↑` | Prompt focused (empty prompt, normal input mode) | Open the history panel with your last prompt filled in; `↑`/`↓` step through entries (each lands in the input), `↓` at the newest closes the panel, and typing edits the recalled prompt in place. Recalled `!` shell commands re-enter shell mode. `↓` never opens history. |

@@ -7,4 +7,5 @@ pub mod skills;
 pub mod subagent_prompts;
 pub mod template;
 pub mod user_message;
+pub mod workspace_tree_card;
 pub mod workspace_user;

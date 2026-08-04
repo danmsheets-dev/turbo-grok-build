@@ -232,6 +232,17 @@ async fn spawn_queues_when_at_concurrency_limit() {
         h.requests.try_recv().is_err(),
         "second spawn must still be queued, not running"
     );
+    // P0/P1 densify: queued id must be queryable (not not_found).
+    let queued_snap = backend.query("sa-2", false, None).await;
+    assert!(
+        queued_snap.is_some(),
+        "queued spawn must be visible to query, got None"
+    );
+    assert_eq!(
+        queued_snap.unwrap().subagent_id,
+        "sa-2",
+        "query must return the queued subagent id"
+    );
     // Start + finish first child so the queue drains.
     let _ = h.start.send(());
     let started1 = h.started.recv().await.expect("sa-1 started");

@@ -1,21 +1,39 @@
-//! Path-not-found enrichment hints for tool error messages.
+﻿//! Path-not-found enrichment hints for tool error messages.
 //!
 //! Enriches "does not exist" errors from `list_dir`, `read_file`,
 //! `search_replace`, and `grep` with actionable hints.
+//!
+//! When a workspace tree index is already available (process cache or durable
+//! store), also attaches atlas `resolve_path` candidates as "Did you mean?".
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::util::workspace_tree_cache;
+
 /// Ceiling for the single blocking-thread filesystem probe.
 const HINT_TIMEOUT: Duration = Duration::from_millis(100);
 /// Max similar-name suggestions
 const MAX_SIMILAR: usize = 3;
+/// Max atlas resolve hits for miss recovery
+const MAX_ATLAS: usize = 8;
+/// Minimum atlas score to surface a "Did you mean?" candidate.
+/// Slightly lower than resolve_path's comfort threshold so miss recovery
+/// surfaces near-matches when the atlas is warm.
+const MIN_ATLAS_SCORE: f32 = 0.45;
 /// Reduces noise from single-character names that would match on too many entries
 const MIN_LEAF_LEN: usize = 2;
 /// Minimum stem length for reverse substring matching (query contains entry).
 /// Prevents short stems from over-matching.
 const MIN_REVERSE_STEM_LEN: usize = 4;
+
+/// One ranked path from the workspace tree atlas.
+#[derive(Debug, Clone)]
+pub struct AtlasPathHint {
+    pub rel_path: String,
+    pub score: f32,
+}
 
 /// Enrichment hints for a path that was not found.
 #[derive(Debug, Clone)]
@@ -25,6 +43,8 @@ pub struct PathNotFoundHint {
     /// Up to [`MAX_SIMILAR`] entries from the parent directory whose names
     /// are case-insensitive substring matches of the missing leaf.
     pub similar: Vec<PathBuf>,
+    /// Workspace-tree atlas candidates (relative paths), if index is ready.
+    pub atlas: Vec<AtlasPathHint>,
     /// Always-present CWD note for model re-orientation.
     pub cwd_note: String,
 }
@@ -34,6 +54,17 @@ impl fmt::Display for PathNotFoundHint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(ref s) = self.suggestion {
             write!(f, " Did you mean {}?", s.display())?;
+        } else if !self.atlas.is_empty() {
+            write!(f, "\nDid you mean?")?;
+            for (i, hit) in self.atlas.iter().enumerate() {
+                write!(
+                    f,
+                    "\n  {}. {}  (score {:.2})",
+                    i + 1,
+                    hit.rel_path,
+                    hit.score
+                )?;
+            }
         } else if !self.similar.is_empty() {
             let names: Vec<&str> = self
                 .similar
@@ -74,9 +105,9 @@ pub async fn path_not_found_hint(path: &Path, cwd: &Path, display_cwd: &Path) ->
     )
     .await;
 
-    let (suggestion, similar) = match result {
+    let (suggestion, similar, atlas) = match result {
         Ok(Ok(val)) => val,
-        _ => (None, Vec::new()),
+        _ => (None, Vec::new(), Vec::new()),
     };
 
     // Remap resolved worktree path to display space so the model never
@@ -98,6 +129,7 @@ pub async fn path_not_found_hint(path: &Path, cwd: &Path, display_cwd: &Path) ->
     PathNotFoundHint {
         suggestion,
         similar,
+        atlas,
         cwd_note,
     }
 }
@@ -125,15 +157,109 @@ pub async fn format_not_found_error(
     format!("{base}{hint}")
 }
 
-/// Returns `(suggestion, similar)` where `suggestion` is a corrected path from
-/// "dropped repo folder" detection (raw, not yet remapped to display space) and
-/// `similar` is a list of substring-matched sibling entries.
-fn collect_hints(path: &Path, cwd: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
+/// Returns `(suggestion, similar, atlas)` where `suggestion` is a corrected path
+/// from "dropped repo folder" detection (raw, not yet remapped to display space),
+/// `similar` is substring-matched sibling entries, and `atlas` is workspace-tree
+/// resolve hits when an index is already available (never builds).
+fn collect_hints(path: &Path, cwd: &Path) -> (Option<PathBuf>, Vec<PathBuf>, Vec<AtlasPathHint>) {
     if let Some(corrected) = try_suggest_under_cwd(path, cwd) {
-        return (Some(corrected), Vec::new());
+        return (Some(corrected), Vec::new(), Vec::new());
     }
-    (None, find_similar_entries(path))
+    let similar = find_similar_entries(path);
+    let atlas = atlas_resolve_hints(path, cwd);
+    (None, similar, atlas)
 }
+
+/// Best-effort atlas suggestions. Never builds an index (miss recovery must stay fast).
+fn atlas_resolve_hints(path: &Path, cwd: &Path) -> Vec<AtlasPathHint> {
+    let config = xai_workspace_tree::WorkspaceTreeConfig::from_env();
+    if !config.enabled {
+        return Vec::new();
+    }
+    // Prefer process cache (warm kickoff), then durable store. Never build.
+    let Some(index) = workspace_tree_cache::try_get(cwd)
+        .or_else(|| workspace_tree_cache::try_load_cached(cwd, &config))
+    else {
+        return Vec::new();
+    };
+
+    // Prefer relative path under cwd as the resolve name / hint.
+    let rel = path
+        .strip_prefix(cwd)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    if rel.is_empty() {
+        return Vec::new();
+    }
+
+    let leaf = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| rel.clone());
+    let stem = Path::new(&leaf)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&leaf)
+        .to_string();
+
+    let mut hits: Vec<AtlasPathHint> = Vec::new();
+    let mut push_hits = |name: &str, hint: Option<&str>| {
+        let result = xai_workspace_tree::resolve_path(&index, name, hint, MAX_ATLAS);
+        for h in result.hits {
+            if h.score < MIN_ATLAS_SCORE {
+                continue;
+            }
+            if hits.iter().any(|x| x.rel_path == h.rel_path) {
+                continue;
+            }
+            hits.push(AtlasPathHint {
+                rel_path: h.rel_path,
+                score: h.score,
+            });
+        }
+    };
+
+    // 1) Leaf basename with full relative path as hint (best for wrong-folder guesses).
+    push_hits(&leaf, Some(rel.as_str()));
+    // 2) Stem without extension (e.g. ship_roster.gd.uid → ship_roster).
+    if stem.len() >= MIN_LEAF_LEN && !stem.eq_ignore_ascii_case(&leaf) {
+        push_hits(&stem, Some(rel.as_str()));
+    }
+    // 3) Full relative path as name (exact-path / substring recovery).
+    if rel.contains('/') {
+        push_hits(&rel, None);
+    }
+    // 4) Fallback: search when resolve is sparse.
+    if hits.len() < 2 && leaf.len() >= MIN_LEAF_LEN {
+        let search = xai_workspace_tree::search(&index, &stem, MAX_ATLAS);
+        for h in search.hits {
+            if hits.iter().any(|x| x.rel_path == h.rel_path) {
+                continue;
+            }
+            // search scores are 0.5–1.0; keep same floor.
+            if h.score < MIN_ATLAS_SCORE {
+                continue;
+            }
+            hits.push(AtlasPathHint {
+                rel_path: h.rel_path,
+                score: h.score,
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| match b.score.partial_cmp(&a.score) {
+        Some(ord) => ord.then_with(|| a.rel_path.cmp(&b.rel_path)),
+        None => a.rel_path.cmp(&b.rel_path),
+    });
+    hits.truncate(MAX_ATLAS);
+    hits
+}
+
+
 
 /// Detect the "dropped repo folder" pattern.
 ///
@@ -220,7 +346,7 @@ mod tests {
     // Display formatting). Broader integration fixtures live in
     // tests/path_suggestions_production.rs.
 
-    // ── CWD note ──────────────────────────────────────────────────────
+    // â”€â”€ CWD note â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[tokio::test]
     async fn cwd_note_always_present() {
@@ -235,7 +361,7 @@ mod tests {
         assert!(hint.similar.is_empty());
     }
 
-    // ── "dropped repo folder" detection ───────────────────────────────
+    // â”€â”€ "dropped repo folder" detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[tokio::test]
     async fn dropped_repo_folder_detected() {
@@ -294,7 +420,7 @@ mod tests {
         assert!(hint.similar.is_empty());
     }
 
-    // ── similar-name scan (internal invariants) ───────────────────────
+    // â”€â”€ similar-name scan (internal invariants) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[tokio::test]
     async fn similar_name_multi_match() {
@@ -346,13 +472,14 @@ mod tests {
         );
     }
 
-    // ── Display formatting ────────────────────────────────────────────
+    // â”€â”€ Display formatting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn display_with_suggestion() {
         let hint = PathNotFoundHint {
             suggestion: Some(PathBuf::from("/project/repo/src")),
             similar: Vec::new(),
+            atlas: Vec::new(),
             cwd_note: "Note: your current working directory is /project/repo".into(),
         };
         let output = hint.to_string();
@@ -368,6 +495,7 @@ mod tests {
                 PathBuf::from("/project/helpers.rs"),
                 PathBuf::from("/project/helper_test.rs"),
             ],
+            atlas: Vec::new(),
             cwd_note: "Note: your current working directory is /project".into(),
         };
         let output = hint.to_string();
@@ -377,10 +505,28 @@ mod tests {
     }
 
     #[test]
+    fn display_with_atlas() {
+        let hint = PathNotFoundHint {
+            suggestion: None,
+            similar: Vec::new(),
+            atlas: vec![AtlasPathHint {
+                rel_path: "scripts/core/ship_roster.gd".into(),
+                score: 0.96,
+            }],
+            cwd_note: "Note: your current working directory is /project".into(),
+        };
+        let output = hint.to_string();
+        assert!(output.contains("Did you mean?"));
+        assert!(output.contains("scripts/core/ship_roster.gd"));
+        assert!(output.contains("0.96"));
+    }
+
+    #[test]
     fn display_empty() {
         let hint = PathNotFoundHint {
             suggestion: None,
             similar: Vec::new(),
+            atlas: Vec::new(),
             cwd_note: "Note: your current working directory is /project".into(),
         };
         let output = hint.to_string();
@@ -389,3 +535,4 @@ mod tests {
         assert!(output.contains("Note: your current working directory is /project"));
     }
 }
+

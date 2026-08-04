@@ -142,6 +142,8 @@ pub enum Command {
     Issues(crate::issues_cmd::IssuesArgs),
     /// Feature Request Log — list / show / export capability requests from agents
     Features(crate::features_cmd::FeaturesArgs),
+    /// Workspace directory atlas: status, doctor, inject-preview, build, resolve
+    Tree(crate::tree_cmd::TreeArgs),
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;

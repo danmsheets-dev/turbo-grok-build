@@ -804,7 +804,47 @@ pub(crate) fn collect_tui_runtime_findings(
         .into_iter()
         .filter_map(view::finding_from_warning)
         .chain(sandbox_profile_conflict_warning(workspace).and_then(view::finding_from_warning))
+        .chain(std::iter::once(web_fetch_status_finding()))
         .collect()
+}
+
+/// Surface web_fetch enablement in `/doctor` (env-visible slice of the full
+/// config stack). Full resolution also includes features/remote/requirements.
+fn web_fetch_status_finding() -> DiagnosticFinding {
+    use model::WEB_FETCH_STATUS_ID;
+    let env_disabled = xai_grok_config::env_bool("GROK_WEB_FETCH") == Some(false)
+        || std::env::var("GROK_DISABLE_WEB_FETCH").is_ok_and(|v| v == "1" || v == "true");
+    if env_disabled {
+        DiagnosticFinding {
+            id: WEB_FETCH_STATUS_ID,
+            disposition: FindingDisposition::Recommendation,
+            message: "web_fetch is disabled via environment (GROK_WEB_FETCH=0 or \
+                      GROK_DISABLE_WEB_FETCH=1)."
+                .to_owned(),
+            remediation: None,
+            automatic_remediation: None,
+            note: Some(
+                "Default is on. Re-enable by unsetting those env vars (or set GROK_WEB_FETCH=1). \
+                 Also check [features] web_fetch and remote web_fetch_enabled."
+                    .to_owned(),
+            ),
+        }
+    } else {
+        DiagnosticFinding {
+            id: WEB_FETCH_STATUS_ID,
+            disposition: FindingDisposition::Recommendation,
+            message: "web_fetch defaults to enabled (open-public + SSRF). Env does not disable it."
+                .to_owned(),
+            remediation: None,
+            automatic_remediation: None,
+            note: Some(
+                "Optional lockdown: [toolset.web_fetch] allowed_domains = [\"docs.rs\", …] \
+                 or allowed_domains = [] / GROK_WEB_FETCH=0 to turn off. extract_mode=article \
+                 saves tokens on long docs."
+                    .to_owned(),
+            ),
+        }
+    }
 }
 
 pub(crate) fn merge_tui_runtime_findings(

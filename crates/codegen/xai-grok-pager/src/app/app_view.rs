@@ -254,7 +254,8 @@ pub enum TickDemand {
     /// Nothing animates or polls: the event loop parks (zero wakeups).
     None,
     /// Only low-frequency work is pending (welcome logo shimmer at ~12fps,
-    /// the macOS Cmd link-hover poll): tick at [`SLOW_TICK_INTERVAL`].
+    /// Game Mode office animations while the agent is otherwise idle, and the
+    /// macOS Cmd link-hover poll): tick at [`SLOW_TICK_INTERVAL`].
     Slow,
     /// Real animation is on screen: tick at the configured animation fps.
     Fast,
@@ -5327,6 +5328,17 @@ impl AppView {
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
+            // Game Mode owns Slow-tick animation (Terra freeze fix). Redraw only
+            // when sync/tick marks dirty — frozen idle rooms skip full office paint.
+            if agent.game_mode.open {
+                let (sw, sh) = agent.last_terminal_size;
+                let stage_h = sh.saturating_sub(3).max(8);
+                needs_redraw |= crate::views::game_mode::sync_game_mode(
+                    agent,
+                    sw.max(20),
+                    stage_h,
+                );
+            }
             needs_redraw |= agent.scrollback.tick();
             needs_redraw |= agent.todo.list_state.tick();
             needs_redraw |= agent.todo.badge_tick();
@@ -5603,8 +5615,9 @@ impl AppView {
     /// [`TickDemand::Fast`] runs at the configured animation fps (default
     /// 30). [`TickDemand::Slow`] runs at [`SLOW_TICK_INTERVAL`] and is used
     /// when the only reasons to tick are low-frequency by construction —
-    /// the ~12fps welcome logo shimmer and the macOS Cmd link-hover poll —
-    /// so an app that *looks* idle doesn't spin a 30fps loop for them.
+    /// the ~12fps welcome logo shimmer, open Game Mode office animations,
+    /// and the macOS Cmd link-hover poll — so an app that *looks* idle
+    /// doesn't spin a 30fps loop for them.
     pub fn tick_demand(&self) -> TickDemand {
         if self.pending_action.is_some() {
             return TickDemand::Fast;
@@ -5646,12 +5659,18 @@ impl AppView {
                 let Some(agent) = self.agents.get(&id) else {
                     return TickDemand::None;
                 };
-                let fast = agent.scrollback.needs_animation()
-                    || agent.todo.list_state.needs_tick()
+                let game_open = agent.game_mode.open;
+                // Dual-audit P0: while Game Mode is open, do **not** inherit Fast
+                // solely from hidden Tasks, streaming scrollback spinners, or
+                // turn-running state — the office wall/desks animate on Slow.
+                // Visible chrome (permissions, modals, file search, toast, …)
+                // still requests Fast.
+                let fast = agent.todo.list_state.needs_tick()
                     || agent.todo.badge_needs_tick()
-                    || agent.tasks.needs_tick()
+                    || (!game_open && agent.tasks.needs_tick())
                     || agent.acp_synced_generation != agent.session.available_commands_generation
-                    || !agent.session.state.is_idle()
+                    || (!game_open && agent.scrollback.needs_animation())
+                    || (!game_open && !agent.session.state.is_idle())
                     || agent.session.loading_replay
                     || agent
                         .mcp_init_progress
@@ -5685,6 +5704,7 @@ impl AppView {
                     || agent.video_load_rx.is_some()
                     || agent.mermaid_needs_tick()
                     || !agent.permission_queue.is_empty()
+                    || agent.question_view.is_some()
                     || matches!(
                         agent.active_modal.as_ref(),
                         Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -5706,7 +5726,8 @@ impl AppView {
                             || child.mode_switch_banner.is_some()
                             || child.has_drag_autoscroll()
                             || child.selection_created_at.is_some()
-                            || (agent.active_subagent.as_deref() == Some(sid.as_str())
+                            || (!game_open
+                                && agent.active_subagent.as_deref() == Some(sid.as_str())
                                 && child.scrollback.needs_animation())
                             || child.scrollback_search.is_some()
                             || child.block_viewer.is_some()
@@ -5717,10 +5738,23 @@ impl AppView {
                 if fast {
                     return TickDemand::Fast;
                 }
-                // Game Mode office animations (~12fps) while the spectator
-                // view is open, even when the agent turn is idle.
-                if agent.game_mode.open {
+                // Game Mode office animations stay on Slow (~12fps / SLOW_TICK_INTERVAL)
+                // while the spectator view is open and nothing else demands Fast.
+                // Pixel recompose is fingerprint-gated inside game_mode::state so
+                // pure tick + hover do not rebuild the scaled BG every frame.
+                if game_open {
                     return TickDemand::Slow;
+                }
+                // Non–Game Mode: turn/tasks still need Fast when active.
+                if agent.tasks.needs_tick()
+                    || agent.scrollback.needs_animation()
+                    || !agent.session.state.is_idle()
+                    || agent.subagent_views.iter().any(|(sid, child)| {
+                        agent.active_subagent.as_deref() == Some(sid.as_str())
+                            && child.scrollback.needs_animation()
+                    })
+                {
+                    return TickDemand::Fast;
                 }
                 if cfg!(target_os = "macos")
                     && (agent.needs_link_modifier_poll()

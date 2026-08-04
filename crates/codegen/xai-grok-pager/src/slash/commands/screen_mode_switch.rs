@@ -139,6 +139,7 @@ mod tests {
             bundle_state: bundle,
             screen_mode: mode,
             billing_surface_visible: true,
+                session_cwd: None,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         }
     }

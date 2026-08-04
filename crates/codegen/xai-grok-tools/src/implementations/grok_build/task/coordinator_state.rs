@@ -628,6 +628,19 @@ pub(super) fn pending_snapshot(child: &PendingChild) -> SubagentSnapshot {
     }
 }
 
+/// Snapshot for a spawn still waiting on the concurrency queue (not yet pending).
+pub(super) fn queued_snapshot(request: &SubagentRequest) -> SubagentSnapshot {
+    SubagentSnapshot {
+        subagent_id: request.id.clone(),
+        description: request.description.clone(),
+        subagent_type: request.subagent_type.clone(),
+        status: SubagentSnapshotStatus::Initializing,
+        started_at_epoch_ms: 0,
+        duration_ms: 0,
+        persona: request.runtime_overrides.persona.clone(),
+    }
+}
+
 pub(super) fn pending_inspection(child: &PendingChild) -> SubagentInspection {
     SubagentInspection {
         snapshot: pending_snapshot(child),
@@ -717,6 +730,26 @@ pub fn completion_summary(
         Some(cap) => cap_completion_output(&result.output, cap),
         None => result.output.clone(),
     };
+    let isolation = if result.isolation_fallback {
+        Some("shared_fallback".to_owned())
+    } else if result.worktree_path.is_some()
+        || result.worktree_state.as_deref() == Some("preserved")
+        || result.worktree_state.as_deref() == Some("cleaned")
+        || result.baseline_ref.is_some()
+        || result.snapshot_ref.is_some()
+    {
+        Some("worktree".to_owned())
+    } else if request
+        .runtime_overrides
+        .isolation
+        .as_ref()
+        .is_some_and(|m| m.as_str() == "worktree")
+    {
+        // Requested worktree but no artifacts (create failed / dispose incomplete).
+        Some("worktree".to_owned())
+    } else {
+        Some("none".to_owned())
+    };
     SubagentCompletionSummary {
         subagent_id: request.id.clone(),
         subagent_type: request.subagent_type.clone(),
@@ -726,6 +759,9 @@ pub fn completion_summary(
         tool_calls: result.tool_calls,
         turns: result.turns,
         output,
+        isolation,
+        worktree_path: result.worktree_path.clone(),
+        worktree_state: result.worktree_state.clone(),
     }
 }
 

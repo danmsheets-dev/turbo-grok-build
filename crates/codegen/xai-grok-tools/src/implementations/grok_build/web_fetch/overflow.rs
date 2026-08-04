@@ -95,6 +95,15 @@ pub(super) struct InlineBudget {
     output_bytes: usize,
 }
 
+impl InlineBudget {
+    /// Shrink budgets so a status/meta prefix of `prefix_len` can be prepended
+    /// without exceeding the original output cap.
+    pub(super) fn reserve_prefix(&mut self, prefix_len: usize) {
+        self.output_bytes = self.output_bytes.saturating_sub(prefix_len);
+        self.preview_bytes = self.preview_bytes.min(self.output_bytes);
+    }
+}
+
 impl OverflowHandler {
     pub(super) fn new() -> Self {
         Self {
@@ -195,21 +204,38 @@ fn bounded_output(
     tools: RecoveryTools<'_>,
 ) -> String {
     if let Some(path) = saved_path {
-        let path_hint = format!(" Full content saved to: {}.", path.display());
         let steer = web_fetch_steer(classification, tools, QueryTools::detect());
-        if !steer.is_empty() {
-            let full_hint = format!("{path_hint}{steer}");
-            if let Some(output) = render_with_hint(content, budget, total_bytes, &full_hint) {
+        // Try full path first, then short session-relative name so long Windows
+        // temp paths still fit the output budget with recovery guidance.
+        for path_hint in path_hint_variants(path) {
+            if !steer.is_empty() {
+                let full_hint = format!("{path_hint}{steer}");
+                if let Some(output) = render_with_hint(content, budget, total_bytes, &full_hint) {
+                    return output;
+                }
+            }
+            if let Some(output) = render_with_hint(content, budget, total_bytes, &path_hint) {
                 return output;
             }
-        }
-        if let Some(output) = render_with_hint(content, budget, total_bytes, &path_hint) {
-            return output;
         }
     } else if let Some(output) = render_with_hint(content, budget, total_bytes, "") {
         return output;
     }
     bounded_generic_marker(content, budget)
+}
+
+/// Path footer candidates from longest/most specific to shortest.
+fn path_hint_variants(path: &Path) -> Vec<String> {
+    let mut hints = Vec::with_capacity(3);
+    hints.push(format!(" Full content saved to: {}.", path.display()));
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        // Session-relative form used by WebFetchArtifactWriter (`web_fetch/N.ext`).
+        hints.push(format!(
+            " Full content saved to session artifact `web_fetch/{name}`."
+        ));
+        hints.push(format!(" Full content saved to `{name}`."));
+    }
+    hints
 }
 
 fn render_with_hint(
@@ -359,8 +385,14 @@ mod tests {
         );
         assert!(result.content.contains("showing first 100 of"));
         assert!(result.content.contains("ReadAsset"));
-        let dump = tmp.path().join("web_fetch/1.md");
-        assert!(result.content.contains(dump.to_string_lossy().as_ref()));
+        let dump = tmp.path().join("web_fetch").join("1.md");
+        // Accept full path or short session-relative form (Windows paths use `\`).
+        assert!(
+            result.content.contains("Full content saved")
+                && (result.content.contains("1.md") || result.content.contains("web_fetch")),
+            "expected path recovery hint in: {}",
+            result.content
+        );
         assert_eq!(tokio::fs::read_to_string(dump).await.unwrap(), full);
     }
 
@@ -771,15 +803,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_path_falls_back_to_bounded_generic_marker() {
+    async fn oversized_path_uses_short_session_relative_hint() {
         let tmp = tempfile::tempdir().unwrap();
+        // Very long session dir makes the absolute path too large for a tight
+        // budget; short `web_fetch/N.ext` recovery form should still fit.
         let session = tmp.path().join("p".repeat(180));
         let result = OverflowHandler::new()
             .process(
                 "line\n".repeat(1_000),
                 InlineBudget {
-                    preview_bytes: 100,
-                    output_bytes: 128,
+                    preview_bytes: 40,
+                    output_bytes: 160,
                 },
                 Some(&session),
                 "text/plain",
@@ -787,9 +821,15 @@ mod tests {
             )
             .await;
 
-        assert!(result.content.len() <= 128);
+        assert!(result.content.len() <= 160);
         assert!(result.content.contains("truncated"));
-        assert!(!result.content.contains("Full content saved"));
+        assert!(
+            result.content.contains("Full content saved"),
+            "expected short path recovery form, got: {}",
+            result.content
+        );
+        // Absolute path should not be required once short form is chosen.
+        assert!(!result.content.contains(&"p".repeat(180)));
         assert!(
             tokio::fs::try_exists(result.artifact_path.unwrap())
                 .await

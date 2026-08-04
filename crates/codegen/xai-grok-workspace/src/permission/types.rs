@@ -237,6 +237,10 @@ impl<'de> Deserialize<'de> for EditPolicy {
 pub struct EditPathContext {
     pub real_cwd: std::path::PathBuf,
     pub display_cwd: Option<std::path::PathBuf>,
+    /// Session-scoped write confine root (isolation=worktree worktree path).
+    /// When set, Bash/Edit confine checks use this even if process-wide
+    /// `--confine` / `GROK_CONFINE` is unset (parent multi-session safe).
+    pub confine_root: Option<std::path::PathBuf>,
 }
 #[allow(clippy::large_enum_variant)]
 pub enum PermissionCommand {
@@ -737,6 +741,10 @@ mod tests {
         use xai_grok_tools::types::ToolInput;
         let input = ToolInput::WebFetch(WebFetchInput {
             url: "https://custom.example.com/api".into(),
+            extract_mode: None,
+            start_offset: None,
+            max_chars: None,
+            include_links: None,
         });
         let access = AccessKind::from(&input);
         assert!(

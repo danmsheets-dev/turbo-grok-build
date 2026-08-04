@@ -175,7 +175,7 @@ Cancel a scheduled task by ID. Returns success if the task was found and removed
 
 ## The Tasks Pane
 
-In the interactive TUI, press `Ctrl+G` to toggle the tasks pane. This pane lists, in a single view:
+In the interactive TUI, press `Ctrl+Shift+G` to toggle the tasks pane (`Ctrl+G` is Game Mode). This pane lists, in a single view:
 
 - Running subagents and their progress
 - Active background tasks and their status

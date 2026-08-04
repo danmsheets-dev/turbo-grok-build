@@ -3,7 +3,22 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-02 (Auto Developer Log package).
+Last reviewed: 2026-08-03 (RC13 Game Mode perf + worktree soft-preserve docs).
+
+## RC13 — Workspace Tree inject + tombstone + Game Mode perf
+
+Source landed for **0.2.114-r14** (rebuild/install required to take effect in the binary).
+Prior line: r13 Workspace Tree inject + Game Mode perf; r14 web_fetch + workflow routing.
+
+| Topic | Notes |
+|-------|--------|
+| Soft-preserve default | Completed isolation worktrees are snapshotted and **kept** by default (`GROK_SUBAGENT_SOFT_PRESERVE=0` deletes after snapshot). See user-guide `16-subagents.md`. |
+| Tombstone writes/shell | Missing CWD / confine root → `cwd_missing` / `worktree_tombstone`; shell preflight; no write success when path gone. |
+| Live marker prune | RUNNING trees with fresh `.grok-subagent-live` are never keep-N pruned. |
+| Workspace Tree inject | Budgeted `<workspace_tree_card>` on session prompt; tools + `/tree` + `turbo tree`. Docs: `docs/workspace-tree.md`. |
+| Keep-N prune | Soft-preserved peers pruned by `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` + free-space guard so densify waves do not fill disk. |
+| Game Mode perf | Terminal-res `pixel_paint` cache (no per-paint scale-3 resize); Game Mode open prefers `TickDemand::Slow` (not Fast from hidden tasks/turn); anim advances on `AppView::tick`; hover dirty-if-changed; dual-audit P1 bugs fixed (SpawnWalk, WaitingOnYou, attention, focus, playground). |
+| Residual accepted | Shell confine is policy-level, not OS FS jail. True incremental tree freshness is still Phase 2. |
 
 ## Added: Auto Developer Log
 

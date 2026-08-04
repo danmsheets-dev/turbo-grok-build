@@ -43,7 +43,8 @@ minijinja = { version = "2", features = ["custom_syntax"] }
 parking_lot = { workspace = true }
 htmd = { workspace = true }
 scraper = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls", "json", "gzip", "brotli", "deflate"] }
+reqwest = { workspace = true, features = ["rustls-tls", "json", "gzip", "brotli", "deflate", "stream"] }
+encoding_rs = "0.8"
 pulldown-cmark = { workspace = true }
 regex = { workspace = true }
 schemars = { workspace = true }
@@ -86,6 +87,7 @@ chrono = { workspace = true }
 futures-util = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
 xai-file-utils = { path = "../xai-file-utils" }
+xai-workspace-tree = { path = "../xai-workspace-tree" }
 dhat = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]

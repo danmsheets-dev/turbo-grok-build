@@ -58,6 +58,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             billing_surface_visible: true,
+                session_cwd: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         let result = JumpCommand.run(&mut ctx, "");

@@ -35,16 +35,22 @@ impl WallMode {
 /// `attention_active` is a brief sticky window after a failure (not forever).
 /// Running work outranks sticky attention so the wall shows WORKING while
 /// other agents continue.
+///
+/// `waiting_on_user`: permission queue / question UI needs human input.
 pub fn compute_wall_mode(
     agents: &[DeskAgentSnapshot],
     supervisor_working: bool,
     had_success: bool,
     handoff_in_flight: bool,
     attention_active: bool,
+    waiting_on_user: bool,
 ) -> WallMode {
     let any_running = agents.iter().any(|a| a.running) || handoff_in_flight;
     if any_running {
         return WallMode::Working;
+    }
+    if waiting_on_user {
+        return WallMode::WaitingOnYou;
     }
     if supervisor_working {
         return WallMode::SupervisorBusy;
@@ -80,11 +86,11 @@ mod tests {
     #[test]
     fn work_finished_requires_success() {
         assert_eq!(
-            compute_wall_mode(&[], false, false, false, false),
+            compute_wall_mode(&[], false, false, false, false, false),
             WallMode::Standby
         );
         assert_eq!(
-            compute_wall_mode(&[], false, true, false, false),
+            compute_wall_mode(&[], false, true, false, false, false),
             WallMode::WorkFinished
         );
     }
@@ -92,7 +98,7 @@ mod tests {
     #[test]
     fn working_beats_finished_and_attention() {
         assert_eq!(
-            compute_wall_mode(&[agent(true, false)], false, true, false, true),
+            compute_wall_mode(&[agent(true, false)], false, true, false, true, false),
             WallMode::Working
         );
     }
@@ -100,12 +106,25 @@ mod tests {
     #[test]
     fn failed_needs_attention_when_sticky() {
         assert_eq!(
-            compute_wall_mode(&[agent(false, true)], false, false, false, true),
+            compute_wall_mode(&[agent(false, true)], false, false, false, true, false),
             WallMode::NeedsAttention
         );
         assert_eq!(
-            compute_wall_mode(&[agent(false, true)], false, false, false, false),
+            compute_wall_mode(&[agent(false, true)], false, false, false, false, false),
             WallMode::Standby
+        );
+    }
+
+    #[test]
+    fn waiting_on_user() {
+        assert_eq!(
+            compute_wall_mode(&[], false, false, false, false, true),
+            WallMode::WaitingOnYou
+        );
+        // Running work still outranks waiting-on-you.
+        assert_eq!(
+            compute_wall_mode(&[agent(true, false)], false, false, false, false, true),
+            WallMode::Working
         );
     }
 }

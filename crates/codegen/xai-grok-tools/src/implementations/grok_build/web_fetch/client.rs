@@ -4,20 +4,35 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, USER_AGENT};
 use url::Url;
 
 use super::cache::FetchCache;
-use super::config::{MAX_REDIRECTS, MAX_URL_LENGTH, USER_AGENT_STRING, WebFetchParams};
+use super::config::{ACCEPT_HEADER, MAX_REDIRECTS, MAX_URL_LENGTH, WebFetchParams};
+use super::domain::DomainMatcher;
 use super::error::WebFetchError;
+use super::extract::{self, ExtractMode};
 use super::http::HttpClient;
 use super::overflow::{OverflowHandler, RecoveryTools, inline_budget};
 use super::ssrf;
 use crate::implementations::grok_build::storage::SessionFileWriter;
 use crate::types::output::{WebFetchContent, WebFetchOutput, WebFetchSourceArtifact};
-use scraper::{Html, Selector};
 
 const DEFAULT_DOWNLOAD_DIR: &str = "downloads";
+/// Max characters of error-page body included in non-2xx messages.
+const ERROR_BODY_PREVIEW_CHARS: usize = 500;
+const DEFAULT_JS_SOFT_NOTE: &str =
+    "\n\n[web_fetch note: large JavaScript response truncated by max_js_bytes]";
+
+/// Per-call options for [`WebFetchClient::fetch`].
+#[derive(Debug, Clone, Default)]
+pub struct FetchOptions<'a> {
+    pub extract_mode: Option<&'a str>,
+    pub start_offset: Option<usize>,
+    pub max_chars: Option<usize>,
+    pub include_links: bool,
+}
 
 /// Shared HTTP client and cache for web fetching.
 #[derive(Clone)]
@@ -26,6 +41,8 @@ pub struct WebFetchClient {
     cache: Arc<parking_lot::RwLock<FetchCache>>,
     converter: Arc<htmd::HtmlToMarkdown>,
     params: WebFetchParams,
+    /// `None` = open-public (any host that passes SSRF). `Some` = enforce list.
+    domain_matcher: Option<DomainMatcher>,
     download_writer: SessionFileWriter,
     image_writer: SessionFileWriter,
     video_writer: SessionFileWriter,
@@ -51,6 +68,10 @@ impl WebFetchClient {
                 .build(),
         );
 
+        let domain_matcher = params
+            .domain_allowlist()
+            .map(DomainMatcher::new);
+
         Ok(Self {
             // Reqwest client can fail to build.
             http: HttpClient::new(params)?,
@@ -60,6 +81,7 @@ impl WebFetchClient {
             ))),
             converter,
             params: params.clone(),
+            domain_matcher,
             download_writer: SessionFileWriter::new(DEFAULT_DOWNLOAD_DIR, "pdf"),
             image_writer: SessionFileWriter::new("images", "jpg"),
             video_writer: SessionFileWriter::new("videos", "mp4"),
@@ -69,9 +91,9 @@ impl WebFetchClient {
 
     /// Fetch a URL and return its content as markdown.
     ///
-    /// Handles: validation, HTTPS upgrade, SSRF check, HTTP fetch with
-    /// same-host redirects, HTML-to-markdown conversion, truncation, and
-    /// caching. On transport errors, the HTTP client is invalidated so
+    /// Handles: domain allowlist, validation, HTTPS upgrade, SSRF check, HTTP
+    /// fetch with same-host redirects, HTML-to-markdown conversion, truncation,
+    /// and caching. On transport errors, the HTTP client is invalidated so
     /// the next call gets a fresh connection pool (see [`HttpClient`]).
     pub async fn fetch(
         &self,
@@ -79,31 +101,55 @@ impl WebFetchClient {
         session_folder: Option<&Path>,
         read_tool_name: Option<&str>,
         execute_tool_name: Option<&str>,
+        options: FetchOptions<'_>,
     ) -> Result<WebFetchOutput, WebFetchError> {
         let mut url = validate_url(raw_url)?;
         upgrade_to_https(&mut url);
 
         let url_str = url.to_string();
+        let mode = ExtractMode::parse(options.extract_mode);
+        if mode == ExtractMode::Headless {
+            return Ok(WebFetchOutput::Error {
+                url: Some(url_str),
+                message: "extract_mode=headless is not supported by static web_fetch \
+                    (no JS runtime). Use a browser MCP tool, or fetch a pre-rendered \
+                    HTML/docs URL with extract_mode=article|full."
+                    .into(),
+            });
+        }
+        // Mode + windowing are part of the cache key so variants do not collide.
+        let cache_key = format!(
+            "{url_str}\0{}\0{}\0{}\0{}",
+            mode.as_str(),
+            options.start_offset.unwrap_or(0),
+            options.max_chars.unwrap_or(0),
+            options.include_links,
+        );
 
-        // Check cache.
+        // Check cache (keyed by URL + extract options).
         {
-            let cache = self.cache.read();
-            if let Some(cached) = cache.get(&url_str) {
+            let mut cache = self.cache.write();
+            if let Some(cached) = cache.get(&cache_key) {
                 tracing::debug!("web_fetch cache hit for {url_str}");
-                return Ok(cached.clone());
+                return Ok(cached);
             }
         }
 
-        // SSRF check (policy from tool params — not process env at call time).
-        ssrf::check_ssrf(&url, self.params.allow_local()).await?;
+        // Domain allowlist before any network I/O.
+        if let Some(matcher) = &self.domain_matcher
+            && let Some(blocked) = matcher.check(&url)
+        {
+            return Ok(blocked);
+        }
 
-        // Make request and build output.
-        let http = self.http.get_or_rebuild()?;
+        // Make request and build output (SSRF + DNS pin inside fetch_url).
         let result = match fetch_url(
-            &http,
+            &self.http,
+            &self.params,
             &url,
             self.params.max_content_length(),
             self.params.allow_local(),
+            self.domain_matcher.as_ref(),
         )
         .await
         {
@@ -115,7 +161,7 @@ impl WebFetchClient {
             Err(e) => return Err(e),
         };
 
-        let (body, content_type, final_url, status_code) = match result {
+        let (body, mut content_type, final_url, status_code) = match result {
             FetchResult::Content {
                 body,
                 content_type,
@@ -131,17 +177,71 @@ impl WebFetchClient {
                     redirect_url,
                 });
             }
+            FetchResult::DomainNotAllowed(domain) => {
+                return Ok(WebFetchOutput::DomainNotAllowed(domain));
+            }
         };
 
-        // PDF: save raw bytes to disk instead of lossy UTF-8 conversion.
-        if is_pdf(&content_type) {
+        // Infer safer content type when the server omitted or lied about it.
+        content_type = refine_content_type(&content_type, &body);
+
+        // 304 and other empty not-modified responses.
+        if status_code == 304 {
+            return Ok(WebFetchOutput::Error {
+                url: Some(final_url),
+                message: "HTTP 304 Not Modified (no body). Re-fetch without validators \
+                    or use a different URL."
+                    .into(),
+            });
+        }
+
+        // Bot / challenge interstitials often return HTTP 200 with little real content.
+        if is_html(&content_type) || content_type.is_empty() {
+            let peek = decode_body(&body, &content_type);
+            if extract::looks_like_bot_challenge(&peek) {
+                return Ok(WebFetchOutput::Error {
+                    url: Some(final_url),
+                    message: format!(
+                        "HTTP {status_code}: page looks like a bot/challenge interstitial \
+                         (Cloudflare/WAF), not real content. Try a different URL, official docs, \
+                         or a browser MCP if you need a live session."
+                    ),
+                });
+            }
+        }
+
+        // Non-2xx: surface as structured error (do not pretend success).
+        if !(200..300).contains(&status_code) {
+            let preview = error_body_preview(&body, &content_type);
+            return Ok(WebFetchOutput::Error {
+                url: Some(final_url),
+                message: format!(
+                    "HTTP {status_code}{}{}",
+                    if preview.is_empty() { "" } else { ": " },
+                    preview
+                ),
+            });
+        }
+
+        // PDF by content-type or magic bytes.
+        if is_pdf(&content_type) || body.starts_with(b"%PDF") {
+            if !body.starts_with(b"%PDF") {
+                return Err(WebFetchError::ContentTypeMismatch {
+                    content_type,
+                    url: final_url,
+                });
+            }
             let media_session_folder = require_media_session_folder(session_folder)?;
             let output = save_pdf(
                 &self.download_writer,
                 media_session_folder,
                 &body,
                 final_url,
-                content_type,
+                if is_pdf(&content_type) {
+                    content_type
+                } else {
+                    "application/pdf".into()
+                },
                 status_code,
                 read_tool_name,
             )
@@ -193,7 +293,8 @@ impl WebFetchClient {
         }
 
         // Reject binary content types that would produce garbage through lossy UTF-8.
-        if is_binary_content_type(&content_type) {
+        // SVG is allowed through the text path (scripts stripped during conversion).
+        if is_binary_content_type(&content_type) && !is_svg_xml(&content_type) {
             return Err(WebFetchError::UnsupportedContentType {
                 content_type,
                 url: final_url,
@@ -209,6 +310,12 @@ impl WebFetchClient {
                     read: read_tool_name,
                     execute: execute_tool_name,
                 },
+                mode,
+                &final_url,
+                status_code,
+                options.start_offset.unwrap_or(0),
+                options.max_chars,
+                options.include_links,
             )
             .await;
         let was_truncated = processed.was_truncated;
@@ -229,7 +336,7 @@ impl WebFetchClient {
         // Insert into cache.
         {
             let mut cache = self.cache.write();
-            cache.insert_text(url_str, output.clone(), was_truncated);
+            cache.insert_text(cache_key, output.clone(), was_truncated);
         }
 
         Ok(output)
@@ -241,16 +348,83 @@ impl WebFetchClient {
         content_type: &str,
         session_folder: Option<&Path>,
         tools: RecoveryTools<'_>,
+        mode: ExtractMode,
+        final_url: &str,
+        status_code: u16,
+        start_offset: usize,
+        max_chars: Option<usize>,
+        include_links: bool,
     ) -> ProcessedText {
-        let raw_content = String::from_utf8_lossy(body);
-        let content = if is_html(content_type) {
-            html_to_markdown(&self.converter, &raw_content)
+        let raw_content = decode_body(body, content_type);
+        let (mut body_text, meta_mode, prepared_html) = if is_html(content_type) {
+            let (prepared, used, spa) = extract::prepare_html(&raw_content, mode);
+            let md = self
+                .converter
+                .convert(&prepared)
+                .unwrap_or_else(|_| prepared.clone());
+            let mut md = strip_base64_data_uris(md);
+            if spa || extract::markdown_looks_empty(&md) {
+                md.push_str(
+                    "\n\n[web_fetch note: little extractable text / possible SPA shell. \
+                     Use browser MCP for JS-rendered pages.]",
+                );
+            }
+            (md, used.as_str(), Some(prepared))
+        } else if is_svg_xml(content_type) {
+            // SVG can embed scripts; treat like HTML for conversion/stripping.
+            let cleaned = extract::clean_chrome(&raw_content);
+            let md = self
+                .converter
+                .convert(&cleaned)
+                .unwrap_or_else(|_| "[svg content]".to_string());
+            (strip_base64_data_uris(md), "svg", None)
         } else {
-            raw_content.into_owned()
+            let mut text = strip_base64_data_uris(raw_content);
+            let max_js = self.params.max_js_bytes();
+            if is_javascript(content_type) && text.len() > max_js {
+                // Truncate by UTF-8 bytes (not chars) to honor max_js_bytes.
+                let mut end = max_js.min(text.len());
+                while end > 0 && !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+                text.push_str(DEFAULT_JS_SOFT_NOTE);
+            }
+            (text, "text", None)
         };
-        let content = strip_base64_data_uris(content);
-        let bytes = content.len();
-        let output_content_type = if is_html(content_type) {
+        // Window body first so links never displace main content under max_chars.
+        body_text = apply_text_window(&body_text, start_offset, max_chars);
+        if include_links {
+            if let Some(ref prepared) = prepared_html {
+                body_text.push_str(&extract::extract_link_summary_budgeted(
+                    prepared,
+                    final_url,
+                    extract::LINK_SUMMARY_MAX_COUNT,
+                    extract::LINK_SUMMARY_MAX_BYTES,
+                ));
+            }
+        }
+
+        // Reserve room for the status header inside the overflow budget so
+        // long URLs cannot push output past the documented cap.
+        // Keep status header short enough to leave room for body under the cap.
+        let mut header = format!("Status: {status_code} | extract={meta_mode} | url={final_url}\n\n");
+        let hard_cap = self.params.max_markdown_length().max(64);
+        if header.len() > hard_cap / 2 {
+            let room = (hard_cap / 2).saturating_sub(40);
+            let short_url: String = final_url.chars().take(room).collect();
+            header = format!(
+                "Status: {status_code} | extract={meta_mode} | url={short_url}…\n\n"
+            );
+        }
+        let mut budget = inline_budget(
+            self.params.context_window_tokens(),
+            self.params.max_markdown_length(),
+        );
+        budget.reserve_prefix(header.len());
+
+        let bytes = body_text.len();
+        let output_content_type = if is_html(content_type) || is_svg_xml(content_type) {
             "markdown".to_string()
         } else {
             content_type.to_owned()
@@ -258,23 +432,24 @@ impl WebFetchClient {
         let overflow = self
             .overflow
             .process(
-                content,
-                inline_budget(
-                    self.params.context_window_tokens(),
-                    self.params.max_markdown_length(),
-                ),
+                body_text,
+                budget,
                 session_folder,
                 &output_content_type,
                 tools,
             )
             .await;
+        let content = format!("{header}{}", overflow.content);
+        let inline_fallback = overflow
+            .path_free_content
+            .map(|body| format!("{header}{body}"));
         ProcessedText {
-            content: overflow.content,
+            content,
             content_type: output_content_type,
             bytes,
             was_truncated: overflow.was_truncated,
             artifact_path: overflow.artifact_path,
-            inline_fallback: overflow.path_free_content,
+            inline_fallback,
         }
     }
 }
@@ -306,15 +481,23 @@ fn validate_url(raw: &str) -> Result<Url, WebFetchError> {
         return Err(WebFetchError::CredentialsInUrl);
     }
 
-    if let Some(host) = parsed.host_str()
-        && host.split('.').count() < 2
-        // `localhost` is a single-label name; SSRF still requires
-        // allow_local for explicit local hosts.
-        && !ssrf::is_explicit_local_host(host)
-    {
-        return Err(WebFetchError::SingleLabelHost {
-            host: host.to_string(),
-        });
+    if let Some(host) = parsed.host_str() {
+        // IP literals (v4/v6) are not DNS labels — skip the multi-label rule.
+        // SSRF still applies to the address later.
+        let is_ip = host
+            .trim_matches(|c| c == '[' || c == ']')
+            .parse::<std::net::IpAddr>()
+            .is_ok();
+        if !is_ip
+            && host.split('.').count() < 2
+            // `localhost` is a single-label name; SSRF still requires
+            // allow_local for explicit local hosts.
+            && !ssrf::is_explicit_local_host(host)
+        {
+            return Err(WebFetchError::SingleLabelHost {
+                host: host.to_string(),
+            });
+        }
     }
 
     Ok(parsed)
@@ -351,88 +534,130 @@ enum FetchResult {
         original_host: String,
         redirect_url: String,
     },
+    DomainNotAllowed(String),
 }
 
 /// Fetch a URL with manual same-host redirect handling.
 ///
-/// Re-runs SSRF checks on every hop so DNS rebinding between redirects cannot
-/// sneak a previously-blocked address past the initial check (partial TOCTOU
-/// mitigation; peer IP on the live TCP connection is not available from reqwest).
+/// Re-runs SSRF + DNS resolution on every hop and pins resolved addresses on
+/// the client (when not using an egress proxy) so rebinding between check and
+/// connect cannot open private IPs. Streams the body and aborts once
+/// `max_content_length` is exceeded.
 async fn fetch_url(
-    client: &reqwest::Client,
+    shared_http: &HttpClient,
+    params: &WebFetchParams,
     url: &Url,
     max_content_length: usize,
     allow_local: bool,
+    domain_matcher: Option<&DomainMatcher>,
 ) -> Result<FetchResult, WebFetchError> {
     let mut current_url = url.clone();
     let mut hops = 0;
+    let use_proxy = params.proxy_endpoint.is_some();
 
     // Loop to follow redirects under the same host.
     loop {
         // Re-check on every hop (including the first) so a rebinding name that
         // was public at the pre-fetch check cannot become loopback/private here.
-        ssrf::check_ssrf(&current_url, allow_local).await?;
+        if let Some(matcher) = domain_matcher
+            && let Some(WebFetchOutput::DomainNotAllowed(domain)) = matcher.check(&current_url)
+        {
+            return Ok(FetchResult::DomainNotAllowed(domain));
+        }
+
+        // Direct egress: resolve + SSRF + DNS pin. Proxy egress: skip local DNS
+        // so split-horizon / proxy-only names still work (proxy is the resolver).
+        let client = if use_proxy {
+            shared_http.get_or_rebuild()?
+        } else {
+            let addrs = ssrf::resolve_and_check_ssrf(&current_url, allow_local).await?;
+            let host = current_url.host_str().unwrap_or("");
+            Arc::new(HttpClient::build_with_dns_pin(params, host, &addrs)?)
+        };
 
         let resp = client
             .get(current_url.as_str())
-            .header(USER_AGENT, USER_AGENT_STRING)
-            .header(
-                ACCEPT,
-                "text/markdown,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            )
-            .header(ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+            .header(USER_AGENT, params.user_agent())
+            .header(ACCEPT, ACCEPT_HEADER)
+            .header(ACCEPT_LANGUAGE, params.accept_language())
+            // Browser-like document navigation headers (compatibility, not stealth).
+            .header("Upgrade-Insecure-Requests", "1")
+            .header("Sec-Fetch-Dest", "document")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", "none")
+            .header("Sec-Fetch-User", "?1")
             .send()
             .await?;
 
         let status = resp.status();
 
-        if status.is_redirection() {
+        // 304 is not a redirect; treat as a normal (empty) response path.
+        if status.is_redirection() && status.as_u16() != 304 {
             hops += 1;
             if hops > MAX_REDIRECTS {
                 return Err(WebFetchError::TooManyRedirects { max: MAX_REDIRECTS });
             }
 
-            // Follow same host; break on cross-host.
-            if let Some(location) = resp.headers().get("location") {
-                let location_str = location.to_str().unwrap_or("");
-                let mut next_url = current_url
-                    .join(location_str)
-                    .map_err(|e| WebFetchError::InvalidRedirect(format!("{e}")))?;
-                if is_same_host(&current_url, &next_url) {
-                    // Re-apply https upgrade on every hop: Location may be
-                    // absolute `http://…` and would otherwise silently
-                    // downgrade an https fetch. Local hosts still skip TLS.
-                    upgrade_to_https(&mut next_url);
-                    // check_ssrf runs at the top of the next loop iteration.
-                    current_url = next_url;
-                    continue;
-                }
-                return Ok(FetchResult::CrossHostRedirect {
-                    original_host: current_url.host_str().unwrap_or("unknown").to_string(),
-                    redirect_url: next_url.to_string(),
-                });
+            // 3xx without Location is not a usable redirect.
+            let Some(location) = resp.headers().get("location") else {
+                return Err(WebFetchError::InvalidRedirect(
+                    "redirect response missing Location header".into(),
+                ));
+            };
+            let location_str = location.to_str().unwrap_or("");
+            if location_str.is_empty() {
+                return Err(WebFetchError::InvalidRedirect(
+                    "redirect Location header is empty".into(),
+                ));
             }
+            let mut next_url = current_url
+                .join(location_str)
+                .map_err(|e| WebFetchError::InvalidRedirect(format!("{e}")))?;
+            // Re-apply URL policy on redirect targets (credentials, scheme, host form).
+            next_url = validate_url(next_url.as_str()).map_err(|e| {
+                WebFetchError::InvalidRedirect(format!("redirect target rejected: {e}"))
+            })?;
+            // Safe auto-follow: exact same host, or apex ↔ www (and trailing-dot)
+            // after full re-validation / allowlist / SSRF on the next loop.
+            if is_same_host(&current_url, &next_url)
+                || is_www_apex_equivalent(&current_url, &next_url)
+            {
+                // Re-apply https upgrade on every hop: Location may be
+                // absolute `http://…` and would otherwise silently
+                // downgrade an https fetch. Local hosts still skip TLS.
+                upgrade_to_https(&mut next_url);
+                // check_ssrf / allowlist run at the top of the next loop iteration.
+                current_url = next_url;
+                continue;
+            }
+            return Ok(FetchResult::CrossHostRedirect {
+                original_host: current_url.host_str().unwrap_or("unknown").to_string(),
+                redirect_url: next_url.to_string(),
+            });
         }
 
         let content_type = resp
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("text/html")
+            .unwrap_or("")
             .to_string();
         let final_url = resp.url().to_string();
         let status_code = status.as_u16();
 
-        let body = resp.bytes().await?;
-
-        if body.len() > max_content_length {
+        // Early reject when Content-Length already exceeds the budget.
+        if let Some(len) = resp.content_length()
+            && len as usize > max_content_length
+        {
             return Err(WebFetchError::ResponseTooLarge {
                 max: max_content_length,
             });
         }
 
+        let body = read_body_bounded(resp, max_content_length).await?;
+
         return Ok(FetchResult::Content {
-            body: body.to_vec(),
+            body,
             content_type,
             final_url,
             status_code,
@@ -440,11 +665,66 @@ async fn fetch_url(
     }
 }
 
-/// Exact host equality — no `www.` stripping. Distinct DNS labels (even when
-/// one is a `www` subdomain of the other) have independent A records and must
-/// surface as cross-host redirects rather than auto-follow.
+/// Stream response body, aborting once `max_content_length` is exceeded.
+async fn read_body_bounded(
+    resp: reqwest::Response,
+    max_content_length: usize,
+) -> Result<Vec<u8>, WebFetchError> {
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(WebFetchError::ResponseTooLarge {
+                max: max_content_length,
+            })?;
+        if next_len > max_content_length {
+            return Err(WebFetchError::ResponseTooLarge {
+                max: max_content_length,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Exact host equality (raw host_str, including brackets for IPv6).
 fn is_same_host(a: &Url, b: &Url) -> bool {
     a.host_str() == b.host_str()
+}
+
+/// True when hosts differ only by a single `www.` label and/or a trailing dot.
+/// Used to auto-follow the common apex ↔ www CDN canonicalization without
+/// following arbitrary cross-host redirects.
+fn is_www_apex_equivalent(a: &Url, b: &Url) -> bool {
+    let Some(ha) = a.host_str() else {
+        return false;
+    };
+    let Some(hb) = b.host_str() else {
+        return false;
+    };
+    // Never equate IP literals via www logic.
+    if ha.parse::<std::net::IpAddr>().is_ok()
+        || hb.parse::<std::net::IpAddr>().is_ok()
+        || ha.trim_matches(|c| c == '[' || c == ']')
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+        || hb.trim_matches(|c| c == '[' || c == ']')
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+    {
+        return false;
+    }
+    let na = normalize_host_for_www(ha);
+    let nb = normalize_host_for_www(hb);
+    na == nb && !na.is_empty()
+}
+
+fn normalize_host_for_www(host: &str) -> String {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    h.strip_prefix("www.").unwrap_or(&h).to_string()
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -464,8 +744,187 @@ fn is_html(content_type: &str) -> bool {
     content_type.contains("text/html") || content_type.contains("application/xhtml")
 }
 
+fn is_javascript(content_type: &str) -> bool {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        mime.as_str(),
+        "application/javascript"
+            | "application/ecmascript"
+            | "application/x-javascript"
+            | "text/javascript"
+            | "text/ecmascript"
+    )
+}
+
+/// When Content-Type is missing or generic, sniff body for PDF/HTML/binary.
+fn refine_content_type(content_type: &str, body: &[u8]) -> String {
+    let trimmed = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    if !trimmed.is_empty()
+        && trimmed != "application/octet-stream"
+        && trimmed != "binary/octet-stream"
+    {
+        return content_type.to_string();
+    }
+    if body.starts_with(b"%PDF") {
+        return "application/pdf".into();
+    }
+    let sample = &body[..body.len().min(512)];
+    let textish = sample
+        .iter()
+        .filter(|b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+        .count();
+    if !sample.is_empty() && textish * 100 / sample.len() < 85 {
+        return "application/octet-stream".into();
+    }
+    let head = String::from_utf8_lossy(sample).to_ascii_lowercase();
+    if head.contains("<html") || head.contains("<!doctype html") || head.contains("<head") {
+        return "text/html; charset=utf-8".into();
+    }
+    if trimmed.is_empty() {
+        "text/plain; charset=utf-8".into()
+    } else {
+        content_type.to_string()
+    }
+}
+
+fn apply_text_window(text: &str, start_offset: usize, max_chars: Option<usize>) -> String {
+    let total = text.chars().count();
+    let start = start_offset.min(total);
+    let sliced: String = text.chars().skip(start).collect();
+    let Some(max) = max_chars.filter(|m| *m > 0) else {
+        return if start == 0 {
+            sliced
+        } else {
+            format!(
+                "{sliced}\n\n[web_fetch window: offset={start} of {total} chars]"
+            )
+        };
+    };
+    let taken: String = sliced.chars().take(max).collect();
+    let remaining = sliced.chars().count().saturating_sub(max);
+    if remaining == 0 && start == 0 {
+        taken
+    } else {
+        format!(
+            "{taken}\n\n[web_fetch window: showing {shown} chars from offset {start} \
+             ({remaining} chars after window; total {total})]",
+            shown = taken.chars().count(),
+        )
+    }
+}
+
+fn is_svg_xml(content_type: &str) -> bool {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    mime == "image/svg+xml" || mime == "application/svg+xml"
+}
+
+/// Decode body using Content-Type charset, then HTML meta charset, else UTF-8.
+fn decode_body(body: &[u8], content_type: &str) -> String {
+    if let Some(charset) = parse_charset(content_type)
+        && let Some(enc) = encoding_rs::Encoding::for_label(charset.as_bytes())
+    {
+        let (cow, _, _) = enc.decode(body);
+        return cow.into_owned();
+    }
+    // UTF-8 BOM
+    if body.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&body[3..]).into_owned();
+    }
+    // HTML <meta charset="…"> / http-equiv content-type when header lacked charset.
+    if is_html(content_type) || content_type.is_empty() {
+        if let Some(charset) = sniff_html_meta_charset(body)
+            && let Some(enc) = encoding_rs::Encoding::for_label(charset.as_bytes())
+        {
+            let (cow, _, _) = enc.decode(body);
+            return cow.into_owned();
+        }
+    }
+    String::from_utf8_lossy(body).into_owned()
+}
+
+/// Cheap scan of the first ~4 KiB for HTML meta charset declarations.
+fn sniff_html_meta_charset(body: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(&body[..body.len().min(4096)]).to_ascii_lowercase();
+    // <meta charset="utf-8">
+    if let Some(i) = head.find("charset=") {
+        let rest = &head[i + "charset=".len()..];
+        let rest = rest.trim_start_matches(['"', '\'', ' ']);
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+            .unwrap_or(rest.len());
+        let label = rest[..end].trim();
+        if !label.is_empty() {
+            return Some(label.to_string());
+        }
+    }
+    None
+}
+
+fn parse_charset(content_type: &str) -> Option<String> {
+    for part in content_type.split(';').skip(1) {
+        let part = part.trim();
+        let Some(eq) = part.find('=') else {
+            continue;
+        };
+        let key = part[..eq].trim();
+        if !key.eq_ignore_ascii_case("charset") {
+            continue;
+        }
+        let val = part[eq + 1..]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+fn error_body_preview(body: &[u8], content_type: &str) -> String {
+    let text = decode_body(body, content_type);
+    let text = if is_html(content_type) {
+        // Prefer a little cleaned text over raw tags in error messages.
+        let (prepared, _, _) = extract::prepare_html(&text, ExtractMode::Full);
+        self_converter()
+            .convert(&prepared)
+            .unwrap_or(text)
+    } else {
+        text
+    };
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= ERROR_BODY_PREVIEW_CHARS {
+        collapsed
+    } else {
+        let truncated: String = collapsed.chars().take(ERROR_BODY_PREVIEW_CHARS).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn self_converter() -> htmd::HtmlToMarkdown {
+    htmd::HtmlToMarkdown::builder()
+        .skip_tags(vec![
+            "script", "style", "noscript", "svg", "iframe", "object", "embed",
+        ])
+        .build()
+}
+
 fn is_pdf(content_type: &str) -> bool {
-    content_type.contains("application/pdf")
+    content_type.to_ascii_lowercase().contains("application/pdf")
 }
 
 /// Returns `true` for image content types, excluding SVG (which can contain
@@ -562,7 +1021,7 @@ fn is_binary_content_type(content_type: &str) -> bool {
             | "application/soap+xml"
             | "application/xslt+xml"
             | "application/mathml+xml"
-            | "application/svg+xml"
+            // SVG handled on a dedicated path (can embed scripts).
             | "application/x-www-form-urlencoded"
             | "application/graphql"
             | "application/ld+json"
@@ -702,63 +1161,18 @@ async fn save_video(
     }))
 }
 
+#[cfg(test)]
 fn html_to_markdown(converter: &htmd::HtmlToMarkdown, html: &str) -> String {
-    let cleaned = clean_html(html);
+    let cleaned = extract::clean_chrome(html);
     converter
         .convert(&cleaned)
         .unwrap_or_else(|_| html.to_string())
 }
 
 /// Remove common noisy elements from HTML before markdown conversion.
+#[cfg(test)]
 fn clean_html(html: &str) -> String {
-    let mut document = Html::parse_document(html);
-
-    // Never detach the root element itself - the broad selectors below can match
-    // attributes on <html> (e.g. class="...advert..."), which would leave the
-    // tree with no root element. Looked up fallibly so we never assume one exists.
-    let root_id = document
-        .tree
-        .root()
-        .children()
-        .find(|child| child.value().is_element())
-        .map(|node| node.id());
-
-    let selectors: Vec<Selector> = [
-        "nav",
-        "header",
-        "footer",
-        "[class*='cookie']",
-        "[class*='sidebar']",
-        "[class*='ad-']",
-        "[class*='advert']",
-        "[id*='cookie']",
-        "[id*='sidebar']",
-        "[id*='ad-']",
-        "[id*='advert']",
-    ]
-    .iter()
-    .filter_map(|s| Selector::parse(s).ok())
-    .collect();
-
-    selectors.iter().for_each(|selector| {
-        document
-            .select(selector)
-            .map(|e| e.id())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .for_each(|id| {
-                if Some(id) == root_id {
-                    return;
-                }
-                if let Some(mut node) = document.tree.get_mut(id) {
-                    node.detach();
-                }
-            });
-    });
-
-    // Serialize the whole document rather than `root_element()`, which panics if
-    // the tree somehow has no root element.
-    document.html()
+    extract::clean_chrome(html)
 }
 
 /// Strip base64 data URIs from content to prevent token bloat.
@@ -880,6 +1294,12 @@ mod tests {
                     read: Some("ReadAsset"),
                     execute: Some("ExecuteAsset"),
                 },
+                ExtractMode::Full,
+                "https://example.com/long",
+                200,
+                0,
+                None,
+                false,
             )
             .await;
 
@@ -888,13 +1308,111 @@ mod tests {
         assert_eq!(processed.bytes, expected.len());
         assert!(!processed.content.contains(tail));
         assert!(expected.contains(tail));
-        let artifact = tmp.path().join("web_fetch/1.md");
+        assert!(processed.content.contains("Status: 200"));
+        let artifact = tmp.path().join("web_fetch").join("1.md");
         assert!(
-            processed
-                .content
-                .contains(artifact.to_string_lossy().as_ref())
+            processed.content.contains("Full content saved")
+                && (processed.content.contains("1.md") || processed.content.contains("web_fetch")),
+            "expected path recovery hint in: {}",
+            processed.content
         );
+        // Artifact is pure body (no status header) for exact recovery.
         assert_eq!(tokio::fs::read_to_string(artifact).await.unwrap(), expected);
+    }
+
+    #[test]
+    fn domain_allowlist_blocks_before_network() {
+        let client = WebFetchClient::new(&WebFetchParams {
+            allowed_domains: Some(vec!["docs.rs".into()]),
+            ..WebFetchParams::default()
+        })
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt
+            .block_on(client.fetch(
+                "https://evil.example.com/steal",
+                None,
+                None,
+                None,
+                FetchOptions::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            out,
+            WebFetchOutput::DomainNotAllowed(ref d) if d == "evil.example.com"
+        ));
+    }
+
+    #[test]
+    fn headless_mode_refuses_without_network() {
+        let client = WebFetchClient::new(&WebFetchParams::default()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt
+            .block_on(client.fetch(
+                "https://example.com/",
+                None,
+                None,
+                None,
+                FetchOptions {
+                    extract_mode: Some("headless"),
+                    ..FetchOptions::default()
+                },
+            ))
+            .unwrap();
+        assert!(matches!(out, WebFetchOutput::Error { .. }));
+    }
+
+    #[test]
+    fn apply_text_window_respects_offset_and_max() {
+        let s = apply_text_window("abcdefghij", 2, Some(3));
+        assert!(s.starts_with("cde"));
+        assert!(s.contains("offset 2") || s.contains("offset=2"));
+    }
+
+    #[test]
+    fn refine_content_type_sniffs_pdf_and_html() {
+        assert_eq!(refine_content_type("", b"%PDF-1.4"), "application/pdf");
+        assert!(refine_content_type("", b"<!DOCTYPE html><html>").contains("html"));
+    }
+
+    #[test]
+    fn sniff_meta_charset() {
+        let html = br#"<html><head><meta charset="iso-8859-1"></head><body>x</body></html>"#;
+        assert_eq!(
+            sniff_html_meta_charset(html).as_deref(),
+            Some("iso-8859-1")
+        );
+    }
+
+    #[test]
+    fn open_public_has_no_matcher() {
+        let client = WebFetchClient::new(&WebFetchParams::default()).unwrap();
+        assert!(client.domain_matcher.is_none());
+    }
+
+    #[test]
+    fn parse_charset_from_content_type() {
+        assert_eq!(
+            parse_charset("text/html; charset=utf-8"),
+            Some("utf-8".into())
+        );
+        assert_eq!(
+            parse_charset("text/html; CHARSET=\"ISO-8859-1\""),
+            Some("ISO-8859-1".into())
+        );
+        assert_eq!(parse_charset("text/html"), None);
+    }
+
+    #[test]
+    fn decode_body_utf8() {
+        let s = decode_body(b"hello", "text/plain; charset=utf-8");
+        assert_eq!(s, "hello");
     }
 
     // ── URL validation ──────────────────────────────────────────────────
@@ -913,6 +1431,12 @@ mod tests {
         assert!(validate_url("http://localhost:8080/foo").is_ok());
         assert!(validate_url("http://intranet/foo").is_err());
         assert!(validate_url("http://metadata/computeMetadata").is_err());
+    }
+
+    #[test]
+    fn validate_url_accepts_ipv6_literals() {
+        assert!(validate_url("https://[2001:db8::1]/").is_ok());
+        assert!(validate_url("http://[::1]/").is_ok());
     }
 
     #[test]
@@ -984,6 +1508,20 @@ mod tests {
         let c = Url::parse("https://www.example.com/a").unwrap();
         assert!(!is_same_host(&a, &c));
         assert!(!is_same_host(&c, &a));
+    }
+
+    #[test]
+    fn www_apex_equivalent_for_safe_follow() {
+        let a = Url::parse("https://example.com/a").unwrap();
+        let c = Url::parse("https://www.example.com/a").unwrap();
+        assert!(is_www_apex_equivalent(&a, &c));
+        assert!(is_www_apex_equivalent(&c, &a));
+        let d = Url::parse("https://example.com./a").unwrap();
+        assert!(is_www_apex_equivalent(&a, &d));
+        let other = Url::parse("https://other.com/a").unwrap();
+        assert!(!is_www_apex_equivalent(&a, &other));
+        let sub = Url::parse("https://api.example.com/a").unwrap();
+        assert!(!is_www_apex_equivalent(&a, &sub));
     }
 
     #[test]
@@ -1071,7 +1609,9 @@ mod tests {
         assert!(!is_binary_content_type("application/xml"));
         assert!(!is_binary_content_type("application/javascript"));
         assert!(!is_binary_content_type("application/xhtml+xml"));
-        assert!(!is_binary_content_type("application/svg+xml"));
+        // SVG is rejected by is_binary but admitted via is_svg_xml on the fetch path.
+        assert!(is_binary_content_type("application/svg+xml"));
+        assert!(is_svg_xml("image/svg+xml"));
         assert!(!is_binary_content_type("application/ld+json"));
         assert!(!is_binary_content_type("application/yaml"));
         assert!(!is_binary_content_type("application/graphql"));

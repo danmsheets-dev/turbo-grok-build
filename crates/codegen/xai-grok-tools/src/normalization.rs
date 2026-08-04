@@ -135,6 +135,8 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::DiscardSubagent(_)
         | ToolInput::DeveloperLog(_)
         | ToolInput::FeatureRequestLog(_)
+        | ToolInput::WorkspaceTree(_)
+        | ToolInput::ResolvePath(_)
         | ToolInput::SpawnMany(_)
         | ToolInput::Dynamic(_) => return None,
     })

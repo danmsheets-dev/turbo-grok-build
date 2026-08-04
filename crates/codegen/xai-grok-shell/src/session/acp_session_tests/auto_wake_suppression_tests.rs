@@ -1545,6 +1545,9 @@ async fn between_turn_drain_suppresses_reserved_subagents() {
                             tool_calls: 3,
                             turns: 1,
                             output: std::sync::Arc::from("done"),
+                            isolation: None,
+                            worktree_path: None,
+                            worktree_state: None,
                         };
                         let mut completions = vec![mk("sa-autowake"), mk("sa-fresh")];
                         completions.retain(|c| !req.suppress_ids.contains(&c.subagent_id));

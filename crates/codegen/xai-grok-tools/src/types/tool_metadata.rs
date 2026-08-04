@@ -149,6 +149,15 @@ pub async fn resolve_cwd(
         })
 }
 
+/// Fail closed when the session CWD path is missing or not a directory.
+///
+/// RC13 Wave A (shell on dead worktree): tombstoned isolation trees must not
+/// spawn shell with a cascaded OS error — agents need an explicit
+/// `cwd_missing` / `worktree_tombstone` signal.
+pub fn ensure_cwd_directory(cwd: &std::path::Path) -> Result<(), xai_tool_runtime::ToolError> {
+    crate::types::resources::enforce_write_roots(Some(cwd), None).map_err(|e| e.into_tool_error())
+}
+
 /// Build a `ToolCallContext` with `SharedResources` installed and a fresh
 /// v7 call id.
 ///
