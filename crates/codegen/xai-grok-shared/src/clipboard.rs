@@ -1008,6 +1008,7 @@ mod platform {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             xai_grok_tools::util::detach_std_command(&mut cmd);
+            #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
             let mut child = cmd
                 .spawn()
                 .map_err(|e| anyhow::anyhow!("failed to spawn pbcopy: {e}"))?;
@@ -1683,6 +1684,7 @@ mod platform {
             .stderr(Stdio::null());
         xai_grok_tools::util::detach_std_command(&mut cmd);
         // Availability = the tool ran and exited in time (any exit status).
+        #[allow(clippy::disallowed_methods)] // availability probe, waited on with a timeout
         let Ok(mut child) = cmd.spawn() else {
             return false;
         };
@@ -1803,6 +1805,7 @@ mod platform {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         xai_grok_tools::util::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("failed to spawn {bin}: {e}"))?;
@@ -1827,6 +1830,7 @@ mod platform {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         xai_grok_tools::util::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("failed to run {bin}: {e}"))?;
@@ -2819,6 +2823,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[cfg(unix)]
+    #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
     fn spawn_sleep(seconds: &str) -> std::process::Child {
         let mut cmd = std::process::Command::new("sleep");
         cmd.arg(seconds)

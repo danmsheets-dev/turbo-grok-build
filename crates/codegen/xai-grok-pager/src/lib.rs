@@ -51,6 +51,7 @@ pub mod obf;
 pub mod plugin_cmd;
 pub mod project_picker;
 pub mod pty_wrap;
+pub mod recent_dirs;
 pub mod readiness;
 pub mod scrollback;
 pub mod search;

@@ -3,7 +3,14 @@
 pub mod detection {
     pub use xai_file_utils::workspace_classifier::is_project_dir;
 }
-pub mod sources;
+
+// Recent-directory collection and path display moved to `crate::recent_dirs`
+// in the 0.2.119 sync, where the dashboard shares them. The former
+// `project_picker::sources` was a byte-for-byte duplicate apart from routing
+// `is_project_dir` through `detection` (itself a re-export of the same
+// `xai_file_utils::workspace_classifier` function), so it is dropped rather
+// than kept alongside.
+pub use crate::recent_dirs::{collect_recent_dirs, display_path};
 
 use std::path::{Path, PathBuf};
 
@@ -38,7 +45,7 @@ pub fn build_project_question(
     };
     options.push(QuestionOption {
         label: format!("{cwd_name} (current)"),
-        description: sources::display_path(cwd),
+        description: display_path(cwd),
         preview: None,
         id: None,
     });
@@ -56,7 +63,7 @@ pub fn build_project_question(
             label: name,
             description: format!(
                 "{}  ({})",
-                sources::display_path(path),
+                display_path(path),
                 crate::views::session_title::format_relative_time(
                     (chrono::Utc::now() - *ts).to_std().unwrap_or_default()
                 ),

@@ -280,7 +280,8 @@ pub fn build_request(
                 });
                 entry.parts.push(function_response);
             }
-            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
+            ConversationItem::Reasoning(_)
+            | ConversationItem::BackendToolCall(_) => {}
         }
     }
     flush_pending(&mut pending_function_responses, &mut contents);
@@ -336,10 +337,10 @@ pub fn build_request(
 }
 
 fn flush_pending(pending: &mut Option<GoogleContent>, contents: &mut Vec<GoogleContent>) {
-    if let Some(content) = pending.take() {
-        if !content.parts.is_empty() {
-            contents.push(content);
-        }
+    if let Some(content) = pending.take()
+        && !content.parts.is_empty()
+    {
+        contents.push(content);
     }
 }
 
@@ -576,6 +577,7 @@ pub fn stream_google_generate_content<'a>(
                     total_tokens: u.total_token_count.unwrap_or(0),
                     reasoning_tokens: u.thoughts_token_count.unwrap_or(0),
                     cached_prompt_tokens: u.cached_content_token_count.unwrap_or(0),
+            cache_creation_prompt_tokens: 0,
                 });
             }
             if let Some(c) = chunk.candidates.and_then(|mut v| v.drain(..).next()) {
@@ -627,7 +629,7 @@ pub fn stream_google_generate_content<'a>(
             model_fingerprint: None,
             reasoning_effort: None,
         }));
-        yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: finish, usage, cost_usd_ticks: None, message_chunks_emitted: msg_chunks, doom_loop_signals: Vec::new(), stop_message: None }), metrics: InferenceLatencyStats::from_timestamps(start, &chunk_timestamps, Instant::now()) };
+        yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: finish, usage, cost_usd_ticks: None, message_chunks_emitted: msg_chunks, doom_loop_signals: Vec::new(), stop_message: None, message_id: None, raw_stop_reason: None, stop_sequence: None }), metrics: InferenceLatencyStats::from_timestamps(start, &chunk_timestamps, Instant::now()) };
     }
 }
 
@@ -680,15 +682,20 @@ impl VertexAdcTokenProvider {
                 let provider = gcloud_auth::token::DefaultTokenSourceProvider::new(config)
                     .await
                     .map_err(|e| {
-                        SamplingError::Auth(format!("failed to initialize Google ADC: {e}"))
+                        SamplingError::auth_unknown(format!("failed to initialize Google ADC: {e}"))
                     })?;
                 Ok::<Arc<dyn token_source::TokenSource>, SamplingError>(provider.token_source())
             })
             .await?;
-        source
-            .token()
-            .await
-            .map_err(|e| SamplingError::Auth(format!("failed to mint Google ADC token: {e}")))
+        source.token().await.map_err(|e| {
+            SamplingError::auth_unknown(format!("failed to mint Google ADC token: {e}"))
+        })
+    }
+}
+
+impl Default for VertexAdcTokenProvider {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -703,10 +710,10 @@ pub fn apply_google_auth_headers(
         if let Ok(v) = HeaderValue::from_str(key) {
             headers.insert(HeaderName::from_static("x-goog-api-key"), v);
         }
-    } else if let Some(bearer) = bearer {
-        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {bearer}")) {
-            headers.insert(AUTHORIZATION, v);
-        }
+    } else if let Some(bearer) = bearer
+        && let Ok(v) = HeaderValue::from_str(&format!("Bearer {bearer}"))
+    {
+        headers.insert(AUTHORIZATION, v);
     }
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));

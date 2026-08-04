@@ -239,7 +239,8 @@ pub fn build_request(req: &ConversationRequest, model: &str) -> Result<PiMessage
                 added_tool_names: Vec::new(),
                 timestamp: 0,
             }),
-            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
+            ConversationItem::Reasoning(_)
+            | ConversationItem::BackendToolCall(_) => {}
         }
     }
     context.tools = req
@@ -616,6 +617,7 @@ fn usage(u: Option<&PiUsage>) -> Option<TokenUsage> {
             total_tokens,
             reasoning_tokens: u.reasoning.unwrap_or(0),
             cached_prompt_tokens: u.cache_read,
+            cache_creation_prompt_tokens: 0,
         }
     })
 }
@@ -645,10 +647,12 @@ fn fail(
             message: message.into(),
             is_retryable: false,
             retry_after_secs: None,
+            should_retry: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         },
     }
 }
@@ -834,7 +838,7 @@ pub fn stream_pi_messages<'a>(
                     items.push(ConversationItem::Assistant(assistant));
                     let cost_usd_ticks = cost_usd_ticks(u.as_ref());
                     let token_usage = usage(u.as_ref());
-                    yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: Some(stop), usage: token_usage, cost_usd_ticks, message_chunks_emitted: text_chunks, doom_loop_signals: Vec::new(), stop_message: None }), metrics: InferenceLatencyStats::from_timestamps(start, &timestamps, Instant::now()) };
+                    yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: Some(stop), usage: token_usage, cost_usd_ticks, message_chunks_emitted: text_chunks, doom_loop_signals: Vec::new(), stop_message: None, message_id: None, raw_stop_reason: None, stop_sequence: None }), metrics: InferenceLatencyStats::from_timestamps(start, &timestamps, Instant::now()) };
                     break;
                 }
                 PiMessagesEvent::Error { reason, error_message, rewrite, .. } => {

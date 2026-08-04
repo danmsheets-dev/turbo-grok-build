@@ -3,6 +3,8 @@
 //! [`acp::Agent`] trait implementation for [`MvpAgent`].
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
+use crate::auth::SilentRefresh;
+use crate::leader::protocol::InternalMethod;
 /// Which `x_search` sub-tools enforce the date cutoff, sent in `initialize`. `x_user_search` and
 /// `x_thread_fetch` are `false`: they don't honor it yet.
 #[derive(serde::Serialize)]
@@ -318,37 +320,10 @@ impl acp::Agent for MvpAgent {
         );
         let mut has_cached_token = init_has_current;
         if !init_has_current && init_is_expired {
-            let refreshed = matches!(
-                tokio::time::timeout(
-                    crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                    self.auth_manager.auth(),
-                )
-                .await,
-                Ok(Ok(_))
-            );
-            if refreshed {
-                tracing::debug!(
-                    auth_type = ?self.auth_type(),
-                    "auth: initialize() silent refresh succeeded",
-                );
-                xai_grok_telemetry::unified_log::info(
-                    "auth: initialize() silent refresh succeeded",
-                    None,
-                    Some(
-                        serde_json::json!({ "auth_type": format!("{:?}", self.auth_type()) }),
-                    ),
-                );
-                has_cached_token = true;
-            } else {
-                tracing::warn!(
-                    "auth: token expired, silent refresh failed - re-authentication required"
-                );
-                xai_grok_telemetry::unified_log::warn(
-                    "auth: token expired, silent refresh failed - re-authentication required",
-                    None,
-                    None,
-                );
-            }
+            has_cached_token = match self.auth_manager.silent_refresh().await {
+                SilentRefresh::Renewed(_) => true,
+                SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
+            };
         }
         let (
             login_label,
@@ -482,6 +457,11 @@ impl acp::Agent for MvpAgent {
         } else {
             self.model_state(None)
         };
+        let session_capabilities = if crate::agent::chat_modes::process_chat_mode_enabled() {
+            acp::SessionCapabilities::new()
+        } else {
+            acp::SessionCapabilities::new().list(acp::SessionListCapabilities::new())
+        };
         Ok(
             acp::InitializeResponse::new(acp::ProtocolVersion::V1)
                 .agent_capabilities(
@@ -509,7 +489,8 @@ impl acp::Agent for MvpAgent {
                         )
                         .mcp_capabilities(
                             acp::McpCapabilities::new().http(true).sse(true),
-                        ),
+                        )
+                        .session_capabilities(session_capabilities),
                 )
                 .auth_methods(auth_methods)
                 .meta({
@@ -724,7 +705,20 @@ impl acp::Agent for MvpAgent {
                         }
                     }
                 }
-                let Some(auth) = self.auth_manager.current() else {
+                let resolved = match self.auth_manager.current() {
+                    Some(auth) => Some(auth),
+                    None if !self.auth_manager.is_expired() => None,
+                    None => {
+                        match self.auth_manager.silent_refresh().await {
+                            SilentRefresh::Renewed(auth) => Some(*auth),
+                            SilentRefresh::Failed(remedy) if remedy.is_self_healing() => {
+                                self.auth_manager.current_or_expired()
+                            }
+                            SilentRefresh::Failed(_) => None,
+                        }
+                    }
+                };
+                let Some(auth) = resolved else {
                     let message = if self.auth_manager.is_expired() {
                         "Session expired, re-authentication required"
                     } else {
@@ -1250,6 +1244,7 @@ impl acp::Agent for MvpAgent {
         &self,
         arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
+        reject_chat_kind_without_feature(arguments.meta.as_ref())?;
         tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
         let init = self
             .initialize_request
@@ -1264,8 +1259,7 @@ impl acp::Agent for MvpAgent {
             .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
-        let initial_client_mcp_servers = arguments.mcp_servers.clone();
-        let (mcp_servers, managed_mcp_expires_at) = self
+        let (initial_client_mcp_servers, mcp_servers, managed_mcp_expires_at) = self
             .resolve_mcp_servers(arguments.mcp_servers, cwd.as_path())
             .await;
         let mcp_meta_config_map = parse_mcp_meta_config(arguments.meta.as_ref());
@@ -1279,10 +1273,29 @@ impl acp::Agent for MvpAgent {
             .as_ref()
             .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
+        #[cfg(all(feature = "local-workspace", unix))]
+        let pending_local_workspace = self
+            .start_own_local_workspace_if_needed(
+                &mut session_meta_for_stamp,
+                cwd.as_path(),
+            )
+            .await?;
+        #[cfg(all(feature = "local-workspace", not(unix)))]
+        {
+            use crate::gateway_bridge::local_workspace_supervisor::parse_local_workspace_intent;
+            use crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceIntent;
+            use crate::gateway_bridge::local_workspace_supervisor::SupervisorError;
+            if matches!(
+                parse_local_workspace_intent(session_meta_for_stamp.as_ref()),
+                Some(LocalWorkspaceIntent::Own { .. })
+            ) {
+                return Err(SupervisorError::UnsupportedPlatform.into_acp_error());
+            }
+        }
         #[allow(unused_variables)]
-        let session_computer_sessions = parse_session_computer_sessions(
+        let session_computer_sessions = resolve_session_computer_sessions(
             arguments.meta.as_ref(),
-        );
+        )?;
         let is_chat_kind = is_chat_session_kind(arguments.meta.as_ref());
         let session_yolo_mode = arguments
             .meta
@@ -1311,6 +1324,15 @@ impl acp::Agent for MvpAgent {
             }
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
+        #[cfg(all(feature = "local-workspace", unix))]
+        let mut local_ws_reap_guard = self
+            .new_local_workspace_reap_guard(session_id.clone(), false);
+        #[cfg(all(feature = "local-workspace", unix))]
+        if let Some(handle) = pending_local_workspace {
+            self.register_local_workspace_supervisor(session_id.clone(), handle);
+            local_ws_reap_guard = self
+                .new_local_workspace_reap_guard(session_id.clone(), true);
+        }
         let mut session_timer = crate::instrumentation_timer!("session.new_session");
         session_timer.with_field("session_id", session_id.0.as_ref());
         session_timer.with_field("cwd", cwd.as_str());
@@ -1527,12 +1549,21 @@ impl acp::Agent for MvpAgent {
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd: None,
+                        is_chat_kind: false,
                     }
             };
             self.spawn_and_register_session(init, spawn_opts).await
         };
+        #[cfg(all(feature = "local-workspace", unix))]
+        if spawn_res.is_err() {
+            self.shutdown_gateway_bridge(&session_id);
+        }
         spawn_res?;
         tracing::debug!(session_id = %session_id.0, "new_session: spawn_session_actor");
+        #[cfg(feature = "local-workspace")]
+        if local_workspace_intent_present(arguments.meta.as_ref()) {
+            self.mark_local_workspace_bound(session_id.clone());
+        }
         self.maybe_spawn_interactive_trust_prompt(
             &session_id,
             cwd.as_path(),
@@ -1667,6 +1698,7 @@ impl acp::Agent for MvpAgent {
             );
             insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
         }
+        #[cfg(all(feature = "local-workspace", unix))] local_ws_reap_guard.disarm();
         Ok(
             acp::NewSessionResponse::new(session_id)
                 .models(Some(models))
@@ -1678,6 +1710,7 @@ impl acp::Agent for MvpAgent {
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let _load_guard = self.begin_session_load(&arguments.session_id);
+        reject_chat_kind_without_feature(arguments.meta.as_ref())?;
         self.sweep_dead_sessions();
         self.drain_old_session_thread(&arguments.session_id).await;
         tracing::debug!("Received load session request {arguments:?}");
@@ -1710,8 +1743,7 @@ impl acp::Agent for MvpAgent {
             .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
-        let initial_client_mcp_servers = client_mcp_servers.clone();
-        let (mcp_servers, managed_mcp_expires_at) = self
+        let (initial_client_mcp_servers, mcp_servers, managed_mcp_expires_at) = self
             .resolve_mcp_servers(client_mcp_servers, cwd.as_path())
             .await;
         let mcp_meta_config_map = parse_mcp_meta_config(request_meta.as_ref());
@@ -1884,9 +1916,9 @@ impl acp::Agent for MvpAgent {
             session_yolo_mode,
         );
         #[allow(unused_variables)]
-        let session_computer_sessions = parse_session_computer_sessions(
+        let session_computer_sessions = resolve_session_computer_sessions(
             request_meta.as_ref(),
-        );
+        )?;
         let restore_code_requested = request_meta
             .as_ref()
             .and_then(|m| m.get("x.ai/restore_code"))
@@ -2089,11 +2121,12 @@ impl acp::Agent for MvpAgent {
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd,
+                        is_chat_kind: false,
                     },
                 )
                 .await?;
             drop(spawn_timer);
-        } else if !mcp_servers.is_empty() {
+        } else {
             tracing::info!(
                 session_id = %session_id.0,
                 mcp_server_count = mcp_servers.len(),
@@ -2109,11 +2142,6 @@ impl acp::Agent for MvpAgent {
                         respond_to: tx,
                     });
             }
-        } else {
-            tracing::info!(
-                session_id = %session_id.0,
-                "load_session: reconnecting to existing session (feedback manager already initialized)"
-            );
         }
         {
             let init_meta = self
@@ -2203,7 +2231,7 @@ impl acp::Agent for MvpAgent {
         let persisted_model = summary.current_model_id.clone();
         let models = self.models_manager.models();
         let available = self.models_manager.available();
-        self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
+        self.session_registry.take_unavailable_model(&session_id);
         let resolved_catalog_key = resolve_catalog_key(&models, &persisted_model);
         tracing::debug!(
             session_id = %session_id.0,
@@ -2327,9 +2355,8 @@ impl acp::Agent for MvpAgent {
                     &reason,
                 )
                 .await;
-            self.model_unavailable_sessions
-                .borrow_mut()
-                .insert(session_id.0.to_string(), persisted_model.clone());
+            self.session_registry
+                .set_unavailable_model(&session_id, persisted_model.clone());
             fallback
         };
         tracing::debug!(
@@ -2484,6 +2511,12 @@ impl acp::Agent for MvpAgent {
         }
         Ok(response)
     }
+    async fn list_sessions(
+        &self,
+        args: acp::ListSessionsRequest,
+    ) -> Result<acp::ListSessionsResponse, acp::Error> {
+        crate::agent::handlers::session::handle_list_sessions(self, args).await
+    }
     #[tracing::instrument(
         name = "agent.prompt",
         skip_all,
@@ -2526,10 +2559,8 @@ impl acp::Agent for MvpAgent {
             return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
         }
         let latched_model = self
-            .model_unavailable_sessions
-            .borrow()
-            .get(arguments.session_id.0.as_ref())
-            .cloned();
+            .session_registry
+            .unavailable_model(&arguments.session_id);
         if let Some(unavailable_model) = latched_model {
             let models = self.models_manager.models();
             let available = self.models_manager.available();
@@ -2554,9 +2585,7 @@ impl acp::Agent for MvpAgent {
                     }),
                     ),
                 );
-                self.model_unavailable_sessions
-                    .borrow_mut()
-                    .remove(arguments.session_id.0.as_ref());
+                self.session_registry.take_unavailable_model(&arguments.session_id);
                 if let Err(e) = crate::agent::handlers::model_switch::apply(
                         self,
                         acp::SetSessionModelRequest::new(
@@ -3700,9 +3729,8 @@ impl acp::Agent for MvpAgent {
         let res = crate::agent::handlers::model_switch::apply(self, args).await;
         if res.is_ok()
             && let Some(unavailable) = self
-                .model_unavailable_sessions
-                .borrow_mut()
-                .remove(session_id.0.as_ref())
+                .session_registry
+                .take_unavailable_model(&session_id)
         {
             tracing::info!(
                 session_id = %session_id.0,
@@ -3762,6 +3790,10 @@ impl acp::Agent for MvpAgent {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::worktree::handle(self, &ops, &args).await
             }
+            #[cfg(feature = "local-workspace")]
+            "x.ai/session/add_local_workspace" => {
+                crate::extensions::session_admin::handle(self, &args).await
+            }
             "x.ai/session/rename" | "x.ai/session/delete"
             | "x.ai/session/update_mcp_servers" | "x.ai/session/fork"
             | "x.ai/internal/reload_all_mcp_servers"
@@ -3771,6 +3803,9 @@ impl acp::Agent for MvpAgent {
             | "x.ai/internal/set_platform_api_key"
             | "x.ai/internal/auth_cleared" | "x.ai/plugins/reload"
             | "x.ai/commands/list" => {
+                crate::extensions::session_admin::handle(self, &args).await
+            }
+            m if InternalMethod::from_name(m).is_some() => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             "x.ai/session/repair" => crate::extensions::repair::handle(self, &args).await,
@@ -4191,7 +4226,7 @@ impl acp::Agent for MvpAgent {
                 "Permission state reset for matching sessions"
             );
         }
-        if args.method.as_ref() == "x.ai/internal/evict_sessions" {
+        if args.method.as_ref() == InternalMethod::EvictSessions.name() {
             self.handle_evict_sessions(&args.params).await;
         }
         if args.method.as_ref() == "x.ai/toggle_plan_mode"

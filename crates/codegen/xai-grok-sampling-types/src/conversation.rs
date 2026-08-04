@@ -901,13 +901,15 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     pub total_tokens: u32,
     pub reasoning_tokens: u32,
-    /// Prompt tokens served from cache.
-    /// - OpenAI: `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens`.
-    /// - Anthropic Messages: `usage.cache_read_input_tokens`. Cache writes
-    ///   (`cache_creation_input_tokens`, billed at ~1.25x) are NOT counted here; they are folded
-    ///   into `prompt_tokens` instead.
+    /// Prompt tokens served from cache (the cache-hit subset of `prompt_tokens`).
+    /// OpenAI: `prompt_tokens_details.cached_tokens`. Messages: `cache_read_input_tokens`.
     #[serde(default)]
     pub cached_prompt_tokens: u32,
+    /// Prompt tokens written to cache this call (Messages `cache_creation_input_tokens`,
+    /// billed at ~1.25x). Part of `prompt_tokens` but distinct from cache reads; 0 on
+    /// backends without a cache-write signal.
+    #[serde(default)]
+    pub cache_creation_prompt_tokens: u32,
 }
 
 impl TokenUsage {
@@ -934,6 +936,7 @@ impl From<Usage> for TokenUsage {
                 .as_ref()
                 .map_or(0, |d| d.reasoning_tokens),
             cached_prompt_tokens,
+            cache_creation_prompt_tokens: 0,
         }
     }
 }
@@ -976,6 +979,17 @@ pub struct ConversationResponse {
     /// the wire (Messages `message_delta.stop_details.explanation`); `None`
     /// otherwise and on backends that don't report one.
     pub stop_message: Option<String>,
+    /// Provider message id (Messages `message.id`); `None` on backends that do
+    /// not carry one (OAI Chat Completions / Responses).
+    pub message_id: Option<String>,
+    /// Verbatim wire stop reason before it collapses into [`StopReason`]
+    /// (e.g. `end_turn`, `tool_use`, `pause_turn`); `None` when unreported.
+    pub raw_stop_reason: Option<String>,
+    /// The provider's matched stop sequence (Messages API
+    /// `message_delta.stop_sequence`), present only when the model stopped on a
+    /// configured stop sequence; `None` otherwise and on backends that do not
+    /// report one (OAI Chat Completions / Responses).
+    pub stop_sequence: Option<String>,
 }
 
 /// Normalize a wire cost-ticks value at capture.
@@ -3593,12 +3607,79 @@ pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) ->
 // Anthropic Messages API Conversion
 // ============================================================================
 
+/// Marks the last block that can carry a cache breakpoint, scanning back past
+/// `Thinking`, which the API rejects a breakpoint on.
+fn mark_message_cache_breakpoint(msg: &mut crate::messages::Message) -> bool {
+    use crate::messages::{CacheControl, ContentBlock, MessageContent};
+
+    match &mut msg.content {
+        MessageContent::Blocks(blocks) => {
+            for block in blocks.iter_mut().rev() {
+                let cache_control = match block {
+                    ContentBlock::Text { cache_control, .. }
+                    | ContentBlock::ToolResult { cache_control, .. }
+                    | ContentBlock::Image { cache_control, .. }
+                    | ContentBlock::ToolUse { cache_control, .. } => cache_control,
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
+                        continue;
+                    }
+                };
+                *cache_control = Some(CacheControl::ephemeral());
+                return true;
+            }
+            false
+        }
+        // Plain text cannot carry a breakpoint, so promote it to block form.
+        MessageContent::Text(text) => {
+            let text = std::mem::take(text);
+            msg.content = MessageContent::Blocks(vec![ContentBlock::Text {
+                text,
+                cache_control: Some(CacheControl::ephemeral()),
+            }]);
+            true
+        }
+    }
+}
+
+/// An entry is written only at a breakpoint, so marking the system prompt alone
+/// leaves the transcript uncached. The third covers a turn that appends more
+/// than the API's 20 block lookback. The fourth slot stays free: a gateway that
+/// turns on automatic caching takes it, and five is rejected outright.
+fn apply_cache_breakpoints(
+    system_blocks: &mut [crate::messages::TextBlock],
+    messages: &mut [crate::messages::Message],
+) {
+    use crate::messages::{CacheControl, MessageRole};
+
+    if let Some(last) = system_blocks.last_mut() {
+        last.cache_control = Some(CacheControl::ephemeral());
+    }
+
+    let tip = (0..messages.len())
+        .rev()
+        .find(|&i| mark_message_cache_breakpoint(&mut messages[i]));
+
+    // Where the previous request ended. A turn can append several user messages
+    // in a row, so skip the whole trailing run rather than a neighbour of the tip.
+    if let Some(tip) = tip
+        && let Some(prev) = messages[..tip]
+            .iter()
+            .rposition(|m| matches!(m.role, MessageRole::Assistant))
+            .and_then(|assistant| {
+                messages[..assistant]
+                    .iter()
+                    .rposition(|m| matches!(m.role, MessageRole::User))
+            })
+    {
+        mark_message_cache_breakpoint(&mut messages[prev]);
+    }
+}
+
 /// Convert a ConversationRequest to Anthropic MessagesRequest.
 pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::MessagesRequest {
     use crate::messages::{
-        CacheControl, ContentBlock, ImageSource, Message, MessageContent, MessageRole,
-        MessagesRequest, OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam,
-        ToolResultContent,
+        ContentBlock, ImageSource, Message, MessageContent, MessageRole, MessagesRequest,
+        OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam, ToolResultContent,
     };
 
     let mut system_blocks: Vec<TextBlock> = Vec::new();
@@ -3644,6 +3725,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     media_type,
                                     data: data.to_string(),
                                 },
+                                cache_control: None,
                             }
                         } else {
                             // Malformed data URI, treat as text
@@ -3657,6 +3739,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                             source: ImageSource::Url {
                                 url: url.as_ref().to_owned(),
                             },
+                            cache_control: None,
                         }
                     } else {
                         // Unknown format, treat as text
@@ -3737,6 +3820,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                         id: sanitize_tool_call_id(&tc.id),
                         name: tc.name.clone(),
                         input,
+                        cache_control: None,
                     });
                 }
             }
@@ -3767,7 +3851,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     url: url.as_ref().to_owned(),
                                 }
                             };
-                            blocks.push(ContentBlock::Image { source });
+                            blocks.push(ContentBlock::Image {
+                                source,
+                                cache_control: None,
+                            });
                         }
                     }
                     ToolResultContent::Blocks(blocks)
@@ -3828,12 +3915,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     flush_assistant(&mut pending_assistant, &mut messages);
     flush_tool_results(&mut pending_tool_results, &mut messages);
 
-    // Attach cache_control: {type: "ephemeral"} to last system block
-    if let Some(last) = system_blocks.last_mut() {
-        last.cache_control = Some(CacheControl {
-            r#type: "ephemeral".to_string(),
-        });
-    }
+    // Prefix caching: a cache entry is only written at a breakpoint, so
+    // marking the system prompt alone leaves the whole transcript uncached.
+    apply_cache_breakpoints(&mut system_blocks, &mut messages);
 
     // Build system param
     let system: Option<SystemParam> = if system_blocks.is_empty() {
@@ -4071,7 +4155,9 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
                     }
                     content.push_str(&text);
                 }
-                ContentBlock::ToolUse { id, name, input } => {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     tool_calls.push(ToolCall {
                         id: Arc::<str>::from(id),
                         name,
@@ -4226,6 +4312,148 @@ mod tests {
     use crate::tool_overrides::*;
     use assert_matches::assert_matches;
 
+    fn make_response(message: ConversationItem) -> ConversationResponse {
+        ConversationResponse {
+            items: vec![message],
+            stop_reason: Some(StopReason::Stop),
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
+        }
+    }
+
+    /// Helper: build a sibling Reasoning item with the given id, summary
+    /// text, and optional encrypted_content.
+    fn reasoning_sibling(
+        id: &str,
+        summary_text: &str,
+        encrypted: Option<&str>,
+    ) -> ConversationItem {
+        ConversationItem::Reasoning(rs::ReasoningItem {
+            id: id.to_string(),
+            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                text: summary_text.to_string(),
+            })],
+            content: None,
+            encrypted_content: encrypted.map(str::to_owned),
+            status: None,
+        })
+    }
+
+    /// Helper: serialise the wire `input` array to a Vec of JSON values.
+    fn input_items_json(req: &ConversationRequest) -> Vec<serde_json::Value> {
+        let cr: rs::CreateResponse = req.into();
+        let mut body = serde_json::to_value(&cr).unwrap();
+        patch_reasoning_text_types(&mut body);
+        body["input"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// Helper: one-line "kind:identifier" summary for readable assertions.
+    fn summarise_input(items: &[serde_json::Value]) -> Vec<String> {
+        items
+            .iter()
+            .map(|v| {
+                let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                if let Some(role) = v.get("role").and_then(|r| r.as_str()) {
+                    let text = v
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("<non-text>");
+                    format!("{role}:{text}")
+                } else if ty == "reasoning" {
+                    let id = v.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+                    format!("reasoning:{id}")
+                } else if ty == "function_call" {
+                    let cid = v.get("call_id").and_then(|c| c.as_str()).unwrap_or("?");
+                    format!("function_call:{cid}")
+                } else {
+                    format!("type:{ty}")
+                }
+            })
+            .collect()
+    }
+
+    /// Assert that base request's serialized input is a byte-stable prefix
+    /// of the extended request's.
+    fn assert_prefix_stable(base: &ConversationRequest, extended: &ConversationRequest) {
+        let base_input = input_items_json(base);
+        let ext_input = input_items_json(extended);
+        assert!(
+            ext_input.len() >= base_input.len(),
+            "extended request has fewer input items ({}) than base ({})",
+            ext_input.len(),
+            base_input.len(),
+        );
+        assert_eq!(
+            &ext_input[..base_input.len()],
+            base_input.as_slice(),
+            "serialized input of request N must be a prefix of request N+1.\n\
+             Base ({} items): {:?}\nExtended ({} items): {:?}\n\
+             First divergence at index {}",
+            base_input.len(),
+            summarise_input(&base_input),
+            ext_input.len(),
+            summarise_input(&ext_input),
+            base_input
+                .iter()
+                .zip(ext_input.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(base_input.len()),
+        );
+    }
+
+    /// Keeps `forwards_prompt_cache_key()` honest against each mapping: a key that never reaches the wire looks like a 0% cache hit, not a bug.
+    #[test]
+    fn prompt_cache_key_reaches_the_wire_only_where_the_backend_claims() {
+        let request = || ConversationRequest {
+            items: vec![ConversationItem::user("hi")],
+            model: Some("test-model".to_string()),
+            prompt_cache_key: Some("cache-key-1".to_string()),
+            ..Default::default()
+        };
+
+        for backend in [
+            crate::ApiBackend::ChatCompletions,
+            crate::ApiBackend::Responses,
+            crate::ApiBackend::Messages,
+        ] {
+            let on_wire = match backend {
+                crate::ApiBackend::Responses => {
+                    rs::CreateResponse::from(&request())
+                        .prompt_cache_key
+                        .as_deref()
+                        == Some("cache-key-1")
+                }
+                crate::ApiBackend::ChatCompletions => {
+                    let mapped = ChatCompletionRequest::from(request());
+                    serde_json::to_value(&mapped)
+                        .expect("chat request serializes")
+                        .get("prompt_cache_key")
+                        .is_some()
+                }
+                crate::ApiBackend::Messages => {
+                    let mapped = build_messages_request(&request());
+                    serde_json::to_value(&mapped)
+                        .expect("messages request serializes")
+                        .get("prompt_cache_key")
+                        .is_some()
+                }
+                // Turbo-only backends are not exercised by this loop.
+                other => unreachable!("unexpected backend in loop: {other:?}"),
+            };
+            assert_eq!(
+                on_wire,
+                backend.forwards_prompt_cache_key(),
+                "{backend:?}: forwards_prompt_cache_key() disagrees with the mapping"
+            );
+        }
+    }
+
     #[test]
     fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {
         for (variant, wire) in [
@@ -4321,163 +4549,6 @@ mod tests {
         let mut sys = ConversationItem::system("sp");
         sys.set_prior_turn_interrupt(PriorTurnInterrupt::MidTurnAbort);
         assert_matches!(sys, ConversationItem::System(_));
-    }
-
-    #[test]
-    fn test_conversation_item_roundtrip() {
-        // System message
-        let system = ConversationItem::system("You are a helpful assistant.");
-        let chat_msg = conversation_item_to_chat_message(system.clone());
-        let back: ConversationItem = chat_msg.into();
-        assert_eq!(back.text_content(), "You are a helpful assistant.");
-
-        // User message
-        let user = ConversationItem::user("Hello!");
-        let chat_msg = conversation_item_to_chat_message(user);
-        let back: ConversationItem = chat_msg.into();
-        assert_eq!(back.text_content(), "Hello!");
-
-        // Assistant message (reasoning is now a sibling, not a field;
-        // single-item conversion produces None for reasoning_content. The
-        // `conversation_to_chat_messages` helper is what carries reasoning
-        // through; tested separately).
-        let assistant = ConversationItem::assistant_with_model("Hi there!", "grok-3");
-        let chat_msg = conversation_item_to_chat_message(assistant);
-        assert_eq!(chat_msg.reasoning_content, None);
-        let back: ConversationItem = chat_msg.into();
-        assert_eq!(back.text_content(), "Hi there!");
-
-        // Tool result
-        let tool_result = ConversationItem::tool_result("call_123", "Result data");
-        let chat_msg = conversation_item_to_chat_message(tool_result);
-        assert_eq!(chat_msg.tool_call_id, Some("call_123".to_string()));
-    }
-
-    #[test]
-    fn test_conversation_request_to_chat_completion() {
-        let req = ConversationRequest::from_items(vec![
-            ConversationItem::system("System prompt"),
-            ConversationItem::user("User message"),
-        ])
-        .with_model("grok-3")
-        .with_temperature(0.7);
-
-        let chat_req: ChatCompletionRequest = req.into();
-        assert_eq!(chat_req.model, Some("grok-3".to_string()));
-        assert_eq!(chat_req.temperature, Some(0.7));
-        assert_eq!(chat_req.messages.len(), 2);
-    }
-
-    #[test]
-    fn test_conversation_request_to_responses_api() {
-        let req = ConversationRequest::from_items(vec![
-            ConversationItem::system("System prompt"),
-            ConversationItem::user("User message"),
-        ])
-        .with_model("grok-3")
-        .with_temperature(0.7);
-
-        let responses_req: rs::CreateResponse = (&req).into();
-        assert_eq!(responses_req.model, Some("grok-3".to_string()));
-        assert_eq!(responses_req.temperature, Some(0.7));
-
-        let rs::InputParam::Items(items) = responses_req.input else {
-            panic!("Expected Items input");
-        };
-        assert_eq!(items.len(), 2);
-    }
-
-    #[test]
-    fn function_tool_colliding_with_hosted_web_search_is_dropped() {
-        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
-            .with_tools(vec![
-                ToolSpec {
-                    name: "web_search".to_string(),
-                    description: Some("local web search".to_string()),
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-                ToolSpec {
-                    name: "read_file".to_string(),
-                    description: None,
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-            ]);
-        req.hosted_tools = vec![HostedTool::WebSearch { options: None }];
-
-        let responses_req: rs::CreateResponse = (&req).into();
-        let tools = responses_req.tools.expect("tools should be set");
-
-        let web_search_count = tools
-            .iter()
-            .filter(|t| matches!(t, rs::Tool::WebSearch(_)))
-            .count();
-        assert_eq!(
-            web_search_count, 1,
-            "exactly one typed web_search: {tools:?}"
-        );
-        let function_names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| match t {
-                rs::Tool::Function(f) => Some(f.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            function_names,
-            vec!["read_file"],
-            "colliding function tool must be dropped"
-        );
-    }
-
-    #[test]
-    fn function_tool_colliding_with_hosted_x_search_is_dropped() {
-        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
-            .with_tools(vec![ToolSpec {
-                name: "x_search".to_string(),
-                description: None,
-                parameters: serde_json::json!({"type": "object"}),
-            }]);
-        req.hosted_tools = vec![HostedTool::XSearch { options: None }];
-
-        let responses_req: rs::CreateResponse = (&req).into();
-        let tools = responses_req.tools.unwrap_or_default();
-        assert!(tools.is_empty(), "expected no tools, got: {tools:?}");
-        let entries = extra_tool_entries(&req.hosted_tools);
-        assert_eq!(entries, vec![serde_json::json!({"type": "x_search"})]);
-    }
-
-    #[test]
-    fn x_search_serializes_to_the_tool_entry() {
-        // A full bound reaches the flat snake_case entry; an empty or `None` bound emits the bare entry.
-        let dated = extra_tool_entries(&[HostedTool::XSearch {
-            options: Some(XSearchOptions {
-                date_bound: Some(
-                    SearchDateBound::new(Some("2024-01-01".into()), Some("2024-03-15".into()))
-                        .unwrap(),
-                ),
-            }),
-        }]);
-        assert_eq!(
-            dated,
-            vec![serde_json::json!({
-                "type": "x_search",
-                "from_date": "2024-01-01",
-                "to_date": "2024-03-15",
-            })]
-        );
-        let bare = vec![serde_json::json!({"type": "x_search"})];
-        assert_eq!(
-            extra_tool_entries(&[HostedTool::XSearch {
-                options: Some(XSearchOptions {
-                    date_bound: Some(SearchDateBound::new(None, None).unwrap()),
-                }),
-            }]),
-            bare
-        );
-        assert_eq!(
-            extra_tool_entries(&[HostedTool::XSearch { options: None }]),
-            bare
-        );
     }
 
     #[test]
@@ -4597,29 +4668,6 @@ mod tests {
                 .is_err(),
             "inverted window must fail through the aggregate wire type"
         );
-    }
-
-    #[test]
-    fn function_web_search_kept_when_no_hosted_tools() {
-        let req =
-            ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_tools(vec![
-                ToolSpec {
-                    name: "web_search".to_string(),
-                    description: None,
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-            ]);
-
-        let responses_req: rs::CreateResponse = (&req).into();
-        let tools = responses_req.tools.expect("tools should be set");
-        let function_names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| match t {
-                rs::Tool::Function(f) => Some(f.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(function_names, vec!["web_search"]);
     }
 
     #[test]
@@ -5220,243 +5268,6 @@ mod tests {
             id: None,
         };
         assert!(reasoning.is_empty());
-    }
-
-    #[test]
-    fn test_responses_api_with_reasoning() {
-        // Test conversion from Responses API response with reasoning
-        let response = rs::Response {
-            background: None,
-            billing: None,
-            conversation: None,
-            created_at: 1234567890,
-            completed_at: None,
-            error: None,
-            id: "resp_123".to_string(),
-            incomplete_details: None,
-            instructions: None,
-            max_output_tokens: None,
-            metadata: None,
-            model: "grok-3".to_string(),
-            object: "response".to_string(),
-            output: vec![
-                rs::OutputItem::Reasoning(rs::ReasoningItem {
-                    id: "reasoning_1".to_string(),
-                    summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                        text: "I need to analyze this carefully.".to_string(),
-                    })],
-                    content: None,
-                    encrypted_content: None,
-                    status: None,
-                }),
-                rs::OutputItem::Message(rs::OutputMessage {
-                    content: vec![rs::OutputMessageContent::OutputText(
-                        rs::OutputTextContent {
-                            text: "Here is my answer.".to_string(),
-                            annotations: vec![],
-                            logprobs: None,
-                        },
-                    )],
-                    id: "msg_123".to_string(),
-                    role: rs::AssistantRole::Assistant,
-                    status: rs::OutputStatus::Completed,
-                }),
-            ],
-            parallel_tool_calls: None,
-            previous_response_id: None,
-            prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
-            reasoning: None,
-            safety_identifier: None,
-            service_tier: None,
-            status: rs::Status::Completed,
-            temperature: None,
-            text: None,
-            tool_choice: None,
-            tools: None,
-            top_logprobs: None,
-            top_p: None,
-            truncation: None,
-            usage: None,
-        };
-
-        // The full flat-list shape (Reasoning siblings preserved) is
-        // exercised in the `test_response_to_conversation_items_preserves_*`
-        // tests below; here we just assert the trailing Assistant content.
-        let items = response_to_conversation_items(response);
-        let item = items
-            .into_iter()
-            .next_back()
-            .expect("response produces at least a trailing Assistant");
-        let ConversationItem::Assistant(a) = &item else {
-            panic!("Expected Assistant item");
-        };
-        assert_eq!(a.content.as_ref(), "Here is my answer.");
-    }
-
-    #[test]
-    fn test_responses_api_with_encrypted_reasoning() {
-        // Test that encrypted reasoning content is preserved from Responses API
-        let response = rs::Response {
-            background: None,
-            billing: None,
-            conversation: None,
-            created_at: 1234567890,
-            completed_at: None,
-            error: None,
-            id: "resp_456".to_string(),
-            incomplete_details: None,
-            instructions: None,
-            max_output_tokens: None,
-            metadata: None,
-            model: "grok-3".to_string(),
-            object: "response".to_string(),
-            output: vec![
-                rs::OutputItem::Reasoning(rs::ReasoningItem {
-                    id: "reasoning_enc".to_string(),
-                    summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                        text: "Visible thinking summary".to_string(),
-                    })],
-                    content: None,
-                    encrypted_content: Some("enc_base64_encrypted_reasoning_data_here".to_string()),
-                    status: Some(rs::OutputStatus::Completed),
-                }),
-                rs::OutputItem::Message(rs::OutputMessage {
-                    content: vec![rs::OutputMessageContent::OutputText(
-                        rs::OutputTextContent {
-                            text: "My response based on reasoning.".to_string(),
-                            annotations: vec![],
-                            logprobs: None,
-                        },
-                    )],
-                    id: "msg_456".to_string(),
-                    role: rs::AssistantRole::Assistant,
-                    status: rs::OutputStatus::Completed,
-                }),
-            ],
-            parallel_tool_calls: None,
-            previous_response_id: None,
-            prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
-            reasoning: None,
-            safety_identifier: None,
-            service_tier: None,
-            status: rs::Status::Completed,
-            temperature: None,
-            text: None,
-            tool_choice: None,
-            tools: None,
-            top_logprobs: None,
-            top_p: None,
-            truncation: None,
-            usage: None,
-        };
-
-        // Exercise the flat-list path: reasoning now lives as a sibling.
-        let items = response_to_conversation_items(response);
-        let assistant_idx = items
-            .iter()
-            .position(|i| matches!(i, ConversationItem::Assistant(_)))
-            .expect("assistant present");
-        let ConversationItem::Assistant(a) = &items[assistant_idx] else {
-            unreachable!()
-        };
-        assert_eq!(a.content.as_ref(), "My response based on reasoning.");
-
-        let reasoning_sibling = items
-            .iter()
-            .find_map(|i| match i {
-                ConversationItem::Reasoning(r) => Some(r),
-                _ => None,
-            })
-            .expect("reasoning sibling present");
-        // Both text summary and encrypted content should be preserved
-        assert_eq!(
-            reasoning_sibling.summary.first().map(|sp| match sp {
-                rs::SummaryPart::SummaryText(t) => t.text.as_str(),
-            }),
-            Some("Visible thinking summary")
-        );
-        assert_eq!(
-            reasoning_sibling.encrypted_content.as_deref(),
-            Some("enc_base64_encrypted_reasoning_data_here")
-        );
-    }
-
-    #[test]
-    fn test_responses_api_with_only_encrypted_reasoning() {
-        // Test case where there's only encrypted content, no visible summary
-        let response = rs::Response {
-            background: None,
-            billing: None,
-            conversation: None,
-            created_at: 1234567890,
-            completed_at: None,
-            error: None,
-            id: "resp_789".to_string(),
-            incomplete_details: None,
-            instructions: None,
-            max_output_tokens: None,
-            metadata: None,
-            model: "grok-3".to_string(),
-            object: "response".to_string(),
-            output: vec![
-                rs::OutputItem::Reasoning(rs::ReasoningItem {
-                    id: "reasoning_only_enc".to_string(),
-                    summary: vec![], // Empty summary
-                    content: None,
-                    encrypted_content: Some("enc_only_encrypted_no_visible_summary".to_string()),
-                    status: Some(rs::OutputStatus::Completed),
-                }),
-                rs::OutputItem::Message(rs::OutputMessage {
-                    content: vec![rs::OutputMessageContent::OutputText(
-                        rs::OutputTextContent {
-                            text: "Response.".to_string(),
-                            annotations: vec![],
-                            logprobs: None,
-                        },
-                    )],
-                    id: "msg_789".to_string(),
-                    role: rs::AssistantRole::Assistant,
-                    status: rs::OutputStatus::Completed,
-                }),
-            ],
-            parallel_tool_calls: None,
-            previous_response_id: None,
-            prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
-            reasoning: None,
-            safety_identifier: None,
-            service_tier: None,
-            status: rs::Status::Completed,
-            temperature: None,
-            text: None,
-            tool_choice: None,
-            tools: None,
-            top_logprobs: None,
-            top_p: None,
-            truncation: None,
-            usage: None,
-        };
-
-        // Flat-list path: reasoning sibling carries the encrypted blob,
-        // empty summary maps to an empty `Vec<SummaryPart>`.
-        let items = response_to_conversation_items(response);
-        let reasoning_sibling = items
-            .iter()
-            .find_map(|i| match i {
-                ConversationItem::Reasoning(r) => Some(r),
-                _ => None,
-            })
-            .expect("reasoning sibling present");
-        assert!(reasoning_sibling.summary.is_empty());
-        assert_eq!(
-            reasoning_sibling.encrypted_content.as_deref(),
-            Some("enc_only_encrypted_no_visible_summary")
-        );
     }
 
     #[test]
@@ -6371,111 +6182,6 @@ mod tests {
     }
 
     // ============================================================================
-    // ConversationToolChoice Tests
-    // ============================================================================
-
-    fn make_test_tool() -> ToolSpec {
-        ToolSpec {
-            name: "test_tool".to_string(),
-            description: Some("A test tool".to_string()),
-            parameters: serde_json::json!({}),
-        }
-    }
-
-    #[test]
-    fn test_tool_choice_auto_to_chat_completion() {
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tools(vec![make_test_tool()])
-            .with_tool_choice(ConversationToolChoice::Auto);
-
-        let chat_req: ChatCompletionRequest = req.into();
-        assert!(chat_req.tool_choice.is_some());
-        let ToolChoice::Preset(preset) = chat_req.tool_choice.unwrap() else {
-            panic!("Expected Preset tool choice");
-        };
-        assert_eq!(preset, "auto");
-    }
-
-    #[test]
-    fn test_tool_choice_none_to_chat_completion() {
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tools(vec![make_test_tool()])
-            .with_tool_choice(ConversationToolChoice::None);
-
-        let chat_req: ChatCompletionRequest = req.into();
-        let ToolChoice::Preset(preset) = chat_req.tool_choice.unwrap() else {
-            panic!("Expected Preset tool choice");
-        };
-        assert_eq!(preset, "none");
-    }
-
-    #[test]
-    fn test_tool_choice_required_to_chat_completion() {
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tools(vec![make_test_tool()])
-            .with_tool_choice(ConversationToolChoice::Required);
-
-        let chat_req: ChatCompletionRequest = req.into();
-        let ToolChoice::Preset(preset) = chat_req.tool_choice.unwrap() else {
-            panic!("Expected Preset tool choice");
-        };
-        assert_eq!(preset, "required");
-    }
-
-    #[test]
-    fn test_tool_choice_function_to_chat_completion() {
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tools(vec![make_test_tool()])
-            .with_tool_choice(ConversationToolChoice::Function("read_file".to_string()));
-
-        let chat_req: ChatCompletionRequest = req.into();
-        let ToolChoice::Function { function, .. } = chat_req.tool_choice.unwrap() else {
-            panic!("Expected Function tool choice");
-        };
-        assert_eq!(function.name, "read_file");
-    }
-
-    #[test]
-    fn test_tool_choice_to_responses_api() {
-        // Test Auto
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tool_choice(ConversationToolChoice::Auto);
-        let responses_req: rs::CreateResponse = (&req).into();
-        assert_matches!(
-            responses_req.tool_choice,
-            Some(rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Auto))
-        );
-
-        // Test Required
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tool_choice(ConversationToolChoice::Required);
-        let responses_req: rs::CreateResponse = (&req).into();
-        assert_matches!(
-            responses_req.tool_choice,
-            Some(rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Required))
-        );
-
-        // Test Function
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tool_choice(ConversationToolChoice::Function("bash".to_string()));
-        let responses_req: rs::CreateResponse = (&req).into();
-        let Some(rs::ToolChoiceParam::Function(fc)) = responses_req.tool_choice else {
-            panic!("Expected Function tool choice");
-        };
-        assert_eq!(fc.name, "bash");
-    }
-
-    #[test]
-    fn test_tool_choice_dropped_when_no_tools_chat_completions() {
-        // Chat Completions API rejects tool_choice without tools
-        let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
-            .with_tool_choice(ConversationToolChoice::Auto);
-        let chat_req: ChatCompletionRequest = req.into();
-        assert!(chat_req.tool_choice.is_none());
-        assert!(chat_req.tools.is_none());
-    }
-
-    // ============================================================================
     // Edge Cases Tests
     // ============================================================================
 
@@ -6502,35 +6208,6 @@ mod tests {
         };
         assert!(a.tool_calls.is_empty());
         assert!(a.content.is_empty());
-    }
-
-    #[test]
-    fn test_user_with_multiple_images() {
-        let parts = vec![
-            ContentPart::Text {
-                text: "Compare these images:".into(),
-            },
-            ContentPart::Image {
-                url: "https://example.com/img1.png".into(),
-            },
-            ContentPart::Image {
-                url: "https://example.com/img2.png".into(),
-            },
-            ContentPart::Image {
-                url: "data:image/png;base64,iVBORw0KGgo=".into(),
-            },
-        ];
-
-        let user = ConversationItem::user_with_parts(parts);
-
-        // Convert to ChatRequestMessage
-        let chat_msg = conversation_item_to_chat_message(user);
-        let blocks = chat_msg.content.blocks();
-        assert_eq!(blocks.len(), 4);
-        assert_matches!(&blocks[0], ChatContentBlock::Text { text } if text == "Compare these images:");
-        assert_matches!(&blocks[1], ChatContentBlock::ImageUrl { .. });
-        assert_matches!(&blocks[2], ChatContentBlock::ImageUrl { .. });
-        assert_matches!(&blocks[3], ChatContentBlock::ImageUrl { .. });
     }
 
     #[test]
@@ -7593,53 +7270,6 @@ mod tests {
         assert_eq!(truncate_bytes(e, 3), ""); // 3 < 4, walks back to 0
     }
 
-    /// sanitize_tool_arguments must not panic when arguments contain non-ASCII
-    /// and the 200-byte preview boundary falls mid-char.
-    #[test]
-    fn test_sanitize_non_ascii_args_preview_does_not_panic() {
-        // Build a string where the 200-byte boundary lands inside a CJK char.
-        // Each '文' is 3 bytes → 67 × 3 = 201 bytes; byte 200 is inside the 67th char.
-        let filler = "文".repeat(70); // > 200 bytes
-        let bad_args = format!("{{\"old_string\": \"{filler}\"}}");
-        // The outer JSON is valid but contains non-ASCII; force the warning path
-        // by making the JSON invalid.
-        let malformed = format!("{{\"old_string\": \"{filler}\" missing_key}}");
-
-        let tool_call = ToolCall {
-            id: "call_1".into(),
-            name: "search_replace".to_string(),
-            arguments: malformed.clone().into(),
-        };
-        // Must not panic.
-        let item = ConversationItem::assistant_tool_calls(vec![tool_call]);
-        let chat_msg = conversation_item_to_chat_message(item);
-        assert_eq!(
-            chat_msg.tool_calls[0].function.arguments, "{}",
-            "malformed non-ASCII arguments must be sanitized to {{}}"
-        );
-        // Also confirm valid non-ASCII passes through unchanged.
-        let tool_call_valid = ToolCall {
-            id: "call_2".into(),
-            name: "search_replace".to_string(),
-            arguments: bad_args.clone().into(),
-        };
-        let item_valid = ConversationItem::assistant_tool_calls(vec![tool_call_valid]);
-        let chat_msg_valid = conversation_item_to_chat_message(item_valid);
-        assert_eq!(
-            chat_msg_valid.tool_calls[0].function.arguments, bad_args,
-            "valid non-ASCII arguments must pass through unchanged"
-        );
-    }
-
-    #[test]
-    fn test_large_tool_result() {
-        let large_output = "x".repeat(100_000); // 100KB of output
-        let tool_result = ConversationItem::tool_result("call_1", &large_output);
-
-        let chat_msg = conversation_item_to_chat_message(tool_result);
-        assert_eq!(chat_msg.text_content().len(), 100_000);
-    }
-
     // ============================================================================
     // conversation_truncate_for_prompt Tests
     // ============================================================================
@@ -8449,6 +8079,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.is_empty());
 
@@ -8461,6 +8094,9 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(!response.is_empty());
 
@@ -8477,6 +8113,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(!response.is_empty());
     }
@@ -8501,6 +8140,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             response.is_empty(),
@@ -8524,6 +8166,9 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             !response.is_empty(),
@@ -8551,6 +8196,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             !response.is_empty(),
@@ -8579,6 +8227,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
 
         let calls = response.tool_calls();
@@ -8599,6 +8250,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -8618,6 +8272,9 @@ mod tests {
             message_chunks_emitted: 42,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -8633,6 +8290,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -8652,6 +8312,9 @@ mod tests {
             message_chunks_emitted: 0, // only reasoning chunks were streamed
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -8674,6 +8337,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -9589,7 +9255,7 @@ mod tests {
             matches!(&inner[0], crate::messages::ContentBlock::Text { text, .. } if text == "Read image file: photo.png")
         );
         assert!(
-            matches!(&inner[1], crate::messages::ContentBlock::Image { source: crate::messages::ImageSource::Base64 { media_type, data } } if media_type == "image/png" && data == "iVBOR")
+            matches!(&inner[1], crate::messages::ContentBlock::Image { source: crate::messages::ImageSource::Base64 { media_type, data }, .. } if media_type == "image/png" && data == "iVBOR")
         );
     }
 
@@ -9958,82 +9624,6 @@ mod tests {
     }
 
     #[test]
-    fn responses_api_conversion_preserves_model_fingerprint() {
-        use std::collections::HashMap;
-
-        let mut metadata = HashMap::new();
-        metadata.insert("system_fingerprint".into(), "fp_abc123".into());
-
-        let response = rs::Response {
-            background: None,
-            billing: None,
-            conversation: None,
-            created_at: 0,
-            completed_at: None,
-            error: None,
-            id: "resp_test".into(),
-            incomplete_details: None,
-            instructions: None,
-            max_output_tokens: None,
-            metadata: Some(metadata),
-            model: "grok-4.5".into(),
-            object: "response".into(),
-            output: vec![rs::OutputItem::Message(rs::OutputMessage {
-                content: vec![rs::OutputMessageContent::OutputText(
-                    rs::OutputTextContent {
-                        text: "hello".into(),
-                        annotations: vec![],
-                        logprobs: None,
-                    },
-                )],
-                id: "msg_test".into(),
-                role: rs::AssistantRole::Assistant,
-                status: rs::OutputStatus::Completed,
-            })],
-            parallel_tool_calls: None,
-            previous_response_id: None,
-            prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
-            reasoning: None,
-            safety_identifier: None,
-            service_tier: None,
-            status: rs::Status::Completed,
-            temperature: None,
-            text: None,
-            tool_choice: None,
-            tools: None,
-            top_logprobs: None,
-            top_p: None,
-            truncation: None,
-            usage: None,
-        };
-
-        let items = response_to_conversation_items(response);
-        let item = items
-            .into_iter()
-            .next_back()
-            .expect("response produces at least a trailing Assistant");
-        assert_matches!(item, ConversationItem::Assistant(ref a) => {
-            assert_eq!(a.model_fingerprint.as_deref(), Some("fp_abc123"));
-            assert_eq!(a.model_id.as_deref(), Some("grok-4.5"));
-            assert_eq!(a.content.as_ref(), "hello");
-        });
-    }
-
-    fn make_response(message: ConversationItem) -> ConversationResponse {
-        ConversationResponse {
-            items: vec![message],
-            stop_reason: Some(StopReason::Stop),
-            usage: None,
-            cost_usd_ticks: None,
-            message_chunks_emitted: 0,
-            doom_loop_signals: Vec::new(),
-            stop_message: None,
-        }
-    }
-
-    #[test]
     fn empty_reason_none_when_has_content() {
         let resp = make_response(ConversationItem::assistant("hello"));
         assert!(resp.empty_reason().is_none());
@@ -10082,6 +9672,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.empty_reason(),
@@ -10254,73 +9847,6 @@ mod tests {
     }
 
     #[test]
-    fn build_responses_input_preserves_multi_turn_ordering() {
-        // 4-turn conversation where each assistant turn carries reasoning.
-        // The wire-level item order must be
-        //     [Sys, U1, R, A1, U2, R, A2, U3, R, A3, U4, R, A4, U5]
-        // and NOT the buggy
-        //     [Sys, U1, U2, U3, U4, U5, R, A1, R, A2, ...]
-        // which would shift the cache prefix every turn.
-        fn r(text: &str) -> ConversationItem {
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: text.to_string(),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: text.to_string(),
-                })],
-                content: None,
-                encrypted_content: Some(format!("enc_{text}")),
-                status: None,
-            })
-        }
-        let items: Vec<ConversationItem> = vec![
-            ConversationItem::system("you are helpful"),
-            ConversationItem::user("u1"),
-            r("r1"),
-            ConversationItem::assistant("a1"),
-            ConversationItem::user("u2"),
-            r("r2"),
-            ConversationItem::assistant("a2"),
-            ConversationItem::user("u3"),
-            r("r3"),
-            ConversationItem::assistant("a3"),
-            ConversationItem::user("u4"),
-            r("r4"),
-            ConversationItem::assistant("a4"),
-            ConversationItem::user("u5"),
-        ];
-
-        let req = ConversationRequest::from_items(items);
-        let input = build_responses_input(&req);
-        let rs::InputParam::Items(wire_items) = input else {
-            panic!("expected Items input");
-        };
-
-        // Walk the wire items and verify the expected pattern.
-        // Roles per wire item: System, User, Reasoning(role=Assistant),
-        // Assistant, User, Reasoning, Assistant, ...
-        let kinds: Vec<&'static str> = wire_items
-            .iter()
-            .map(|w| match w {
-                rs::InputItem::EasyMessage(m) => match m.role {
-                    rs::Role::System => "Sys",
-                    rs::Role::User => "U",
-                    rs::Role::Assistant => "A",
-                    _ => "other",
-                },
-                rs::InputItem::Item(rs::Item::Reasoning(_)) => "R",
-                _ => "other",
-            })
-            .collect();
-        assert_eq!(
-            kinds,
-            vec![
-                "Sys", "U", "R", "A", "U", "R", "A", "U", "R", "A", "U", "R", "A", "U",
-            ],
-            "multi-turn ordering must preserve interleaved Reasoning ↔ Assistant per turn"
-        );
-    }
-
-    #[test]
     fn conversation_to_chat_messages_folds_reasoning_into_following_assistant() {
         let items = vec![
             ConversationItem::user("hi"),
@@ -10460,36 +9986,6 @@ mod tests {
         assert_eq!(msg.reasoning_content.as_deref(), None);
     }
 
-    #[test]
-    fn conversation_to_chat_messages_drops_reasoning_when_user_intervenes() {
-        // Reasoning only folds onto the *immediately* following assistant. A
-        // non-assistant item in between (here a User) clears pending reasoning,
-        // matching the "reasoning lived on the immediately-following assistant
-        // turn only" semantic. This is the non-trailing sibling of
-        // `conversation_to_chat_messages_drops_trailing_reasoning`.
-        let items = vec![
-            reasoning_sibling("r1", "stale thinking", None),
-            ConversationItem::user("actually, new question"),
-            ConversationItem::assistant("answer"),
-        ];
-
-        let msgs = conversation_to_chat_messages(items);
-
-        assert_eq!(
-            msgs.len(),
-            2,
-            "user + assistant; orphaned reasoning dropped"
-        );
-        assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[1].role, Role::Assistant);
-        assert_eq!(msgs[1].text_content(), "answer");
-        assert_eq!(
-            msgs[1].reasoning_content.as_deref(),
-            None,
-            "reasoning separated from the assistant by a user message is dropped"
-        );
-    }
-
     // ========================================================================
     // upgrade_legacy_reasoning — legacy in-memory reconstruction
     // ========================================================================
@@ -10539,71 +10035,6 @@ mod tests {
             r.encrypted_content.as_deref(),
             Some("bIfXFNBiP8EI8F7pkKC1tgbYjvVuIctMAlCUGMii")
         );
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_singular_anthropic_no_id() {
-        // Anthropic streaming sets id = "" (see stream/messages.rs:340).
-        // The upgrader must still emit a sibling carrying text + signature.
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "answer",
-            "reasoning": {
-                "text": "Let me think about this...",
-                "encrypted": "anthropic-signature-bytes-here",
-                "id": ""
-            },
-            "model_id": "messages-compatible-model"
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        assert_eq!(siblings.len(), 1);
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling");
-        };
-        assert_eq!(r.id, "");
-        assert_eq!(
-            r.encrypted_content.as_deref(),
-            Some("anthropic-signature-bytes-here")
-        );
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_singular_chat_completions_text_only() {
-        // Chat-completions has only text (no encrypted, no id).
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "answer",
-            "reasoning": {"text": "step-by-step plain reasoning"}
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        assert_eq!(siblings.len(), 1);
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling");
-        };
-        assert_eq!(r.id, "");
-        assert!(r.encrypted_content.is_none());
-        let rs::SummaryPart::SummaryText(s) = &r.summary[0];
-        assert_eq!(s.text, "step-by-step plain reasoning");
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_v0_chat_request_message_shape() {
-        // v0 on disk: top-level role + reasoning_content.
-        let raw = serde_json::json!({
-            "role": "assistant",
-            "content": "v0 answer",
-            "reasoning_content": "v0-style plain text reasoning"
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        assert_eq!(siblings.len(), 1);
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling");
-        };
-        let rs::SummaryPart::SummaryText(s) = &r.summary[0];
-        assert_eq!(s.text, "v0-style plain text reasoning");
     }
 
     #[test]
@@ -10736,359 +10167,6 @@ mod tests {
         assert!(upgrade_legacy_reasoning(&raw, &mut seen).is_empty());
     }
 
-    #[test]
-    fn upgrade_then_fold_through_conversation_to_chat_messages() {
-        // End-to-end: lift legacy `reasoning` to a sibling, then run the
-        // chat-completions wire path. Reasoning must land on the next
-        // assistant's `reasoning_content`. This mirrors what the real
-        // load-then-replay flow does for a legacy session.
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "the answer",
-            "reasoning": {"text": "step-by-step", "id": "rs_x"}
-        });
-        let mut seen = std::collections::HashSet::new();
-        let mut siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        // Append the assistant (post-strip) by re-deserializing the same
-        // raw value as the new AssistantItem (which silently ignores
-        // `reasoning`).
-        let assistant: ConversationItem = serde_json::from_value(raw).unwrap();
-        siblings.push(assistant);
-
-        let msgs = conversation_to_chat_messages(siblings);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, Role::Assistant);
-        assert_eq!(
-            msgs[0].reasoning_content.as_deref(),
-            Some("step-by-step"),
-            "reconstructed sibling folded onto assistant.reasoning_content"
-        );
-    }
-
-    #[test]
-    fn patch_reasoning_text_types_injects_type_discriminator() {
-        // Build a request body containing a reasoning item whose nested
-        // `content[]` entries lack the `type` field (the async-openai gap).
-        let mut body = serde_json::json!({
-            "input": [
-                {
-                    "type": "reasoning",
-                    "id": "r1",
-                    "content": [
-                        { "text": "thinking..." },
-                        { "text": "more thinking" }
-                    ]
-                },
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": "hi"
-                }
-            ]
-        });
-        patch_reasoning_text_types(&mut body);
-        let reasoning_content = body
-            .pointer("/input/0/content")
-            .and_then(|v| v.as_array())
-            .expect("reasoning content array");
-        for item in reasoning_content {
-            assert_eq!(
-                item.get("type").and_then(|t| t.as_str()),
-                Some("reasoning_text"),
-                "every nested content item must carry the discriminator"
-            );
-        }
-        // Untouched: the user message stays as-is.
-        assert_eq!(
-            body.pointer("/input/1/content").and_then(|v| v.as_str()),
-            Some("hi")
-        );
-    }
-
-    /// Forward-compat guard for the async-openai gap fix.
-    ///
-    /// `patch_reasoning_text_types` uses `Entry::or_insert_with`, so when
-    /// upstream `ReasoningTextContent` eventually grows its own `type`
-    /// field (and serde starts emitting it), the walker must be a strict
-    /// NO-OP on items that already carry `type` — never clobbering,
-    /// overwriting, or duplicating it. That is what makes the patch safe
-    /// to keep until upstream lands the fix (at which point it can simply
-    /// be deleted). This test pins the conditional-insert semantics so a
-    /// future refactor to an unconditional `insert` (which *would* break
-    /// us by overwriting upstream's value) fails loudly here.
-    #[test]
-    fn patch_reasoning_text_types_preserves_existing_type() {
-        let mut body = serde_json::json!({
-            "input": [
-                {
-                    "type": "reasoning",
-                    "id": "r1",
-                    "content": [
-                        // Post-upstream-fix shape: discriminator already present.
-                        { "type": "reasoning_text", "text": "already tagged" },
-                        // A hypothetical different discriminator must NOT be clobbered.
-                        { "type": "some_future_variant", "text": "future shape" },
-                        // Current gap: missing type → gets filled in.
-                        { "text": "needs tag" }
-                    ]
-                }
-            ]
-        });
-        patch_reasoning_text_types(&mut body);
-        let content = body
-            .pointer("/input/0/content")
-            .and_then(|v| v.as_array())
-            .expect("reasoning content array");
-
-        // Existing discriminators preserved verbatim (no clobber).
-        assert_eq!(
-            content[0].get("type").and_then(|t| t.as_str()),
-            Some("reasoning_text"),
-        );
-        assert_eq!(
-            content[1].get("type").and_then(|t| t.as_str()),
-            Some("some_future_variant"),
-            "a non-default upstream discriminator must be left untouched",
-        );
-        // Only the type-less item is filled in.
-        assert_eq!(
-            content[2].get("type").and_then(|t| t.as_str()),
-            Some("reasoning_text"),
-        );
-
-        // Object integrity: each item has exactly one `type` and its `text`.
-        for item in content {
-            let obj = item.as_object().expect("content item is an object");
-            assert!(obj.contains_key("type") && obj.contains_key("text"));
-        }
-    }
-
-    // ========================================================================
-    // KV Cache Invariant Tests (adapted to sibling-Reasoning)
-    //
-    // These tests enforce prefix stability and correct turn ordering for the
-    // Responses API input construction. Prompt caching (server-side prefix
-    // match) requires that request N's serialised input is a strict prefix
-    // of request N+1's. Any re-ordering of items -- especially reasoning
-    // items -- destroys the prefix and tanks the cache hit rate.
-    //
-    // The invariant asserted is `&input2[..input1.len()] == input1` for
-    // every pair of consecutive turns.
-    //
-    // In the sibling-Reasoning refactor, reasoning rides as
-    // `ConversationItem::Reasoning(rs::ReasoningItem)` siblings in the flat
-    // ordered `items` list. The serialized wire shape is produced by the
-    // `From<&ConversationRequest> for rs::CreateResponse` impl with no
-    // placeholder/splice dance. The old `__RAW_OUTPUT_PLACEHOLDER_`
-    // / `extract_raw_input_items` / `splice_raw_input_items` tests are
-    // structurally obsolete and are not ported; the invariants they pinned
-    // are preserved here in a backend-shape-agnostic form.
-    // ========================================================================
-
-    /// Helper: build a sibling Reasoning item with the given id, summary
-    /// text, and optional encrypted_content. This replaces the old
-    /// `assistant_with_raw_output()` helper.
-    fn reasoning_sibling(
-        id: &str,
-        summary_text: &str,
-        encrypted: Option<&str>,
-    ) -> ConversationItem {
-        ConversationItem::Reasoning(rs::ReasoningItem {
-            id: id.to_string(),
-            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                text: summary_text.to_string(),
-            })],
-            content: None,
-            encrypted_content: encrypted.map(str::to_owned),
-            status: None,
-        })
-    }
-
-    /// Helper: serialise the wire `input` array to a Vec of JSON values.
-    fn input_items_json(req: &ConversationRequest) -> Vec<serde_json::Value> {
-        let cr: rs::CreateResponse = req.into();
-        let mut body = serde_json::to_value(&cr).unwrap();
-        patch_reasoning_text_types(&mut body);
-        body["input"].as_array().cloned().unwrap_or_default()
-    }
-
-    /// Helper: one-line "kind:identifier" summary for readable assertions.
-    fn summarise_input(items: &[serde_json::Value]) -> Vec<String> {
-        items
-            .iter()
-            .map(|v| {
-                let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
-                if let Some(role) = v.get("role").and_then(|r| r.as_str()) {
-                    let text = v
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("<non-text>");
-                    format!("{role}:{text}")
-                } else if ty == "reasoning" {
-                    let id = v.get("id").and_then(|i| i.as_str()).unwrap_or("?");
-                    format!("reasoning:{id}")
-                } else if ty == "function_call" {
-                    let cid = v.get("call_id").and_then(|c| c.as_str()).unwrap_or("?");
-                    format!("function_call:{cid}")
-                } else {
-                    format!("type:{ty}")
-                }
-            })
-            .collect()
-    }
-
-    /// Assert that base request's serialized input is a byte-stable prefix
-    /// of the extended request's.
-    fn assert_prefix_stable(base: &ConversationRequest, extended: &ConversationRequest) {
-        let base_input = input_items_json(base);
-        let ext_input = input_items_json(extended);
-        assert!(
-            ext_input.len() >= base_input.len(),
-            "extended request has fewer input items ({}) than base ({})",
-            ext_input.len(),
-            base_input.len(),
-        );
-        assert_eq!(
-            &ext_input[..base_input.len()],
-            base_input.as_slice(),
-            "serialized input of request N must be a prefix of request N+1.\n\
-             Base ({} items): {:?}\nExtended ({} items): {:?}\n\
-             First divergence at index {}",
-            base_input.len(),
-            summarise_input(&base_input),
-            ext_input.len(),
-            summarise_input(&ext_input),
-            base_input
-                .iter()
-                .zip(ext_input.iter())
-                .position(|(a, b)| a != b)
-                .unwrap_or(base_input.len()),
-        );
-    }
-
-    /// Cache-prefix invariant: with a single Reasoning sibling before an
-    /// Assistant, the wire input must have exactly one typed reasoning
-    /// item at that position -- not a placeholder, not a duplicate, and
-    /// not flattened into the assistant message.
-    #[test]
-    fn build_responses_input_single_reasoning_sibling_lands_inline() {
-        let req = ConversationRequest::from_items(vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("u1"),
-            reasoning_sibling("r_abc", "thinking", Some("enc1")),
-            ConversationItem::assistant("hi"),
-        ]);
-
-        let input = input_items_json(&req);
-        let summary = summarise_input(&input);
-
-        // Expected: [system, user, reasoning, assistant]
-        assert_eq!(summary.len(), 4, "got: {summary:?}");
-        assert_eq!(summary[0], "system:sys");
-        assert_eq!(summary[1], "user:u1");
-        assert_eq!(summary[2], "reasoning:r_abc");
-        assert_eq!(summary[3], "assistant:hi");
-
-        // No placeholder strings must appear (post-refactor invariant).
-        let body_str = serde_json::to_string(&input).unwrap();
-        assert!(
-            !body_str.contains("__RAW_OUTPUT_PLACEHOLDER_"),
-            "no placeholder strings post-refactor"
-        );
-
-        // The reasoning item must carry encrypted_content verbatim.
-        assert_eq!(
-            input[2].get("encrypted_content").and_then(|v| v.as_str()),
-            Some("enc1"),
-        );
-    }
-
-    /// Cache-prefix regression: with MULTIPLE turns each carrying a Reasoning
-    /// sibling, each reasoning must appear at its own interleaved
-    /// position -- NOT all bunched at the end. This is the exact bug
-    /// class caused by the earlier placeholder design,
-    /// now structurally impossible because reasoning lives in the
-    /// `Vec<ConversationItem>` directly.
-    #[test]
-    fn build_responses_input_multi_turn_reasoning_ordering() {
-        let req = ConversationRequest::from_items(vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("u1"),
-            reasoning_sibling("r1", "think 1", Some("enc1")),
-            ConversationItem::assistant("a1"),
-            ConversationItem::tool_result("tc1", "result1"),
-            ConversationItem::user("u2"),
-            reasoning_sibling("r2", "think 2", Some("enc2")),
-            ConversationItem::assistant("a2"),
-            ConversationItem::tool_result("tc2", "result2"),
-            ConversationItem::user("u3"),
-            reasoning_sibling("r3", "think 3", Some("enc3")),
-            ConversationItem::assistant("a3"),
-        ]);
-
-        let input = input_items_json(&req);
-        let summary = summarise_input(&input);
-
-        // INVARIANT 1: There must be exactly N reasoning items for N
-        // siblings. The pre-refactor bug produced only 1.
-        let reasoning_count = summary
-            .iter()
-            .filter(|s| s.starts_with("reasoning:"))
-            .count();
-        assert_eq!(
-            reasoning_count, 3,
-            "must have 3 reasoning items, got {reasoning_count}. Items: {summary:?}"
-        );
-
-        // INVARIANT 2: Each reasoning must be BETWEEN its corresponding
-        // user message and the NEXT user message. Without this check,
-        // all reasoning items bunched at the end would still pass count.
-        let user_positions: Vec<usize> = summary
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.starts_with("user:"))
-            .map(|(i, _)| i)
-            .collect();
-        let reasoning_positions: Vec<usize> = summary
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.starts_with("reasoning:"))
-            .map(|(i, _)| i)
-            .collect();
-
-        assert_eq!(user_positions.len(), 3);
-        assert_eq!(reasoning_positions.len(), 3);
-
-        for (i, rp) in reasoning_positions.iter().enumerate() {
-            assert!(
-                *rp > user_positions[i],
-                "reasoning {i} at position {rp} must be after user {i} at position {}. \
-                 Items: {summary:?}",
-                user_positions[i]
-            );
-            if i + 1 < user_positions.len() {
-                assert!(
-                    *rp < user_positions[i + 1],
-                    "reasoning {i} at position {rp} must be before user {} at position {}. \
-                     Items: {summary:?}",
-                    i + 1,
-                    user_positions[i + 1]
-                );
-            }
-        }
-
-        // INVARIANT 3: encrypted_content per item is preserved 1:1.
-        let mut enc_seen: Vec<&str> = Vec::new();
-        for v in &input {
-            if v.get("type").and_then(|t| t.as_str()) == Some("reasoning")
-                && let Some(enc) = v.get("encrypted_content").and_then(|s| s.as_str())
-            {
-                enc_seen.push(enc);
-            }
-        }
-        assert_eq!(enc_seen, vec!["enc1", "enc2", "enc3"]);
-    }
-
     /// INVARIANT: prefix stability across turns without reasoning.
     /// Context and instructions must be prefixed once and consistently
     /// across requests.
@@ -11143,67 +10221,6 @@ mod tests {
         let req3 = ConversationRequest::from_items(turn3);
 
         assert_prefix_stable(&req2, &req3);
-    }
-
-    /// `BackendToolCall` items round-trip through the wire as their
-    /// typed Item shape; their serialized position must be stable across
-    /// turns. (This is the structural analogue of the old
-    /// `test_backend_tool_call_skip_with_raw_output`: in the new model,
-    /// BackendToolCall items are never "skipped" because there is no
-    /// raw_output decompose-vs-passthrough split -- they are always
-    /// passed through inline. We test that all BackendToolCall items
-    /// survive serialization at their position.)
-    #[test]
-    fn backend_tool_call_position_stable() {
-        let ws_a = ConversationItem::BackendToolCall(BackendToolCallItem {
-            kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
-                id: "ws_a".to_string(),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: "alpha".to_string(),
-                    sources: Some(vec![]),
-                }),
-            }),
-        });
-        let ws_b = ConversationItem::BackendToolCall(BackendToolCallItem {
-            kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
-                id: "ws_b".to_string(),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: "beta".to_string(),
-                    sources: Some(vec![]),
-                }),
-            }),
-        });
-
-        let req = ConversationRequest::from_items(vec![
-            ConversationItem::user("u1"),
-            reasoning_sibling("r1", "think a", Some("enc_a")),
-            ws_a,
-            ConversationItem::assistant("a1"),
-            ConversationItem::user("u2"),
-            ws_b,
-            ConversationItem::assistant("a2"),
-        ]);
-
-        let input = input_items_json(&req);
-        let ws_items: Vec<&serde_json::Value> = input
-            .iter()
-            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("web_search_call"))
-            .collect();
-
-        // Both backend tool calls must survive serialization.
-        assert_eq!(
-            ws_items.len(),
-            2,
-            "both web_search_call items must survive; got: {:?}",
-            summarise_input(&input)
-        );
-        let ids: Vec<&str> = ws_items
-            .iter()
-            .filter_map(|v| v.get("id").and_then(|i| i.as_str()))
-            .collect();
-        assert_eq!(ids, vec!["ws_a", "ws_b"], "ordering preserved");
     }
 
     /// Canary for `serde_json`'s `preserve_order` feature.

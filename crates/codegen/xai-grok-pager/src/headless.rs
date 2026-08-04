@@ -185,6 +185,12 @@ pub struct HeadlessOptions {
     pub yolo: bool,
     pub trust: bool,
     pub output_format: OutputFormat,
+    /// Accepted for CLI compatibility with upstream but not supported here:
+    /// it only ever applied to upstream's `streaming-messages-json` reducer
+    /// output, and turbo keeps its own `streaming-json` schemaVersion-2 event
+    /// vocabulary instead. Plumbed (rather than dropped) so the flag is
+    /// rejected loudly instead of parsing into a silent no-op.
+    pub include_partial_messages: bool,
     pub json_schema: Option<serde_json::Value>,
     pub model: Option<String>,
     pub rules: Option<String>,
@@ -1735,6 +1741,21 @@ pub async fn run_single_turn(
              first (e.g. `turbo worktree` or `git worktree add`) and pass \
              --confine <path> (and optionally --cwd <path>). --worktree-ref was \
              also dropped in this mode."
+        );
+    }
+
+    // Upstream gates partial-message deltas on its `streaming-messages-json`
+    // reducer, which turbo does not carry (see `OutputFormat`: turbo emits its
+    // own `streaming-json` schemaVersion-2 events). Accepting the flag and
+    // emitting nothing would be a silent lie to a harness that asked for
+    // deltas, so refuse it the same way `--worktree` is refused above.
+    if options.include_partial_messages {
+        anyhow::bail!(
+            "--include-partial-messages is not supported in headless mode; it \
+             applies to upstream's streaming-messages-json output, which turbo \
+             does not emit. Use --output-format streaming-json and consume the \
+             tool_call/tool_call_update/tool_result events instead \
+             (docs/streaming-json.schema.json)."
         );
     }
 

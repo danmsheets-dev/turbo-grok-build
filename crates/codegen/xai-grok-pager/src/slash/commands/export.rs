@@ -188,7 +188,8 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
-                session_cwd: None,
+            usage_command_visible: true,
+            session_cwd: None,
             pager_state: PagerLocalSnapshot::default(),
         }
     }
@@ -214,7 +215,8 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
-                session_cwd: None,
+            usage_command_visible: true,
+            session_cwd: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         let cmd = ExportCommand;
@@ -236,7 +238,8 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
-                session_cwd: None,
+            usage_command_visible: true,
+            session_cwd: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         let cmd = ExportCommand;
