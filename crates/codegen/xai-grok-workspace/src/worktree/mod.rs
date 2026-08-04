@@ -490,12 +490,32 @@ pub const META_KEY_LABEL: &str = "label";
 /// Metadata key for whether the label was user-provided.
 pub const META_KEY_USER_PROVIDED: &str = "user_provided";
 
+/// Whether a *already sanitized* label may be used as a directory name under
+/// `~/.grok/worktrees/`.
+///
+/// [`sanitize_label`] already reduces its input to `[a-z0-9-]`, which kills
+/// every traversal and separator case on its own. What it does **not** catch is
+/// Windows: `sanitize_label("CON")` returns `"con"`, and `con`, `nul`, `aux`,
+/// `prn`, `com1`…`com9`, `lpt1`…`lpt9` are *device* names on Win32. A worktree
+/// checked out into `~/.grok/worktrees/<repo>/nul` would silently write every
+/// file to the bit bucket and report success — a Turbo-only failure mode, since
+/// the same label is a perfectly ordinary directory on Linux and macOS.
+///
+/// Shares one definition of "safe segment" with the subagent land/diff path via
+/// [`xai_tool_types::is_safe_path_segment`], so the two never drift apart.
+fn label_is_usable_dir_name(sanitized: &str) -> bool {
+    xai_tool_types::is_safe_path_segment(sanitized)
+}
+
 /// Sanitize a user-provided label into a filesystem-safe directory name.
 ///
 /// Lowercases, replaces spaces/underscores with hyphens, strips non-alphanumeric
 /// characters (except hyphens -- dots are removed by this filter, making `.` and
 /// `..` impossible), deduplicates consecutive hyphens, trims leading/trailing
 /// hyphens, and truncates to [`MAX_LABEL_LEN`] characters.
+///
+/// Callers must still run the result through `label_is_usable_dir_name` before
+/// joining it: sanitizing cannot rule out a Windows reserved device name.
 pub fn sanitize_label(name: &str) -> String {
     let lower = name.to_lowercase();
     let mut out = String::with_capacity(lower.len());
@@ -554,14 +574,23 @@ pub fn auto_label() -> String {
 ///
 /// If the user provides a non-empty name, sanitize it; otherwise generate
 /// an automatic label.
+///
+/// A sanitized label that is still unusable as a directory name -- empty, or a
+/// Windows reserved device name such as `con`/`nul`/`com1` -- falls back to
+/// [`auto_label`] rather than being joined. Falling back is safe *here* (and
+/// only here) because the label is decoration, not identity: the worktree's
+/// identity is its `worktrees.db` record, and [`resolve_label_collision`]
+/// already assumes two requests may want the same label. Anywhere an id is the
+/// identity (subagent ids, task ids) the rule is the opposite -- reject, never
+/// substitute -- or two distinct ids would land on one directory.
 pub fn derive_worktree_label(user_input: Option<&str>) -> String {
     match user_input {
         Some(name) if !name.trim().is_empty() => {
             let sanitized = sanitize_label(name);
-            if sanitized.is_empty() {
-                auto_label()
-            } else {
+            if label_is_usable_dir_name(&sanitized) {
                 sanitized
+            } else {
+                auto_label()
             }
         }
         _ => auto_label(),
@@ -588,10 +617,13 @@ pub fn repo_slug(git_root: &Path) -> String {
     let take = 2.min(components.len());
     let raw = components[components.len() - take..].join("-");
     let slug = sanitize_label(&raw);
-    if slug.is_empty() {
-        "repo".to_owned()
-    } else {
+    // A repo checked out as `.../aux` or `.../nul` on Linux would sanitize to a
+    // Win32 device name and make the whole worktrees group directory unusable on
+    // Windows. Fall back to the generic bucket instead.
+    if label_is_usable_dir_name(&slug) {
         slug
+    } else {
+        "repo".to_owned()
     }
 }
 
@@ -974,11 +1006,15 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     );
     let session_id_for_builder = session_id.clone();
     let btrfs_delegate = btrfs_delegate_from_env();
+    // Must mirror `derive_worktree_label`'s accept condition exactly, or the
+    // metadata would claim `user_provided: true` for a label that was actually
+    // discarded (empty after sanitizing, or a Windows reserved device name) and
+    // replaced by an auto-generated one.
     let user_provided_label = req.worktree_path.is_none()
         && req
             .label
             .as_ref()
-            .is_some_and(|n| !n.trim().is_empty() && !sanitize_label(n).is_empty());
+            .is_some_and(|n| !n.trim().is_empty() && label_is_usable_dir_name(&sanitize_label(n)));
     let label_for_meta = label_from_path(&worktree_path_str);
     let label_metadata = build_label_metadata(&label_for_meta, user_provided_label);
     let report = match tokio::task::spawn_blocking(move || {
@@ -3285,5 +3321,82 @@ mod tests {
             dest.exists(),
             "the winning creator must have created the worktree"
         );
+    }
+}
+
+#[cfg(test)]
+mod label_path_guard_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_labels_survive_sanitizing_and_the_guard() {
+        for (input, expected) in [
+            ("My Feature", "my-feature"),
+            ("fix_the_bug", "fix-the-bug"),
+            ("RC15", "rc15"),
+        ] {
+            let sanitized = sanitize_label(input);
+            assert_eq!(sanitized, expected);
+            assert!(
+                label_is_usable_dir_name(&sanitized),
+                "{sanitized:?} should be usable"
+            );
+            assert_eq!(derive_worktree_label(Some(input)), expected);
+        }
+    }
+
+    #[test]
+    fn windows_device_labels_fall_back_to_an_auto_label() {
+        // `sanitize_label` happily produces these — they are pure `[a-z0-9]` —
+        // but each names a Win32 device, so a worktree checked out into
+        // `~/.grok/worktrees/<repo>/nul` would write to the bit bucket and
+        // report success. The guard has to catch what sanitizing cannot.
+        for device in ["CON", "con", "nul", "AUX", "prn", "com1", "LPT9"] {
+            let sanitized = sanitize_label(device);
+            assert!(
+                !sanitized.is_empty(),
+                "sanitizing alone does not reject {device:?}"
+            );
+            assert!(
+                !label_is_usable_dir_name(&sanitized),
+                "{device:?} must not be usable as a directory name"
+            );
+            let derived = derive_worktree_label(Some(device));
+            assert_ne!(derived, sanitized, "{device:?} must not be joined verbatim");
+            assert!(
+                label_is_usable_dir_name(&derived),
+                "auto-label fallback {derived:?} must itself be usable"
+            );
+        }
+    }
+
+    #[test]
+    fn traversal_and_separator_labels_never_reach_a_join() {
+        for hostile in ["..", ".", "../../etc", "..\\windows", "a/b", "C:\\Windows"] {
+            let derived = derive_worktree_label(Some(hostile));
+            assert!(
+                label_is_usable_dir_name(&derived),
+                "{hostile:?} produced unusable label {derived:?}"
+            );
+            assert!(!derived.contains('/') && !derived.contains('\\'));
+            assert_ne!(derived, "..");
+            assert_ne!(derived, ".");
+        }
+    }
+
+    #[test]
+    fn auto_label_is_always_a_usable_directory_name() {
+        assert!(label_is_usable_dir_name(&auto_label()));
+        assert!(label_is_usable_dir_name(&derive_worktree_label(None)));
+        assert!(label_is_usable_dir_name(&derive_worktree_label(Some("   "))));
+    }
+
+    #[test]
+    fn repo_slug_falls_back_when_the_directory_name_is_a_device_name() {
+        assert_eq!(repo_slug(Path::new("/srv/nul")), "srv-nul");
+        // A single-component root named after a device must not become the
+        // worktrees group directory.
+        assert_eq!(repo_slug(Path::new("/aux")), "repo");
+        assert_eq!(repo_slug(Path::new("/home/user/project")), "user-project");
     }
 }

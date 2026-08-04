@@ -3169,6 +3169,9 @@ mod tests {
                 let context = RequestPathContext {
                     real_cwd: child.path().to_path_buf(),
                     display_cwd: None,
+                    // No session-scoped confine root: this case exercises
+                    // identity-keyed rule matching, not confinement.
+                    confine_root: None,
                 };
 
                 // Absolute parent-workspace file: the rule keys on identity

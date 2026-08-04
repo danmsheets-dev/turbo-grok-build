@@ -97,6 +97,18 @@ rustflags = [
 # env vars below for those platforms.
 # See: https://github.com/tikv/jemallocator/issues/122
 [env]
+# Rust-spawned threads (libtest's per-test threads, tokio workers) default to a
+# 2 MiB stack, while the PE main thread gets 16 MiB from `/STACK` above. The
+# 0.2.119 prompt-turn future is large enough to exhaust 2 MiB, so the shell test
+# suite aborts with STATUS_STACK_OVERFLOW partway through. Match the main-thread
+# reserve so threads and main agree.
+#
+# Scope: this reaches processes cargo launches (tests, `cargo run`, build
+# scripts) — NOT the environment of a shipped `turbo.exe`. Whether the release
+# binary needs an explicit tokio `thread_stack_size` is tracked separately;
+# upstream's answer (`box_turn_future`, community 14c3799a1) is entangled with
+# the Hypercore turn path Turbo does not carry, so it was not taken here.
+RUST_MIN_STACK = "16777216"
 # `audiopus_sys` otherwise prefers a host pkg-config result even with its
 # `static` feature. Force the pinned bundled Opus source so normal and release
 # builds use the same ABI/license payload on every supported target.

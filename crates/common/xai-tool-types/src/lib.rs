@@ -1,11 +1,19 @@
 //! Canonical, extensible tool types.
 mod ext;
+mod path_guard;
 mod schema_utils;
 pub mod serde_lenient;
 mod task;
 mod types;
 
 pub use ext::Extensions;
+// Path-segment guards for untrusted ids. They live in this crate — not in a
+// tools crate — because both `xai-grok-tools` (subagent land/diff/discard) and
+// `xai-grok-workspace` (worktree directory naming) must apply the *same* rules;
+// two independent copies would drift and one of them would be the hole.
+pub use path_guard::{
+    MAX_SAFE_PATH_SEGMENT_LEN, is_safe_agent_name, is_safe_path_segment, is_safe_task_id,
+};
 pub use schema_utils::parse_arguments_from_schema_lossy;
 pub use serde_lenient::{
     deserialize_lenient_bool, deserialize_lenient_option_bool, lenient_bool_from_json,

@@ -4,6 +4,13 @@
 //! only reads releases from `danmsheets-dev/turbo-grok-build` and only activates
 //! binaries below `~/.turbo` (or `TURBO_SHARE_DIR` in debug/test builds).
 //! Nothing here calls the x.ai/npm updater or writes `~/.grok/bin/grok`.
+//!
+//! Release archives ship more than the executable: the release workflow copies
+//! the whole `bundled/` tree (skills, agents, prompts) next to `turbo` /
+//! `turbo.exe`. The archive reader therefore accepts a `bundled/**` subtree at
+//! arbitrary depth and activates it at `<TURBO_HOME>/bundled` — staged into a
+//! sibling directory first, then swapped in with renames so a crash can never
+//! leave a half-written bundle live.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -34,7 +41,19 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_AUXILIARY_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 32;
+/// A real Turbo archive is not just the binary plus a licence: it carries the
+/// whole `bundled/` tree, which is thousands of small markdown files. The old
+/// limit of 32 was sized for the binary-only layout and rejected every real
+/// release.
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
+const MAX_BUNDLE_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_BUNDLE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_BUNDLE_FILES: usize = 4096;
+/// Depth cap for archive entries. Deep nesting is never legitimate here and is
+/// the cheapest way to blow past Windows' 260-char `MAX_PATH` once the staging
+/// prefix is prepended.
+const MAX_PATH_DEPTH: usize = 32;
+const BUNDLE_DIR_NAME: &str = "bundled";
 const INSTALLER_NAME: &str = "community-github";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -114,14 +133,29 @@ impl Drop for UpdateLock {
 }
 
 /// Removes a temporary artifact unless ownership was explicitly consumed.
+/// Staging a `bundled/` tree means the guard must be able to clean up whole
+/// directories, not just files, so the kind is recorded at construction.
 struct TempArtifact {
     path: PathBuf,
+    is_dir: bool,
     keep: bool,
 }
 
 impl TempArtifact {
-    fn new(path: PathBuf) -> Self {
-        Self { path, keep: false }
+    fn new_file(path: PathBuf) -> Self {
+        Self {
+            path,
+            is_dir: false,
+            keep: false,
+        }
+    }
+
+    fn new_dir(path: PathBuf) -> Self {
+        Self {
+            path,
+            is_dir: true,
+            keep: false,
+        }
     }
 
     fn keep(mut self) -> PathBuf {
@@ -132,10 +166,43 @@ impl TempArtifact {
 
 impl Drop for TempArtifact {
     fn drop(&mut self) {
-        if !self.keep {
+        if self.keep {
+            return;
+        }
+        if self.is_dir {
+            let _ = std::fs::remove_dir_all(&self.path);
+        } else {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+fn path_exists_or_symlink(path: &Path) -> bool {
+    path.exists() || path.is_symlink()
+}
+
+/// Joins a rollback failure onto the failure that triggered it. Both matter to
+/// the operator: the first says what broke, the second says what state the
+/// install was left in.
+fn combine_errors(primary: anyhow::Error, secondary: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{primary:#}\n\nalso: {secondary:#}")
+}
+
+/// Moves whatever currently occupies `path` out of the way so a restore can
+/// rename its replacement in. Returns the aside path when something moved.
+fn move_active_aside(path: &Path, suffix: &str) -> Result<Option<PathBuf>> {
+    if !path_exists_or_symlink(path) {
+        return Ok(None);
+    }
+    let doomed = unique_sibling(path, suffix);
+    std::fs::rename(path, &doomed).with_context(|| {
+        format!(
+            "moving active path {} aside to {} for rollback",
+            path.display(),
+            doomed.display()
+        )
+    })?;
+    Ok(Some(doomed))
 }
 
 pub(crate) fn turbo_home() -> PathBuf {
@@ -159,6 +226,24 @@ pub(crate) fn hyper_home() -> PathBuf {
 pub(crate) fn managed_application() -> PathBuf {
     let name = if cfg!(windows) { "turbo.exe" } else { "turbo" };
     hyper_home().join("bin").join(name)
+}
+
+/// Shared Grok config home (`$GROK_HOME`, default `~/.grok`).
+///
+/// Deliberately *not* [`turbo_home`]: binaries and update state are Turbo's own
+/// (`~/.turbo`), but the bundle is runtime content and the agent/skill loaders
+/// read it from the Grok home (`xai_grok_agent` discovery and skill lookup both
+/// resolve `<grok home>/bundled/...`). `install.sh` activates the bundle at
+/// `${GROK_HOME:-$HOME/.grok}/bundled` for the same reason; the in-app updater
+/// must land in exactly the same place or an update would silently orphan the
+/// skills the installer put there.
+fn community_grok_home() -> PathBuf {
+    xai_grok_shell::util::grok_home::grok_home()
+}
+
+/// Activation target for the archive's `bundled/` tree.
+fn managed_bundle_path() -> PathBuf {
+    community_grok_home().join(BUNDLE_DIR_NAME)
 }
 
 fn state_path() -> PathBuf {
@@ -268,42 +353,96 @@ fn unique_sibling(base: &Path, suffix: &str) -> PathBuf {
 
 fn write_state_atomic(state: &UpdateState) -> Result<()> {
     ensure_safe_layout()?;
-    let path = state_path();
-    reject_symlink(&path, "update state")?;
-    let tmp = unique_sibling(&path, "tmp");
+    let mut bytes = serde_json::to_vec_pretty(state)?;
+    bytes.push(b'\n');
+    write_state_bytes_atomic(&state_path(), &bytes)
+}
+
+/// Byte-level state publish. Split out from [`write_state_atomic`] so install
+/// rollback can put the *previous* state file back verbatim instead of
+/// re-deriving it from a struct it may no longer be able to reconstruct.
+fn write_state_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    reject_symlink(path, "update state")?;
+    let tmp = unique_sibling(path, "tmp");
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&tmp)
         .with_context(|| format!("creating {}", tmp.display()))?;
-    let tmp_guard = TempArtifact::new(tmp.clone());
-    serde_json::to_writer_pretty(&mut file, state)?;
-    file.write_all(b"\n")?;
+    let tmp_guard = TempArtifact::new_file(tmp.clone());
+    file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
 
     #[cfg(windows)]
     {
-        let backup = unique_sibling(&path, "old");
+        // Windows `rename` cannot replace an existing file, so publish is a
+        // move-aside/rename/cleanup sequence with restore on failure.
+        let backup = unique_sibling(path, "old");
         let had_old = path.exists();
         if had_old {
-            std::fs::rename(&path, &backup).with_context(|| {
+            std::fs::rename(path, &backup).with_context(|| {
                 format!("moving existing Turbo update state {}", path.display())
             })?;
         }
-        if let Err(error) = std::fs::rename(&tmp, &path) {
-            if had_old {
-                let _ = std::fs::rename(&backup, &path);
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let activation_error =
+                anyhow::Error::new(error).context(format!("activating {}", path.display()));
+            if had_old && let Err(restore_error) = std::fs::rename(&backup, path) {
+                return Err(combine_errors(
+                    activation_error,
+                    anyhow::Error::new(restore_error).context(format!(
+                        "restoring previous Turbo update state from {} (backup preserved)",
+                        backup.display()
+                    )),
+                ));
             }
-            return Err(error).with_context(|| format!("activating {}", path.display()));
+            return Err(activation_error);
         }
         let _ = std::fs::remove_file(backup);
     }
     #[cfg(not(windows))]
-    std::fs::rename(&tmp, &path).with_context(|| format!("activating {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("activating {}", path.display()))?;
 
     let _ = tmp_guard.keep();
     Ok(())
+}
+
+/// Captures the exact previous update-state bytes *before* any activation
+/// mutation. Anything other than "missing" or "readable regular file" fails
+/// closed so a symlinked or directory state path cannot be silently clobbered.
+fn capture_previous_state_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    reject_symlink(path, "update state")?;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                bail!(
+                    "Turbo update state is not a regular file: {}",
+                    path.display()
+                );
+            }
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading Turbo update state {}", path.display()))?;
+            Ok(Some(bytes))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspecting Turbo update state {}", path.display()))
+        }
+    }
+}
+
+fn restore_state_bytes(path: &Path, previous: Option<&[u8]>) -> Result<()> {
+    match previous {
+        Some(bytes) => write_state_bytes_atomic(path, bytes),
+        None => {
+            if path_exists_or_symlink(path) {
+                std::fs::remove_file(path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[allow(unreachable_code)]
@@ -814,25 +953,139 @@ async fn download_archive(candidate: &Candidate, destination: &Path) -> Result<S
     Ok(digest)
 }
 
-fn normalized_root_entry(path: &Path) -> Result<Option<String>> {
-    let raw = path.to_string_lossy();
-    if raw.contains('\\') {
-        bail!("archive entry uses a backslash path: {raw}");
+/// Windows refuses to create these names (with or without an extension) in any
+/// directory, and some of them are devices rather than files. An archive that
+/// contains one is either hostile or broken; either way it must never reach a
+/// `create_new` call on a Turbo user's machine. Checked on every platform so a
+/// Linux CI run catches a bad archive before Windows users do.
+fn is_windows_reserved_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn validate_path_component(name: &str, raw: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." {
+        bail!("archive entry has an invalid path component: {raw}");
     }
-    let mut name: Option<String> = None;
+    if name.contains('\0') {
+        bail!("archive entry has an invalid path component: {raw}");
+    }
+    // `:` would be an alternate-data-stream / drive separator on Windows.
+    if name.contains(':') {
+        bail!("archive entry component contains ':': {raw}");
+    }
+    // Windows silently strips trailing dots and spaces, so `evil.` and `evil `
+    // both resolve to `evil` — a rename-time collision the checks above cannot
+    // see.
+    if name.ends_with('.') || name.ends_with(' ') {
+        bail!("archive entry component has trailing '.' or space: {raw}");
+    }
+    if is_windows_reserved_device(name) {
+        bail!("archive entry uses a Windows reserved device name: {raw}");
+    }
+    Ok(())
+}
+
+/// Safely normalizes an archive entry into relative path components.
+///
+/// Multiple `Normal` components are allowed (that is the whole point: a
+/// `bundled/**` tree is nested), `.` is ignored, and absolute / rooted /
+/// drive-prefixed / `..` paths, empty and reserved names, and excessive depth
+/// are rejected. Returns `None` for the archive root (`.` or empty), which tar
+/// producers emit as a directory placeholder.
+///
+/// `allow_backslash_as_separator`: zip producers (PowerShell's `Copy-Item` +
+/// `Compress-Archive`, older tools) may emit `\` separators, so for zip we fold
+/// them to `/` and then apply the same component rules. Tar entry names are
+/// defined to use `/`, so a literal backslash there is a suspicious filename
+/// and stays rejected outright.
+fn normalize_archive_path(
+    raw: &str,
+    allow_backslash_as_separator: bool,
+) -> Result<Option<Vec<String>>> {
+    if raw.contains('\0') {
+        bail!("archive entry contains a NUL byte");
+    }
+    let normalized = if allow_backslash_as_separator {
+        raw.replace('\\', "/")
+    } else {
+        if raw.contains('\\') {
+            bail!("archive entry uses a backslash path: {raw}");
+        }
+        raw.to_string()
+    };
+    // `Path::components` on Unix does not treat `C:` as a prefix, so a drive
+    // spec would survive as a `Normal` component and only turn into an absolute
+    // path once it reached Windows. Reject it explicitly on every platform.
+    if normalized.chars().nth(1) == Some(':') {
+        bail!("archive entry has a Windows drive prefix: {raw}");
+    }
+    let path = Path::new(&normalized);
+    let mut parts = Vec::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::Normal(part) if name.is_none() => {
-                name = Some(part.to_string_lossy().to_string());
+            Component::Normal(part) => {
+                let name = part.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("archive entry has a non-UTF-8 component: {raw}")
+                })?;
+                validate_path_component(name, raw)?;
+                if name.contains('/') || (!allow_backslash_as_separator && name.contains('\\')) {
+                    bail!("archive entry has an invalid path component: {raw}");
+                }
+                parts.push(name.to_string());
             }
-            Component::Normal(_) => bail!("archive entry is nested: {raw}"),
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                bail!("archive entry escapes its root: {raw}")
+                bail!("archive entry escapes its root: {raw}");
             }
         }
     }
-    Ok(name)
+    if parts.len() > MAX_PATH_DEPTH {
+        bail!("archive entry exceeds the maximum path depth ({MAX_PATH_DEPTH}): {raw}");
+    }
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parts))
+}
+
+/// Duplicate detection key. Case-folded because NTFS and APFS are usually
+/// case-insensitive: `bundled/A.md` and `bundled/a.md` are two archive entries
+/// but one file on disk, and the second `create_new` would fail mid-extract.
+fn path_key_casefold(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn display_parts(parts: &[String]) -> String {
+    parts.join("/")
 }
 
 fn auxiliary_entry_allowed(name: &str) -> bool {
@@ -842,163 +1095,587 @@ fn auxiliary_entry_allowed(name: &str) -> bool {
     )
 }
 
-#[cfg(unix)]
-fn extract_tar_binary(archive_path: &Path, destination: &Path, binary_entry: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveEntryClass {
+    /// Archive root `.` / empty (tar directory placeholder).
+    RootPlaceholder,
+    /// Root-level managed binary (`turbo` / `turbo.exe`).
+    Binary,
+    /// Root-level licence/notice allowlist (drained, never deployed).
+    Notice,
+    /// The `bundled` directory entry itself.
+    BundleRootDir,
+    /// A directory under `bundled/`.
+    BundleDir,
+    /// A regular file under `bundled/`.
+    BundleFile,
+}
 
-    let archive_file = File::open(archive_path)?;
+/// The archive layout contract, in one place: exactly one `turbo` binary at the
+/// root, an allowlist of root notices, and an optional `bundled/**` subtree.
+/// Anything else — including nested paths outside `bundled/` — is rejected.
+fn classify_archive_entry(
+    parts: Option<&[String]>,
+    binary_entry: &str,
+) -> Result<ArchiveEntryClass> {
+    let Some(parts) = parts else {
+        return Ok(ArchiveEntryClass::RootPlaceholder);
+    };
+    match parts.len() {
+        0 => Ok(ArchiveEntryClass::RootPlaceholder),
+        1 => {
+            let name = &parts[0];
+            if name == binary_entry {
+                Ok(ArchiveEntryClass::Binary)
+            } else if auxiliary_entry_allowed(name) {
+                Ok(ArchiveEntryClass::Notice)
+            } else if name == BUNDLE_DIR_NAME {
+                Ok(ArchiveEntryClass::BundleRootDir)
+            } else {
+                bail!("Turbo archive contains unexpected root entry {name}");
+            }
+        }
+        _ => {
+            if parts[0] != BUNDLE_DIR_NAME {
+                bail!(
+                    "Turbo archive contains unexpected nested entry {}",
+                    display_parts(parts)
+                );
+            }
+            // Every remaining component was already validated by
+            // `normalize_archive_path`, so the join below cannot escape.
+            Ok(ArchiveEntryClass::BundleFile)
+        }
+    }
+}
+
+/// Result of a successful archive extraction.
+struct ExtractedArchive {
+    binary: PathBuf,
+    /// Stage directory whose *contents* are the `bundled/` tree (the `bundled`
+    /// component itself is not part of the path). `None` when the archive did
+    /// not ship a bundle, e.g. older releases and the binary-only test fixture.
+    bundle_stage: Option<PathBuf>,
+    _binary_guard: TempArtifact,
+    _bundle_guard: Option<TempArtifact>,
+}
+
+/// Running totals enforced across an extraction so a zip bomb cannot expand
+/// into the Turbo home one small entry at a time.
+struct ExtractLimits {
+    entries: usize,
+    bundle_files: usize,
+    bundle_bytes: u64,
+}
+
+impl ExtractLimits {
+    fn new() -> Self {
+        Self {
+            entries: 0,
+            bundle_files: 0,
+            bundle_bytes: 0,
+        }
+    }
+
+    fn count_entry(&mut self) -> Result<()> {
+        self.entries += 1;
+        if self.entries > MAX_ARCHIVE_ENTRIES {
+            bail!("Turbo archive contains too many entries (limit {MAX_ARCHIVE_ENTRIES})");
+        }
+        Ok(())
+    }
+
+    fn count_bundle_file(&mut self, size: u64) -> Result<()> {
+        self.bundle_files += 1;
+        if self.bundle_files > MAX_BUNDLE_FILES {
+            bail!("Turbo archive bundle contains too many files (limit {MAX_BUNDLE_FILES})");
+        }
+        self.bundle_bytes = self.bundle_bytes.saturating_add(size);
+        if self.bundle_bytes > MAX_BUNDLE_TOTAL_BYTES {
+            bail!(
+                "Turbo archive bundle exceeds the {MAX_BUNDLE_TOTAL_BYTES}-byte decompressed limit"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn ensure_parent_dirs(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent directory {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+/// Copies at most `max` bytes and fails if the source had more. The declared
+/// header size is only a hint; this is the check that actually binds.
+fn copy_limited<R: Read>(
+    reader: &mut R,
+    mut writer: impl Write,
+    max: u64,
+    label: &str,
+) -> Result<u64> {
+    let copied = std::io::copy(&mut reader.take(max.saturating_add(1)), &mut writer)?;
+    if copied > max {
+        bail!("{label} exceeds the decompressed size limit ({max} bytes)");
+    }
+    Ok(copied)
+}
+
+fn drain_limited<R: Read>(reader: &mut R, max: u64, label: &str) -> Result<u64> {
+    copy_limited(reader, std::io::sink(), max, label)
+}
+
+fn insert_seen(seen: &mut HashSet<String>, parts: &[String]) -> Result<()> {
+    let key = path_key_casefold(parts);
+    if !seen.insert(key) {
+        bail!(
+            "Turbo archive contains duplicate or case-colliding entry {}",
+            display_parts(parts)
+        );
+    }
+    Ok(())
+}
+
+fn prepare_extract_destinations(
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    binary_entry: &str,
+) -> Result<(PathBuf, PathBuf, TempArtifact, TempArtifact)> {
+    std::fs::create_dir_all(stage_root)
+        .with_context(|| format!("creating extract stage {}", stage_root.display()))?;
+    let binary_path = stage_root.join(binary_entry);
+    // The bundle stage must already sit on the same filesystem as the final
+    // `<TURBO_HOME>/bundled` target so activation is a rename, not a copy — a
+    // copy would not be atomic and could be interrupted half-written.
+    if path_exists_or_symlink(&bundle_stage) {
+        bail!(
+            "bundle stage path already exists: {}",
+            bundle_stage.display()
+        );
+    }
+    std::fs::create_dir_all(&bundle_stage)
+        .with_context(|| format!("creating bundle stage {}", bundle_stage.display()))?;
+    let binary_guard = TempArtifact::new_file(binary_path.clone());
+    let bundle_guard = TempArtifact::new_dir(bundle_stage.clone());
+    Ok((binary_path, bundle_stage, binary_guard, bundle_guard))
+}
+
+fn finish_extracted(
+    binary_path: PathBuf,
+    binary_guard: TempArtifact,
+    bundle_stage: PathBuf,
+    bundle_guard: TempArtifact,
+    wrote_bundle: bool,
+    found_binary: bool,
+    binary_entry: &str,
+) -> Result<ExtractedArchive> {
+    if !found_binary {
+        bail!("Turbo archive does not contain {binary_entry}");
+    }
+    if !binary_path.is_file() {
+        bail!("Turbo binary stage is missing after extraction");
+    }
+    if wrote_bundle {
+        Ok(ExtractedArchive {
+            binary: binary_path,
+            bundle_stage: Some(bundle_stage),
+            _binary_guard: binary_guard,
+            _bundle_guard: Some(bundle_guard),
+        })
+    } else {
+        // No bundle in this archive: dropping the guard removes the empty stage
+        // so activation never publishes an empty `bundled/` over a good one.
+        drop(bundle_guard);
+        Ok(ExtractedArchive {
+            binary: binary_path,
+            bundle_stage: None,
+            _binary_guard: binary_guard,
+            _bundle_guard: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn extract_tar_archive(
+    archive_path: &Path,
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    binary_entry: &str,
+) -> Result<ExtractedArchive> {
+    use std::os::unix::fs::PermissionsExt;
+    use tar::EntryType;
+
+    let (binary_path, bundle_stage, binary_guard, bundle_guard) =
+        prepare_extract_destinations(stage_root, bundle_stage, binary_entry)?;
+
+    let archive_file = File::open(archive_path)
+        .with_context(|| format!("opening Turbo archive {}", archive_path.display()))?;
     let decoder = flate2::read::GzDecoder::new(archive_file);
     let mut archive = tar::Archive::new(decoder);
-    let mut seen_names = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut limits = ExtractLimits::new();
     let mut found_binary = false;
-    let mut entries = 0usize;
+    let mut wrote_bundle = false;
 
     for entry in archive.entries().context("reading Turbo tar archive")? {
-        entries += 1;
-        if entries > MAX_ARCHIVE_ENTRIES {
-            bail!("Turbo archive contains too many entries");
-        }
-        let entry = entry.context("reading Turbo tar entry")?;
-        let path = entry
+        limits.count_entry()?;
+        let mut entry = entry.context("reading Turbo tar entry")?;
+        let kind = entry.header().entry_type();
+        // Security decisions must not run on lossily decoded paths: a lossy
+        // decode can turn an unrepresentable byte into a benign-looking name.
+        let raw_os = entry
             .path()
             .context("reading Turbo tar entry path")?
             .into_owned();
-        let name = normalized_root_entry(&path)?;
-        let kind = entry.header().entry_type();
-        if kind.is_dir() && name.is_none() {
-            continue;
+        let raw = raw_os
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Turbo archive entry path is not valid UTF-8"))?
+            .to_string();
+        let parts = normalize_archive_path(&raw, false)?;
+
+        // `tar -C staging .` emits a `.` root placeholder. Accept it only as a
+        // directory so a zero-byte root *file* cannot skip classification.
+        if parts.is_none() {
+            match kind {
+                EntryType::Directory => continue,
+                _ => bail!("Turbo archive root entry has unsupported type: {raw}"),
+            }
         }
-        if !kind.is_file() {
+        let parts = parts.expect("checked above");
+        let mut class = classify_archive_entry(Some(&parts), binary_entry)?;
+        if matches!(class, ArchiveEntryClass::BundleFile) && kind == EntryType::Directory {
+            class = ArchiveEntryClass::BundleDir;
+        }
+        if matches!(class, ArchiveEntryClass::BundleRootDir) && kind != EntryType::Directory {
             bail!(
-                "Turbo archive contains a non-regular entry: {}",
-                path.display()
+                "Turbo archive entry {} must be a directory",
+                display_parts(&parts)
             );
         }
-        let Some(name) = name else {
-            bail!("Turbo archive contains an unnamed regular entry");
-        };
-        if !seen_names.insert(name.clone()) {
-            bail!("Turbo archive contains duplicate entry {name}");
-        }
-        if name == binary_entry {
-            if found_binary {
-                bail!("Turbo archive contains duplicate {binary_entry}");
+
+        match kind {
+            EntryType::Directory => {
+                insert_seen(&mut seen, &parts)?;
+                match class {
+                    ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => {
+                        let rel: PathBuf = parts[1..].iter().collect();
+                        let dest = bundle_stage.join(&rel);
+                        std::fs::create_dir_all(&dest).with_context(|| {
+                            format!(
+                                "creating bundle directory stage for {}",
+                                display_parts(&parts)
+                            )
+                        })?;
+                        wrote_bundle = true;
+                    }
+                    ArchiveEntryClass::RootPlaceholder => {}
+                    _ => bail!(
+                        "Turbo archive has an unexpected directory entry {}",
+                        display_parts(&parts)
+                    ),
+                }
             }
-            if entry.size() > MAX_BINARY_BYTES {
-                bail!("Turbo binary exceeds the decompressed size limit");
+            EntryType::Regular | EntryType::Continuous => {
+                insert_seen(&mut seen, &parts)?;
+                match class {
+                    ArchiveEntryClass::Binary => {
+                        if found_binary {
+                            bail!("Turbo archive contains duplicate {binary_entry}");
+                        }
+                        if entry.size() > MAX_BINARY_BYTES {
+                            bail!("Turbo binary exceeds the decompressed size limit");
+                        }
+                        let mut out = OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(&binary_path)
+                            .with_context(|| {
+                                format!("creating binary stage {}", binary_path.display())
+                            })?;
+                        copy_limited(&mut entry, &mut out, MAX_BINARY_BYTES, "Turbo binary")?;
+                        out.sync_all()?;
+                        std::fs::set_permissions(
+                            &binary_path,
+                            std::fs::Permissions::from_mode(0o755),
+                        )?;
+                        found_binary = true;
+                    }
+                    ArchiveEntryClass::Notice => {
+                        if entry.size() > MAX_AUXILIARY_BYTES {
+                            bail!(
+                                "Turbo archive auxiliary entry {} is too large",
+                                display_parts(&parts)
+                            );
+                        }
+                        // Drained, not unpacked: validates the stream without
+                        // putting release notices into the install tree.
+                        drain_limited(
+                            &mut entry,
+                            MAX_AUXILIARY_BYTES,
+                            &format!("Turbo archive auxiliary entry {}", display_parts(&parts)),
+                        )?;
+                    }
+                    ArchiveEntryClass::BundleFile => {
+                        if entry.size() > MAX_BUNDLE_FILE_BYTES {
+                            bail!(
+                                "Turbo archive bundle file {} exceeds the per-file size limit",
+                                display_parts(&parts)
+                            );
+                        }
+                        let rel: PathBuf = parts[1..].iter().collect();
+                        if rel.as_os_str().is_empty() {
+                            bail!("Turbo archive bundle file path is empty");
+                        }
+                        let dest = bundle_stage.join(&rel);
+                        ensure_parent_dirs(&dest)?;
+                        let mut out = OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(&dest)
+                            .with_context(|| {
+                                format!(
+                                    "creating bundle stage file {} -> {}",
+                                    display_parts(&parts),
+                                    dest.display()
+                                )
+                            })?;
+                        let copied = copy_limited(
+                            &mut entry,
+                            &mut out,
+                            MAX_BUNDLE_FILE_BYTES,
+                            &format!("Turbo archive bundle file {}", display_parts(&parts)),
+                        )?;
+                        out.sync_all()?;
+                        limits.count_bundle_file(copied)?;
+                        wrote_bundle = true;
+                    }
+                    ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => bail!(
+                        "Turbo archive directory entry {} is not a regular file",
+                        display_parts(&parts)
+                    ),
+                    ArchiveEntryClass::RootPlaceholder => {
+                        bail!("Turbo archive contains an unnamed regular entry")
+                    }
+                }
             }
-            let mut out = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(destination)?;
-            let copied = std::io::copy(&mut entry.take(MAX_BINARY_BYTES + 1), &mut out)?;
-            if copied > MAX_BINARY_BYTES {
-                bail!("Turbo binary exceeds the decompressed size limit");
-            }
-            out.sync_all()?;
-            std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
-            found_binary = true;
-        } else if auxiliary_entry_allowed(&name) {
-            if entry.size() > MAX_AUXILIARY_BYTES {
-                bail!("Turbo archive auxiliary entry {name} is too large");
-            }
-            // Drain to validate the compressed stream without unpacking it.
-            let copied = std::io::copy(
-                &mut entry.take(MAX_AUXILIARY_BYTES + 1),
-                &mut std::io::sink(),
-            )?;
-            if copied > MAX_AUXILIARY_BYTES {
-                bail!("Turbo archive auxiliary entry {name} is too large");
-            }
-        } else {
-            bail!("Turbo archive contains unexpected entry {name}");
+            // Symlinks and hard links are how an archive reaches outside its
+            // own tree; devices and sparse/extended headers have no legitimate
+            // use in a Turbo release.
+            _ => bail!(
+                "Turbo archive contains unsupported entry type {:?} at {}",
+                kind,
+                display_parts(&parts)
+            ),
         }
     }
-    if !found_binary {
-        bail!("Turbo archive does not contain {binary_entry}");
-    }
-    Ok(())
+
+    finish_extracted(
+        binary_path,
+        binary_guard,
+        bundle_stage,
+        bundle_guard,
+        wrote_bundle,
+        found_binary,
+        binary_entry,
+    )
 }
 
-#[cfg(windows)]
-fn extract_zip_binary(archive_path: &Path, destination: &Path, binary_entry: &str) -> Result<()> {
-    let file = File::open(archive_path)?;
+/// Not `#[cfg(windows)]`: the Windows producer layout is the one most likely to
+/// carry hostile separators, and gating this on Windows would mean the security
+/// matrix for it never runs on Linux CI.
+fn extract_zip_archive(
+    archive_path: &Path,
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    binary_entry: &str,
+) -> Result<ExtractedArchive> {
+    let (binary_path, bundle_stage, binary_guard, bundle_guard) =
+        prepare_extract_destinations(stage_root, bundle_stage, binary_entry)?;
+
+    let file = File::open(archive_path)
+        .with_context(|| format!("opening Turbo archive {}", archive_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("reading Turbo zip archive")?;
     if archive.len() > MAX_ARCHIVE_ENTRIES {
-        bail!("Turbo archive contains too many entries");
+        bail!("Turbo archive contains too many entries (limit {MAX_ARCHIVE_ENTRIES})");
     }
-    let mut seen_names = HashSet::new();
+
+    let mut seen = HashSet::new();
+    let mut limits = ExtractLimits::new();
     let mut found_binary = false;
+    let mut wrote_bundle = false;
+
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index)?;
-        let path = Path::new(entry.name());
-        let name = normalized_root_entry(path)?;
-        if entry.is_dir() && name.is_none() {
+        limits.count_entry()?;
+        let mut entry = archive
+            .by_index(index)
+            .with_context(|| format!("reading Turbo zip entry #{index}"))?;
+        let raw_name = entry.name().to_string();
+        let trimmed = raw_name.trim_end_matches(['/', '\\']);
+        let parts = normalize_archive_path(trimmed, true)?;
+        let is_dir = entry.is_dir() || raw_name.ends_with('/') || raw_name.ends_with('\\');
+
+        // Unix mode S_IFLNK survives in zip entries produced on Unix; a symlink
+        // extracted into the bundle would redirect writes outside the stage.
+        if entry.is_symlink() {
+            bail!("Turbo archive contains a symlink: {raw_name}");
+        }
+
+        if parts.is_none() {
+            if is_dir {
+                continue;
+            }
+            bail!("Turbo archive contains an unnamed regular entry: {raw_name}");
+        }
+        let parts = parts.expect("checked above");
+        let mut class = classify_archive_entry(Some(&parts), binary_entry)?;
+
+        if is_dir {
+            if matches!(class, ArchiveEntryClass::BundleFile) {
+                class = ArchiveEntryClass::BundleDir;
+            }
+            insert_seen(&mut seen, &parts)?;
+            match class {
+                ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => {
+                    let rel: PathBuf = parts[1..].iter().collect();
+                    let dest = bundle_stage.join(&rel);
+                    std::fs::create_dir_all(&dest).with_context(|| {
+                        format!(
+                            "creating bundle directory stage for {}",
+                            display_parts(&parts)
+                        )
+                    })?;
+                    wrote_bundle = true;
+                }
+                ArchiveEntryClass::RootPlaceholder => {}
+                _ => bail!(
+                    "Turbo archive has an unexpected directory entry {}",
+                    display_parts(&parts)
+                ),
+            }
             continue;
         }
-        if entry.is_dir() {
-            bail!(
-                "Turbo archive contains an unexpected directory: {}",
-                entry.name()
-            );
-        }
-        if entry
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
-            bail!("Turbo archive contains a symlink: {}", entry.name());
-        }
-        let Some(name) = name else {
-            bail!("Turbo archive contains an unnamed regular entry");
-        };
-        if !seen_names.insert(name.clone()) {
-            bail!("Turbo archive contains duplicate entry {name}");
-        }
-        let max = if name == binary_entry {
-            MAX_BINARY_BYTES
-        } else if auxiliary_entry_allowed(&name) {
-            MAX_AUXILIARY_BYTES
-        } else {
-            bail!("Turbo archive contains unexpected entry {name}");
-        };
-        if entry.size() > max {
-            bail!("Turbo archive entry {name} exceeds the decompressed size limit");
-        }
-        if name == binary_entry {
-            let mut out = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(destination)?;
-            let copied = std::io::copy(&mut entry.take(max + 1), &mut out)?;
-            if copied > max {
-                bail!("Turbo binary exceeds the decompressed size limit");
+
+        insert_seen(&mut seen, &parts)?;
+        match class {
+            ArchiveEntryClass::Binary => {
+                if found_binary {
+                    bail!("Turbo archive contains duplicate {binary_entry}");
+                }
+                if entry.size() > MAX_BINARY_BYTES {
+                    bail!("Turbo binary exceeds the decompressed size limit");
+                }
+                let mut out = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&binary_path)
+                    .with_context(|| format!("creating binary stage {}", binary_path.display()))?;
+                copy_limited(&mut entry, &mut out, MAX_BINARY_BYTES, "Turbo binary")?;
+                out.sync_all()?;
+                found_binary = true;
             }
-            out.sync_all()?;
-            found_binary = true;
-        } else {
-            let copied = std::io::copy(&mut entry.take(max + 1), &mut std::io::sink())?;
-            if copied > max {
-                bail!("Turbo archive auxiliary entry {name} is too large");
+            ArchiveEntryClass::Notice => {
+                if entry.size() > MAX_AUXILIARY_BYTES {
+                    bail!(
+                        "Turbo archive auxiliary entry {} is too large",
+                        display_parts(&parts)
+                    );
+                }
+                drain_limited(
+                    &mut entry,
+                    MAX_AUXILIARY_BYTES,
+                    &format!("Turbo archive auxiliary entry {}", display_parts(&parts)),
+                )?;
+            }
+            ArchiveEntryClass::BundleFile => {
+                if entry.size() > MAX_BUNDLE_FILE_BYTES {
+                    bail!(
+                        "Turbo archive bundle file {} exceeds the per-file size limit",
+                        display_parts(&parts)
+                    );
+                }
+                let rel: PathBuf = parts[1..].iter().collect();
+                if rel.as_os_str().is_empty() {
+                    bail!("Turbo archive bundle file path is empty");
+                }
+                let dest = bundle_stage.join(&rel);
+                ensure_parent_dirs(&dest)?;
+                let mut out = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&dest)
+                    .with_context(|| {
+                        format!(
+                            "creating bundle stage file {} -> {}",
+                            display_parts(&parts),
+                            dest.display()
+                        )
+                    })?;
+                let copied = copy_limited(
+                    &mut entry,
+                    &mut out,
+                    MAX_BUNDLE_FILE_BYTES,
+                    &format!("Turbo archive bundle file {}", display_parts(&parts)),
+                )?;
+                out.sync_all()?;
+                limits.count_bundle_file(copied)?;
+                wrote_bundle = true;
+            }
+            ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => bail!(
+                "Turbo archive directory entry {} is not a regular file",
+                display_parts(&parts)
+            ),
+            ArchiveEntryClass::RootPlaceholder => {
+                bail!("Turbo archive contains an unnamed regular entry")
             }
         }
     }
-    if !found_binary {
-        bail!("Turbo archive does not contain {binary_entry}");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if found_binary {
+            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))?;
+        }
     }
-    Ok(())
+
+    finish_extracted(
+        binary_path,
+        binary_guard,
+        bundle_stage,
+        bundle_guard,
+        wrote_bundle,
+        found_binary,
+        binary_entry,
+    )
 }
 
-async fn extract_binary(archive: &Path, destination: &Path, platform: Platform) -> Result<()> {
+/// Extraction entry point. Returns both the staged binary and, when the
+/// release shipped one, the staged `bundled/` tree ready for activation.
+async fn extract_archive(
+    archive: &Path,
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    platform: Platform,
+) -> Result<ExtractedArchive> {
     let archive = archive.to_owned();
-    let destination = destination.to_owned();
+    let stage_root = stage_root.to_owned();
     tokio::task::spawn_blocking(move || {
         #[cfg(unix)]
         {
-            extract_tar_binary(&archive, &destination, platform.binary_entry)
+            // Unix releases ship tar.gz; dispatch on the extension anyway so a
+            // zip fixture can exercise the Windows producer layout on Unix CI.
+            let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.ends_with(".zip") {
+                extract_zip_archive(&archive, &stage_root, bundle_stage, platform.binary_entry)
+            } else {
+                extract_tar_archive(&archive, &stage_root, bundle_stage, platform.binary_entry)
+            }
         }
         #[cfg(windows)]
         {
-            extract_zip_binary(&archive, &destination, platform.binary_entry)
+            extract_zip_archive(&archive, &stage_root, bundle_stage, platform.binary_entry)
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -1087,10 +1764,32 @@ fn publish_versioned_binary(stage: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn activate_binary(versioned: &Path) -> Result<()> {
-    let app = managed_application();
-    let bin_dir = app.parent().context("Turbo application has no parent")?;
+/// What the active application path looked like before activation, i.e. what a
+/// rollback has to put back.
+enum PreviousBinary {
+    /// Nothing was installed yet — rollback means removing what we published.
+    Missing,
+    /// Unix: `bin/turbo` was a symlink; the target is enough to recreate it.
+    #[cfg(unix)]
+    Symlink { target: PathBuf },
+    /// Unix: `bin/turbo` was a real file (older installer layouts). It was
+    /// moved aside because a symlink rename would otherwise destroy it.
+    #[cfg(unix)]
+    RegularAside { aside: PathBuf },
+    /// Windows: the previous executable, moved aside so the new one can take
+    /// its name.
+    #[cfg(windows)]
+    ExeAside { aside: PathBuf },
+}
+
+struct BinaryActivation {
+    previous: PreviousBinary,
+    /// Aside path kept alive until the state write commits, so a late failure
+    /// can still restore the previous executable. Deleted on success.
+    pending_aside: Option<PathBuf>,
+}
+
+fn relative_versioned_link_target(versioned: &Path) -> Result<PathBuf> {
     let downloads = hyper_home().join("downloads");
     let name = versioned
         .file_name()
@@ -1100,33 +1799,176 @@ fn activate_binary(versioned: &Path) -> Result<()> {
             .file_name()
             .context("Turbo downloads directory has no filename")?,
     );
-    let relative = relative.join(name);
-    let tmp = unique_sibling(&app, "tmp-link");
-    let tmp_guard = TempArtifact::new(tmp.clone());
-    std::os::unix::fs::symlink(&relative, &tmp)?;
-    std::fs::rename(&tmp, &app).with_context(|| {
-        format!(
-            "atomically activating Turbo at {} (bin dir {})",
+    Ok(relative.join(name))
+}
+
+fn restore_previous_binary(app: &Path, previous: &PreviousBinary) -> Result<()> {
+    match previous {
+        PreviousBinary::Missing => {
+            // A first install failed after publishing the active path: remove
+            // it so a broken deployment is not left reachable on PATH.
+            if path_exists_or_symlink(app)
+                && let Some(doomed) = move_active_aside(app, "failed-new")?
+            {
+                let _ = std::fs::remove_file(&doomed);
+                let _ = std::fs::remove_dir_all(&doomed);
+            }
+            Ok(())
+        }
+        #[cfg(unix)]
+        PreviousBinary::Symlink { target } => {
+            // Prefer an atomic replace: stage the restore link, rename over.
+            let tmp = unique_sibling(app, "restore-link");
+            let _ = std::fs::remove_file(&tmp);
+            std::os::unix::fs::symlink(target, &tmp).with_context(|| {
+                format!(
+                    "staging restore symlink for {} -> {}",
+                    app.display(),
+                    target.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&tmp, app) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(anyhow::Error::new(error).context(format!(
+                    "restoring previous Turbo symlink at {}",
+                    app.display()
+                )));
+            }
+            Ok(())
+        }
+        #[cfg(unix)]
+        PreviousBinary::RegularAside { aside } => restore_aside_over_active(app, aside),
+        #[cfg(windows)]
+        PreviousBinary::ExeAside { aside } => restore_aside_over_active(app, aside),
+    }
+}
+
+/// Puts `aside` back at `app`. Neither Windows nor a non-empty Unix target can
+/// be renamed over, so the failed-new artifact is moved out of the way first —
+/// and put back if the restore itself fails, so the active path is never left
+/// missing entirely.
+#[cfg(any(unix, windows))]
+fn restore_aside_over_active(app: &Path, aside: &Path) -> Result<()> {
+    let doomed = move_active_aside(app, "failed-new").map_err(|move_err| {
+        move_err.context(format!(
+            "cannot clear active Turbo at {} before restoring {}",
             app.display(),
-            bin_dir.display()
-        )
+            aside.display()
+        ))
     })?;
-    let _ = tmp_guard.keep();
+    if let Err(error) = std::fs::rename(aside, app) {
+        let restore_error = anyhow::Error::new(error).context(format!(
+            "restoring previous Turbo executable from {} (aside preserved)",
+            aside.display()
+        ));
+        // Better a broken-but-present active path than none at all: put the
+        // failed-new artifact back if the real restore could not happen.
+        if let Some(doomed) = doomed.as_ref()
+            && let Err(republish_error) = std::fs::rename(doomed, app)
+        {
+            return Err(combine_errors(
+                restore_error,
+                anyhow::Error::new(republish_error).context(format!(
+                    "republishing failed-new Turbo executable from {} to {}",
+                    doomed.display(),
+                    app.display()
+                )),
+            ));
+        }
+        return Err(restore_error);
+    }
+    if let Some(doomed) = doomed {
+        let _ = std::fs::remove_file(doomed);
+    }
     Ok(())
 }
 
-#[cfg(windows)]
-fn activate_binary(versioned: &Path) -> Result<()> {
+#[cfg(unix)]
+fn activate_binary_transactional(versioned: &Path) -> Result<BinaryActivation> {
     let app = managed_application();
+    let bin_dir = app.parent().context("Turbo application has no parent")?;
+
+    // Inspect before mutating so an unsupported shape (directory, socket, …)
+    // fails closed rather than half-way through activation.
+    let meta = match std::fs::symlink_metadata(&app) {
+        Ok(meta) => Some(meta),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting {}", app.display()));
+        }
+    };
+
+    let relative = relative_versioned_link_target(versioned)?;
+    let tmp = unique_sibling(&app, "tmp-link");
+    let tmp_guard = TempArtifact::new_file(tmp.clone());
+    std::os::unix::fs::symlink(&relative, &tmp).context("staging Turbo activation symlink")?;
+
+    let mut pending_aside = None;
+    let previous = match meta {
+        Some(meta) if meta.file_type().is_symlink() => {
+            let target = std::fs::read_link(&app)
+                .with_context(|| format!("reading active Turbo symlink {}", app.display()))?;
+            PreviousBinary::Symlink { target }
+        }
+        Some(meta) if meta.is_file() => {
+            // Renaming a symlink over a regular file would destroy the previous
+            // install outright; move it aside so rollback can restore it.
+            let aside = unique_sibling(&app, "old-regular");
+            std::fs::rename(&app, &aside).with_context(|| {
+                format!(
+                    "preserving existing Turbo regular file {} before activation",
+                    app.display()
+                )
+            })?;
+            pending_aside = Some(aside.clone());
+            PreviousBinary::RegularAside { aside }
+        }
+        Some(_) => {
+            bail!(
+                "Turbo application path is not a regular file or symlink: {}",
+                app.display()
+            );
+        }
+        None => PreviousBinary::Missing,
+    };
+
+    if let Err(error) = std::fs::rename(&tmp, &app) {
+        let activation_err = anyhow::Error::new(error).context(format!(
+            "atomically activating Turbo at {} (bin dir {})",
+            app.display(),
+            bin_dir.display()
+        ));
+        // A failed rename leaves an existing symlink untouched; only the
+        // moved-aside regular file needs putting back.
+        if matches!(previous, PreviousBinary::RegularAside { .. })
+            && let Err(restore_error) = restore_previous_binary(&app, &previous)
+        {
+            return Err(combine_errors(activation_err, restore_error));
+        }
+        return Err(activation_err);
+    }
+    let _ = tmp_guard.keep();
+    Ok(BinaryActivation {
+        previous,
+        pending_aside,
+    })
+}
+
+#[cfg(windows)]
+fn activate_binary_transactional(versioned: &Path) -> Result<BinaryActivation> {
+    let app = managed_application();
+    reject_symlink(&app, "application")?;
     let staged = unique_sibling(&app, "new.exe");
     std::fs::copy(versioned, &staged)?;
-    let staged_guard = TempArtifact::new(staged.clone());
+    let staged_guard = TempArtifact::new_file(staged.clone());
     if sha256_file(versioned)? != sha256_file(&staged)? {
         bail!("copied Turbo executable failed activation integrity check");
     }
     let aside = unique_sibling(&app, "old.exe");
     let had_old = app.exists();
     if had_old {
+        // Windows cannot rename *over* a running image, but it can rename that
+        // image out of the way while it runs.
         std::fs::rename(&app, &aside).with_context(|| {
             format!(
                 "cannot replace running {}; close all Turbo sessions and retry",
@@ -1135,16 +1977,169 @@ fn activate_binary(versioned: &Path) -> Result<()> {
         })?;
     }
     if let Err(error) = std::fs::rename(&staged, &app) {
-        if had_old {
-            let _ = std::fs::rename(&aside, &app);
+        let activation_err =
+            anyhow::Error::new(error).context("activating downloaded Turbo executable");
+        if had_old && let Err(restore_error) = std::fs::rename(&aside, &app) {
+            return Err(combine_errors(
+                activation_err,
+                anyhow::Error::new(restore_error).context(format!(
+                    "failed to restore previous Turbo executable from {} (aside preserved)",
+                    aside.display()
+                )),
+            ));
         }
-        return Err(error).context("activating downloaded Turbo executable");
+        return Err(activation_err);
     }
     let _ = staged_guard.keep();
-    // A still-running old image may keep the aside locked. It is harmless and
-    // can be removed by a later update after that process exits.
-    let _ = std::fs::remove_file(aside);
+    // The aside survives until the install commits. A still-running old image
+    // may keep it locked; that is harmless and a later update cleans it up.
+    Ok(BinaryActivation {
+        previous: if had_old {
+            PreviousBinary::ExeAside {
+                aside: aside.clone(),
+            }
+        } else {
+            PreviousBinary::Missing
+        },
+        pending_aside: had_old.then_some(aside),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn activate_binary_transactional(_versioned: &Path) -> Result<BinaryActivation> {
+    bail!("unsupported platform for Turbo binary activation")
+}
+
+/// The bundle's parent must exist and be a real directory, and the bundle path
+/// itself must not be a symlink — otherwise activation would rename into
+/// whatever directory that link points at.
+fn ensure_bundle_parent_ready(bundle_path: &Path) -> Result<()> {
+    let parent = bundle_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("bundled runtime path has no parent directory")?;
+    if parent.exists() {
+        reject_symlink(parent, "bundled runtime parent")?;
+        if !std::fs::metadata(parent)?.is_dir() {
+            bail!(
+                "bundled runtime parent is not a directory: {}",
+                parent.display()
+            );
+        }
+    } else {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating bundled runtime parent {}", parent.display()))?;
+    }
+    if path_exists_or_symlink(bundle_path) {
+        reject_symlink(bundle_path, "bundled runtime directory")?;
+    }
     Ok(())
+}
+
+/// Activates a staged bundle tree at `bundle_path` (`$GROK_HOME/bundled` in
+/// production) using same-volume renames only. Returns the aside path of the
+/// previous bundle, if any, so the caller can roll it back on a later failure
+/// or delete it on commit.
+///
+/// Rename is the unit of work precisely because it is atomic: a crash at any
+/// point leaves either the old bundle or the new one live, never a merge of the
+/// two and never a partially written tree.
+///
+/// `bundle_path` is a parameter rather than a call to [`managed_bundle_path`]
+/// so the transaction can be exercised against a scratch directory without
+/// mutating process-global `GROK_HOME` state.
+fn activate_bundle_transactional(bundle_path: &Path, stage: &Path) -> Result<Option<PathBuf>> {
+    ensure_bundle_parent_ready(bundle_path)?;
+    if !stage.is_dir() {
+        bail!("bundle stage is not a directory: {}", stage.display());
+    }
+    reject_symlink(stage, "bundle stage")?;
+
+    let aside = unique_sibling(bundle_path, "old");
+    let had_old = path_exists_or_symlink(bundle_path);
+    if had_old {
+        reject_symlink(bundle_path, "bundled runtime directory")?;
+        std::fs::rename(bundle_path, &aside).with_context(|| {
+            format!(
+                "moving existing bundled runtime {} aside",
+                bundle_path.display()
+            )
+        })?;
+    }
+    if let Err(error) = std::fs::rename(stage, bundle_path) {
+        let activation_err = anyhow::Error::new(error).context(format!(
+            "activating bundled runtime at {} from stage {}",
+            bundle_path.display(),
+            stage.display()
+        ));
+        if had_old && let Err(restore_error) = std::fs::rename(&aside, bundle_path) {
+            return Err(combine_errors(
+                activation_err,
+                anyhow::Error::new(restore_error).context(format!(
+                    "failed to restore previous bundled runtime from {} (aside preserved)",
+                    aside.display()
+                )),
+            ));
+        }
+        return Err(activation_err);
+    }
+    Ok(had_old.then_some(aside))
+}
+
+/// Undoes [`activate_bundle_transactional`]: the just-published tree is moved
+/// out of the way and the previous one renamed back.
+fn restore_bundle(bundle_path: &Path, aside: Option<&Path>) -> Result<()> {
+    let doomed = if path_exists_or_symlink(bundle_path) {
+        move_active_aside(bundle_path, "failed")?
+    } else {
+        None
+    };
+
+    if let Some(aside) = aside
+        && let Err(error) = std::fs::rename(aside, bundle_path)
+    {
+        let restore_error = anyhow::Error::new(error).context(format!(
+            "restoring previous bundled runtime from {} (aside preserved)",
+            aside.display()
+        ));
+        // Better a stale-but-complete bundle than none at all: put the
+        // failed-new tree back so the runtime still has skills to load.
+        if let Some(doomed) = doomed.as_ref()
+            && let Err(republish_error) = std::fs::rename(doomed, bundle_path)
+        {
+            return Err(combine_errors(
+                restore_error,
+                anyhow::Error::new(republish_error).context(format!(
+                    "republishing failed-new bundled runtime from {} to {}",
+                    doomed.display(),
+                    bundle_path.display()
+                )),
+            ));
+        }
+        return Err(restore_error);
+    }
+    if let Some(doomed) = doomed {
+        let _ = std::fs::remove_dir_all(&doomed);
+        let _ = std::fs::remove_file(&doomed);
+    }
+    Ok(())
+}
+
+fn format_rollback_failure(
+    commit_error: anyhow::Error,
+    rollback_errors: Vec<anyhow::Error>,
+) -> anyhow::Error {
+    if rollback_errors.is_empty() {
+        return commit_error;
+    }
+    let mut msg = format!(
+        "Turbo community update failed and rollback was incomplete; \
+         installation may be inconsistent.\n\ncommit error: {commit_error:#}"
+    );
+    for (index, error) in rollback_errors.iter().enumerate() {
+        msg.push_str(&format!("\n\nrollback error {}: {error:#}", index + 1));
+    }
+    anyhow::anyhow!(msg)
 }
 
 async fn install_candidate(candidate: &Candidate) -> Result<()> {
@@ -1152,12 +2147,14 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
     let platform = platform()?;
     let downloads = hyper_home().join("downloads");
     let archive_tmp = unique_sibling(&downloads.join(&candidate.asset_name), "download");
-    let archive_guard = TempArtifact::new(archive_tmp.clone());
+    let archive_guard = TempArtifact::new_file(archive_tmp.clone());
     eprintln!(
         "  Downloading Turbo v{} ({}) from community releases...",
         candidate.version, platform.asset_triple
     );
     let actual_sha = download_archive(candidate, &archive_tmp).await?;
+    // Non-negotiable: nothing is unpacked before the published SHA256SUMS entry
+    // matches the bytes that were actually downloaded.
     if actual_sha != candidate.sha256 {
         bail!(
             "SHA-256 mismatch for {}: expected {}, got {}",
@@ -1167,10 +2164,21 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
         );
     }
 
-    let stage = unique_sibling(&downloads.join("turbo-extracted"), "tmp");
-    let stage_guard = TempArtifact::new(stage.clone());
-    extract_binary(&archive_tmp, &stage, platform).await?;
-    smoke_test(&stage).await?;
+    // The binary stages under `downloads`; the bundle stages as a sibling of
+    // its final home (the Grok home, not the Turbo one) so activation is a
+    // same-volume rename.
+    let extract_root = unique_sibling(&downloads.join("turbo-extracted"), "dir");
+    std::fs::create_dir_all(&extract_root)
+        .with_context(|| format!("creating extract root {}", extract_root.display()))?;
+    let extract_root_guard = TempArtifact::new_dir(extract_root.clone());
+
+    let bundle_path = managed_bundle_path();
+    ensure_bundle_parent_ready(&bundle_path)?;
+    let bundle_stage_path = unique_sibling(&bundle_path, "install");
+
+    let extracted =
+        extract_archive(&archive_tmp, &extract_root, bundle_stage_path, platform).await?;
+    smoke_test(&extracted.binary).await?;
 
     let extension = if cfg!(windows) { ".exe" } else { "" };
     let binary_name = format!(
@@ -1178,19 +2186,95 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
         candidate.version, platform.local_os, platform.local_arch, candidate.sha256, extension
     );
     let versioned = downloads.join(&binary_name);
-    publish_versioned_binary(&stage, &versioned)?;
+    publish_versioned_binary(&extracted.binary, &versioned)?;
     smoke_test(&versioned).await?;
-    activate_binary(&versioned)?;
 
-    let state = UpdateState {
-        installed_version: Some(candidate.version.clone()),
-        installed_asset: Some(candidate.asset_name.clone()),
-        installed_sha256: Some(candidate.sha256.clone()),
-        installed_binary: Some(binary_name),
-        checked_at_unix: Some(now_unix()),
-    };
-    write_state_atomic(&state)?;
-    drop(stage_guard);
+    // Read the previous state before anything mutates: a symlinked or otherwise
+    // unusable state file must fail closed while the deployment is untouched.
+    let state_file = state_path();
+    let previous_state_bytes = capture_previous_state_bytes(&state_file)?;
+
+    // --- Compensating transaction: bundle -> binary -> state ---
+    // The state write is the sole commit point. Any failure before it restores
+    // the whole previous deployment, so users never end up running a new binary
+    // against an old bundle (or the reverse).
+    let mut bundle_aside: Option<PathBuf> = None;
+    let mut bundle_activated = false;
+    let mut binary_activation: Option<BinaryActivation> = None;
+    let mut state_write_attempted = false;
+
+    let commit_result: Result<()> = (|| {
+        if let Some(stage) = extracted.bundle_stage.as_ref() {
+            bundle_aside = activate_bundle_transactional(&bundle_path, stage)?;
+            bundle_activated = true;
+        }
+
+        binary_activation = Some(activate_binary_transactional(&versioned)?);
+
+        let state = UpdateState {
+            installed_version: Some(candidate.version.clone()),
+            installed_asset: Some(candidate.asset_name.clone()),
+            installed_sha256: Some(candidate.sha256.clone()),
+            installed_binary: Some(binary_name.clone()),
+            checked_at_unix: Some(now_unix()),
+        };
+        state_write_attempted = true;
+        write_state_atomic(&state)?;
+        Ok(())
+    })();
+
+    if let Err(error) = commit_result {
+        let mut rollback_errors = Vec::new();
+
+        if let Some(activation) = binary_activation.as_ref()
+            && let Err(restore_error) =
+                restore_previous_binary(&managed_application(), &activation.previous)
+        {
+            rollback_errors.push(
+                restore_error
+                    .context("binary rollback failed; previous/active paths may be inconsistent"),
+            );
+        }
+
+        if bundle_activated
+            && let Err(restore_error) = restore_bundle(&bundle_path, bundle_aside.as_deref())
+        {
+            let aside_note = bundle_aside
+                .as_ref()
+                .map(|path| format!(" (aside preserved at {})", path.display()))
+                .unwrap_or_default();
+            rollback_errors.push(restore_error.context(format!(
+                "bundle rollback failed{aside_note}; installation may be inconsistent"
+            )));
+        }
+
+        if state_write_attempted
+            && let Err(restore_error) =
+                restore_state_bytes(&state_file, previous_state_bytes.as_deref())
+        {
+            rollback_errors.push(
+                restore_error
+                    .context("update-state rollback failed; installation may be inconsistent"),
+            );
+        }
+
+        return Err(format_rollback_failure(error, rollback_errors));
+    }
+
+    // Committed. Asides are best-effort cleanup from here on; the versioned
+    // binaries under `downloads` are kept on purpose so a pinned reinstall can
+    // relink without re-downloading.
+    if let Some(aside) = bundle_aside {
+        let _ = std::fs::remove_dir_all(&aside);
+        let _ = std::fs::remove_file(&aside);
+    }
+    if let Some(activation) = binary_activation
+        && let Some(aside) = activation.pending_aside
+    {
+        let _ = std::fs::remove_file(aside);
+    }
+    drop(extracted);
+    drop(extract_root_guard);
     drop(archive_guard);
     Ok(())
 }
@@ -1575,16 +2659,288 @@ mod tests {
     }
 
     #[test]
-    fn archive_paths_are_root_only_and_never_escape() {
+    fn archive_paths_accept_bundled_subtree_and_never_escape() {
+        // Tar mode (`allow_backslash_as_separator = false`).
         assert_eq!(
-            normalized_root_entry(Path::new("./turbo"))
+            normalize_archive_path("./turbo", false).unwrap().as_deref(),
+            Some(["turbo".to_string()].as_slice())
+        );
+        // The whole point of the fix: a real release ships a nested bundle.
+        assert_eq!(
+            normalize_archive_path("bundled/skills/demo/SKILL.md", false)
                 .unwrap()
                 .as_deref(),
-            Some("turbo")
+            Some(
+                [
+                    "bundled".to_string(),
+                    "skills".to_string(),
+                    "demo".to_string(),
+                    "SKILL.md".to_string(),
+                ]
+                .as_slice()
+            )
         );
-        assert!(normalized_root_entry(Path::new("../turbo")).is_err());
-        assert!(normalized_root_entry(Path::new("nested/turbo")).is_err());
-        assert!(normalized_root_entry(Path::new("nested\\turbo")).is_err());
+        // Tar root placeholders.
+        assert_eq!(normalize_archive_path(".", false).unwrap(), None);
+        assert_eq!(normalize_archive_path("./", false).unwrap(), None);
+        assert_eq!(normalize_archive_path("", false).unwrap(), None);
+
+        // Escapes and absolute forms.
+        assert!(normalize_archive_path("../turbo", false).is_err());
+        assert!(normalize_archive_path("/turbo", false).is_err());
+        assert!(normalize_archive_path("nested\\turbo", false).is_err());
+        assert!(normalize_archive_path("bundled/../../evil", false).is_err());
+        assert!(normalize_archive_path("C:/turbo", false).is_err());
+
+        // Zip mode: `\` is a separator, but `..` is still an escape.
+        assert_eq!(
+            normalize_archive_path("bundled\\skills\\x.md", true)
+                .unwrap()
+                .as_deref(),
+            Some(
+                [
+                    "bundled".to_string(),
+                    "skills".to_string(),
+                    "x.md".to_string(),
+                ]
+                .as_slice()
+            )
+        );
+        assert!(normalize_archive_path("..\\evil", true).is_err());
+        assert!(normalize_archive_path("bundled\\..\\..\\evil", true).is_err());
+
+        // Windows-hostile component shapes, rejected on every platform.
+        assert!(normalize_archive_path("bundled/foo:bar", false).is_err());
+        assert!(normalize_archive_path("bundled/foo.", false).is_err());
+        assert!(normalize_archive_path("bundled/foo ", false).is_err());
+        assert!(normalize_archive_path("bundled/CON", false).is_err());
+        assert!(normalize_archive_path("bundled/nul.txt", false).is_err());
+        assert!(normalize_archive_path("bundled/COM1", false).is_err());
+        assert!(normalize_archive_path("bundled/lpt9.md", false).is_err());
+
+        // Depth overflow: `bundled` + 32 nested dirs + leaf = 34 components.
+        let deep = format!("bundled/{}x.md", "a/".repeat(MAX_PATH_DEPTH));
+        assert!(normalize_archive_path(&deep, false).is_err());
+        let at_limit = format!("bundled/{}x.md", "a/".repeat(MAX_PATH_DEPTH - 2));
+        assert!(normalize_archive_path(&at_limit, false).is_ok());
+    }
+
+    #[test]
+    fn classify_accepts_bundle_files_but_not_other_nesting() {
+        assert_eq!(
+            classify_archive_entry(Some(&["turbo".into()]), "turbo").unwrap(),
+            ArchiveEntryClass::Binary
+        );
+        assert_eq!(
+            classify_archive_entry(Some(&["LICENSE".into()]), "turbo").unwrap(),
+            ArchiveEntryClass::Notice
+        );
+        assert_eq!(
+            classify_archive_entry(Some(&["bundled".into()]), "turbo").unwrap(),
+            ArchiveEntryClass::BundleRootDir
+        );
+        assert_eq!(
+            classify_archive_entry(
+                Some(&["bundled".into(), "a".into(), "b.md".into()]),
+                "turbo"
+            )
+            .unwrap(),
+            ArchiveEntryClass::BundleFile
+        );
+        assert_eq!(
+            classify_archive_entry(None, "turbo").unwrap(),
+            ArchiveEntryClass::RootPlaceholder
+        );
+        // Nesting outside `bundled/` stays rejected — that is the guarantee the
+        // old root-only contract provided, and it must survive the fix.
+        assert!(classify_archive_entry(Some(&["nested".into(), "turbo".into()]), "turbo").is_err());
+        assert!(classify_archive_entry(Some(&["README".into()]), "turbo").is_err());
+    }
+
+    /// Extraction stages: `stage` holds the binary, `bundle` is the (not yet
+    /// created) bundle stage directory.
+    fn extract_dirs(root: &Path, label: &str) -> (PathBuf, PathBuf) {
+        let stage = root.join(format!("{label}-stage"));
+        let bundle = root.join(format!("{label}-bundle"));
+        std::fs::create_dir_all(&stage).unwrap();
+        (stage, bundle)
+    }
+
+    fn write_test_zip(entries: &[(&str, bool, &[u8])], path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, is_dir, body) in entries {
+            if *is_dir {
+                let dir_name = if name.ends_with('/') {
+                    (*name).to_string()
+                } else {
+                    format!("{name}/")
+                };
+                zip.add_directory(dir_name, options).unwrap();
+            } else {
+                zip.start_file(*name, options).unwrap();
+                zip.write_all(body).unwrap();
+            }
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn real_layout_zip_extracts_binary_and_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("good.zip");
+        write_test_zip(
+            &[
+                ("turbo.exe", false, b"MZ-fake-binary"),
+                ("LICENSE", false, b"lic\n"),
+                ("bundled/", true, b""),
+                ("bundled/skills/", true, b""),
+                ("bundled/skills/demo/", true, b""),
+                ("bundled/skills/demo/SKILL.md", false, b"# skill\n"),
+                ("bundled/agents/helper.md", false, b"# agent\n"),
+            ],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path(), "good");
+        let extracted = extract_zip_archive(&archive, &stage, bundle_stage, "turbo.exe").unwrap();
+        assert_eq!(std::fs::read(&extracted.binary).unwrap(), b"MZ-fake-binary");
+        let bundle = extracted.bundle_stage.clone().expect("bundle present");
+        assert_eq!(
+            std::fs::read(bundle.join("skills/demo/SKILL.md")).unwrap(),
+            b"# skill\n"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("agents/helper.md")).unwrap(),
+            b"# agent\n"
+        );
+        // Notices are drained, never staged next to the binary.
+        assert!(!stage.join("LICENSE").exists());
+    }
+
+    #[test]
+    fn binary_only_zip_leaves_no_bundle_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("binary-only.zip");
+        write_test_zip(
+            &[
+                ("turbo.exe", false, b"MZ"),
+                ("THIRD-PARTY-NOTICES", false, b"tpn\n"),
+            ],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path(), "binonly");
+        let extracted =
+            extract_zip_archive(&archive, &stage, bundle_stage.clone(), "turbo.exe").unwrap();
+        assert!(extracted.binary.is_file());
+        assert!(extracted.bundle_stage.is_none());
+        // An empty stage must not survive; activating it would wipe a good
+        // bundle from a previous install.
+        assert!(!bundle_stage.exists());
+    }
+
+    #[test]
+    fn zip_extraction_rejects_unsafe_bundle_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = format!("bundled/{}x.md", "a/".repeat(MAX_PATH_DEPTH));
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, &[(&str, bool, &[u8])])] = &[
+            // Zip-slip: the bundle prefix must not license traversal.
+            (
+                "zip_slip",
+                &[
+                    ("turbo.exe", false, b"MZ"),
+                    ("bundled/../../evil", false, b"pwned"),
+                ],
+            ),
+            (
+                "backslash_parent",
+                &[("turbo.exe", false, b"MZ"), ("..\\evil", false, b"pwned")],
+            ),
+            ("absolute", &[("/turbo.exe", false, b"MZ")]),
+            // Windows reserved device name inside the bundle.
+            (
+                "reserved_device",
+                &[("turbo.exe", false, b"MZ"), ("bundled/CON", false, b"x")],
+            ),
+            (
+                "reserved_device_with_extension",
+                &[
+                    ("turbo.exe", false, b"MZ"),
+                    ("bundled/skills/nul.md", false, b"x"),
+                ],
+            ),
+            (
+                "trailing_space",
+                &[("turbo.exe", false, b"MZ"), ("bundled/foo ", false, b"x")],
+            ),
+            // Nesting outside the bundle is still forbidden.
+            (
+                "nested_outside_bundle",
+                &[("turbo.exe", false, b"MZ"), ("nested/turbo", false, b"x")],
+            ),
+            (
+                "unexpected_root",
+                &[("turbo.exe", false, b"MZ"), ("README", false, b"nope")],
+            ),
+            // Case-folding collision would be one file on NTFS/APFS.
+            (
+                "case_collision",
+                &[
+                    ("turbo.exe", false, b"MZ"),
+                    ("bundled/A.md", false, b"a"),
+                    ("bundled/a.md", false, b"b"),
+                ],
+            ),
+            (
+                "duplicate_binary",
+                &[("turbo.exe", false, b"one"), ("TURBO.EXE", false, b"two")],
+            ),
+            ("missing_binary", &[("LICENSE", false, b"lic\n")]),
+        ];
+        for (label, entries) in cases {
+            let archive = dir.path().join(format!("{label}.zip"));
+            write_test_zip(entries, &archive);
+            let (stage, bundle_stage) = extract_dirs(dir.path(), label);
+            let result = extract_zip_archive(&archive, &stage, bundle_stage, "turbo.exe");
+            assert!(
+                result.is_err(),
+                "case {label} must be rejected, got {:?}",
+                result.err()
+            );
+        }
+
+        // Depth overflow, built separately because the name is generated.
+        let archive = dir.path().join("depth.zip");
+        write_test_zip(
+            &[("turbo.exe", false, b"MZ"), (deep.as_str(), false, b"x")],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path(), "depth");
+        assert!(extract_zip_archive(&archive, &stage, bundle_stage, "turbo.exe").is_err());
+    }
+
+    #[test]
+    fn zip_accepts_backslash_separated_bundle_paths() {
+        // PowerShell's Compress-Archive is a real producer for the Windows
+        // asset and emits `\` separators.
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("backslash.zip");
+        write_test_zip(
+            &[
+                ("turbo.exe", false, b"MZ"),
+                ("bundled\\skills\\demo\\SKILL.md", false, b"# skill\n"),
+            ],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path(), "backslash");
+        let extracted = extract_zip_archive(&archive, &stage, bundle_stage, "turbo.exe").unwrap();
+        let bundle = extracted.bundle_stage.clone().expect("bundle present");
+        assert_eq!(
+            std::fs::read(bundle.join("skills/demo/SKILL.md")).unwrap(),
+            b"# skill\n"
+        );
     }
 
     #[cfg(unix)]
@@ -1595,17 +2951,72 @@ mod tests {
         for (name, kind, body) in entries {
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(*kind);
-            header.set_mode(0o755);
-            if kind.is_symlink() {
+            header.set_mode(if kind.is_dir() { 0o755 } else { 0o644 });
+            if *kind == tar::EntryType::Symlink {
                 header.set_size(0);
                 header.set_link_name("outside").unwrap();
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *name, &[] as &[u8])
+                    .unwrap();
+            } else if kind.is_dir() {
+                header.set_size(0);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *name, &[] as &[u8])
+                    .unwrap();
             } else {
                 header.set_size(body.len() as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, *name, *body).unwrap();
             }
-            header.set_cksum();
-            builder.append_data(&mut header, name, *body).unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_layout_tar_extracts_binary_licenses_and_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("good.tar.gz");
+        write_test_tar(
+            &[
+                (".", tar::EntryType::Directory, b"".as_slice()),
+                ("turbo", tar::EntryType::Regular, b"#!/bin/sh\nexit 0\n"),
+                ("LICENSE", tar::EntryType::Regular, b"lic\n"),
+                ("THIRD-PARTY-NOTICES", tar::EntryType::Regular, b"tpn\n"),
+                ("bundled", tar::EntryType::Directory, b""),
+                ("bundled/skills", tar::EntryType::Directory, b""),
+                ("bundled/skills/demo", tar::EntryType::Directory, b""),
+                (
+                    "bundled/skills/demo/SKILL.md",
+                    tar::EntryType::Regular,
+                    b"# skill\n",
+                ),
+                (
+                    "bundled/agents/helper.md",
+                    tar::EntryType::Regular,
+                    b"# agent\n",
+                ),
+            ],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path(), "tar-good");
+        let extracted = extract_tar_archive(&archive, &stage, bundle_stage, "turbo").unwrap();
+        assert_eq!(
+            std::fs::read(&extracted.binary).unwrap(),
+            b"#!/bin/sh\nexit 0\n"
+        );
+        let bundle = extracted.bundle_stage.clone().expect("bundle present");
+        assert_eq!(
+            std::fs::read(bundle.join("skills/demo/SKILL.md")).unwrap(),
+            b"# skill\n"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("agents/helper.md")).unwrap(),
+            b"# agent\n"
+        );
+        assert!(!stage.join("LICENSE").exists());
     }
 
     #[cfg(unix)]
@@ -1613,13 +3024,13 @@ mod tests {
     fn strict_tar_extraction_rejects_links_and_duplicate_binary() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("bad.tar.gz");
-        let destination = dir.path().join("turbo");
         write_test_tar(
             &[("turbo", tar::EntryType::Symlink, b"".as_slice())],
             &archive,
         );
-        assert!(extract_tar_binary(&archive, &destination, "turbo").is_err());
-        assert!(!destination.exists());
+        let (stage, bundle_stage) = extract_dirs(dir.path(), "tar-link");
+        assert!(extract_tar_archive(&archive, &stage, bundle_stage, "turbo").is_err());
+        assert!(!stage.join("turbo").exists());
 
         std::fs::remove_file(&archive).unwrap();
         write_test_tar(
@@ -1629,7 +3040,142 @@ mod tests {
             ],
             &archive,
         );
-        assert!(extract_tar_binary(&archive, &destination, "turbo").is_err());
+        let (stage, bundle_stage) = extract_dirs(dir.path(), "tar-dup");
+        assert!(extract_tar_archive(&archive, &stage, bundle_stage, "turbo").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_extraction_rejects_bundle_traversal_and_reserved_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for (label, entry) in [
+            ("slip", "bundled/../../evil"),
+            ("device", "bundled/skills/COM1.md"),
+            ("outside", "nested/turbo"),
+        ] {
+            let archive = dir.path().join(format!("{label}.tar.gz"));
+            write_test_tar(
+                &[
+                    ("turbo", tar::EntryType::Regular, b"one".as_slice()),
+                    (entry, tar::EntryType::Regular, b"x".as_slice()),
+                ],
+                &archive,
+            );
+            let (stage, bundle_stage) = extract_dirs(dir.path(), label);
+            let result = extract_tar_archive(&archive, &stage, bundle_stage, "turbo");
+            assert!(
+                result.is_err(),
+                "case {label} must be rejected, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    /// Bundle activation is exercised against a scratch directory: the real
+    /// `GROK_HOME` resolution is a process-wide `OnceLock`, so pointing it at a
+    /// temp dir from a unit test would be order-dependent and flaky.
+    fn scratch_bundle(root: &Path) -> PathBuf {
+        let home = root.join("grok-home");
+        std::fs::create_dir_all(&home).unwrap();
+        home.join(BUNDLE_DIR_NAME)
+    }
+
+    #[test]
+    fn bundle_activation_publishes_stage_and_rollback_restores_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = scratch_bundle(dir.path());
+
+        // A previous install's bundle is already live.
+        std::fs::create_dir_all(live.join("skills")).unwrap();
+        std::fs::write(live.join("skills/old.md"), b"old").unwrap();
+
+        // Stage the replacement as a same-volume sibling and activate it.
+        let stage = unique_sibling(&live, "install");
+        std::fs::create_dir_all(stage.join("skills")).unwrap();
+        std::fs::write(stage.join("skills/new.md"), b"new").unwrap();
+
+        let aside = activate_bundle_transactional(&live, &stage)
+            .unwrap()
+            .expect("previous bundle should be moved aside");
+        assert_eq!(std::fs::read(live.join("skills/new.md")).unwrap(), b"new");
+        assert!(!live.join("skills/old.md").exists());
+        assert!(!stage.exists(), "stage must be consumed by the rename");
+
+        // A later step failing must put the previous tree back verbatim.
+        restore_bundle(&live, Some(&aside)).unwrap();
+        assert_eq!(std::fs::read(live.join("skills/old.md")).unwrap(), b"old");
+        assert!(!live.join("skills/new.md").exists());
+    }
+
+    #[test]
+    fn bundle_activation_from_clean_home_rolls_back_to_no_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = scratch_bundle(dir.path());
+        let stage = unique_sibling(&live, "install");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("only.md"), b"new").unwrap();
+
+        // No previous bundle: nothing to move aside.
+        assert!(
+            activate_bundle_transactional(&live, &stage)
+                .unwrap()
+                .is_none()
+        );
+        assert!(live.join("only.md").is_file());
+
+        restore_bundle(&live, None).unwrap();
+        assert!(
+            !live.exists(),
+            "rollback must not leave a partial bundle live"
+        );
+    }
+
+    #[test]
+    fn bundle_activation_refuses_a_symlinked_target() {
+        // A symlinked `bundled` would make the rename land wherever the link
+        // points — outside the Grok home entirely.
+        let dir = tempfile::tempdir().unwrap();
+        let live = scratch_bundle(dir.path());
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&elsewhere, &live).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&elsewhere, &live).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let linked = false;
+        if !linked {
+            // Windows without Developer Mode cannot create symlinks; nothing to
+            // assert on such a host.
+            return;
+        }
+
+        let stage = unique_sibling(&live, "install");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("only.md"), b"new").unwrap();
+        assert!(activate_bundle_transactional(&live, &stage).is_err());
+    }
+
+    #[test]
+    fn state_bytes_round_trip_and_restore_removes_a_state_that_did_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("update-state.json");
+
+        // Missing state is captured as `None`, not an error.
+        assert!(capture_previous_state_bytes(&state).unwrap().is_none());
+
+        write_state_bytes_atomic(&state, b"{\"installed_version\":\"0.2.113\"}\n").unwrap();
+        let captured = capture_previous_state_bytes(&state).unwrap().unwrap();
+        assert_eq!(captured, b"{\"installed_version\":\"0.2.113\"}\n");
+
+        // Rollback to "there was no state" removes the file again.
+        restore_state_bytes(&state, None).unwrap();
+        assert!(!state.exists());
+
+        // Rollback to captured bytes restores them verbatim.
+        restore_state_bytes(&state, Some(&captured)).unwrap();
+        assert_eq!(std::fs::read(&state).unwrap(), captured);
     }
 
     #[test]

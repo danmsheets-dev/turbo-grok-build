@@ -183,24 +183,44 @@ crate::register_resource!(
     LiveWorktreeApplyBackend
 );
 
-/// Validate `subagent_id` is a single path segment (no traversal).
+/// Validate `subagent_id` is a single, filesystem-safe path segment.
+///
+/// The id arrives verbatim from the model (`land_subagent_work`,
+/// `diff_subagent_work`, `discard_subagent_work`) and is joined into
+/// `{sessions_cwd}/{session_id}/subagents/<id>/meta.json`, so it is an
+/// untrusted path component that decides which subagent's work gets landed into
+/// the parent checkout. Delegates to [`xai_tool_types::is_safe_task_id`] so the
+/// worktree-naming code in `xai-grok-workspace` and this land/diff path agree on
+/// one definition of "safe segment".
+///
+/// **Fails closed, never sanitises.** The previous version trimmed whitespace
+/// and then joined the trimmed value; `" s1 "` and `"s1"` therefore addressed
+/// the same directory. Rewriting an id into a "clean" one is exactly the bug we
+/// have to avoid — two distinct ids must never collide onto one subagent
+/// directory, or a subagent could land over another's metadata by choosing a
+/// name that normalises the same way. An id we cannot use verbatim is an error.
+///
+/// The guard is a Windows-correctness check as much as a security check: it also
+/// rejects reserved device names (`CON`, `NUL`, `COM1`…), NTFS alternate-data-
+/// stream `:`, drive/UNC prefixes, and the trailing dot or space that Win32
+/// silently strips. See `xai_tool_types::path_guard` for the full rationale.
 pub fn validate_subagent_id(id: &str) -> Result<(), xai_tool_runtime::ToolError> {
-    let id = id.trim();
     if id.is_empty() {
         return Err(xai_tool_runtime::ToolError::custom(
             "invalid_subagent_id",
             "subagent_id must not be empty",
         ));
     }
-    if id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-        || id == "."
-        || id.chars().any(|c| c.is_control())
-    {
+    if !xai_tool_types::is_safe_task_id(id) {
         return Err(xai_tool_runtime::ToolError::custom(
             "invalid_subagent_id",
-            format!("subagent_id `{id}` is not a valid id (no path separators)"),
+            format!(
+                "subagent_id `{id}` is not a valid id: it must be a single path segment of \
+                 letters, digits, `-`, `_` or `.` (no path separators, drive or UNC prefixes, \
+                 `:`, control characters, surrounding whitespace, Windows reserved device names \
+                 such as CON/NUL/COM1, or a trailing dot or space), at most {} characters",
+                xai_tool_types::MAX_SAFE_PATH_SEGMENT_LEN
+            ),
         ));
     }
     Ok(())
@@ -226,11 +246,30 @@ pub async fn resolve_subagent_work(
             })?
     };
 
+    // `session_id` is normally a UUID we minted, but it reaches us through a
+    // resource slot that a peer (or a restored session file) can populate, and
+    // it is the *parent* of the subagent directory — a traversal here would
+    // walk out of the sessions tree entirely, before the subagent-id guard ever
+    // gets a say. Validate it too, and fail closed.
+    if !xai_tool_types::is_safe_path_segment(&session_id) {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "invalid_session_id",
+            format!(
+                "session id `{session_id}` is not a usable directory name; refusing to resolve \
+                 subagents/<id>/meta.json under it"
+            ),
+        ));
+    }
+
     let cwd_str = parent_cwd.to_string_lossy().into_owned();
+    // No `.trim()` here: `validate_subagent_id` already rejected any id we would
+    // have had to alter, so the segment we join is exactly the id the caller
+    // asked for. Trimming would reintroduce the "two ids, one directory"
+    // collision the guard exists to prevent.
     let subagent_dir = sessions_cwd_dir(&cwd_str)
         .join(&session_id)
         .join("subagents")
-        .join(subagent_id.trim());
+        .join(subagent_id);
     let meta_path = subagent_dir.join("meta.json");
 
     if !meta_path.is_file() {
@@ -238,7 +277,7 @@ pub async fn resolve_subagent_work(
             "subagent_not_found",
             format!(
                 "no meta.json for subagent_id `{}` at {}",
-                subagent_id.trim(),
+                subagent_id,
                 meta_path.display()
             ),
         ));
@@ -290,8 +329,7 @@ pub async fn resolve_subagent_work(
             format!(
                 "subagent `{}` has no live worktree, snapshot_ref, or changes.patch to act on \
                  (worktree_state={:?})",
-                subagent_id.trim(),
-                meta.worktree_state
+                subagent_id, meta.worktree_state
             ),
         ));
     }
@@ -844,3 +882,64 @@ mod allowlist_tests {
     }
 }
 
+
+#[cfg(test)]
+mod subagent_id_guard_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_normal_subagent_ids() {
+        for good in [
+            "subagent-019e5f2c-7a10-7c31-9b44-2f0d61a8e3bb",
+            "s1",
+            "task.v1",
+            "child_session-3",
+        ] {
+            assert!(
+                validate_subagent_id(good).is_ok(),
+                "{good:?} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_traversal_and_separators() {
+        for bad in ["", ".", "..", "../..", "a/b", "a\\b", "..\\meta.json"] {
+            assert!(
+                validate_subagent_id(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_windows_hostile_ids() {
+        // Drive prefix, UNC, alternate data stream, reserved device name,
+        // trailing dot/space — each of these either escapes the subagents dir
+        // or silently aliases onto a different one under Win32.
+        for bad in [
+            "C:", "C:\\Windows", "\\\\server\\share", "id:stream", "con", "NUL", "com1", "id.",
+            "id ",
+        ] {
+            assert!(
+                validate_subagent_id(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_padded_ids_rather_than_trimming_them() {
+        // Fail closed: `" s1 "` must not silently resolve to the `s1`
+        // directory, or two distinct ids would address one subagent.
+        assert!(validate_subagent_id(" s1 ").is_err());
+        assert!(validate_subagent_id("s1\t").is_err());
+        assert!(validate_subagent_id("s1").is_ok());
+    }
+
+    #[test]
+    fn rejects_over_length_ids() {
+        let too_long = "s".repeat(xai_tool_types::MAX_SAFE_PATH_SEGMENT_LEN + 1);
+        assert!(validate_subagent_id(&too_long).is_err());
+    }
+}

@@ -657,7 +657,25 @@ fn path_context_matches(path: &str, cr: &CompiledRule<'_>, cwd: Option<&Path>) -
         None => return true,
     };
     // Raw spelling, including the canonicalising fallbacks.
-    if path_glob_matches(path, pattern, cr.matcher) {
+    //
+    // ASYMMETRY, and it is deliberate. Widening the set of spellings that match
+    // is strictly SAFER for deny/ask (an operand cannot dodge a deny by being
+    // respelled) and strictly MORE DANGEROUS for allow (a grant leaks to a path
+    // the rule never meant to cover). The raw spelling is the one form that has
+    // not had `..` collapsed, so for an allow rule it is exactly the form that
+    // can escape: `./../../etc/passwd` textually matches the glob `./**` while
+    // denoting `/etc/passwd`, well outside the cwd the rule is scoped to.
+    //
+    // So an allow rule does not get to match on a raw spelling that still
+    // contains a parent-dir component; it must match one of the normalised
+    // forms below, where traversal has already been resolved and cwd-relative
+    // spellings are minted only for paths genuinely under the cwd. Allow rules
+    // over traversal-free paths, and every deny/ask rule, are unaffected.
+    let raw_escapes = matches!(cr.rule.action, RuleAction::Allow)
+        && Path::new(path)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+    if !raw_escapes && path_glob_matches(path, pattern, cr.matcher) {
         return true;
     }
     // Normalized / cwd-relative spellings, each also run through the
