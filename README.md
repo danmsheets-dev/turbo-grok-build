@@ -8,8 +8,8 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.114--r14%20RC14-blue" alt="RC14">
-  <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
+  <img src="https://img.shields.io/badge/version-0.2.119--r1%20RC15-blue" alt="RC15">
+  <img src="https://img.shields.io/badge/rust-1.93.0-orange?logo=rust" alt="Rust 1.93">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
 </p>
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **RC14** · wire version **`0.2.114-r14`**.
+Current release line: **RC15** · wire version **`0.2.119-r1`** (synced to xAI upstream 0.2.119).
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
 
@@ -465,9 +465,18 @@ Artifacts ship as `turbo-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 | `upstream` | `xai-org/grok-build` | Official Grok Build (fetch-only) |
 | `community` | `DaviRain-Su/hyper-grok-build` | Hyper community (fetch-only) |
 
-Turbo and Hyper share a common history but diverge after the rebrand. Hyper
-`community/dev` is often ahead on wire version (e.g. 0.2.119-rN vs Turbo
-0.2.114-r14). Use fetch + log for compare; do not merge casually.
+Turbo and Hyper share a common history but diverge after the rebrand. Use
+fetch + log for compare; do not merge casually.
+
+**Last sync: RC15 (`0.2.119-r1`).** Turbo merged xAI upstream `e5478eff1`
+(0.2.119, `SOURCE_REV` `27d2088ae…`) in full and cherry-picked a set of Hyper
+fixes on top. The Turbo/Hyper fork point is `c260695cc` (2026-07-29); Hyper was
+compared at `7a48dd755`. Anything already listed in the RC15 changelog under
+"Deliberately NOT taken" was evaluated and declined — re-read that before
+proposing it again. Note that two Hyper fixes Turbo carries (the circuit-breaker
+probe race and the `auth.json` scope-lock question) exist **only inside Hyper's
+merge commits**, so a `--no-merges` log will not show them; use
+`git show --cc <merge>` when surveying.
 
 ```sh
 git fetch origin
