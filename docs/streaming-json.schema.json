@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://x.ai/hyper/streaming-json.schema.json",
-  "title": "Hyper streaming-json NDJSON events",
+  "$id": "https://x.ai/turbo/streaming-json.schema.json",
+  "title": "Turbo streaming-json NDJSON events",
   "description": "One event per line. schemaVersion is 2 on start/end/tool/subagent events. Consumers MUST ignore unknown type values for forward compatibility.",
   "oneOf": [
     {
