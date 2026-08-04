@@ -4022,9 +4022,42 @@ mod tests {
             "ollama/gpt-oss:120b",
             "ollama/kimi-k2.7-code",
             "ollama/deepseek-v4-pro",
+            "ollama/deepseek-v4-flash",
+            "ollama/deepseek-v4-flash:0731",
+            "fireworks/accounts/fireworks/models/deepseek-v4-flash",
+            "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
         ] {
             assert!(keys.contains(id), "missing offline fallback {id}");
         }
+        for key in [
+            "ollama/deepseek-v4-flash",
+            "ollama/deepseek-v4-flash:0731",
+            "ollama/deepseek-v4-pro",
+            "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
+        ] {
+            let m = platform_builtin_models()
+                .iter()
+                .find(|m| m.catalog_key() == key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(
+                m.context_window, 1_000_000,
+                "{key}: DeepSeek V4 is 1M context"
+            );
+            assert_eq!(
+                m.max_completion_tokens,
+                Some(384_000),
+                "{key}: DeepSeek V4 max output is 384K"
+            );
+        }
+        let fw_flash_0731 = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731")
+            .expect("fireworks deepseek-v4-flash-0731");
+        assert_eq!(
+            fw_flash_0731.api_backend,
+            PlatformApiBackend::Messages,
+            "Fireworks DeepSeek V4 Flash uses Anthropic Messages like the Pi flash row"
+        );
         assert!(
             platform_builtin_models().len() >= 100,
             "expected full Pi-derived catalog, got {}",

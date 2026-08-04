@@ -1980,7 +1980,7 @@ fn parse_auth_providers(
 impl Config {
     /// Reject invalid glob patterns in the model-filter lists at config load, so
     /// a typo fails loudly instead of silently changing availability.
-    pub(crate) fn validate_model_filters(&self) -> Result<(), String> {
+    pub fn validate_model_filters(&self) -> Result<(), String> {
         for (field, list) in [
             ("allowed_models", &self.models.allowed_models),
             ("enabled_models", &self.models.enabled_models),
@@ -6678,6 +6678,16 @@ pub(crate) fn to_acp_model_info(
         })
         .collect()
 }
+
+/// ACP metadata flag identifying catalog rows sourced from `[model.*]` in
+/// `config.toml`. Clients use it to replace only config-owned rows during an
+/// explicit `/model` reload while retaining remote and provider catalogs.
+pub const CONFIG_MODEL_META_KEY: &str = "xaiConfigModel";
+
+/// Request metadata flag asking the shell to re-read model configuration
+/// before resolving an explicitly selected model.
+pub const RELOAD_MODEL_CONFIG_META_KEY: &str = "reloadModelConfig";
+
 /// Error code for model switch rejection due to agent type mismatch.
 pub const MODEL_SWITCH_INCOMPATIBLE_AGENT: &str = "MODEL_SWITCH_INCOMPATIBLE_AGENT";
 /// Error code for model switch failure during the zero-turn full harness

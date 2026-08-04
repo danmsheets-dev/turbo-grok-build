@@ -1292,6 +1292,15 @@ impl acp::Agent for MvpAgent {
                 return Err(SupervisorError::UnsupportedPlatform.into_acp_error());
             }
         }
+        let reload_model_config = arguments
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(crate::agent::config::RELOAD_MODEL_CONFIG_META_KEY))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if reload_model_config && custom_model_id.is_some() {
+            crate::extensions::session_admin::reload_models_from_disk(self)?;
+        }
         #[allow(unused_variables)]
         let session_computer_sessions = resolve_session_computer_sessions(
             arguments.meta.as_ref(),
@@ -3704,6 +3713,15 @@ impl acp::Agent for MvpAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        let reload_model_config = args
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(crate::agent::config::RELOAD_MODEL_CONFIG_META_KEY))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if reload_model_config {
+            crate::extensions::session_admin::reload_models_from_disk(self)?;
+        }
         let model = self.resolve_model_id(&args.model_id)?;
         if !model.info.user_selectable {
             return Err(
