@@ -1912,6 +1912,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_secs(30),
             0,
             crate::util::config::CompactionToolChoice::Auto,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap_or_else(|_| panic!("compaction must succeed after an endpoint switch"));

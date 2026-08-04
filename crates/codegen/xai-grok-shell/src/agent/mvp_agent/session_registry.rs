@@ -166,6 +166,15 @@ impl SessionRegistry {
             e.resident.get_or_insert_default().codebase_index = Some(index);
         });
     }
+    /// Mark a session as holding a gateway requirement, so `counts()` reports
+    /// it under `require_gateway_sessions`. Lost in the 0.2.119 merge: the
+    /// `require_gateway` field and its accounting both survived, but this
+    /// setter did not, leaving the flag unreachable and permanently `false`.
+    pub(super) fn mark_require_gateway(&self, id: &acp::SessionId) {
+        self.edit(id, |e| {
+            e.resident.get_or_insert_default().require_gateway = true;
+        });
+    }
     /// Destructured so a new field has to be counted, or go unmeasured.
     pub(super) fn counts(&self) -> SessionCounts {
         let mut counts = SessionCounts::default();
