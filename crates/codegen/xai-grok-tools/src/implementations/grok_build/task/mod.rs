@@ -360,6 +360,32 @@ impl xai_tool_runtime::Tool for TaskTool {
         }
 
         // 3. Build the subagent request
+        //
+        // `task_id` is documented as server-injected and is `#[schemars(skip)]`,
+        // so it is absent from the advertised schema — but it is still
+        // `#[serde(default)]` on the input struct, so a model that emits it
+        // anyway has it deserialized and honoured. This id becomes both the
+        // child session id AND a directory component:
+        // `<session dir>/subagents/<id>` and `sessions_cwd_dir(cwd).join(id)`,
+        // written via `create_dir_all` + persist. Unvalidated, `../../..` walks
+        // the metadata write out of the sessions tree, `../<sibling-id>` lands
+        // on another subagent's meta.json (redirecting a later land to a
+        // worktree the parent never approved), and on Windows `nul` sends every
+        // metadata write to the NUL device while reporting success.
+        //
+        // Fail closed rather than sanitising: rewriting a hostile id into a
+        // legal one would let two distinct ids collapse onto one directory.
+        if let Some(requested) = input.task_id.as_deref()
+            && !xai_tool_types::is_safe_task_id(requested)
+        {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "task_id `{requested}` is not a valid id: it must be a single path segment of \
+                 letters, digits, `-`, `_` or `.` (no path separators, drive or UNC prefixes, \
+                 `:`, control characters, surrounding whitespace, Windows reserved device names \
+                 such as CON/NUL/COM1, or a trailing dot or space), at most {} characters",
+                xai_tool_types::MAX_SAFE_PATH_SEGMENT_LEN
+            )));
+        }
         let id = input
             .task_id
             .clone()

@@ -277,14 +277,30 @@ pub enum PermissionCommand {
     ResetState,
     Shutdown,
 }
+/// Trim/unquote a model-supplied path exactly as the tool will before opening
+/// it (`resources::sanitize_model_path_arg`, called from `resolve_model_path`).
+///
+/// The gate and the tool MUST derive their operand from the same string. They
+/// did not: `AccessKind` carried the verbatim model spelling while every path
+/// tool sanitized first, so a deny keyed on `**/.env` missed `" .env"` or
+/// `"'.env'"` — no rule matched, the request fell through to the default
+/// auto-allow, and the tool then trimmed to `.env` and read it. The
+/// canonicalising layer does not rescue this: a padded leaf has no
+/// canonicalisable ancestor, so it comes back lexical-only with the padding
+/// intact. Compare the `Bash` arm in `policy.rs`, which has trimmed leading
+/// whitespace for this exact reason (CWE-178) since before the fork.
+fn gate_path(raw: &str) -> String {
+    xai_grok_tools::types::resources::sanitize_model_path_arg(raw).to_owned()
+}
+
 impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
     fn from(input: &xai_grok_tools::types::ToolInput) -> Self {
         use xai_grok_tools::types::ToolInput;
         match input {
-            ToolInput::ReadFile(r) => AccessKind::Read(Some(r.path.clone())),
-            ToolInput::ListDir(l) => AccessKind::Read(Some(l.target_directory.clone())),
+            ToolInput::ReadFile(r) => AccessKind::Read(Some(gate_path(&r.path))),
+            ToolInput::ListDir(l) => AccessKind::Read(Some(gate_path(&l.target_directory))),
             ToolInput::Grep(g) => AccessKind::Grep {
-                path: g.path.clone(),
+                path: g.path.as_deref().map(gate_path),
                 glob: g.glob.clone(),
             },
             ToolInput::TodoWrite(_)
@@ -294,11 +310,11 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             | ToolInput::Skill(_) => AccessKind::Read(None),
             ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
             ToolInput::SearchReplace(search_replace) => {
-                AccessKind::Edit(search_replace.file_path.to_string())
+                AccessKind::Edit(gate_path(&search_replace.file_path.to_string()))
             }
             ToolInput::ApplyPatch(ap) => apply_patch_access_kind(&ap.patch),
-            ToolInput::HashlineEdit(he) => AccessKind::Edit(he.file_path.to_string()),
-            ToolInput::Write(w) => AccessKind::Edit(w.file_path.clone()),
+            ToolInput::HashlineEdit(he) => AccessKind::Edit(gate_path(&he.file_path.to_string())),
+            ToolInput::Write(w) => AccessKind::Edit(gate_path(&w.file_path)),
             ToolInput::Bash(bash) => AccessKind::Bash(bash.command.to_string()),
             ToolInput::Monitor(m) => AccessKind::Bash(m.command.clone()),
             ToolInput::MCPTool(mcp) => AccessKind::MCPTool {

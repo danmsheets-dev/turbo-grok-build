@@ -956,7 +956,13 @@ pub fn emit_confine_violation(
 /// with a quote character (true quote-wrapping): a stray unbalanced quote is
 /// still stripped, but does not enable escape stripping, so backslashes in
 /// otherwise-unquoted real paths (e.g. Windows `dir\n ame`) are never eaten.
-fn sanitize_model_path_arg(input: &str) -> &str {
+/// Trim and unquote a model-supplied path argument.
+///
+/// PUBLIC because the permission gate must derive its operand from the exact
+/// same string the tool will act on. If the gate sees ` .env` while the tool
+/// opens `.env`, a configured deny keyed on `**/.env` misses and the read
+/// falls through to the default auto-allow.
+pub fn sanitize_model_path_arg(input: &str) -> &str {
     let trimmed = input.trim();
     let quote_wrapped =
         trimmed.len() >= 2 && trimmed.starts_with(['"', '\'']) && trimmed.ends_with(['"', '\'']);

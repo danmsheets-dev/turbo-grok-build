@@ -2241,7 +2241,7 @@ mod tests {
             vec![
                 "Turbo Grok Build TUI",
                 "",
-                "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: turbo [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]
