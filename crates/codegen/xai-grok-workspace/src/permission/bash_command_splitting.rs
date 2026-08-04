@@ -894,7 +894,7 @@ fn sh_split_simple(s: &str) -> Vec<String> {
 ///
 /// For the above example:
 ///   prefix: ["XAI_API_KEY=xai-some-key"]
-///   highlighted_words: ["cargo", "run", "--bin", "hyper"]
+///   highlighted_words: ["cargo", "run", "--bin", "turbo"]
 ///   suffix: []
 pub fn primary_command_from_script(script: &str) -> Option<BashCommandHighlights> {
     let tree = try_parse_shell(script)?;
@@ -1407,7 +1407,7 @@ mod tests {
                     "cargo".to_owned(),
                     "run".to_owned(),
                     "--bin".to_owned(),
-                    "hyper".to_owned()
+                    "turbo".to_owned()
                 ],
                 suffix: vec![],
             })
@@ -1445,7 +1445,7 @@ mod tests {
                     "cargo".to_owned(),
                     "build".to_owned(),
                     "--bin".to_owned(),
-                    "hyper".to_owned(),
+                    "turbo".to_owned(),
                 ],
                 suffix: vec!["2>&1".to_owned(),],
             })

@@ -28,7 +28,7 @@ Structured product-issue store for agents + runtime detectors. See
 | Surface | Notes |
 |---------|--------|
 | Tool `developer_log` | Agents file/dedup incidents under `~/.grok/developer-log/` |
-| CLI `hyper issues list\|show\|export\|ack\|resolve\|path` | Maintainer review + export packs |
+| CLI `turbo issues list\|show\|export\|ack\|resolve\|path` | Maintainer review + export packs |
 | Auto detectors | Worktree dispose without artifacts; isolation fallback; stall/timeout |
 | Disable | `GROK_DEVELOPER_LOG=0` |
 
@@ -39,7 +39,7 @@ Structured product-issue store for agents + runtime detectors. See
 | NVIDIA stream deser `null` vs `u32` | Null-tolerant Chat Completions usage/index/tool_calls |
 | Subagent hang without timeout | `timeout_ms` + budget monitor; stall on no progress |
 | Worktree ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œdisappearedÃƒÂ¢Ã¢â€šÂ¬Ã‚Â | `changes.patch` + `snapshot_ref` + `worktree_state` on completion; `retain_worktree` |
-| Parent cannot merge child work | `diff_subagent` / `land_subagent` tools or `hyper subagent land` |
+| Parent cannot merge child work | `diff_subagent` / `land_subagent` tools or `turbo subagent land` |
 | NVIDIA `prompt_cache_key` 400s | Platform defaults + opt-in stamp only |
 | Catalog EOL / Nano token overflow | Hide EOL; clamp Nano 9B; `agent_ready` / max_parallel on compat |
 | Deep multi-agent audit | `/deepaudit` + `continuous-improve` workflows |
@@ -89,7 +89,7 @@ Structured product-issue store for agents + runtime detectors. See
 |----|--------|-----|
 | F-1 | `is_grok_process` ignored `turbo` | Recognizes basenames `turbo` / `grok`, `xai-grok-*` / `xai_grok_*` test bins, and `~/.turbo/bin` / `~/.grok/bin` paths. |
 | F-2 | MiniMax / Fireworks Messages 404 | Messages `base_url_override` values are normalized to end in `/v1` before the sampler joins `/messages`. |
-| F-3 | Branding | `community-build` (default on the Hyper binary) makes `--version` and `completions` emit `turbo`. |
+| F-3 | Branding | `community-build` (default on the Turbo binary) makes `--version` and `completions` emit `turbo`. |
 | F-9 | Local builds without community-build | `xai-grok-pager-bin` defaults include `community-build`. |
 
 ### S1 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â OAuth refresh storms + oracle discoverability
@@ -106,7 +106,7 @@ Structured product-issue store for agents + runtime detectors. See
 | ID | Topic | Fix |
 |----|--------|-----|
 | F-1-mac | macOS/BSD liveness-only process check | macOS/iOS uses `proc_pidpath` + the same basename/path rules as Linux/Windows. |
-| F-8 | Bare logout only cleared xAI | Bare logout prints remaining Kimi/Codex scopes; `hyper logout --all` clears xAI + Kimi + Codex (not BYOK keys). |
+| F-8 | Bare logout only cleared xAI | Bare logout prints remaining Kimi/Codex scopes; `turbo logout --all` clears xAI + Kimi + Codex (not BYOK keys). |
 
 ## Intentional / accepted
 

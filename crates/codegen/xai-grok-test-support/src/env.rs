@@ -81,7 +81,7 @@ fn target_dir() -> PathBuf {
 fn local_grok_binary_path() -> PathBuf {
     target_dir()
         .join("debug")
-        .join(format!("hyper{}", std::env::consts::EXE_SUFFIX))
+        .join(format!("turbo{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn ensure_local_grok_binary(binary: &Path) {
@@ -109,12 +109,12 @@ fn ensure_local_grok_binary(binary: &Path) {
     );
     assert!(
         binary.exists(),
-        "hyper build completed but binary missing at {}",
+        "turbo build completed but binary missing at {}",
         binary.display()
     );
 }
 
-/// Resolve binary: `GROK_BINARY` env (CI) or a locally built `hyper` binary.
+/// Resolve binary: `GROK_BINARY` env (CI) or a locally built `turbo` binary.
 pub fn grok_binary() -> PathBuf {
     if let Ok(path) = std::env::var("GROK_BINARY") {
         let p = PathBuf::from(path);

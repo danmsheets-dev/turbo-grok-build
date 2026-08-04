@@ -1,7 +1,7 @@
 //! Turbo community updater.
 //!
 //! This module is deliberately separate from the official Grok updater. It
-//! only reads releases from `danmsheets-dev/hyper-grok-build` and only activates
+//! only reads releases from `danmsheets-dev/turbo-grok-build` and only activates
 //! binaries below `~/.turbo` (or `TURBO_SHARE_DIR` in debug/test builds).
 //! Nothing here calls the x.ai/npm updater or writes `~/.grok/bin/grok`.
 
@@ -24,9 +24,9 @@ use crate::auto_update::{
     BackgroundUpdateCheck, EnsureLatestOutcome, UpdateAvailable, UpdateRunMode, UpdateStatus,
 };
 
-const RELEASE_REPO: &str = "danmsheets-dev/hyper-grok-build";
+const RELEASE_REPO: &str = "danmsheets-dev/turbo-grok-build";
 const RELEASE_API_BASE: &str =
-    "https://api.github.com/repos/danmsheets-dev/hyper-grok-build/releases";
+    "https://api.github.com/repos/danmsheets-dev/turbo-grok-build/releases";
 const CHECK_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const SMOKE_TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1479,9 +1479,9 @@ pub(crate) async fn run_update(
         anyhow::anyhow!(
             "Turbo community update failed: {error:#}\n\nReinstall with:\n  {}",
             if cfg!(windows) {
-                "irm https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.ps1 | iex"
+                "irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex"
             } else {
-                "curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/hyper-grok-build/dev/install.sh | bash"
+                "curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash"
             }
         )
     })?;
@@ -1577,14 +1577,14 @@ mod tests {
     #[test]
     fn archive_paths_are_root_only_and_never_escape() {
         assert_eq!(
-            normalized_root_entry(Path::new("./hyper"))
+            normalized_root_entry(Path::new("./turbo"))
                 .unwrap()
                 .as_deref(),
             Some("turbo")
         );
-        assert!(normalized_root_entry(Path::new("../hyper")).is_err());
-        assert!(normalized_root_entry(Path::new("nested/hyper")).is_err());
-        assert!(normalized_root_entry(Path::new("nested\\hyper")).is_err());
+        assert!(normalized_root_entry(Path::new("../turbo")).is_err());
+        assert!(normalized_root_entry(Path::new("nested/turbo")).is_err());
+        assert!(normalized_root_entry(Path::new("nested\\turbo")).is_err());
     }
 
     #[cfg(unix)]

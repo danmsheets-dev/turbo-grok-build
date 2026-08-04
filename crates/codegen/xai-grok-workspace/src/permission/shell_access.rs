@@ -609,13 +609,13 @@ fn peel_powershell_expression(seg: &str) -> &str {
 ///
 /// Modelled = known readers, known writers (operand-checked), pure builtins,
 /// path commands (`cp`/`mv`/…), special flag writers (`dd`/`rustc`/…),
-/// read-only / path-extracted `git`, and nested hyper (inherits
+/// read-only / path-extracted `git`, and nested turbo/hyper/grok (inherits
 /// `GROK_CONFINE`). Everything else is fail-closed.
 fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> bool {
-    // Nested hyper/grok re-applies GROK_CONFINE on startup — allow under pin.
+    // Nested turbo/hyper/grok re-applies GROK_CONFINE on startup — allow under pin.
     if matches!(
         program,
-        "hyper" | "grok" | "xai-grok" | "xai-grok-pager"
+        "turbo" | "hyper" | "grok" | "xai-grok" | "xai-grok-pager"
     ) {
         return true;
     }
@@ -2216,7 +2216,7 @@ mod tests {
             "tee out.txt",
             "cd src",
             "true",
-            "hyper -p 'hi'",
+            "turbo -p 'hi'",
             "git show HEAD",
             "git log --oneline -5",
             "wc -l src/main.rs",

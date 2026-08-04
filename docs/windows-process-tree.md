@@ -1,4 +1,4 @@
-# Stopping a Hyper run on Windows
+# Stopping a Turbo run on Windows
 
 ## The failure you may have seen
 
@@ -14,28 +14,28 @@ direct terminate. Killing the guessed PID leaves orphans.
 
 ## Do this instead: kill the Job Object
 
-Hyper can run inside a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+Turbo can run inside a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
 Closing the last handle to that job terminates **every** process in the tree
 (agent, terminal children, MCP servers, `rg`, engines, …).
 
 ### Opt-in (harness / CI)
 
 ```text
-hyper --job-object -p "…"
+turbo --job-object -p "…"
 # or
 set TURBO_JOB_OBJECT=1
-hyper -p "…"
+turbo -p "…"
 ```
 
 Interactive users leave this **off**. Nested jobs or an already-jobbed parent
-can make assignment fail; Hyper logs a warning and continues.
+can make assignment fail; Turbo logs a warning and continues.
 
 ### What the harness should do
 
 1. Launch Turbo with `--job-object` / `TURBO_JOB_OBJECT=1`.
 2. Prefer holding a job handle if you created the job yourself and assigned
-   Hyper into it; **close that handle** to stop the run.
-3. If you only have Hyper's PID: open the process, query its job
+   Turbo into it; **close that handle** to stop the run.
+3. If you only have Turbo's PID: open the process, query its job
    (`IsProcessInJob` / `QueryInformationJobObject`), and terminate the **job**,
    not a grandchild PID you scraped from logs.
 4. Do **not** rely on `taskkill /T` against a random child PID — that is what

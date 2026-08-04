@@ -1,6 +1,6 @@
 # Reasoning effort ladder (`--reasoning-effort` / `--effort`)
 
-Hyper accepts an explicit enumerated effort ladder on `--reasoning-effort`
+Turbo accepts an explicit enumerated effort ladder on `--reasoning-effort`
 (alias `--effort`). A typo fails fast with the full accepted set in the error
 message (HYPER-2 — harnesses previously had no way to learn the ceiling and
 capped themselves at `low|medium|high`).
@@ -28,7 +28,7 @@ distinct tokens. See `ReasoningEffort` in
 
 ## Per-model support
 
-Not every model accepts every tier. `hyper models --json` surfaces:
+Not every model accepts every tier. `turbo models --json` surfaces:
 
 ```json
 {

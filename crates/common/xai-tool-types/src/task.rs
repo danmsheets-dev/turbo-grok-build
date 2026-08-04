@@ -423,7 +423,7 @@ impl SubagentCompletedOutput {
             let base = self.baseline_ref.as_deref().unwrap_or("HEAD");
             text.push_str(&format!(
                 "\n\n<snapshot_ref>{snap}</snapshot_ref>\n\
-                 Recover: `hyper subagent open {id} --restore` · \
+                 Recover: `turbo subagent open {id} --restore` · \
                  `git show {snap}:<path>` · `git diff {base} {snap}`",
                 id = self.subagent_id
             ));

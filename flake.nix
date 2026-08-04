@@ -149,9 +149,9 @@
 
             meta = with pkgs.lib; {
               description = "Unofficial multi-provider community build of Grok Build — terminal AI coding agent";
-              homepage = "https://github.com/danmsheets-dev/hyper-grok-build";
+              homepage = "https://github.com/danmsheets-dev/turbo-grok-build";
               license = licenses.asl20;
-              # Single shipped binary `hyper`; required for `nix run` to
+              # Single shipped binary `turbo`; required for `nix run` to
               # resolve to the right executable.
               mainProgram = "turbo";
               # Linux glibc targets first (matches the repo's release matrix).
