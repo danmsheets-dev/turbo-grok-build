@@ -38,8 +38,7 @@ use super::model::{
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 use super::storage::{
-    AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt,
-    with_auth_json_scope_lock, write_auth_json,
+    AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt, write_auth_json,
 };
 
 #[cfg(test)]
@@ -868,18 +867,26 @@ impl AuthManager {
     /// needing the post-enrichment view re-read `current()`.
     pub(crate) async fn update(self: &Arc<Self>, auth: GrokAuth) -> std::io::Result<GrokAuth> {
         let update_started = std::time::Instant::now();
-        // This whole-map read-modify-write must share `auth.json.lock` with the
-        // Kimi/Codex/Claude/BYOK writers in `storage.rs`, which all take it. An
-        // unlocked read-then-write here can interleave with a third-party login
-        // and write back a map that never saw their scope, dropping it. Users
-        // experience that as "logging into Grok wiped my Kimi/Codex login".
+        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
+            Ok(map) => map,
+            Err(e) => {
+                // Non-recoverable error (PermissionDenied, etc.) — keep conservative.
+                tracing::warn!(error = %e, "auth: read failed, updating in-memory only");
+                xai_grok_telemetry::unified_log::warn(
+                    "auth update skipped disk write (read failed)",
+                    None,
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                );
+                self.with_inner_write(|inner| *inner = Some(auth.clone()));
+                self.spawn_user_info_enrichment(auth.clone());
+                return Ok(auth);
+            }
+        };
+        let mut map = map;
+        // One entry per scope (personal and team share the scope key).
         tracing::debug!(scope = %self.scope, "auth: storing token");
-        let write_result = with_auth_json_scope_lock(&self.path, || {
-            // One entry per scope (personal and team share the scope key).
-            let mut map = read_auth_json_or_empty_recovering_corrupt(&self.path)?;
-            map.insert(self.scope.clone(), auth.clone());
-            write_auth_json(&self.path, &map)
-        });
+        map.insert(self.scope.clone(), auth.clone());
+        let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = update_started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => xai_grok_telemetry::unified_log::info(
@@ -889,23 +896,16 @@ impl AuthManager {
                     "rt_prefix": auth.refresh_token.as_deref().map(token_suffix),
                     "key_prefix": token_suffix(&auth.key),
                     "elapsed_ms": elapsed_ms,
-                    "scope": self.scope,
                 })),
             ),
-            Err(e) => {
-                // Lock or IO failure (PermissionDenied, read-only disk, …) —
-                // stay conservative and keep the credential in memory only.
-                tracing::warn!(error = %e, "auth: disk update failed, updating in-memory only");
-                xai_grok_telemetry::unified_log::error(
-                    "auth update disk write failed",
-                    None,
-                    Some(serde_json::json!({
-                        "error": e.to_string(),
-                        "elapsed_ms": elapsed_ms,
-                        "scope": self.scope,
-                    })),
-                );
-            }
+            Err(e) => xai_grok_telemetry::unified_log::error(
+                "auth update disk write failed",
+                None,
+                Some(serde_json::json!({
+                    "error": e.to_string(),
+                    "elapsed_ms": elapsed_ms,
+                })),
+            ),
         }
         // Always update in-memory, even if disk write failed. This lets the
         // current session work with fresh credentials while the user fixes the
@@ -930,14 +930,24 @@ impl AuthManager {
         auth: GrokAuth,
     ) -> std::io::Result<GrokAuth> {
         let started = std::time::Instant::now();
-        // Same scope-lock requirement as `update` above: an unlocked whole-map
-        // RMW here can drop a concurrently-written third-party scope.
+        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
+            Ok(map) => map,
+            Err(e) => {
+                // Non-recoverable error — keep conservative.
+                tracing::warn!(error = %e, "auth: read failed, updating in-memory only (no enrichment)");
+                xai_grok_telemetry::unified_log::warn(
+                    "auth update skipped disk write (read failed, no enrichment)",
+                    None,
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                );
+                self.with_inner_write(|inner| *inner = Some(auth.clone()));
+                return Ok(auth);
+            }
+        };
+        let mut map = map;
         tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        let write_result = with_auth_json_scope_lock(&self.path, || {
-            let mut map = read_auth_json_or_empty_recovering_corrupt(&self.path)?;
-            map.insert(self.scope.clone(), auth.clone());
-            write_auth_json(&self.path, &map)
-        });
+        map.insert(self.scope.clone(), auth.clone());
+        let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => xai_grok_telemetry::unified_log::info(
