@@ -376,9 +376,26 @@ Windows PowerShell:
 ```powershell
 $env:GROK_VERSION = (Get-Content VERSION -Raw).Trim()
 cargo build -p xai-grok-pager-bin --profile release-dist --bin turbo
+# Binary: target\release-dist\turbo.exe  (do not install over ~/.turbo until ready)
 ```
 
 Community branding / updater: `--features community-build` (default on this tree).
+
+### Disk hygiene (important on Windows)
+
+This monorepo’s `target/` can grow past **100–200 GB** (debug incremental + PDBs,
+plus independent `release-dist` caches). Prefer package-scoped `cargo check` /
+`cargo test`. Before large builds, free space should be ≥40 GB (see
+[`AGENTS.md`](./AGENTS.md)). After a successful ship binary:
+
+```powershell
+# Keep turbo.exe; drop release-dist rebuild caches (optional)
+Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
+# Or only: target\release-dist\{incremental,deps,build,.fingerprint}
+```
+
+RC15 plans a productized `turbo disk report|clean` surface (see feature request
+log / [`CHANGELOG.md`](./CHANGELOG.md) Unreleased).
 
 ---
 
@@ -387,9 +404,9 @@ Community branding / updater: `--features community-build` (default on this tree
 - [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **RC14** (`0.2.114-r14`) is current
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
 - [`docs/workspace-tree.md`](docs/workspace-tree.md) — Workspace Tree (RC12–RC13)
-- [`docs/RC11_RELEASE_NOTES.md`](docs/RC11_RELEASE_NOTES.md) — Game Mode (RC11 base)
-- [`docs/RC9_FEATURES.md`](./docs/RC9_FEATURES.md) — worktrees, Boot Card, ADL (RC9 base)
-- [`docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`](docs/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md) — RC10 harness matrix
+- [`docs/archive/RC11_RELEASE_NOTES.md`](docs/archive/RC11_RELEASE_NOTES.md) — Game Mode (historical)
+- [`docs/archive/RC9_FEATURES.md`](docs/archive/RC9_FEATURES.md) — worktrees, Boot Card, ADL (historical)
+- [`docs/archive/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md`](docs/archive/Q&A/rc9/RC10_HARNESS_FIX_PLAN.md) — RC10 harness matrix (historical)
 
 ---
 
@@ -440,20 +457,29 @@ Artifacts ship as `turbo-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 
 `SOURCE_REV` records the last monorepo sync point.
 
-### Tracking remotes (for cherry-picks)
+### Tracking remotes (for cherry-picks / Turbo vs Hyper compare)
 
 | Remote | URL | Use |
 |--------|-----|-----|
-| `origin` | `danmsheets-dev/turbo-grok-build` | Your Turbo fork |
+| `origin` | `danmsheets-dev/turbo-grok-build` | This Turbo fork (`dev` default) |
 | `upstream` | `xai-org/grok-build` | Official Grok Build (fetch-only) |
 | `community` | `DaviRain-Su/hyper-grok-build` | Hyper community (fetch-only) |
 
+Turbo and Hyper share a common history but diverge after the rebrand. Hyper
+`community/dev` is often ahead on wire version (e.g. 0.2.119-rN vs Turbo
+0.2.114-r14). Use fetch + log for compare; do not merge casually.
+
 ```sh
+git fetch origin
 git fetch upstream
 git fetch community
 # Inspect without merging:
-git log --oneline dev..community/dev | head
-git log --oneline dev..upstream/main | head
+git log --oneline HEAD..community/dev | head
+git log --oneline community/dev..HEAD | head
+git rev-list --count HEAD..community/dev   # commits Hyper has that Turbo lacks
+git rev-list --count community/dev..HEAD   # commits Turbo has that Hyper lacks
+git show community/dev:VERSION
+git show HEAD:VERSION
 ```
 
 ---

@@ -61,9 +61,24 @@ Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
 # Drop plain release if you only ship release-dist
 Remove-Item -Recurse -Force target\release -ErrorAction SilentlyContinue
 
-# Full clean (last resort — long rebuild)
-cargo clean
+# Keep ship binary; free release-dist rebuild caches (~50–70+ GB typical)
+# Do NOT run while cargo is still linking release-dist.
+$rd = "target\release-dist"
+foreach ($sub in @("incremental", "deps", "build", "examples", ".fingerprint")) {
+  Remove-Item -Recurse -Force (Join-Path $rd $sub) -ErrorAction SilentlyContinue
+}
+# Optional nuclear debug wipe (independent of release-dist):
+# Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
+
+# Full clean (last resort — long rebuild; also removes turbo.exe)
+# cargo clean
 ```
+
+**After a repo rename / move** (e.g. `hyper-grok-build` → `turbo-grok-build`):
+build caches may still embed **absolute paths** to the old tree (cranelift,
+opus, aws-lc). Symptoms: mid-build “cannot read file …\hyper-grok-build\…”.
+Fix: delete polluted `target\*\build` / `.fingerprint` units, or wipe
+`target\debug` and release-dist caches (keep `turbo.exe` if needed).
 
 **Cargo global caches** (outside the repo; only if still tight on disk):
 
@@ -117,6 +132,7 @@ Guidelines:
 - Active worktrees under `~/.grok/worktrees/` unless pruning soft-preserved
   subagent trees with product tools (`turbo subagent …` / keep-N)
 - `target/release-dist` mid-ship-build
+- `target/release-dist/turbo.exe` (or `turbo`) when you still need the ship binary
 
 ## Product context (short)
 
@@ -125,6 +141,7 @@ Guidelines:
 - Composition root binary: **`xai-grok-pager-bin`** → `turbo`
 - Config/auth/sessions: **`~/.grok`** (shared with official `grok` if installed)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md) · current RC line: see `VERSION`
+- Hyper compare remote: **`community`** → `DaviRain-Su/hyper-grok-build` (fetch-only)
 
 ## When fixing isolation / subagents
 

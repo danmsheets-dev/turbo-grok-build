@@ -34,6 +34,22 @@ Older release notes (r1–r13 detail) are archived under
 
 ## [Unreleased]
 
+### Fixed (post-RC14 brand polish)
+- Finish **hyper → turbo** leftovers: community updater + install URLs point at
+  `danmsheets-dev/turbo-grok-build`, test harness looks up `turbo` binary, nested
+  confine allowlist includes `turbo`, recovery text / docs use `turbo` CLI names,
+  flake homepage + archive-entry tests aligned.
+
+### Planned (RC15 candidates — feature request log)
+Rust `target/` disk hygiene product surface (Windows monorepo often 100–300 GB):
+- `turbo disk report` / `turbo disk clean --safe`
+- Doctor free-space probe + agent preflight before heavy cargo / release-dist
+- Windows PDB / light-agent cargo policy; post-ship cache trim (keep `turbo.exe`)
+- Stale absolute-path target self-heal after renames; optional `turbo build ship`
+- Auto developer_log on disk pressure
+
+Review: `turbo features list` / `turbo features export`.
+
 ## [0.2.114-r14] - 2026-08-04
 
 **Turbo Grok Build RC14** — production `web_fetch`, workflow routing so free-text
@@ -68,3 +84,5 @@ rename prep (`turbo-grok-build`).
   - `origin` → your Turbo fork
   - `upstream` → `xai-org/grok-build` (official)
   - `community` → `DaviRain-Su/hyper-grok-build` (Hyper community, fetch-only)
+- For **Turbo vs Hyper** compare: `git fetch community` then
+  `git log --oneline HEAD..community/dev` (do not merge casually).
