@@ -25,7 +25,8 @@ pub use sprites_pixel::{
     sprite_developer_walk,
 };
 pub use state::{
-    ActorPhase, DESK_COUNT, DeskAgentSnapshot, DeskSlot, GameModeState, SupervisorPhase,
+    ActorPhase, DESK_COUNT, DeskAgentSnapshot, DeskSlot, GameModeState, HoverTarget,
+    SupervisorPhase, SupervisorSnapshot,
 };
 pub use wall::WallMode;
 
@@ -224,6 +225,11 @@ pub fn sync_game_mode(agent: &mut AgentView, stage_width: u16, stage_height: u16
     if sync_due {
         let waiting_on_user = !agent.permission_queue.is_empty() || agent.question_view.is_some();
         let working = supervisor_is_working(agent);
+        // Overlay data, refreshed on every due sync — deliberately *outside*
+        // the rebuild skip below, which only proves the subagent map and the
+        // room are unchanged and says nothing about the model, the turn timer
+        // or the context window (see [`SupervisorSnapshot`]).
+        refresh_supervisor_snapshot(agent, working, waiting_on_user);
         let sig = subagent_signature(&agent.subagent_sessions, working, waiting_on_user, tier);
         // Identical inputs + a room with nothing in flight ⇒ the sync is a
         // provable no-op; skip the rebuild entirely (RC16 PERF-2).
@@ -243,6 +249,43 @@ pub fn sync_game_mode(agent: &mut AgentView, stage_width: u16, stage_height: u16
     }
 
     agent.game_mode.take_redraw_dirty()
+}
+
+/// Refresh the Supervisor hover card's data from the live agent.
+///
+/// Overlay-only by construction: nothing here marks redraw dirty (that would
+/// un-park a frozen room — RC16 PERF-1) and nothing here reaches
+/// [`GameModeState::visual_fingerprint`]. The card is repainted by whatever
+/// already repaints the office, which is guaranteed while any of this can move:
+/// a running turn puts the Supervisor in `Working`, and that both animates the
+/// office and holds `needs_animation_tick`.
+///
+/// Cost is one `String` clone for the model name per due sync (~12/s while the
+/// room is awake, zero while parked); `branch` is only cloned when it changes.
+fn refresh_supervisor_snapshot(agent: &mut AgentView, working: bool, waiting_on_user: bool) {
+    let model = agent.session.models.current_model_name();
+    // Only meaningful while a turn is actually running: `turn_started_at`
+    // outlives the turn, and a finished turn's elapsed would sit frozen on the
+    // card of a parked room.
+    let turn_elapsed = if working { agent.turn_elapsed() } else { None };
+    let (used, total, pct) = agent
+        .context_state
+        .as_ref()
+        .map(|c| (c.used, c.total, c.usage_pct))
+        .unwrap_or((0, 0, 0));
+    let branch = (agent.game_mode.supervisor_info.branch.as_deref()
+        != agent.current_branch.as_deref())
+    .then(|| agent.current_branch.clone());
+    let snap = &mut agent.game_mode.supervisor_info;
+    snap.model = model;
+    snap.turn_elapsed = turn_elapsed;
+    snap.context_used = used;
+    snap.context_total = total;
+    snap.context_pct = pct;
+    snap.waiting_on_user = waiting_on_user;
+    if let Some(branch) = branch {
+        snap.branch = branch;
+    }
 }
 
 /// Rebuild snapshots, reseat the room, and mark redraw when the office changed.
@@ -412,6 +455,48 @@ mod tests {
         );
         assert_eq!(agent.game_mode.desks[0].phase, ActorPhase::AtDeskWorking);
         assert_eq!(agent.game_mode.active_desk_count(), 1);
+    }
+
+    /// The Supervisor hover card's data is refreshed *outside* the PERF-2
+    /// rebuild skip (a settled room says nothing about the model or the branch)
+    /// and is overlay-only: refreshing it must never mark the room dirty, or a
+    /// frozen office could never park (PERF-1).
+    #[test]
+    fn supervisor_snapshot_refreshes_without_dirtying_the_room() {
+        let mut agent =
+            crate::app::agent_view::test_agent_view(None, std::path::PathBuf::from("."));
+        agent.game_mode.open = true;
+        agent.current_branch = Some("rc16-game-mode".to_string());
+        sync_game_mode(&mut agent, 100, 20);
+        assert_eq!(agent.game_mode.sync_rebuilds, 1, "first sync rebuilds");
+        assert_eq!(
+            agent.game_mode.supervisor_info.branch.as_deref(),
+            Some("rc16-game-mode")
+        );
+        assert_eq!(
+            agent.game_mode.supervisor_info.turn_elapsed, None,
+            "an idle supervisor must not show a running turn timer"
+        );
+
+        agent.game_mode.take_redraw_dirty();
+        agent.current_branch = Some("dev".to_string());
+        open_sync_gate(&mut agent);
+        freeze_anim_gate(&mut agent);
+        sync_game_mode(&mut agent, 100, 20);
+
+        assert_eq!(
+            agent.game_mode.sync_rebuilds, 1,
+            "empty settled room must still skip the rebuild"
+        );
+        assert_eq!(
+            agent.game_mode.supervisor_info.branch.as_deref(),
+            Some("dev"),
+            "the card must not go stale behind a skipped rebuild"
+        );
+        assert!(
+            !agent.game_mode.take_redraw_dirty(),
+            "overlay-only tooltip data must not wake the room"
+        );
     }
 
     /// PERF-2: the skip is signature-driven, so a real change is still picked

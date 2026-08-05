@@ -68,7 +68,9 @@ fn fmt_duration(d: std::time::Duration) -> String {
 const TOK_M_MIN: u64 = 999_950;
 const TOK_B_MIN: u64 = 999_950_000;
 
-fn fmt_tokens(n: u64) -> String {
+/// Compact token count (`842`, `12.4k`, `1.2M`) — also used by the Supervisor
+/// hover card for the context window.
+pub(super) fn fmt_tokens(n: u64) -> String {
     if n >= TOK_B_MIN {
         format!("{:.1}B", n as f64 / 1_000_000_000.0)
     } else if n >= TOK_M_MIN {

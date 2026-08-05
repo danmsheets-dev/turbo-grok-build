@@ -28,9 +28,40 @@ const DESK_ANCHORS: [(f32, f32); 6] = [
 
 const SUPERVISOR_ANCHOR: (f32, f32) = (0.50, 0.28);
 
+/// Footprint cleared + rugged under the supervisor, as fractions of the canvas.
+///
+/// Also the supervisor's hover hit box — see [`supervisor_hit_rect`].
+const SUPERVISOR_COVER_W_FRAC: f32 = 0.13;
+const SUPERVISOR_COVER_H_FRAC: f32 = 0.14;
+
 /// Door position as a fraction of frame width — actors enter (SpawnWalk) and
 /// leave (ExitDoor) through it.
 const DOOR_X_FRAC: f32 = 0.06;
+
+/// Cell rect covering the composed supervisor — the pixel office's hover hit box.
+///
+/// Derived from the same fractions the compose pass places the sprite with
+/// ([`SUPERVISOR_ANCHOR`] centre, `SUPERVISOR_COVER_*_FRAC` footprint) so the box
+/// tracks the drawn art instead of guessing at it. Both fractions are of the
+/// compose *canvas*, and the canvas is `cell_w*scale` by `cell_h*2*scale` — the
+/// halfblock doubling and the scale cancel in a fraction, so the identical
+/// fractions apply to the cell-space stage rect.
+pub(super) fn supervisor_hit_rect(stage: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    if stage.width == 0 || stage.height == 0 {
+        return ratatui::layout::Rect::default();
+    }
+    let (w, h) = (f32::from(stage.width), f32::from(stage.height));
+    let cover_w = (w * SUPERVISOR_COVER_W_FRAC).round().max(1.0);
+    let cover_h = (h * SUPERVISOR_COVER_H_FRAC).round().max(1.0);
+    let x = (w * SUPERVISOR_ANCHOR.0 - cover_w / 2.0).max(0.0) as u16;
+    let y = (h * SUPERVISOR_ANCHOR.1 - cover_h / 2.0).max(0.0) as u16;
+    ratatui::layout::Rect {
+        x: stage.x.saturating_add(x),
+        y: stage.y.saturating_add(y),
+        width: (cover_w as u16).min(stage.width.saturating_sub(x)),
+        height: (cover_h as u16).min(stage.height.saturating_sub(y)),
+    }
+}
 
 pub fn load_office_background() -> Result<RgbaImage, String> {
     image::load_from_memory(OFFICE_BG_PNG)
@@ -474,8 +505,8 @@ pub fn compose_cell_frame_into(
         let (sx, sy) = SUPERVISOR_ANCHOR;
         let cx = (sx * w as f32) as i32;
         let cy = (sy * h as f32) as i32;
-        let cover_w = (w as f32 * 0.13) as i32;
-        let cover_h = (h as f32 * 0.14) as i32;
+        let cover_w = (w as f32 * SUPERVISOR_COVER_W_FRAC) as i32;
+        let cover_h = (h as f32 * SUPERVISOR_COVER_H_FRAC) as i32;
         stamp_floor_patch_sampled(
             canvas,
             Some(bg_scaled),
@@ -706,6 +737,41 @@ mod tests {
 
     /// P8(a): frames that render identical art must share one entry. The walk
     /// sprite only has two limb poses, so frame 0 and frame 2 are the same
+    /// The supervisor hover box must sit on the sprite the compose pass draws,
+    /// not next to it: same centre anchor, same footprint fractions, always
+    /// inside the stage it was derived from.
+    #[test]
+    fn supervisor_hit_rect_tracks_the_composed_sprite() {
+        use ratatui::layout::Rect;
+        for stage in [
+            Rect::new(0, 0, 100, 24),
+            Rect::new(3, 7, 160, 40),
+            Rect::new(0, 0, 72, 18),
+        ] {
+            let r = supervisor_hit_rect(stage);
+            assert!(r.width > 0 && r.height > 0, "{stage:?} → empty hit rect");
+            assert!(
+                r.x >= stage.x
+                    && r.y >= stage.y
+                    && r.x + r.width <= stage.x + stage.width
+                    && r.y + r.height <= stage.y + stage.height,
+                "{r:?} escaped {stage:?}"
+            );
+            // Centre within one cell of the anchor the sprite is blitted at.
+            let cx = f32::from(stage.x) + f32::from(stage.width) * SUPERVISOR_ANCHOR.0;
+            let cy = f32::from(stage.y) + f32::from(stage.height) * SUPERVISOR_ANCHOR.1;
+            let rcx = f32::from(r.x) + f32::from(r.width) / 2.0;
+            let rcy = f32::from(r.y) + f32::from(r.height) / 2.0;
+            assert!((rcx - cx).abs() <= 1.0, "{r:?} off-centre in x for {stage:?}");
+            assert!((rcy - cy).abs() <= 1.0, "{r:?} off-centre in y for {stage:?}");
+        }
+        assert_eq!(
+            supervisor_hit_rect(Rect::new(0, 0, 0, 0)),
+            Rect::default(),
+            "degenerate stage must not produce a hover target"
+        );
+    }
+
     /// picture — keying on the raw frame stored it twice.
     #[test]
     fn equivalent_frames_share_one_cache_entry() {

@@ -15,7 +15,7 @@ use super::sprites::{
     developer_lines, door_lines, empty_desk_lines, floor_style, plant_span, rug_style,
     supervisor_lines, wall_bg,
 };
-use super::state::{ActorPhase, DeskSlot, GameModeState, SupervisorPhase};
+use super::state::{ActorPhase, DeskSlot, GameModeState, HoverTarget, SupervisorPhase};
 use super::wall::WallMode;
 
 /// Render game mode into `area` (region above composer).
@@ -47,22 +47,32 @@ pub fn render_game_mode(buf: &mut Buffer, area: Rect, state: &mut GameModeState)
         && pixel_area.height >= 8
         && state.ensure_pixel_frame(pixel_area.width, pixel_area.height);
 
+    let mut pixel_painted = false;
     if use_pixel {
         // Prefer precomputed cell cache (HIT skips image sampling). Fallback to
         // terminal-res RGBA paint buffer, then unicode office.
-        let painted = if let Some(cache) = state.pixel_halfblock.as_ref() {
+        pixel_painted = if let Some(cache) = state.pixel_halfblock.as_ref() {
             crate::render::image_overlay::paint_halfblock_cells(buf, pixel_area, cache)
         } else if let Some(frame) = state.pixel_paint_frame() {
             crate::render::image_overlay::paint_halfblock_rgba(buf, pixel_area, frame)
         } else {
             false
         };
-        if !painted {
+        if !pixel_painted {
             render_unicode_office(buf, &layout, state);
         }
     } else {
         render_unicode_office(buf, &layout, state);
     }
+
+    // Supervisor hover hit box — must follow whichever office actually painted:
+    // the pixel path places the boss from `compose`'s fractional anchors, the
+    // unicode path fills `layout.supervisor` with the rug and centres the art.
+    state.last_supervisor = if pixel_painted {
+        super::compose::supervisor_hit_rect(pixel_area)
+    } else {
+        layout.supervisor
+    };
 
     // Overlay-only chrome (never invalidates pixel_frame / scaled BG).
     paint_focus_ring_overlay(buf, &layout, state);
@@ -116,18 +126,37 @@ fn paint_focus_ring_overlay(buf: &mut Buffer, layout: &GameLayout, state: &GameM
     }
 }
 
-/// Floating SNES-style info card when the mouse is over a seated subagent.
+/// Floating SNES-style info card for whatever the pointer / Tab focus is on.
 ///
 /// Buffer-only: never calls `ensure_pixel_frame` / compose. Live labels, tokens,
-/// and elapsed update here without invalidating the scaled BG or sprite cache.
+/// elapsed and the Supervisor's model/turn/context update here without
+/// invalidating the scaled BG or sprite cache.
 fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &GameModeState) {
-    let Some(idx) = state.focus_desk() else {
+    let Some(target) = state.focus_target() else {
         return;
     };
-    if idx >= state.desks.len() || state.desks[idx].is_empty() {
-        return;
-    }
-    let desk = &state.desks[idx];
+    let (lines, subject) = match target {
+        HoverTarget::Desk(idx) => {
+            if idx >= state.desks.len() || state.desks[idx].is_empty() {
+                return;
+            }
+            (desk_popup_lines(&state.desks[idx]), layout.desks[idx])
+        }
+        HoverTarget::Supervisor => (supervisor_popup_lines(state), state.last_supervisor),
+    };
+    paint_popup(
+        buf,
+        area,
+        PopupAnchor {
+            cursor: state.hover_screen,
+            subject,
+        },
+        &lines,
+    );
+}
+
+/// Card body for a seated subagent.
+fn desk_popup_lines(desk: &DeskSlot) -> Vec<(String, Style)> {
     let phase = match desk.phase {
         ActorPhase::AtDeskWorking => "working",
         ActorPhase::AtDeskThinking => "thinking",
@@ -138,26 +167,138 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
         ActorPhase::FailBeat => "failed",
     };
     let secs = desk.elapsed.as_secs();
-    let lines = [
-        format!(" {}", desk.label),
-        format!(" type  {}", desk.subagent_type),
-        format!(
-            " id    {}",
-            truncate_mid(desk.child_session_id.as_deref().unwrap_or("—"), 22)
+    let body = popup_body_style();
+    vec![
+        (format!(" {}", desk.label), popup_title_style()),
+        (format!(" type  {}", desk.subagent_type), body),
+        (
+            format!(
+                " id    {}",
+                truncate_mid(desk.child_session_id.as_deref().unwrap_or("—"), 22)
+            ),
+            body,
         ),
-        format!(" state {phase}"),
-        format!(
-            " time  {}m{:02}s  tok {}  tools {}",
-            secs / 60,
-            secs % 60,
-            desk.tokens,
-            desk.tool_calls
+        (format!(" state {phase}"), body),
+        (
+            format!(
+                " time  {}m{:02}s  tok {}  tools {}",
+                secs / 60,
+                secs % 60,
+                desk.tokens,
+                desk.tool_calls
+            ),
+            body,
         ),
-        format!(" act   {}", truncate_mid(&desk.activity, 28)),
+        (format!(" act   {}", truncate_mid(&desk.activity, 28)), body),
+    ]
+}
+
+/// Card body for the Supervisor (the main agent driving the room).
+///
+/// Reads the overlay-only [`super::state::SupervisorSnapshot`] plus room state
+/// the painter already owns (seats, overflow, wall). Deliberately tight — this
+/// is a tooltip, not the status bar: what is on the model, how long this turn
+/// has run, how full the context is, and what the room is doing.
+fn supervisor_popup_lines(state: &GameModeState) -> Vec<(String, Style)> {
+    let info = &state.supervisor_info;
+    let phase = match state.supervisor {
+        SupervisorPhase::Idle => "idle",
+        SupervisorPhase::Working => "working",
+        SupervisorPhase::Reviewing => "reviewing",
+        SupervisorPhase::Waiting => "watching",
+    };
+    let body = popup_body_style();
+    let mut lines = vec![
+        (" Supervisor".to_string(), popup_title_style()),
+        (
+            format!(
+                " model {}",
+                truncate_mid(info.model.as_deref().unwrap_or("—"), 28)
+            ),
+            body,
+        ),
+        (
+            format!(
+                " turn  {}  ({phase})",
+                match info.turn_elapsed {
+                    Some(d) => {
+                        let secs = d.as_secs();
+                        format!("{}m{:02}s", secs / 60, secs % 60)
+                    }
+                    None => "—".to_string(),
+                }
+            ),
+            body,
+        ),
     ];
+    if info.context_total > 0 {
+        lines.push((
+            format!(
+                " ctx   {}/{}  {}%",
+                super::monitor::fmt_tokens(info.context_used),
+                super::monitor::fmt_tokens(info.context_total),
+                info.context_pct
+            ),
+            body,
+        ));
+    }
+    let overflow = if state.overflow_count > 0 {
+        format!(" +{}", state.overflow_count)
+    } else {
+        String::new()
+    };
+    lines.push((
+        format!(
+            " desks {}/{}{overflow}  {}",
+            state.active_desk_count(),
+            super::state::DESK_COUNT,
+            state.wall.title()
+        ),
+        body,
+    ));
+    if let Some(branch) = info.branch.as_deref() {
+        lines.push((format!(" branch {}", truncate_mid(branch, 26)), body));
+    }
+    if info.waiting_on_user {
+        lines.push((" ▲ waiting on you".to_string(), popup_title_style()));
+    }
+    lines
+}
+
+/// Placement inputs for [`paint_popup`].
+struct PopupAnchor {
+    /// Cursor cell — the card sits just above it when there is room.
+    cursor: Option<(u16, u16)>,
+    /// Rect the card describes: the fallback anchor when there is no cursor,
+    /// and the "drop below" position when the card does not fit above.
+    subject: Rect,
+}
+
+fn popup_body_style() -> Style {
+    Style::default()
+        .fg(Color::Rgb(220, 236, 255))
+        .bg(Color::Rgb(22, 28, 42))
+}
+
+fn popup_title_style() -> Style {
+    Style::default()
+        .fg(Color::Rgb(120, 255, 180))
+        .bg(Color::Rgb(22, 28, 42))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Paint one bordered SNES-style card with a drop shadow, clipped to `area`.
+///
+/// The box, the 1-cell SE shadow, the cursor-relative placement and the edge
+/// clamping live here so every Game Mode tooltip (desk, Supervisor, and the MCP
+/// rack to come) is placed and framed identically; callers only supply text.
+fn paint_popup(buf: &mut Buffer, area: Rect, anchor: PopupAnchor, lines: &[(String, Style)]) {
+    if lines.is_empty() {
+        return;
+    }
     let width = lines
         .iter()
-        .map(|s| UnicodeWidthStr::width(s.as_str()))
+        .map(|(s, _)| UnicodeWidthStr::width(s.as_str()))
         .max()
         .unwrap_or(20)
         .clamp(24, 48) as u16
@@ -174,16 +315,16 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
     let max_x = right.saturating_sub(width.saturating_add(1)).max(area.x);
     let max_y = bottom.saturating_sub(height.saturating_add(1)).max(area.y);
 
-    // Prefer near cursor; fall back to above desk.
-    let (mut x, mut y) = state.hover_screen.unwrap_or((
-        layout.desks[idx].x,
-        layout.desks[idx].y.saturating_sub(height),
+    // Prefer near cursor; fall back to above the subject.
+    let (mut x, mut y) = anchor.cursor.unwrap_or((
+        anchor.subject.x,
+        anchor.subject.y.saturating_sub(height),
     ));
     y = y.saturating_sub(height.saturating_add(1));
     x = x.clamp(area.x, max_x);
     if y < area.y {
-        // Prefer below desk if no room above.
-        y = layout.desks[idx].y.saturating_add(layout.desks[idx].height);
+        // Prefer below the subject if no room above.
+        y = anchor.subject.y.saturating_add(anchor.subject.height);
     }
     y = y.clamp(area.y, max_y);
 
@@ -198,13 +339,7 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
     let border = Style::default()
         .fg(Color::Rgb(255, 220, 96))
         .bg(Color::Rgb(22, 28, 42));
-    let body = Style::default()
-        .fg(Color::Rgb(220, 236, 255))
-        .bg(Color::Rgb(22, 28, 42));
-    let title = Style::default()
-        .fg(Color::Rgb(120, 255, 180))
-        .bg(Color::Rgb(22, 28, 42))
-        .add_modifier(Modifier::BOLD);
+    let body = popup_body_style();
     // Soft drop shadow (1 cell SE) for popup depth.
     let shadow = Style::default()
         .fg(Color::Rgb(8, 10, 16))
@@ -256,8 +391,7 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
             }
         }
     }
-    for (i, line) in lines.iter().enumerate() {
-        let style = if i == 0 { title } else { body };
+    for (i, (line, style)) in lines.iter().enumerate() {
         let tx = popup.x.saturating_add(1);
         let ty = popup.y.saturating_add(1 + i as u16);
         if ty >= bottom {
@@ -269,7 +403,7 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
             ty,
             width.saturating_sub(2).min(right.saturating_sub(tx)),
             line,
-            style,
+            *style,
         );
     }
 }
@@ -761,10 +895,111 @@ mod tests {
         state.desks[0].subagent_type = "general-purpose".to_string();
         state.desks[0].activity = "Running: cargo build".to_string();
         state.desks[0].phase = ActorPhase::AtDeskWorking;
-        state.hover_desk = Some(0);
+        state.hover = Some(HoverTarget::Desk(0));
         state.hover_screen = Some(hover);
         render_game_mode(&mut buf, game, &mut state);
         buf
+    }
+
+    /// Rows of the popup card as painted, located by its top-left corner.
+    ///
+    /// Returns the card's interior text lines (trailing blanks trimmed) so a
+    /// tooltip's rendered content can be pinned without pinning its placement.
+    fn popup_text_rows(buf: &Buffer, area: Rect) -> Vec<String> {
+        let (mut ox, mut oy) = (0u16, 0u16);
+        let mut found = false;
+        'scan: for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if buf.cell((x, y)).map(|c| c.symbol()) == Some("┌") {
+                    (ox, oy) = (x, y);
+                    found = true;
+                    break 'scan;
+                }
+            }
+        }
+        assert!(found, "no popup card painted");
+        // Card width: run of "─" after the corner, plus both corners.
+        let mut w = 1u16;
+        while buf.cell((ox + w, oy)).map(|c| c.symbol()) == Some("─") {
+            w += 1;
+        }
+        w += 1;
+        let mut rows = Vec::new();
+        let mut y = oy + 1;
+        while buf.cell((ox, y)).map(|c| c.symbol()) == Some("│") {
+            let mut row = String::new();
+            for x in ox + 1..ox + w - 1 {
+                row.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            rows.push(row.trim_end().to_string());
+            y += 1;
+        }
+        rows
+    }
+
+    /// The desk card was reimplemented on top of the shared [`paint_popup`]
+    /// core (so the Supervisor and the MCP rack can reuse the box); its
+    /// rendered content must be exactly what it was before.
+    #[test]
+    fn desk_tooltip_lines_are_unchanged_by_the_popup_refactor() {
+        let game = Rect::new(2, 3, 100, 24);
+        let buf = render_hovering(game, (game.x + 20, game.y + 18));
+        assert_eq!(
+            popup_text_rows(&buf, game),
+            vec![
+                " worker",
+                " type  general-purpose",
+                " id    child-1",
+                " state working",
+                " time  0m00s  tok 0  tools 0",
+                " act   Running: cargo build",
+            ]
+        );
+    }
+
+    /// Hovering the boss paints the Supervisor card from the overlay snapshot
+    /// (never from the composed frame).
+    #[test]
+    fn supervisor_tooltip_renders_the_snapshot() {
+        let game = Rect::new(2, 3, 100, 24);
+        let mut buf = Buffer::empty(Rect::new(0, 0, game.x + game.width + 4, game.y + game.height + 4));
+        let mut state = GameModeState::new();
+        state.pixel_mode = false;
+        state.open = true;
+        state.desks[0].child_session_id = Some("child-1".to_string());
+        state.overflow_count = 2;
+        state.supervisor = SupervisorPhase::Working;
+        state.wall = WallMode::Working;
+        state.supervisor_info = super::super::state::SupervisorSnapshot {
+            model: Some("Grok 4.5".to_string()),
+            turn_elapsed: Some(std::time::Duration::from_secs(93)),
+            context_used: 42_000,
+            context_total: 256_000,
+            context_pct: 16,
+            waiting_on_user: true,
+            branch: Some("rc16-game-mode".to_string()),
+        };
+        state.hover = Some(HoverTarget::Supervisor);
+        state.hover_screen = Some((game.x + 20, game.y + 18));
+        render_game_mode(&mut buf, game, &mut state);
+
+        assert_eq!(
+            popup_text_rows(&buf, game),
+            vec![
+                " Supervisor",
+                " model Grok 4.5",
+                " turn  1m33s  (working)",
+                " ctx   42.0k/256.0k  16%",
+                " desks 1/6 +2  WORKING",
+                " branch rc16-game-mode",
+                " ▲ waiting on you",
+            ]
+        );
+        assert_ne!(
+            state.last_supervisor,
+            Rect::default(),
+            "the unicode path must publish a supervisor hit rect"
+        );
     }
 
     /// B5: the hover card is placed with a 1-cell SE drop shadow, so clamping

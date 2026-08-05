@@ -1158,7 +1158,7 @@ impl AgentView {
                         }
                     }
                     KeyCode::Esc
-                        if self.game_mode.hover_desk.is_some()
+                        if self.game_mode.hover.is_some()
                             || self.game_mode.keyboard_focus.is_some() =>
                     {
                         self.game_mode.clear_hover();

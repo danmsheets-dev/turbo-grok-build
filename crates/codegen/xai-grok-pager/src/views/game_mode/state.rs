@@ -113,6 +113,52 @@ pub enum SupervisorPhase {
     Waiting,
 }
 
+/// What the pointer (or Tab focus) is currently over.
+///
+/// Hit-tested against the rects captured at paint time (`last_desks`,
+/// `last_supervisor`). Purely an *overlay* concern: the tooltip and focus ring
+/// are painted after the halfblock blit, so no variant may ever reach
+/// [`GameModeState::visual_fingerprint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoverTarget {
+    /// Seated subagent desk, by index into `desks`.
+    Desk(usize),
+    /// The Supervisor (main agent) at the rug.
+    Supervisor,
+    // A `McpRack` variant lands with the composed rack (RC16 §3 step 2/3).
+}
+
+/// Live Supervisor facts behind the Supervisor hover card — **overlay data**.
+///
+/// Filled in [`super::sync_game_mode`], which is the one Game Mode entry point
+/// holding `&mut AgentView`. Never hashed into
+/// [`GameModeState::visual_fingerprint`] and never marks redraw dirty: the card
+/// is a ratatui overlay painted after the blit, and dirtying on a ticking timer
+/// would un-park the event loop that RC16 PERF-1 exists to park.
+///
+/// **Bounded staleness.** The sync is throttled (`sync_gate`, ~75 ms) and can
+/// skip its *snapshot rebuild* entirely — the refresh here deliberately sits
+/// outside that skip, so the worst case is one sync gate, and the paint path
+/// re-syncs anything older than 40 ms ([`GameModeState::needs_paint_sync`]).
+/// `turn_elapsed` is `Some` only while the Supervisor is actually working, and
+/// a working Supervisor keeps [`GameModeState::needs_animation_tick`] true, so
+/// a running timer can never be frozen by loop parking.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SupervisorSnapshot {
+    /// Display name of the active model (`models.current_model_name()`).
+    pub model: Option<String>,
+    /// Pause-corrected elapsed time of the running turn; `None` when idle.
+    pub turn_elapsed: Option<Duration>,
+    /// Context window used / total tokens, and the resolved usage percent.
+    pub context_used: u64,
+    pub context_total: u64,
+    pub context_pct: u8,
+    /// A permission prompt or question is blocking on the human.
+    pub waiting_on_user: bool,
+    /// Current git branch of this agent's cwd, when known.
+    pub branch: Option<String>,
+}
+
 /// Full Game Mode UI state owned by `AgentView`.
 #[derive(Debug)]
 pub struct GameModeState {
@@ -161,9 +207,14 @@ pub struct GameModeState {
     pub(crate) pixel_frame_fp: u64,
     /// Prefer pixel office (mockup + sprites). False falls back to Unicode.
     pub pixel_mode: bool,
-    /// Desk under mouse cursor (popup placement), if any.
-    pub hover_desk: Option<usize>,
+    /// Target under the mouse cursor (popup placement), if any.
+    pub hover: Option<HoverTarget>,
     /// Keyboard focus desk (Tab cycle); independent of mouse hover (dual-audit).
+    ///
+    /// Desks only — Tab deliberately does **not** reach the Supervisor: it
+    /// cycles the *seats*, and everything the Supervisor card shows (model,
+    /// turn timer, context) is already reachable from the status bar without a
+    /// pointer.
     pub keyboard_focus: Option<usize>,
     /// Last mouse position in screen coords (for popup placement).
     pub hover_screen: Option<(u16, u16)>,
@@ -171,6 +222,11 @@ pub struct GameModeState {
     pub last_stage: Option<ratatui::layout::Rect>,
     /// Last desk rects from layout (for hover hit-testing).
     pub last_desks: [ratatui::layout::Rect; 6],
+    /// Last painted supervisor rect (for hover hit-testing) — derived from the
+    /// compose anchors in the pixel office, from `layout.supervisor` in unicode.
+    pub last_supervisor: ratatui::layout::Rect,
+    /// Supervisor tooltip data, refreshed by the sync path (overlay-only).
+    pub supervisor_info: SupervisorSnapshot,
     /// Failed child IDs already used to arm `attention_until` (transition-only).
     attention_armed_ids: std::collections::HashSet<String>,
     /// Set when UI needs a redraw (tick/sync/hover); consumed by AppView::tick.
@@ -223,11 +279,13 @@ impl GameModeState {
             pixel_compose_scratch: None,
             pixel_frame_fp: 0,
             pixel_mode: true,
-            hover_desk: None,
+            hover: None,
             keyboard_focus: None,
             hover_screen: None,
             last_stage: None,
             last_desks: [ratatui::layout::Rect::default(); 6],
+            last_supervisor: ratatui::layout::Rect::default(),
+            supervisor_info: SupervisorSnapshot::default(),
             attention_armed_ids: std::collections::HashSet::new(),
             redraw_dirty: false,
             last_sync_at: None,
@@ -237,9 +295,17 @@ impl GameModeState {
         }
     }
 
-    /// Desk shown in popup / focus ring: keyboard focus wins over mouse hover.
+    /// Target shown in the popup: keyboard focus wins over mouse hover.
+    pub fn focus_target(&self) -> Option<HoverTarget> {
+        self.keyboard_focus.map(HoverTarget::Desk).or(self.hover)
+    }
+
+    /// Desk shown in popup / focus ring, when the focused target *is* a desk.
     pub fn focus_desk(&self) -> Option<usize> {
-        self.keyboard_focus.or(self.hover_desk)
+        match self.focus_target() {
+            Some(HoverTarget::Desk(i)) => Some(i),
+            _ => None,
+        }
     }
 
     /// Mark that the next Slow tick / paint cycle should redraw.
@@ -256,51 +322,57 @@ impl GameModeState {
 
     /// Update hover from terminal mouse coordinates using last paint layout.
     ///
-    /// Returns `true` only when the **hovered desk** changes (not every mouse
-    /// cell). Popup anchors to entry cell; micro-moves on the same desk do not
-    /// repaint (triple-scan hover throttle).
+    /// Returns `true` only when the **hovered target** changes (not every mouse
+    /// cell). Popup anchors to entry cell; micro-moves on the same target do not
+    /// repaint (triple-scan hover throttle) — `agent_view::input` relies on that
+    /// to drop the flood of `Moved` events.
+    ///
+    /// Seats win over the Supervisor when rects overlap, so the desk-only
+    /// behaviour is preserved exactly wherever a desk is hit.
     pub fn update_hover(&mut self, col: u16, row: u16) -> bool {
-        let prev_desk = self.hover_desk;
-        let new_desk = self.last_desks.iter().enumerate().find_map(|(i, r)| {
-            if r.width == 0 || r.height == 0 {
-                return None;
-            }
-            if col >= r.x
-                && col < r.x.saturating_add(r.width)
-                && row >= r.y
-                && row < r.y.saturating_add(r.height)
-                && self.desks[i].is_occupied()
-            {
-                Some(i)
-            } else {
-                None
-            }
-        });
-        if new_desk == prev_desk {
+        let prev = self.hover;
+        let new_target = self.hit_test(col, row);
+        if new_target == prev {
             return false;
         }
-        self.hover_desk = new_desk;
-        // Anchor popup once per desk enter (or clear).
-        self.hover_screen = new_desk.map(|_| (col, row)).or(None);
-        if new_desk.is_none() {
-            self.hover_screen = None;
-        }
-        // Mouse landing on a desk clears keyboard focus; empty keeps Tab focus.
-        if new_desk.is_some() && new_desk != self.keyboard_focus {
+        self.hover = new_target;
+        // Anchor popup once per target enter (or clear).
+        self.hover_screen = new_target.map(|_| (col, row));
+        // Mouse landing on a target takes the card over from Tab focus (which
+        // otherwise wins in `focus_target`); empty floor keeps Tab focus.
+        if new_target.is_some() && new_target != self.keyboard_focus.map(HoverTarget::Desk) {
             self.keyboard_focus = None;
         }
         self.mark_redraw_dirty();
         true
     }
 
-    pub fn clear_hover(&mut self) {
-        if self.hover_desk.is_some()
-            || self.hover_screen.is_some()
-            || self.keyboard_focus.is_some()
+    /// Hover target at a terminal cell, if any.
+    fn hit_test(&self, col: u16, row: u16) -> Option<HoverTarget> {
+        let hit = |r: ratatui::layout::Rect| {
+            r.width > 0
+                && r.height > 0
+                && col >= r.x
+                && col < r.x.saturating_add(r.width)
+                && row >= r.y
+                && row < r.y.saturating_add(r.height)
+        };
+        if let Some(i) = self
+            .last_desks
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| (hit(*r) && self.desks[i].is_occupied()).then_some(i))
         {
+            return Some(HoverTarget::Desk(i));
+        }
+        hit(self.last_supervisor).then_some(HoverTarget::Supervisor)
+    }
+
+    pub fn clear_hover(&mut self) {
+        if self.hover.is_some() || self.hover_screen.is_some() || self.keyboard_focus.is_some() {
             self.mark_redraw_dirty();
         }
-        self.hover_desk = None;
+        self.hover = None;
         self.hover_screen = None;
         self.keyboard_focus = None;
     }
@@ -314,7 +386,8 @@ impl GameModeState {
             self.keyboard_focus = None;
             return false;
         }
-        let cur = self.keyboard_focus.or(self.hover_desk);
+        // Same precedence as `focus_desk`: Tab focus, else a hovered desk.
+        let cur = self.focus_desk();
         let next = match cur.and_then(|c| occupied.iter().position(|&i| i == c)) {
             Some(pos) => occupied[(pos + 1) % occupied.len()],
             None => occupied[0],
@@ -336,7 +409,8 @@ impl GameModeState {
             self.keyboard_focus = None;
             return false;
         }
-        let cur = self.keyboard_focus.or(self.hover_desk);
+        // Same precedence as `focus_desk`: Tab focus, else a hovered desk.
+        let cur = self.focus_desk();
         let next = match cur.and_then(|c| occupied.iter().position(|&i| i == c)) {
             Some(pos) => occupied[(pos + occupied.len() - 1) % occupied.len()],
             None => occupied[occupied.len() - 1],
@@ -388,8 +462,10 @@ impl GameModeState {
     /// PERF INVARIANTS (RC13):
     /// 1. Pure `tick_anim` while all desks are empty/thinking and the supervisor
     ///    is Idle/Waiting must keep `pixel_frame_fp` stable (no recompose).
-    /// 2. `hover_desk` / `hover_screen` are **excluded** — focus ring + popup are
-    ///    painted as buffer overlays after halfblock paint.
+    /// 2. `hover` / `hover_screen` / `supervisor_info` are **excluded** — focus
+    ///    ring + hover card are painted as buffer overlays after halfblock
+    ///    paint, so neither the hovered target nor the live model/turn/context
+    ///    text behind the Supervisor card may force a recompose.
     /// 3. Wall title, overflow, labels, tokens, elapsed, activity are **excluded**
     ///    (status strip / hover popup only).
     /// 4. `anim_t` is hashed only for phases whose composited position actually
@@ -1353,9 +1429,79 @@ mod tests {
         assert!(!s.update_hover(13, 11), "same desk micro-move is clean");
         assert!(!s.update_hover(12, 12), "same desk cell move is clean");
         assert!(s.update_hover(32, 11), "other desk dirties");
-        assert_eq!(s.hover_desk, Some(1));
+        assert_eq!(s.hover, Some(HoverTarget::Desk(1)));
         assert!(s.update_hover(0, 0), "leaving desk dirties");
-        assert_eq!(s.hover_desk, None);
+        assert_eq!(s.hover, None);
+    }
+
+    /// The Supervisor is a hover target of its own, and carries the same
+    /// change-only throttle the desks do — `agent_view::input` returns
+    /// `Unchanged` for every mouse move that does not flip the target.
+    #[test]
+    fn update_hover_selects_supervisor_with_the_same_throttle() {
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("a".into());
+        s.last_desks[0] = ratatui::layout::Rect::new(10, 20, 8, 4);
+        s.last_supervisor = ratatui::layout::Rect::new(40, 5, 12, 3);
+
+        assert!(s.update_hover(44, 6), "entering the supervisor dirties");
+        assert_eq!(s.hover, Some(HoverTarget::Supervisor));
+        assert_eq!(s.focus_desk(), None, "supervisor is not a desk");
+        assert_eq!(s.hover_screen, Some((44, 6)), "card anchors on entry");
+
+        assert!(!s.update_hover(45, 7), "micro-move on the boss is clean");
+        assert_eq!(s.hover_screen, Some((44, 6)), "anchor must not follow");
+
+        assert!(s.update_hover(12, 21), "desk ← supervisor dirties");
+        assert_eq!(s.hover, Some(HoverTarget::Desk(0)));
+
+        assert!(s.update_hover(0, 0), "leaving dirties");
+        assert_eq!(s.hover, None);
+        assert_eq!(s.hover_screen, None);
+    }
+
+    /// Seats win over the boss wherever the rects overlap, so the pre-RC16
+    /// desk-only behaviour is preserved exactly.
+    #[test]
+    fn overlapping_desk_wins_over_supervisor() {
+        let mut s = GameModeState::new();
+        s.desks[2].child_session_id = Some("c".into());
+        s.last_desks[2] = ratatui::layout::Rect::new(10, 10, 8, 4);
+        s.last_supervisor = ratatui::layout::Rect::new(8, 8, 20, 10);
+        assert!(s.update_hover(12, 11));
+        assert_eq!(s.hover, Some(HoverTarget::Desk(2)));
+        // ...but the surrounding boss rect still answers outside the desk.
+        assert!(s.update_hover(9, 9));
+        assert_eq!(s.hover, Some(HoverTarget::Supervisor));
+    }
+
+    /// Tab cycles **seats only** (documented on `keyboard_focus`): hovering the
+    /// Supervisor and pressing Tab lands on a desk, and Tab focus keeps winning
+    /// over the mouse until the pointer enters a target itself.
+    #[test]
+    fn tab_focus_stays_on_desks() {
+        let mut s = GameModeState::new();
+        s.desks[1].child_session_id = Some("b".into());
+        s.last_desks[1] = ratatui::layout::Rect::new(10, 20, 8, 4);
+        s.last_supervisor = ratatui::layout::Rect::new(40, 5, 12, 3);
+
+        assert!(s.update_hover(44, 6));
+        assert!(s.focus_next_desk(), "Tab must reach the only occupied desk");
+        assert_eq!(s.focus_target(), Some(HoverTarget::Desk(1)));
+        assert_eq!(
+            s.hover,
+            Some(HoverTarget::Supervisor),
+            "Tab does not clear the mouse target, it outranks it"
+        );
+
+        // Mouse re-entering the boss takes the card back off Tab focus (leaving
+        // and re-entering, since a move that does not flip the target is
+        // swallowed by the throttle — as it always was for desks).
+        assert!(s.update_hover(0, 0));
+        assert_eq!(s.focus_target(), Some(HoverTarget::Desk(1)), "Tab holds");
+        assert!(s.update_hover(45, 6));
+        assert_eq!(s.keyboard_focus, None);
+        assert_eq!(s.focus_target(), Some(HoverTarget::Supervisor));
     }
 
     #[test]
@@ -1368,13 +1514,34 @@ mod tests {
         s.supervisor = SupervisorPhase::Idle;
         let fp0 = s.visual_fingerprint(80, 24);
         s.tick = s.tick.wrapping_add(40);
-        s.hover_desk = Some(0);
+        s.hover = Some(HoverTarget::Desk(0));
         s.hover_screen = Some((10, 10));
         s.overflow_count = 3;
         assert_eq!(
             s.visual_fingerprint(80, 24),
             fp0,
             "idle/thinking + hover must not dirty pixel fingerprint"
+        );
+
+        // ...and neither does hovering the Supervisor, nor anything the
+        // Supervisor card renders: the whole card is a buffer overlay painted
+        // after the halfblock blit.
+        s.last_supervisor = ratatui::layout::Rect::new(40, 5, 12, 3);
+        assert!(s.update_hover(44, 6), "moved onto the boss");
+        assert_eq!(s.hover, Some(HoverTarget::Supervisor));
+        s.supervisor_info = SupervisorSnapshot {
+            model: Some("Grok 4.5".to_string()),
+            turn_elapsed: Some(Duration::from_secs(93)),
+            context_used: 42_000,
+            context_total: 256_000,
+            context_pct: 16,
+            waiting_on_user: true,
+            branch: Some("rc16-game-mode".to_string()),
+        };
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            fp0,
+            "supervisor hover + tooltip snapshot must not dirty pixel fingerprint"
         );
     }
 
