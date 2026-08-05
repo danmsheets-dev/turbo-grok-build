@@ -164,25 +164,28 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
         + 2;
     let height = lines.len() as u16 + 2;
 
+    // The card is placed with room for its 1-cell SE drop shadow, so the
+    // footprint to keep inside `area` is one row and one column larger than the
+    // card itself. Clamping the card alone parked it flush against the right /
+    // bottom edge and the shadow then bled into the neighbouring UI rows
+    // (RC16 B5).
+    let right = area.x.saturating_add(area.width);
+    let bottom = area.y.saturating_add(area.height);
+    let max_x = right.saturating_sub(width.saturating_add(1)).max(area.x);
+    let max_y = bottom.saturating_sub(height.saturating_add(1)).max(area.y);
+
     // Prefer near cursor; fall back to above desk.
     let (mut x, mut y) = state.hover_screen.unwrap_or((
         layout.desks[idx].x,
         layout.desks[idx].y.saturating_sub(height),
     ));
     y = y.saturating_sub(height.saturating_add(1));
-    if x.saturating_add(width) > area.x.saturating_add(area.width) {
-        x = area.x.saturating_add(area.width).saturating_sub(width);
-    }
+    x = x.clamp(area.x, max_x);
     if y < area.y {
         // Prefer below desk if no room above.
-        y = layout.desks[idx]
-            .y
-            .saturating_add(layout.desks[idx].height)
-            .min(area.y.saturating_add(area.height).saturating_sub(height));
+        y = layout.desks[idx].y.saturating_add(layout.desks[idx].height);
     }
-    if y.saturating_add(height) > area.y.saturating_add(area.height) {
-        y = area.y.saturating_add(area.height).saturating_sub(height);
-    }
+    y = y.clamp(area.y, max_y);
 
     let popup = Rect {
         x,
@@ -190,6 +193,8 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
         width,
         height,
     };
+    // An area too small to hold card + shadow still clips per cell below.
+    let in_area = |x: u16, y: u16| rect_contains(area, x, y);
     let border = Style::default()
         .fg(Color::Rgb(255, 220, 96))
         .bg(Color::Rgb(22, 28, 42));
@@ -208,6 +213,9 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
         for col in 0..width {
             let cx = popup.x.saturating_add(col).saturating_add(1);
             let cy = popup.y.saturating_add(row).saturating_add(1);
+            if !in_area(cx, cy) {
+                continue;
+            }
             if let Some(cell) = buf.cell_mut((cx, cy)) {
                 if row + 1 == height || col + 1 == width {
                     cell.set_symbol(" ");
@@ -222,6 +230,9 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
         for col in 0..width {
             let cx = popup.x.saturating_add(col);
             let cy = popup.y.saturating_add(row);
+            if !in_area(cx, cy) {
+                continue;
+            }
             if let Some(cell) = buf.cell_mut((cx, cy)) {
                 let edge = row == 0 || row + 1 == height || col == 0 || col + 1 == width;
                 cell.set_symbol(if edge {
@@ -247,11 +258,16 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
     }
     for (i, line) in lines.iter().enumerate() {
         let style = if i == 0 { title } else { body };
+        let tx = popup.x.saturating_add(1);
+        let ty = popup.y.saturating_add(1 + i as u16);
+        if ty >= bottom {
+            break;
+        }
         put_line(
             buf,
-            popup.x.saturating_add(1),
-            popup.y.saturating_add(1 + i as u16),
-            width.saturating_sub(2),
+            tx,
+            ty,
+            width.saturating_sub(2).min(right.saturating_sub(tx)),
             line,
             style,
         );
@@ -713,4 +729,96 @@ fn blit_lines_centered(buf: &mut Buffer, area: Rect, lines: &[Line<'static>]) {
         height: area.height.saturating_sub(y_off),
     };
     blit_lines(buf, sub, lines);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Paint the office into `game`, inside a buffer with 4 spare cells of
+    /// surrounding UI on every side, hovering desk 0 at `hover`.
+    fn render_hovering(game: Rect, hover: (u16, u16)) -> Buffer {
+        let full = Rect::new(0, 0, game.x + game.width + 4, game.y + game.height + 4);
+        let mut buf = Buffer::empty(full);
+        let mut state = GameModeState::new();
+        // Unicode path: the popup + shadow are the same buffer overlay either
+        // way, and this keeps the test off the PNG decode.
+        state.pixel_mode = false;
+        state.open = true;
+        state.desks[0].child_session_id = Some("child-1".to_string());
+        state.desks[0].label = "worker".to_string();
+        state.desks[0].subagent_type = "general-purpose".to_string();
+        state.desks[0].activity = "Running: cargo build".to_string();
+        state.desks[0].phase = ActorPhase::AtDeskWorking;
+        state.hover_desk = Some(0);
+        state.hover_screen = Some(hover);
+        render_game_mode(&mut buf, game, &mut state);
+        buf
+    }
+
+    /// B5: the hover card is placed with a 1-cell SE drop shadow, so clamping
+    /// the card alone to the game area let the shadow paint one row/column
+    /// into the neighbouring UI. Nothing outside `game` may be touched — from
+    /// any hover position, including the far corners.
+    #[test]
+    fn hover_popup_and_shadow_stay_inside_the_game_area() {
+        let game = Rect::new(2, 3, 100, 24);
+        let blank = Buffer::empty(Rect::new(
+            0,
+            0,
+            game.x + game.width + 4,
+            game.y + game.height + 4,
+        ));
+        let right = game.x + game.width - 1;
+        let bottom = game.y + game.height - 1;
+        for hover in [
+            (game.x, game.y),
+            (right, game.y),
+            (game.x, bottom),
+            (right, bottom),
+            (right, game.y + game.height / 2),
+        ] {
+            let buf = render_hovering(game, hover);
+            for y in blank.area.y..blank.area.y + blank.area.height {
+                for x in blank.area.x..blank.area.x + blank.area.width {
+                    if rect_contains(game, x, y) {
+                        continue;
+                    }
+                    assert_eq!(
+                        buf.cell((x, y)),
+                        blank.cell((x, y)),
+                        "hover {hover:?} painted outside the game area at ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// ...and a game area far too small for the card still paints only inside
+    /// it (the per-cell clip, not the placement clamp, carries this one).
+    #[test]
+    fn hover_popup_clips_when_the_area_is_smaller_than_the_card() {
+        let game = Rect::new(1, 1, 12, 6);
+        let blank = Buffer::empty(Rect::new(
+            0,
+            0,
+            game.x + game.width + 4,
+            game.y + game.height + 4,
+        ));
+        let buf = render_hovering(game, (game.x + 1, game.y + 1));
+        for y in blank.area.y..blank.area.y + blank.area.height {
+            for x in blank.area.x..blank.area.x + blank.area.width {
+                if rect_contains(game, x, y) {
+                    continue;
+                }
+                assert_eq!(
+                    buf.cell((x, y)),
+                    blank.cell((x, y)),
+                    "popup escaped a {}x{} game area at ({x},{y})",
+                    game.width,
+                    game.height
+                );
+            }
+        }
+    }
 }

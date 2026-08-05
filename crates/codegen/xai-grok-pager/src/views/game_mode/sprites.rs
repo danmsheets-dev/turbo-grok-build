@@ -2,9 +2,26 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use super::layout::SpriteSet;
 use super::state::{ActorPhase, SupervisorPhase};
+
+/// Centre `s` in `w` **display** columns.
+///
+/// Sprite rows are box-drawn art blitted left-aligned as a block, so every row
+/// of one sprite has to measure the same width or the walls stagger. Byte or
+/// char counts do not work here: the faces and props mix ambiguous-width
+/// glyphs (`◕`, `░`), zero-width combining marks (`•̀`) and wide emoji (`📄`).
+/// Oversized text is returned unchanged rather than truncated mid-glyph.
+fn pad_center(s: &str, w: usize) -> String {
+    let sw = UnicodeWidthStr::width(s);
+    if sw >= w {
+        return s.to_string();
+    }
+    let left = (w - sw) / 2;
+    format!("{}{s}{}", " ".repeat(left), " ".repeat(w - sw - left))
+}
 
 /// Developer skin palettes (shirt / skin).
 pub fn skin_colors(skin: u8) -> (Color, Color) {
@@ -74,15 +91,26 @@ pub fn supervisor_lines(phase: SupervisorPhase, tick: u64, set: SpriteSet) -> Ve
             ]),
             Line::from(vec![Span::styled(format!(" {hands}"), body)]),
         ],
+        // Every row is exactly `SUPER_W` display columns: `hands` is 3-4 cols
+        // wide depending on phase, so the desk front used to fall 2-3 columns
+        // short of the `╔═SUPER═╗` header and the right wall stepped inwards
+        // (RC16 B8). Head and face are centred over the same box.
         SpriteSet::Medium => vec![
-            Line::from(vec![Span::styled("   ∩  ∩   ", gold)]),
-            Line::from(vec![Span::styled(format!("  {face}  "), body)]),
+            Line::from(vec![Span::styled(pad_center("∩   ∩", SUPER_W), gold)]),
+            Line::from(vec![Span::styled(pad_center(face, SUPER_W), body)]),
             Line::from(vec![Span::styled(" ╔═SUPER═╗ ", gold)]),
-            Line::from(vec![Span::styled(format!(" ║ {hands}║ "), body)]),
+            Line::from(vec![Span::styled(
+                format!(" ║{}║ ", pad_center(hands, SUPER_W - 4)),
+                body,
+            )]),
             Line::from(vec![Span::styled(" ╚═══════╝ ", desk_wood())]),
         ],
     }
 }
+
+/// Display width of every [`supervisor_lines`] row in [`SpriteSet::Medium`] —
+/// the `╔═SUPER═╗` header plus its one-column margins.
+const SUPER_W: usize = 11;
 
 /// Developer sprite at desk (or walking placeholder glyph).
 pub fn developer_lines(
@@ -154,11 +182,14 @@ pub fn empty_desk_lines(set: SpriteSet) -> Vec<Line<'static>> {
     let wood = desk_wood();
     let dim = Style::default().fg(Color::Rgb(80, 90, 95));
     match set {
+        // 8 columns wide: the box is sized to its `IDLE` label, which is 4
+        // columns and used to overhang a 3-column box by one, pushing the
+        // right wall out of line with the rows above and below (RC16 B7).
         SpriteSet::Small => vec![
-            Line::from(vec![Span::styled("  ░░░  ", dim)]),
-            Line::from(vec![Span::styled(" ┌───┐ ", wood)]),
+            Line::from(vec![Span::styled("  ░░░░  ", dim)]),
+            Line::from(vec![Span::styled(" ┌────┐ ", wood)]),
             Line::from(vec![Span::styled(" │IDLE│ ", dim)]),
-            Line::from(vec![Span::styled(" └─┬─┘ ", wood)]),
+            Line::from(vec![Span::styled(" └─┬──┘ ", wood)]),
         ],
         SpriteSet::Medium => vec![
             Line::from(vec![Span::styled("    ░░░░    ", dim)]),
@@ -191,4 +222,65 @@ pub fn door_lines(height: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled(" ║  ░║ ", s)));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Display width of each row of a sprite, spans summed.
+    fn row_widths(lines: &[Line<'static>]) -> Vec<usize> {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// B7: sprite rows are blitted as a left-aligned block, so a row wider than
+    /// its own box borders steps the right wall out. Measured in display
+    /// columns — `░` is three bytes and one column.
+    #[test]
+    fn empty_desk_rows_are_rectangular() {
+        for set in [SpriteSet::Small, SpriteSet::Medium] {
+            let w = row_widths(&empty_desk_lines(set));
+            assert!(
+                w.windows(2).all(|p| p[0] == p[1]),
+                "{set:?} empty-desk rows are ragged: {w:?}"
+            );
+        }
+    }
+
+    /// B8: the supervisor's desk front is built from a phase-dependent `hands`
+    /// run (3-4 columns, including wide emoji) and must still fill the
+    /// `╔═SUPER═╗` box on every phase and animation frame.
+    #[test]
+    fn medium_supervisor_rows_match_the_super_box() {
+        for phase in [
+            SupervisorPhase::Idle,
+            SupervisorPhase::Working,
+            SupervisorPhase::Reviewing,
+            SupervisorPhase::Waiting,
+        ] {
+            for tick in 0..4u64 {
+                let w = row_widths(&supervisor_lines(phase, tick, SpriteSet::Medium));
+                assert!(
+                    w.iter().all(|c| *c == SUPER_W),
+                    "{phase:?} tick {tick}: rows {w:?} != {SUPER_W}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pad_center_measures_display_width_not_bytes() {
+        // 4 display columns from 8 bytes of emoji.
+        assert_eq!(pad_center("📄👀", 6), " 📄👀 ");
+        // Oversized input is never truncated mid-glyph.
+        assert_eq!(pad_center("📄👀", 2), "📄👀");
+    }
 }

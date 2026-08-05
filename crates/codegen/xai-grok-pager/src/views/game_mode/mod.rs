@@ -93,7 +93,17 @@ fn snapshots_filtered(
                 .tokens_used
                 .or_else(|| info.usage.as_ref().map(|u| u.totals.total_tokens))
                 .unwrap_or(0);
-            let tool_calls = info.tool_call_count.or(info.tool_calls).unwrap_or(0);
+            // Progress can lag the terminal notification, so once the child is
+            // finished the authoritative final count wins. Mirrors the Tasks
+            // pane (`views::tasks_pane::format_subagent_metrics`); Game Mode
+            // had the precedence inverted and left a stale live count on the
+            // desk HUD of a finished agent (RC16 B10).
+            let tool_calls = if info.finished {
+                info.tool_calls.or(info.tool_call_count)
+            } else {
+                info.tool_call_count.or(info.tool_calls)
+            }
+            .unwrap_or(0);
             let label = if !info.description.is_empty() {
                 info.description.as_ref().to_string()
             } else {
@@ -118,14 +128,16 @@ fn snapshots_filtered(
 }
 
 /// Terminal status the room renders as a failure (fail beat + attention window).
+///
+/// Delegates to the dashboard's classifier so the two vocabularies cannot drift
+/// apart: the inline `"failed" | "cancelled"` match here already missed
+/// `"error"`, which would have celebrated a failed subagent and walked it to
+/// the supervisor for a handoff (RC16 B9).
 fn info_failed(info: &SubagentInfo) -> bool {
-    info.status
-        .as_ref()
-        .map(|s| {
-            let s = s.as_ref();
-            s == "failed" || s == "cancelled"
-        })
-        .unwrap_or(false)
+    matches!(
+        crate::views::dashboard::classify_subagent(info),
+        crate::views::dashboard::RowState::Failed
+    )
 }
 
 /// Order-independent signature of everything a sync reads out of the subagent
@@ -278,6 +290,13 @@ fn rebuild_from_subagents(
     agent.game_mode.last_phase_sig = Some(phase_sig_after);
 }
 
+/// Signature of everything a sync *derives* that the painter reads outside the
+/// desks themselves — the sync's dirty gate.
+///
+/// `overflow_count` is included because the +N door badge and the status strip
+/// render it while the seats, phases and wall all stay put: a 7th subagent
+/// arriving at a full room changed nothing else, so the badge went stale
+/// (RC16 B11).
 fn phase_signature(state: &GameModeState) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -287,6 +306,7 @@ fn phase_signature(state: &GameModeState) -> u64 {
         d.failed.hash(&mut h);
     }
     (state.supervisor as u8).hash(&mut h);
+    state.overflow_count.hash(&mut h);
     h.finish()
 }
 
@@ -513,5 +533,100 @@ mod tests {
             2,
             "a new running subagent must seat on the next gated sync"
         );
+    }
+
+    /// B9: the room's failure vocabulary must be the dashboard's. `"error"` is
+    /// a failure there, so it must run the fail beat here — never a celebrate
+    /// + handoff walk.
+    #[test]
+    fn error_status_runs_the_fail_beat() {
+        for status in ["failed", "cancelled", "error"] {
+            let mut agent = office_with_one_working_desk();
+            {
+                let info = agent.subagent_sessions.get_mut("child-1").unwrap();
+                info.finished = true;
+                info.status = Some(status.into());
+            }
+            open_sync_gate(&mut agent);
+            sync_game_mode(&mut agent, 100, 20);
+
+            assert_eq!(
+                agent.game_mode.desks[0].phase,
+                ActorPhase::FailBeat,
+                "{status:?} must read as a failure"
+            );
+        }
+
+        // ...and a completed one still celebrates.
+        let mut agent = office_with_one_working_desk();
+        {
+            let info = agent.subagent_sessions.get_mut("child-1").unwrap();
+            info.finished = true;
+            info.status = Some("completed".into());
+        }
+        open_sync_gate(&mut agent);
+        sync_game_mode(&mut agent, 100, 20);
+        assert_eq!(agent.game_mode.desks[0].phase, ActorPhase::Celebrate);
+    }
+
+    /// B10: a finished subagent's desk must show the authoritative final tool
+    /// count, not the live progress count that can lag behind it.
+    #[test]
+    fn finished_desk_prefers_the_final_tool_call_count() {
+        let mut sessions = std::collections::HashMap::new();
+        let mut info = crate::app::agent_view::test_fixtures::running_subagent_info("child-1");
+        info.tool_call_count = Some(3); // live progress, lagging
+        info.tool_calls = Some(7); // terminal notification
+        sessions.insert("child-1".to_string(), info);
+
+        let running = snapshots_from_subagents(&sessions);
+        assert_eq!(running[0].tool_calls, 3, "live count wins while running");
+
+        sessions.get_mut("child-1").unwrap().finished = true;
+        let finished = snapshots_from_subagents(&sessions);
+        assert_eq!(finished[0].tool_calls, 7, "final count wins once finished");
+    }
+
+    /// B11: a 7th subagent arriving at a full room only changes `+N` — same
+    /// seats, same phases, same wall — so the sync must still mark redraw
+    /// dirty or the door badge and status strip sit stale.
+    #[test]
+    fn overflow_change_marks_redraw_dirty() {
+        let mut agent =
+            crate::app::agent_view::test_agent_view(None, std::path::PathBuf::from("."));
+        agent.game_mode.open = true;
+        for i in 0..DESK_COUNT {
+            let sid = format!("child-{i}");
+            agent.subagent_sessions.insert(
+                sid.clone(),
+                crate::app::agent_view::test_fixtures::running_subagent_info(&sid),
+            );
+        }
+        sync_game_mode(&mut agent, 100, 20);
+        assert_eq!(agent.game_mode.active_desk_count(), DESK_COUNT);
+        // The seated desks are left in their spawn walk and no tick advances
+        // them, so the room re-syncs (never skips) with a *stable* phase
+        // signature — the control below proves nothing else moves, which is
+        // what makes the final assertion about `+N` and nothing else.
+        open_sync_gate(&mut agent);
+        assert!(
+            !sync_game_mode(&mut agent, 100, 20),
+            "control: an unchanged room must not repaint"
+        );
+
+        agent.subagent_sessions.insert(
+            "child-overflow".into(),
+            crate::app::agent_view::test_fixtures::running_subagent_info("child-overflow"),
+        );
+        open_sync_gate(&mut agent);
+        let dirty = sync_game_mode(&mut agent, 100, 20);
+
+        assert_eq!(agent.game_mode.overflow_count, 1, "must queue at the door");
+        assert_eq!(
+            agent.game_mode.active_desk_count(),
+            DESK_COUNT,
+            "seats are unchanged — only +N moved"
+        );
+        assert!(dirty, "the +N door badge / status strip must repaint");
     }
 }

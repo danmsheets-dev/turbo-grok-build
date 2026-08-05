@@ -41,8 +41,19 @@ fn fmt_duration(d: std::time::Duration) -> String {
     }
 }
 
+/// Smallest count that renders as `1.0M` / `1.0B`.
+///
+/// `{:.1}` rounds to nearest, so promoting on the raw unit boundary printed
+/// `1000.0k` for everything from 999_950 up (RC16 B13). Promote on the
+/// *rounded* boundary instead so the digits always match the suffix. The `k`
+/// tier needs no such constant — below 1000 the count prints in full.
+const TOK_M_MIN: u64 = 999_950;
+const TOK_B_MIN: u64 = 999_950_000;
+
 fn fmt_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
+    if n >= TOK_B_MIN {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= TOK_M_MIN {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1000 {
         format!("{:.1}k", n as f64 / 1000.0)
@@ -125,4 +136,44 @@ pub fn monitor_lines(desk: &DeskSlot, width: u16, tick: u64) -> Vec<Line<'static
         Span::styled("┘", border),
     ]));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B13: the unit must never disagree with the digits — `{:.1}` rounding
+    /// used to print `1000.0k` / `1000.0M` just below each boundary.
+    #[test]
+    fn fmt_tokens_promotes_on_the_rounded_boundary() {
+        assert_eq!(fmt_tokens(0), "0");
+        assert_eq!(fmt_tokens(999), "999");
+        assert_eq!(fmt_tokens(1000), "1.0k");
+        assert_eq!(fmt_tokens(999_949), "999.9k");
+        assert_eq!(fmt_tokens(999_950), "1.0M");
+        assert_eq!(fmt_tokens(1_000_000), "1.0M");
+        assert_eq!(fmt_tokens(999_949_999), "999.9M");
+        assert_eq!(fmt_tokens(999_950_000), "1.0B");
+        assert_eq!(fmt_tokens(1_000_000_000), "1.0B");
+    }
+
+    /// No rendered token string may carry a mantissa of 1000 or more: that is
+    /// the exact shape of the bug, at every tier.
+    #[test]
+    fn fmt_tokens_never_renders_a_thousand_of_a_unit() {
+        for n in [
+            999_949_u64,
+            999_950,
+            999_999,
+            999_949_999,
+            999_950_000,
+            u64::MAX / 2,
+        ] {
+            let s = fmt_tokens(n);
+            assert!(
+                !s.starts_with("1000."),
+                "fmt_tokens({n}) = {s:?} should have promoted a unit"
+            );
+        }
+    }
 }

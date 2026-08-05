@@ -615,6 +615,11 @@ impl GameModeState {
         waiting_on_user: bool,
     ) {
         // Compact mid-walk: snap-complete handoffs (spec §7.8).
+        //
+        // No supervisor phase is set here: [`Self::update_supervisor`] runs
+        // unconditionally at the end of this sync and derives it from the
+        // (now cleared) desks + handoff queue, so an assignment in this loop
+        // was dead by construction (RC16 B12).
         if !tier.uses_office_art() {
             for i in 0..DESK_COUNT {
                 if matches!(
@@ -626,7 +631,6 @@ impl GameModeState {
                         | ActorPhase::SpawnWalk
                 ) {
                     self.clear_desk(i);
-                    self.supervisor = SupervisorPhase::Reviewing;
                 }
             }
             self.handoff_queue.clear();
@@ -1178,6 +1182,31 @@ mod tests {
         assert!(matches!(s.desks[0].phase, ActorPhase::Celebrate));
         assert_eq!(s.desks[0].phase_started, started);
         assert_eq!(s.handoff_queue.len(), 0);
+    }
+
+    /// B12: the compact snap-complete branch used to assign
+    /// `SupervisorPhase::Reviewing` per cleared desk, which
+    /// [`GameModeState::update_supervisor`] overwrote at the end of the same
+    /// sync. The phase is derived from the room, never written mid-sync.
+    #[test]
+    fn compact_snap_complete_leaves_the_supervisor_derived() {
+        let mut s = GameModeState::new();
+        s.sync_from_snapshots(&[snap("a", true)], false, GameTier::Compact, false);
+        assert_eq!(s.active_desk_count(), 1);
+        s.desks[0].phase = ActorPhase::Celebrate;
+
+        // Agent gone from the map: the celebrate snap-completes, the room
+        // empties, and the supervisor must read the emptied room.
+        s.sync_from_snapshots(&[], false, GameTier::Compact, false);
+        assert_eq!(s.active_desk_count(), 0);
+        assert_eq!(s.supervisor, SupervisorPhase::Idle);
+
+        // ...and it follows the live turn, not the snap-complete, when the
+        // supervisor is actually busy.
+        s.desks[0].child_session_id = Some("a".into());
+        s.desks[0].phase = ActorPhase::Handoff;
+        s.sync_from_snapshots(&[], true, GameTier::Compact, false);
+        assert_eq!(s.supervisor, SupervisorPhase::Working);
     }
 
     #[test]

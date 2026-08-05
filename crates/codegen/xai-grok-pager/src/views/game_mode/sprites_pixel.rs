@@ -449,8 +449,11 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
     // arms to keyboard
     if typing {
         let y = 16 + (frame % 2) as i32;
+        // No outline at this thickness: `outline_rect` paints the top *and*
+        // bottom row, which on a 2px-tall rect is every pixel — the arm came
+        // out as a solid black bar with no skin left (RC16 B6). The idle arm
+        // below is likewise outline-free.
         fill_rect(&mut img, 11, y, 6, 2, pal.skin);
-        outline_rect(&mut img, 11, y, 6, 2, OUTLINE);
         // sleeve
         fill_rect(&mut img, 10, y, 2, 2, pal.shirt);
     } else {
@@ -836,6 +839,24 @@ mod tests {
         assert_ne!(p[3], 0, "sampled stamp should write opaque pixels");
         // Should be teal-family (mixed with sample), not pure magenta garbage.
         assert!(p[1] > p[0], "green channel should dominate for teal floor");
+    }
+
+    /// B6: the typing arm is a 2px-tall rect, so an outline pass covers the
+    /// top *and* bottom row — i.e. every pixel — and the arm rendered as a
+    /// solid black bar. It must keep visible skin on both typing frames.
+    #[test]
+    fn typing_arm_keeps_visible_skin() {
+        let pal = DevPalette::by_index(0);
+        for frame in 0..2u8 {
+            let img = sprite_developer_at_desk(pal, true, frame);
+            // Arm rect minus the sleeve that covers its first two columns.
+            let y = 16 + u32::from(frame % 2);
+            let skin = (12..17)
+                .flat_map(|x| [(x, y), (x, y + 1)])
+                .filter(|(x, y)| img.get_pixel(*x, *y).0 == pal.skin)
+                .count();
+            assert!(skin > 0, "frame {frame}: typing arm has no skin left");
+        }
     }
 
     #[test]
