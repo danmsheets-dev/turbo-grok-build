@@ -489,22 +489,20 @@ impl GameModeState {
             .unwrap_or_else(|| RgbaImage::new(bg.width(), bg.height()));
         super::compose::compose_cell_frame_into(&mut scratch, &bg, self, tick);
         // Terminal-res paint buffer for halfblock (use_direct — no per-paint resize).
+        //
+        // PERF (RC16 PERF-5): both the paint buffer and the cell cache are
+        // retained and overwritten in place. At a stable terminal size a
+        // fingerprint miss now allocates nothing; only a size change reallocates.
         let paint_w = u32::from(cell_w).max(1);
         let paint_h = u32::from(cell_h).saturating_mul(2).max(1);
-        let paint = if scratch.width() == paint_w && scratch.height() == paint_h {
-            scratch.clone()
-        } else {
-            image::imageops::resize(
-                &scratch,
-                paint_w,
-                paint_h,
-                image::imageops::FilterType::Nearest,
-            )
-        };
-        let halfblock =
-            xai_grok_pager_render::render::image_overlay::HalfblockCellCache::from_rgba(
-                &paint, cell_w, cell_h,
-            );
+        let mut paint = self
+            .pixel_paint
+            .take()
+            .filter(|p| p.width() == paint_w && p.height() == paint_h)
+            .unwrap_or_else(|| RgbaImage::new(paint_w, paint_h));
+        resample_nearest_into(&mut paint, &scratch);
+        let mut halfblock = self.pixel_halfblock.take().unwrap_or_default();
+        halfblock.fill_from_rgba(&paint, cell_w, cell_h);
         self.pixel_bg_scaled = Some(bg);
         // High-res only kept as reusable scratch (no second full-frame clone).
         self.pixel_frame = None;
@@ -524,6 +522,9 @@ impl GameModeState {
             self.last_sync_sig = None;
             self.last_phase_sig = None;
             self.mark_redraw_dirty();
+        } else {
+            // PERF (RC16 PERF-7): a hidden office must impose no standing cost.
+            self.release_pixel_memory();
         }
     }
 
@@ -784,8 +785,24 @@ impl GameModeState {
         );
     }
 
+    /// Drop **every** image buffer Game Mode owns, including the decoded
+    /// full-res office background.
+    ///
+    /// PERF (RC16 PERF-7): called when Game Mode is toggled closed. Hidden, the
+    /// office used to keep ~8-10 MB resident for the rest of the process
+    /// (`pixel_bg_full` alone is 1448×1086 RGBA ≈ 6.3 MB). `pixel_bg_full` is
+    /// dropped too: re-decoding the embedded PNG on reopen measures ~11 ms
+    /// (release), on a path that already pays 26-190 ms to rescale the
+    /// background for the new stage — so the reopen hitch grows by well under
+    /// half, in exchange for releasing the largest buffer.
+    pub fn release_pixel_memory(&mut self) {
+        self.invalidate_pixel_cache();
+        self.pixel_bg_full = None;
+    }
+
     /// Drop composited pixel caches (e.g. terminal resize). Scaled BG rebuilds
-    /// on the next [`Self::ensure_pixel_frame`].
+    /// on the next [`Self::ensure_pixel_frame`]; the decoded full-res BG is
+    /// kept (see [`Self::release_pixel_memory`] to drop that too).
     pub fn invalidate_pixel_cache(&mut self) {
         self.pixel_frame = None;
         self.pixel_paint = None;
@@ -1024,6 +1041,32 @@ impl GameModeState {
 
     pub fn active_desk_count(&self) -> usize {
         self.desks.iter().filter(|d| d.is_occupied()).count()
+    }
+}
+
+/// Nearest-neighbour resample of `src` into the already-allocated `dst`.
+///
+/// PERF (RC16 PERF-5): replaces `image::imageops::resize(.., Nearest)` on the
+/// compose path so the terminal-res paint buffer is written in place instead of
+/// reallocated on every fingerprint miss. Picks the same source pixel
+/// `imageops` would — `floor((out + 0.5) * src/dst)` per axis — so the painted
+/// frame is unchanged. `dst` dimensions define the target size; the Game Mode
+/// caller always passes an exact integer downscale (`src = dst * pixel_scale`).
+fn resample_nearest_into(dst: &mut RgbaImage, src: &RgbaImage) {
+    let (dw, dh) = dst.dimensions();
+    let (sw, sh) = src.dimensions();
+    if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+        return;
+    }
+    let ratio_x = sw as f32 / dw as f32;
+    let ratio_y = sh as f32 / dh as f32;
+    for y in 0..dh {
+        let sy = (((y as f32 + 0.5) * ratio_y) as u32).min(sh - 1);
+        for x in 0..dw {
+            let sx = (((x as f32 + 0.5) * ratio_x) as u32).min(sw - 1);
+            let p = *src.get_pixel(sx, sy);
+            dst.put_pixel(x, y, p);
+        }
     }
 }
 
@@ -1287,5 +1330,114 @@ mod tests {
         assert_eq!(s.visual_fingerprint(80, 24), fp0);
         s.tick = 4; // next bucket
         assert_ne!(s.visual_fingerprint(80, 24), fp0);
+    }
+
+    /// PERF-7: a hidden office holds no image memory; reopening rebuilds it.
+    #[test]
+    fn toggle_closed_releases_image_memory_and_reopen_repaints() {
+        let mut s = GameModeState::new();
+        s.toggle();
+        assert!(s.open);
+        assert!(s.ensure_pixel_frame(40, 14), "office must paint when open");
+        assert!(s.pixel_bg_full.is_some());
+        assert!(s.pixel_bg_scaled.is_some());
+        assert!(s.pixel_paint.is_some());
+        assert!(s.pixel_halfblock.is_some());
+        assert!(s.pixel_compose_scratch.is_some());
+
+        s.toggle();
+        assert!(!s.open);
+        assert!(s.pixel_bg_full.is_none(), "full-res BG must be released");
+        assert!(s.pixel_bg_scaled.is_none());
+        assert!(s.pixel_paint.is_none());
+        assert!(s.pixel_halfblock.is_none());
+        assert!(s.pixel_compose_scratch.is_none());
+        assert_eq!(s.pixel_cell_w, 0);
+        assert_eq!(s.pixel_cell_h, 0);
+        assert_eq!(s.pixel_bg_scale, 0);
+        assert_eq!(
+            s.pixel_frame_fp, 0,
+            "a stale fingerprint must not HIT against dropped buffers"
+        );
+
+        s.toggle();
+        assert!(
+            s.ensure_pixel_frame(40, 14),
+            "reopen must rebuild the frame"
+        );
+        assert_eq!(
+            s.pixel_paint.as_ref().expect("paint buffer").dimensions(),
+            (40, 28)
+        );
+        let cache = s.pixel_halfblock.as_ref().expect("cell cache");
+        assert_eq!((cache.cell_w, cache.cell_h), (40, 14));
+        assert_eq!(cache.packed.len(), 40 * 14);
+    }
+
+    /// PERF-5: repeated fingerprint misses at one terminal size must not
+    /// reallocate the paint buffer or the packed cell cache.
+    #[test]
+    fn repeated_fingerprint_misses_reuse_paint_buffers() {
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("w".into());
+        s.desks[0].phase = ActorPhase::AtDeskWorking;
+        assert!(s.ensure_pixel_frame(40, 14));
+        let paint_ptr = s.pixel_paint.as_ref().expect("paint").as_raw().as_ptr();
+        let cache0 = s.pixel_halfblock.as_ref().expect("cache");
+        let packed_ptr = cache0.packed.as_ptr();
+        let packed_cap = cache0.packed.capacity();
+        let mut fp = s.pixel_frame_fp;
+
+        for step in 1..4u64 {
+            s.tick = step * 4; // next sprite frame bucket => guaranteed miss
+            assert!(s.ensure_pixel_frame(40, 14));
+            assert_ne!(s.pixel_frame_fp, fp, "step {step} must be a miss");
+            fp = s.pixel_frame_fp;
+            assert_eq!(
+                s.pixel_paint.as_ref().expect("paint").as_raw().as_ptr(),
+                paint_ptr,
+                "paint buffer reallocated on fingerprint miss"
+            );
+            let cache = s.pixel_halfblock.as_ref().expect("cache");
+            assert_eq!(cache.packed.as_ptr(), packed_ptr, "cell cache reallocated");
+            assert_eq!(cache.packed.capacity(), packed_cap);
+        }
+    }
+
+    /// PERF-5: a stage size change still yields a correct, correctly sized buffer.
+    #[test]
+    fn stage_resize_rebuilds_correctly_sized_paint_buffers() {
+        let mut s = GameModeState::new();
+        assert!(s.ensure_pixel_frame(40, 14));
+        assert_eq!(
+            s.pixel_paint.as_ref().expect("paint").dimensions(),
+            (40, 28)
+        );
+
+        assert!(s.ensure_pixel_frame(30, 10));
+        assert_eq!(
+            s.pixel_paint.as_ref().expect("paint").dimensions(),
+            (30, 20)
+        );
+        let cache = s.pixel_halfblock.as_ref().expect("cache");
+        assert_eq!((cache.cell_w, cache.cell_h), (30, 10));
+        assert_eq!(cache.packed.len(), 30 * 10);
+        assert!(
+            cache.packed.iter().any(|p| p.iter().any(|&c| c > 0)),
+            "resampled office must not be blank"
+        );
+    }
+
+    /// PERF-5: the in-place resample must pick the same pixels `imageops` did.
+    #[test]
+    fn resample_nearest_into_matches_imageops() {
+        let mut src = RgbaImage::new(12, 8);
+        for (x, y, p) in src.enumerate_pixels_mut() {
+            *p = image::Rgba([(x * 20) as u8, (y * 30) as u8, (x + y) as u8, 255]);
+        }
+        let expect = image::imageops::resize(&src, 4, 4, image::imageops::FilterType::Nearest);
+        let mut got = RgbaImage::new(4, 4);
+        resample_nearest_into(&mut got, &src);
+        assert_eq!(got.as_raw(), expect.as_raw());
     }
 }

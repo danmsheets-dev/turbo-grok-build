@@ -34,7 +34,7 @@ pub fn paint_halfblock_image(buf: &mut Buffer, area: Rect, image_bytes: &[u8]) -
 ///
 /// Built once per Game Mode visual fingerprint so paint can skip per-pixel
 /// sampling (`get_pixel` + alpha blend) and only write ratatui cells.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HalfblockCellCache {
     pub cell_w: u16,
     pub cell_h: u16,
@@ -45,6 +45,19 @@ pub struct HalfblockCellCache {
 impl HalfblockCellCache {
     /// Sample `img` (expected `cell_w × cell_h*2`) into packed cell colors.
     pub fn from_rgba(img: &RgbaImage, cell_w: u16, cell_h: u16) -> Self {
+        let mut cache = Self::default();
+        cache.fill_from_rgba(img, cell_w, cell_h);
+        cache
+    }
+
+    /// Re-sample `img` into this cache in place, reusing the packed allocation.
+    ///
+    /// PERF (RC16 PERF-5): Game Mode rebuilds the cache on every visual
+    /// fingerprint miss — a fresh `Vec` per miss was ~100 KB of short-lived
+    /// allocation per animation step. The packed buffer keeps its capacity
+    /// across calls at a stable terminal size and only reallocates when the
+    /// cell grid grows.
+    pub fn fill_from_rgba(&mut self, img: &RgbaImage, cell_w: u16, cell_h: u16) {
         let target_w = u32::from(cell_w).max(1);
         let target_h = u32::from(cell_h).saturating_mul(2).max(1);
         let (src_w, src_h) = img.dimensions();
@@ -67,7 +80,9 @@ impl HalfblockCellCache {
         };
 
         let n = (cell_w as usize).saturating_mul(cell_h as usize);
-        let mut packed = Vec::with_capacity(n);
+        let packed = &mut self.packed;
+        packed.clear();
+        packed.reserve(n);
         for row in 0..cell_h {
             for col in 0..cell_w {
                 let x = u32::from(col);
@@ -84,11 +99,8 @@ impl HalfblockCellCache {
                 packed.push([tr, tg, tb, br, bg, bb]);
             }
         }
-        Self {
-            cell_w,
-            cell_h,
-            packed,
-        }
+        self.cell_w = cell_w;
+        self.cell_h = cell_h;
     }
 }
 
@@ -218,6 +230,32 @@ mod tests {
         let img: RgbaImage = ImageBuffer::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
         assert!(paint_halfblock_rgba(&mut buf, Rect::new(0, 0, 2, 1), &img));
         assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn fill_from_rgba_reuses_packed_allocation() {
+        let img: RgbaImage = ImageBuffer::from_pixel(4, 4, Rgba([9, 8, 7, 255]));
+        let mut cache = HalfblockCellCache::from_rgba(&img, 4, 2);
+        assert_eq!(cache.packed.len(), 8);
+        let ptr = cache.packed.as_ptr();
+        let cap = cache.packed.capacity();
+
+        let next: RgbaImage = ImageBuffer::from_pixel(4, 4, Rgba([1, 2, 3, 255]));
+        cache.fill_from_rgba(&next, 4, 2);
+        assert_eq!(
+            cache.packed.as_ptr(),
+            ptr,
+            "same-size refill must not reallocate"
+        );
+        assert_eq!(cache.packed.capacity(), cap);
+        assert_eq!(cache.packed[0], [1, 2, 3, 1, 2, 3]);
+
+        // A larger grid grows the buffer and reports the new dimensions.
+        let big: RgbaImage = ImageBuffer::from_pixel(8, 8, Rgba([4, 5, 6, 255]));
+        cache.fill_from_rgba(&big, 8, 4);
+        assert_eq!((cache.cell_w, cache.cell_h), (8, 4));
+        assert_eq!(cache.packed.len(), 32);
+        assert_eq!(cache.packed[31], [4, 5, 6, 4, 5, 6]);
     }
 
     #[test]
