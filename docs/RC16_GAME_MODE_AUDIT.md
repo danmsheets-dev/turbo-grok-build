@@ -1,5 +1,10 @@
 # RC16 Game Mode Audit — Bugs, Performance, Hover Info & Sprite Animations
 
+> **STATUS: IMPLEMENTED** on `rc16-game-mode` (18 commits). Every bug and perf finding below is fixed; both hover
+> tooltips and 11 of the 12 animation proposals shipped. Animation #10 (supervisor pacing) was **skipped** — see
+> "Deferred" at the bottom. Game Mode tests went 25 → 132. Do not read this document as a list of open issues;
+> it is the design record for work that has landed. Shipped behavior is summarized in `KNOWN_ISSUES.md`.
+
 **Date:** 2026-08-05 · **Branch:** `dev` @ `28038242d` · **Method:** 19-agent workflow (4 bug/perf finders, 2 feature assessors, 12 adversarial verifiers, 1 completeness critic), static analysis only — nothing compiled or profiled.
 
 **Scope:** `crates/codegen/xai-grok-pager/src/views/game_mode/` (mod, state, layout, compose, render, sprites, sprites_pixel, monitor, wall) plus integration (`app_view.rs` tick/demand, `agent_view/{render,input}.rs`, `event_loop.rs`, halfblock overlay). GBoom is a separate mini-game and was excluded.
@@ -176,3 +181,25 @@ Also free wins: per-desk frame offset (`frame + desk_index`) so desks don't type
 4. Sprite-cache key quantization + eviction (prereq for all new sprites), then hover step 1 (Supervisor tooltip) and animations #1-4/#6.
 5. Hover steps 2-3 (rack + MCP cache) together with animation #5 — they share the rack compositing work.
 6. PERF-4 dirty-rect compositing only if profiling shows compose cost matters after the above; the Handoff pinned-t fingerprint fix is a cheap standalone slice of it.
+
+---
+
+## Deferred — animation #10, supervisor pacing
+
+Skipped deliberately after measurement, not for lack of effort. The audit named z-order and event-loop wakeups as
+the blockers; both turned out to be non-issues (a horizontal pace stays in the supervisor's own depth band, and
+`SupervisorPhase::Waiting` implies an occupied desk, which already holds the loop on `Slow`). The real blocker is
+the asset:
+
+1. `sprite_supervisor` is not a figure — it is 34×30 px of boss **and his wide executive desk baked into one
+   image** (`// Wide executive desk` is the first thing it draws). Pacing it would walk the desk around the room.
+2. He does not stand on floor. Compose stamps a 0.13w × 0.14h carpet patch over the mockup's bare **wall** at
+   (0.50, 0.28); the room's real floor does not start until ~0.35h.
+3. He does not fit on that patch. At the two smallest office stages the sprite already overhangs it; at the most
+   generous there is ±7 px of slack — under 2.5 terminal cells of travel. Widening the patch to a pace-worthy
+   ±0.12w stamps carpet over the mockup's own picture frame (0.556–0.614w) and left plant (to 0.41w).
+
+Doing #10 properly therefore means splitting the supervisor sprite into a desk prop plus a figure, re-anchoring
+both, authoring gold-horned walk frames, and re-authoring `office_bg.png` to give the boss a real floor bay — an
+asset change plus a re-pin of every placement test, not a code batch. What #10 wanted (a free-roaming actor that
+proves the office is alive) is delivered by #11, the floor robot, on real floor and at provably zero cost.
