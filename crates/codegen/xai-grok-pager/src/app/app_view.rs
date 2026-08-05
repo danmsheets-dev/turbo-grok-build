@@ -5540,6 +5540,9 @@ impl AppView {
         }
         let mut bootstrap_commands_update: Option<Vec<agent_client_protocol::AvailableCommand>> =
             None;
+        // Game Mode's one-shot `mcp/list` request, deferred out of the agent
+        // borrow below so `pending_effects` is reachable.
+        let mut game_mode_mcps_fetch: Option<(AgentId, agent_client_protocol::SessionId)> = None;
         for agent in self.agents.values_mut() {
             needs_redraw |= agent.edit_hl_tick();
             for child in agent.subagent_views.values_mut() {
@@ -5563,6 +5566,18 @@ impl AppView {
                 });
                 let (sw, sh) = (stage.width.max(20), stage.height.max(8));
                 needs_redraw |= crate::views::game_mode::sync_game_mode(agent, sw, sh);
+                // The rack tooltip needs per-server MCP status, which only the
+                // `/mcps` modal ever fetched. Ctrl+G dispatches no Effect, so
+                // the office asks for it here — once per open, and only while
+                // `agent` is still borrowed can we see that the cache is empty.
+                // The effect itself is pushed below, where `self` is free again.
+                if crate::views::game_mode::wants_mcp_list_fetch(agent) {
+                    game_mode_mcps_fetch = agent
+                        .session
+                        .session_id
+                        .clone()
+                        .map(|session_id| (id, session_id));
+                }
             }
             needs_redraw |= agent.scrollback.tick();
             needs_redraw |= agent.todo.list_state.tick();
@@ -5677,6 +5692,22 @@ impl AppView {
                     }
                     needs_redraw = true;
                 }
+            }
+        }
+        // Reuses the extensions modal's per-agent coalescing guard, so an
+        // /mcps fetch already in flight wins and Game Mode simply reads the
+        // cache it lands in. `mark_..._dispatched` only fires on the push, so a
+        // coalesced tick retries on the next one instead of losing the request.
+        if let Some((agent_id, session_id)) = game_mode_mcps_fetch
+            && !crate::app::acp_handler::agent_has_pending_mcps_fetch(self, agent_id)
+        {
+            self.pending_effects.push(crate::app::actions::Effect::FetchMcpsList {
+                agent_id,
+                session_id,
+                cache: true,
+            });
+            if let Some(agent) = self.agents.get_mut(&agent_id) {
+                crate::views::game_mode::mark_mcp_list_fetch_dispatched(agent);
             }
         }
         if let Some(commands) = bootstrap_commands_update {
@@ -6999,6 +7030,52 @@ pub(crate) mod tests {
             app.tick_demand(),
             TickDemand::Slow,
             "an occupied working desk animates on Slow"
+        );
+    }
+
+    /// RC16 §3 step 3: opening Game Mode must fetch the MCP server list once —
+    /// Ctrl+G dispatches no Effect, so without this the rack tooltip would be
+    /// stuck on startup counts for the whole session. "Once" is the load-bearing
+    /// half: the tick path runs ~12×/second.
+    #[test]
+    fn game_mode_open_fetches_the_mcp_list_exactly_once() {
+        use crate::app::actions::Effect;
+
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        app.agents.get_mut(&id).unwrap().game_mode.open = true;
+
+        for _ in 0..5 {
+            app.tick();
+        }
+        let fetches = app
+            .pending_effects
+            .iter()
+            .filter(|e| matches!(e, Effect::FetchMcpsList { agent_id, .. } if *agent_id == id))
+            .count();
+        assert_eq!(fetches, 1, "the office must ask for mcp/list exactly once");
+
+        // Draining the effect (as the event loop does) must not re-arm it.
+        app.pending_effects.clear();
+        for _ in 0..5 {
+            app.tick();
+        }
+        assert!(
+            app.pending_effects.is_empty(),
+            "a dispatched fetch must not be re-issued every tick"
+        );
+
+        // A populated cache never asks at all.
+        let mut fresh = test_app_with_agent();
+        {
+            let agent = fresh.agents.get_mut(&id).unwrap();
+            agent.game_mode.open = true;
+            agent.mcp_status_cache = Some(Vec::new());
+        }
+        fresh.tick();
+        assert!(
+            fresh.pending_effects.is_empty(),
+            "a loaded cache (even an empty fleet) must not re-fetch"
         );
     }
 

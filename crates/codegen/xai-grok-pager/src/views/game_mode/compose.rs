@@ -629,27 +629,51 @@ fn desk_frame(frame: u8, desk: usize) -> u8 {
 /// share a hash bucket can never disagree about the door. That is what makes
 /// the door free: no new fingerprint input, and both phases already recompose
 /// every tick.
-/// Whether the MCP rack's LEDs chase this frame (RC16 §3 step 2).
+/// Whether the MCP rack's LEDs chase this frame (RC16 §4 #5).
 ///
-/// FINGERPRINT NOTE: like [`door_is_open`], a pure function of inputs
-/// [`GameModeState::visual_fingerprint`] already hashes — the supervisor phase
-/// and every desk's occupancy + phase — so it adds **no** new fingerprint input
-/// and the idle↔active edge recomposes for free.
+/// The signal is **real tool-call traffic**: a seated desk's `tool_calls`
+/// counter going up arms [`GameModeState::rack_active_until`] for
+/// `RACK_BURST`, and the rack is lit for exactly that window. RC16 §3 step 2
+/// shipped a placeholder here — "any desk typing" — which lit the rack for the
+/// whole life of every subagent whether or not a single tool was ever called.
 ///
-/// WAKEUP NOTE: every state that lights the rack (a Working supervisor, a desk
-/// typing) is already in `GameModeState::pixel_needs_tick_frame`, so the
-/// `(tick / 4)` bucket the chase rides is already hashed and the event loop is
-/// already awake for it — **zero** new `needs_animation_tick` wakeups. A frozen
-/// room composes `tick = 0` against an idle rack, i.e. one still frame, so the
-/// RC16 PERF-1 parking and the idle-freeze invariant are both untouched.
-/// Blinking the LEDs unconditionally would have broken both, which is why the
-/// rack goes dark with the room. Real MCP tool-call activity replaces this
-/// derivation in RC16 §4 #5.
+/// FINGERPRINT / WAKEUP contract now lives with the state that owns it: see
+/// [`GameModeState::rack_burst_active`]. In short — the bool is hashed (it is
+/// new state, not a re-derivation of hashed inputs), it costs two recomposes
+/// per burst, and the only wakeups it can add are the tail of a burst whose
+/// desks all retired inside the window.
 pub(super) fn rack_is_active(state: &GameModeState) -> bool {
-    matches!(state.supervisor, SupervisorPhase::Working)
-        || state.desks.iter().any(|d| {
-            d.is_occupied() && matches!(d.phase, ActorPhase::AtDeskWorking)
-        })
+    state.rack_burst_active()
+}
+
+/// Cell rect covering the composed MCP rack — its hover hit box.
+///
+/// Exact analogue of [`supervisor_hit_rect`]: derived from the same
+/// [`RACK_ANCHOR`] centre and `RACK_COVER_*_FRAC` footprint the compose pass
+/// places (and [`rack_scale`] fits) the sprite with, so the box tracks the
+/// baked chassis rather than guessing at it. Both fractions are of the compose
+/// canvas, and the halfblock doubling cancels in a fraction, so the identical
+/// fractions apply to the cell-space stage rect.
+///
+/// The caller publishes this **only when the pixel office actually painted**
+/// (see the TIER NOTE on [`RACK_ANCHOR`]); everywhere else `last_mcp_rack`
+/// stays a zero-size `Rect`, which never hit-tests.
+pub(super) fn rack_hit_rect(stage: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    if stage.width == 0 || stage.height == 0 {
+        return ratatui::layout::Rect::default();
+    }
+    let (x, y, cover_w, cover_h) =
+        rack_cover_px(u32::from(stage.width), u32::from(stage.height));
+    let cover_w = cover_w.round().max(1.0);
+    let cover_h = cover_h.round().max(1.0);
+    let x = x.max(0.0) as u16;
+    let y = y.max(0.0) as u16;
+    ratatui::layout::Rect {
+        x: stage.x.saturating_add(x),
+        y: stage.y.saturating_add(y),
+        width: (cover_w as u16).min(stage.width.saturating_sub(x)),
+        height: (cover_h as u16).min(stage.height.saturating_sub(y)),
+    }
 }
 
 fn door_is_open(state: &GameModeState) -> bool {
@@ -1066,6 +1090,50 @@ mod tests {
             supervisor_hit_rect(Rect::new(0, 0, 0, 0)),
             Rect::default(),
             "degenerate stage must not produce a hover target"
+        );
+    }
+
+    /// Same contract for the rack box (RC16 §3 step 3): it must cover the baked
+    /// chassis the sprite is fitted into, stay inside the stage at every office
+    /// geometry, and collapse to nothing on a degenerate stage — a zero-size
+    /// `Rect` is how `render_game_mode` says "no rack painted here".
+    #[test]
+    fn rack_hit_rect_tracks_the_composed_rack() {
+        use ratatui::layout::Rect;
+        for stage in [
+            Rect::new(0, 0, 100, 24),
+            Rect::new(3, 7, 160, 40),
+            Rect::new(0, 0, 72, 18),
+        ] {
+            let r = rack_hit_rect(stage);
+            assert!(r.width > 0 && r.height > 0, "{stage:?} → empty hit rect");
+            assert!(
+                r.x >= stage.x
+                    && r.y >= stage.y
+                    && r.x + r.width <= stage.x + stage.width
+                    && r.y + r.height <= stage.y + stage.height,
+                "{r:?} escaped {stage:?}"
+            );
+            let cx = f32::from(stage.x) + f32::from(stage.width) * RACK_ANCHOR.0;
+            let cy = f32::from(stage.y) + f32::from(stage.height) * RACK_ANCHOR.1;
+            let rcx = f32::from(r.x) + f32::from(r.width) / 2.0;
+            let rcy = f32::from(r.y) + f32::from(r.height) / 2.0;
+            assert!((rcx - cx).abs() <= 1.0, "{r:?} off-centre in x for {stage:?}");
+            assert!((rcy - cy).abs() <= 1.0, "{r:?} off-centre in y for {stage:?}");
+        }
+        assert_eq!(
+            rack_hit_rect(Rect::new(0, 0, 0, 0)),
+            Rect::default(),
+            "degenerate stage must not produce a hover target"
+        );
+        // The two boxes describe different props and must never overlap, or the
+        // supervisor (tested first in `hit_test`) would swallow the rack.
+        let stage = Rect::new(0, 0, 120, 30);
+        let sup = supervisor_hit_rect(stage);
+        let rack = rack_hit_rect(stage);
+        assert!(
+            sup.x + sup.width <= rack.x,
+            "supervisor {sup:?} overlaps rack {rack:?}"
         );
     }
 
@@ -1554,6 +1622,10 @@ mod tests {
             let mut busy = GameModeState::new();
             busy.desks[0].child_session_id = Some("a".into());
             busy.desks[0].phase = ActorPhase::AtDeskWorking;
+            // RC16 §4 #5: the rack answers to real tool calls, not to a desk
+            // merely existing — arm the burst the way a sync would.
+            busy.rack_active_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
             assert!(rack_is_active(&busy));
             let busy0 = compose_cell_frame(&bg, &busy, 0);
             assert!(

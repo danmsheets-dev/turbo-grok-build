@@ -435,6 +435,77 @@ pub fn patch_server_row(
     true
 }
 
+/// One server in the always-on MCP status cache
+/// (`AgentView::mcp_status_cache`).
+///
+/// [`McpServerInfo`] is the *modal's* working set — setup schemas, per-tool
+/// details, wire source, section routing — and it only exists while
+/// `/mcps` is open. The Game Mode rack tooltip needs four facts per server and
+/// needs them whether or not that modal was ever opened, so the cache keeps a
+/// distilled row instead of cloning the full struct (which would carry the
+/// setup config and the entire tool list into a view that never reads them).
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpStatusRow {
+    /// Config name — the join key for `x.ai/mcp/server_status` pushes.
+    pub name: String,
+    /// Friendlier label from the shell, when it supplied one.
+    pub display_name: Option<String>,
+    pub status: McpServerDisplayStatus,
+    pub tool_count: usize,
+    /// Failure text from the last `x.ai/mcp/server_status` push, already
+    /// flattened and capped by [`truncate_status_detail`].
+    pub status_detail: Option<String>,
+}
+
+impl McpStatusRow {
+    /// What to print for this server: display name when the shell gave one.
+    pub fn label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// Distil a fetched `mcp/list` response into the always-on status cache.
+///
+/// Order is preserved: [`convert_list_response`] already sorts managed →
+/// plugin → local, alphabetical within each, which is the order the rack
+/// tooltip wants to print.
+pub fn distill_status_rows(servers: &[McpServerInfo]) -> Vec<McpStatusRow> {
+    servers
+        .iter()
+        .map(|s| McpStatusRow {
+            name: s.name.clone(),
+            display_name: s.display_name.clone(),
+            status: s.status,
+            tool_count: s.tool_count,
+            status_detail: s.status_detail.as_deref().map(truncate_status_detail),
+        })
+        .collect()
+}
+
+/// [`patch_server_row`] for the distilled cache.
+///
+/// Same contract: find by `name`, always apply `status` + `status_detail`
+/// (including clearing it), apply `tool_count` only when the push actually
+/// carried a tools list, and silently no-op on an unknown name. Returns
+/// whether a row changed.
+pub fn patch_status_row(
+    rows: &mut [McpStatusRow],
+    name: &str,
+    new_status: McpServerDisplayStatus,
+    new_tool_count: Option<usize>,
+    status_detail: Option<String>,
+) -> bool {
+    let Some(row) = rows.iter_mut().find(|s| s.name == name) else {
+        return false;
+    };
+    row.status = new_status;
+    row.status_detail = status_detail.as_deref().map(truncate_status_detail);
+    if let Some(count) = new_tool_count {
+        row.tool_count = count;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

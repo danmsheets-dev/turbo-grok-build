@@ -776,3 +776,121 @@
         );
     }
 
+    /// RC16 §3 step 3: a live `server_status` push must reach the
+    /// modal-independent status cache *before* the modal-closed cheap path
+    /// drops it — that drop is why Game Mode's rack could only ever show
+    /// startup counts. The cheap path itself is unchanged: still no redraw,
+    /// still no effect.
+    #[test]
+    fn server_status_patches_the_status_cache_with_the_modal_closed() {
+        use crate::views::mcps_modal::{McpServerDisplayStatus, McpStatusRow};
+        use xai_grok_shell::extensions::mcp::McpServerStatus;
+
+        let mut app = make_app_two_agents();
+        {
+            let owner = app.agents.get_mut(&AgentId(0)).unwrap();
+            owner.mcp_status_cache = Some(vec![McpStatusRow {
+                name: "alpha".into(),
+                display_name: None,
+                status: McpServerDisplayStatus::Initializing,
+                tool_count: 0,
+                status_detail: None,
+            }]);
+        }
+        assert!(
+            app.agents[&AgentId(0)].extensions_modal.is_none(),
+            "modal must be closed for this to mean anything"
+        );
+
+        let notif =
+            make_server_status_notif("sess-owner", "alpha", McpServerStatus::Ready, None);
+        let redraw = handle_mcp_server_status(&notif, &mut app);
+
+        let rows = app.agents[&AgentId(0)]
+            .mcp_status_cache
+            .as_ref()
+            .expect("cache present");
+        assert_eq!(
+            rows[0].status,
+            McpServerDisplayStatus::Ready,
+            "the push must land in the cache even with no modal open"
+        );
+        assert!(
+            app.agents[&AgentId(0)].mcp_status_gen > 0,
+            "a cache write must bump the generation"
+        );
+        assert!(
+            !redraw,
+            "the cache is overlay data — it must not start requesting redraws"
+        );
+        assert!(
+            app.pending_effects.is_empty(),
+            "closed-modal cheap path must still schedule no effects"
+        );
+    }
+
+    /// The cache is a per-ROOT-agent view of this agent's fleet, exactly like
+    /// `mcp_init_progress`. A subagent runs its own MCP init, so a push under a
+    /// child session id must not repaint the parent's rack.
+    #[test]
+    fn server_status_cache_drops_child_session_pushes() {
+        use crate::views::mcps_modal::{McpServerDisplayStatus, McpStatusRow};
+        use xai_grok_shell::extensions::mcp::McpServerStatus;
+
+        let mut app = make_app_two_agents();
+        {
+            let owner = app.agents.get_mut(&AgentId(0)).unwrap();
+            owner.mcp_status_cache = Some(vec![McpStatusRow {
+                name: "alpha".into(),
+                display_name: None,
+                status: McpServerDisplayStatus::Initializing,
+                tool_count: 0,
+                status_detail: None,
+            }]);
+            owner
+                .subagent_views
+                .insert("child-sess".to_string(), Box::new(make_agent(Some("child-sess"))));
+        }
+
+        let notif =
+            make_server_status_notif("child-sess", "alpha", McpServerStatus::Ready, None);
+        let _ = handle_mcp_server_status(&notif, &mut app);
+
+        let rows = app.agents[&AgentId(0)]
+            .mcp_status_cache
+            .as_ref()
+            .expect("cache present");
+        assert_eq!(
+            rows[0].status,
+            McpServerDisplayStatus::Initializing,
+            "a subagent's own MCP init must not repaint the parent's rack"
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].mcp_status_gen, 0,
+            "a dropped push must not bump the generation"
+        );
+    }
+
+    /// A push for a server the cache has never seen is a silent no-op (same
+    /// contract as `patch_server_row`), and a never-fetched cache stays `None`
+    /// so Game Mode still knows to ask for the list.
+    #[test]
+    fn server_status_never_invents_cache_rows() {
+        use xai_grok_shell::extensions::mcp::McpServerStatus;
+
+        let mut app = make_app_two_agents();
+        let notif =
+            make_server_status_notif("sess-owner", "alpha", McpServerStatus::Ready, None);
+        let _ = handle_mcp_server_status(&notif, &mut app);
+        assert!(
+            app.agents[&AgentId(0)].mcp_status_cache.is_none(),
+            "a push must not fabricate a cache the list never filled"
+        );
+
+        app.agents.get_mut(&AgentId(0)).unwrap().mcp_status_cache = Some(Vec::new());
+        let _ = handle_mcp_server_status(&notif, &mut app);
+        assert_eq!(
+            app.agents[&AgentId(0)].mcp_status_gen, 0,
+            "an unknown server name must not bump the generation"
+        );
+    }

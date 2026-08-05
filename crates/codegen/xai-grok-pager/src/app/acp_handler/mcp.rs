@@ -154,7 +154,7 @@ pub(super) fn handle_mcp_tools_changed(notif: &acp::ExtNotification, app: &mut A
 /// which collapsed across agents — a pending fetch on agent A would
 /// drop the push for agent B. Now we key on `agent_id` so each
 /// agent's refetch is independently debounced.
-pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> bool {
+pub(crate) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> bool {
     app.pending_effects.iter().any(|e| {
         matches!(
             e,
@@ -170,6 +170,13 @@ pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> 
 /// patched in-place via [`crate::views::mcps_modal::patch_server_row`]
 /// using the per-row delta, avoiding the full `mcp/list` round trip
 /// the legacy `tools_changed` debounced refetch path requires.
+///
+/// Before any of that it patches the matched **root** agent's
+/// modal-independent [`crate::app::agent_view::AgentView::mcp_status_cache`],
+/// which is the only per-server MCP status Game Mode's rack tooltip can
+/// read (RC16 §3 step 3). That write is silent: it never schedules an
+/// effect and never requests a redraw, so every no-op below still
+/// behaves exactly as it did.
 ///
 /// No-ops when:
 /// - the `sessionId` does not match any known agent (drop),
@@ -197,11 +204,15 @@ pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> 
 /// drop the entire push — `status` still applies, and `tools` is
 /// silently skipped (warn-logged) on shape mismatch.
 ///
-/// Returns `true` (request redraw) only when the row mutation
-/// happened AND the matched agent is the currently active view.
+/// Returns `true` (request redraw) only when the **modal** row mutation
+/// happened AND the matched agent is the currently active view. The
+/// modal-independent status cache patched below deliberately does not
+/// contribute — see the note on that block.
 pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     use crate::views::extensions_modal::TabDataState;
-    use crate::views::mcps_modal::{McpServerDisplayStatus, McpToolDetail, patch_server_row};
+    use crate::views::mcps_modal::{
+        McpServerDisplayStatus, McpToolDetail, patch_server_row, patch_status_row,
+    };
     use xai_grok_shell::extensions::mcp::{McpServerStatus, McpServerStatusPayload, McpToolEntry};
 
     let Ok(payload) = serde_json::from_str::<McpServerStatusPayload>(notif.params.get()) else {
@@ -219,20 +230,6 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
     };
     let id = matched.agent_id();
     let is_active = is_matched_agent_active(app, id);
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return false;
-    };
-    // Cheap path: modal closed. Drop the push — the next `/mcps`
-    // open will fetch a fresh full list.
-    let Some(modal) = agent.extensions_modal.as_mut() else {
-        return false;
-    };
-    // Cheap path: list still loading / errored. Patching would
-    // produce incoherent state; the in-flight fetch will land
-    // a consistent snapshot momentarily.
-    let TabDataState::Loaded(ref mut servers) = modal.mcps_data else {
-        return false;
-    };
     let display_status = match payload.status {
         McpServerStatus::Ready => McpServerDisplayStatus::Ready,
         McpServerStatus::Initializing => McpServerDisplayStatus::Initializing,
@@ -269,6 +266,51 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
             }
         }
     });
+    let new_tool_count = new_tools.as_ref().map(Vec::len);
+
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return false;
+    };
+
+    // Patch the modal-independent status cache FIRST, ahead of the
+    // modal-closed cheap path below: Game Mode's rack tooltip reads
+    // these rows with no modal open, and dropping the push there is
+    // exactly what left the office showing startup counts forever.
+    //
+    // Two deliberate constraints:
+    // - `Root` matches only. The cache is a per-root-agent view of
+    //   *this* agent's fleet, like `mcp_init_progress`
+    //   (`routing.rs`) — a subagent's own MCP init must not repaint
+    //   the parent's rack. The modal patch below keeps its existing
+    //   parent-routed behaviour untouched.
+    // - Never contributes to the return value. The rows are overlay
+    //   data (the same contract as `SupervisorSnapshot`), so a closed
+    //   modal keeps the exact no-redraw, no-effect cheap path it had
+    //   before; the tooltip repaints with whatever repaints next.
+    if matches!(matched, SessionMatch::Root(_))
+        && let Some(rows) = agent.mcp_status_cache.as_mut()
+        && patch_status_row(
+            rows,
+            &payload.name,
+            display_status,
+            new_tool_count,
+            payload.detail.clone(),
+        )
+    {
+        agent.mcp_status_gen = agent.mcp_status_gen.wrapping_add(1);
+    }
+
+    // Cheap path: modal closed. Drop the push — the next `/mcps`
+    // open will fetch a fresh full list.
+    let Some(modal) = agent.extensions_modal.as_mut() else {
+        return false;
+    };
+    // Cheap path: list still loading / errored. Patching would
+    // produce incoherent state; the in-flight fetch will land
+    // a consistent snapshot momentarily.
+    let TabDataState::Loaded(ref mut servers) = modal.mcps_data else {
+        return false;
+    };
     let mutated = patch_server_row(
         servers,
         &payload.name,

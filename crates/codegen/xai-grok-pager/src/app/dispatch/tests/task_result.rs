@@ -2975,3 +2975,77 @@ fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
         "Build-mode modal non-empty degraded list stays silent"
     );
 }
+
+/// RC16 §3 step 3: the `mcp/list` response must always refresh the
+/// modal-independent status cache, not only when the extensions modal happens
+/// to be open. Game Mode's rack tooltip is the other consumer, and the fetch it
+/// triggers from `AppView::tick` never opens a modal at all.
+#[test]
+fn mcps_list_loaded_fills_the_status_cache_with_no_modal_open() {
+    use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    assert!(app.agents[&id].extensions_modal.is_none(), "no modal open");
+    assert!(app.agents[&id].mcp_status_cache.is_none(), "never fetched");
+
+    let server = McpServerInfo {
+        name: "github".into(),
+        display_name: Some("GitHub".into()),
+        status: McpServerDisplayStatus::Ready,
+        tool_count: 12,
+        auth_required: false,
+        setup_required: false,
+        setup: None,
+        setup_values: std::collections::HashMap::new(),
+        tools: Vec::new(),
+        enabled: true,
+        source: "local".into(),
+        wire_source: McpWireSource::Local,
+        plugin_name: None,
+        is_managed_gateway: false,
+        status_detail: None,
+    };
+    dispatch_task_result(
+        TaskResult::McpsListLoaded {
+            agent_id: id,
+            result: Ok(vec![server]),
+        },
+        &mut app,
+    );
+
+    let rows = app.agents[&id]
+        .mcp_status_cache
+        .as_ref()
+        .expect("cache populated");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "github");
+    assert_eq!(rows[0].label(), "GitHub");
+    assert_eq!(rows[0].status, McpServerDisplayStatus::Ready);
+    assert_eq!(rows[0].tool_count, 12);
+    let gen_after_ok = app.agents[&id].mcp_status_gen;
+    assert!(gen_after_ok > 0, "a write must bump the generation");
+
+    // An error must not blank a good cache — the office keeps showing the last
+    // known fleet rather than dropping to "no servers reported".
+    dispatch_task_result(
+        TaskResult::McpsListLoaded {
+            agent_id: id,
+            result: Err("couldn't load server list".into()),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .mcp_status_cache
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0),
+        1,
+        "a failed refetch must not clear the cache"
+    );
+    assert_eq!(
+        app.agents[&id].mcp_status_gen, gen_after_ok,
+        "a failed refetch changed nothing, so nothing must re-clone"
+    );
+}

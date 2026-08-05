@@ -73,6 +73,14 @@ pub fn render_game_mode(buf: &mut Buffer, area: Rect, state: &mut GameModeState)
     } else {
         layout.supervisor
     };
+    // The MCP rack is pixel-office-only art: the Unicode fallback composes no
+    // rack and Compact has no office at all, so a zero-size rect (which never
+    // hit-tests) is how "no rack to hover here" is expressed.
+    state.last_mcp_rack = if pixel_painted {
+        super::compose::rack_hit_rect(pixel_area)
+    } else {
+        Rect::default()
+    };
 
     // Overlay-only chrome (never invalidates pixel_frame / scaled BG).
     paint_focus_ring_overlay(buf, &layout, state);
@@ -143,6 +151,7 @@ fn paint_hover_popup(buf: &mut Buffer, area: Rect, layout: &GameLayout, state: &
             (desk_popup_lines(&state.desks[idx]), layout.desks[idx])
         }
         HoverTarget::Supervisor => (supervisor_popup_lines(state), state.last_supervisor),
+        HoverTarget::McpRack => (mcp_rack_popup_lines(state), state.last_mcp_rack),
     };
     paint_popup(
         buf,
@@ -261,6 +270,88 @@ fn supervisor_popup_lines(state: &GameModeState) -> Vec<(String, Style)> {
     }
     if info.waiting_on_user {
         lines.push((" ▲ waiting on you".to_string(), popup_title_style()));
+    }
+    lines
+}
+
+/// Rows the rack card prints before it collapses the rest into `+N more`.
+///
+/// Six is the tallest the card can get without out-growing the desk card it
+/// shares a placement routine with (6 body lines + title + 2 border rows).
+const MCP_POPUP_MAX_ROWS: usize = 6;
+
+/// Status glyph for one MCP server row.
+///
+/// Drawn instead of a colour badge because [`paint_popup`] paints one `Style`
+/// per line and the office cards use fixed SNES-ish colours rather than the
+/// theme — see [`popup_body_style`]. `label()` on the right carries the same
+/// information in words, so the glyph is decoration, not the only signal.
+fn mcp_status_glyph(status: crate::views::mcps_modal::McpServerDisplayStatus) -> char {
+    use crate::views::mcps_modal::McpServerDisplayStatus as S;
+    match status {
+        S::Ready => '●',
+        S::Initializing => '◐',
+        S::NeedsAuth | S::SetupRequired => '▲',
+        S::Unavailable => '✕',
+    }
+}
+
+/// Card body for the MCP server rack.
+///
+/// Reads the overlay-only [`super::state::McpRackSnapshot`]. Falls back to the
+/// `x.ai/mcp/init_progress` counts while the per-server list has not landed
+/// yet, which is the whole window between session start and the first
+/// `mcp/list` response — the rack is on screen for all of it.
+fn mcp_rack_popup_lines(state: &GameModeState) -> Vec<(String, Style)> {
+    let info = &state.mcp_info;
+    let body = popup_body_style();
+    let mut lines = vec![(" MCP servers".to_string(), popup_title_style())];
+
+    if info.servers.is_empty() {
+        // No list yet. Say which of the two reasons it is, rather than
+        // implying the agent has no servers.
+        lines.push((
+            if info.init_active || info.init_total > 0 {
+                format!(
+                    " connecting {}/{}",
+                    info.init_connected, info.init_total
+                )
+            } else {
+                " no servers reported".to_string()
+            },
+            body,
+        ));
+        return lines;
+    }
+
+    let shown = info.servers.len().min(MCP_POPUP_MAX_ROWS);
+    for row in &info.servers[..shown] {
+        let ready = matches!(
+            row.status,
+            crate::views::mcps_modal::McpServerDisplayStatus::Ready
+        );
+        lines.push((
+            format!(
+                " {} {}  {}  {} tools",
+                mcp_status_glyph(row.status),
+                truncate_mid(row.label(), 18),
+                row.status.label(),
+                row.tool_count
+            ),
+            if ready { body } else { popup_title_style() },
+        ));
+        // Why it is not ready, when the shell told us.
+        if !ready
+            && let Some(detail) = row.status_detail.as_deref()
+        {
+            lines.push((format!("   {}", truncate_mid(detail, 32)), body));
+        }
+    }
+    if info.servers.len() > shown {
+        lines.push((
+            format!(" +{} more", info.servers.len() - shown),
+            body,
+        ));
     }
     lines
 }
@@ -908,9 +999,16 @@ mod tests {
     fn popup_text_rows(buf: &Buffer, area: Rect) -> Vec<String> {
         let (mut ox, mut oy) = (0u16, 0u16);
         let mut found = false;
+        // Match on the card's gold border colour as well as the corner glyph:
+        // the office art draws `┌` corners of its own (empty desks, compact
+        // cards), and a short card can land below one of them.
+        let gold = Color::Rgb(255, 220, 96);
         'scan: for y in area.y..area.y + area.height {
             for x in area.x..area.x + area.width {
-                if buf.cell((x, y)).map(|c| c.symbol()) == Some("┌") {
+                if buf
+                    .cell((x, y))
+                    .is_some_and(|c| c.symbol() == "┌" && c.style().fg == Some(gold))
+                {
                     (ox, oy) = (x, y);
                     found = true;
                     break 'scan;
@@ -1000,6 +1098,115 @@ mod tests {
             Rect::default(),
             "the unicode path must publish a supervisor hit rect"
         );
+    }
+
+    /// Paint the office with the MCP rack hovered and `mcp_info` preloaded.
+    ///
+    /// Forces the target rather than hit-testing it: the rack is pixel-office
+    /// art, so the unicode path this helper uses (to stay off the PNG decode)
+    /// deliberately publishes a zero-size `last_mcp_rack`. The card body is the
+    /// same either way — that is what `paint_popup` exists for.
+    fn render_rack_card(info: super::super::state::McpRackSnapshot) -> (Buffer, Rect) {
+        let game = Rect::new(2, 3, 100, 24);
+        let mut buf = Buffer::empty(Rect::new(
+            0,
+            0,
+            game.x + game.width + 4,
+            game.y + game.height + 4,
+        ));
+        let mut state = GameModeState::new();
+        state.pixel_mode = false;
+        state.open = true;
+        state.mcp_info = info;
+        state.hover = Some(HoverTarget::McpRack);
+        state.hover_screen = Some((game.x + 20, game.y + 18));
+        render_game_mode(&mut buf, game, &mut state);
+        assert_eq!(
+            state.last_mcp_rack,
+            Rect::default(),
+            "the unicode office composes no rack, so none may be hoverable"
+        );
+        (buf, game)
+    }
+
+    /// Startup: the per-server list has not landed, so the card falls back to
+    /// the `mcp/init_progress` counts rather than claiming there are no
+    /// servers.
+    #[test]
+    fn mcp_rack_tooltip_falls_back_to_init_progress() {
+        let (buf, game) = render_rack_card(super::super::state::McpRackSnapshot {
+            servers: Vec::new(),
+            init_connected: 2,
+            init_total: 5,
+            init_active: true,
+            rows_gen: 0,
+        });
+        assert_eq!(
+            popup_text_rows(&buf, game),
+            vec![" MCP servers", " connecting 2/5"]
+        );
+
+        // ...and with no init progress either, it says so instead of lying
+        // about a fleet it has never seen.
+        let (buf, game) = render_rack_card(super::super::state::McpRackSnapshot::default());
+        assert_eq!(
+            popup_text_rows(&buf, game),
+            vec![" MCP servers", " no servers reported"]
+        );
+    }
+
+    /// Once the cache is populated the card is one row per server, with the
+    /// truncated failure detail under the rows that are not Ready, and a
+    /// `+N more` tail past [`MCP_POPUP_MAX_ROWS`].
+    #[test]
+    fn mcp_rack_tooltip_renders_one_row_per_server() {
+        use crate::views::mcps_modal::{McpServerDisplayStatus, McpStatusRow};
+
+        let row = |name: &str, status, tools| McpStatusRow {
+            name: name.to_string(),
+            display_name: None,
+            status,
+            tool_count: tools,
+            status_detail: None,
+        };
+        let mut servers = vec![
+            row("github", McpServerDisplayStatus::Ready, 12),
+            McpStatusRow {
+                status_detail: Some("EOF while reading handshake".into()),
+                ..row("linear", McpServerDisplayStatus::Unavailable, 0)
+            },
+        ];
+        let (buf, game) = render_rack_card(super::super::state::McpRackSnapshot {
+            servers: servers.clone(),
+            init_connected: 0,
+            init_total: 0,
+            init_active: false,
+            rows_gen: 1,
+        });
+        assert_eq!(
+            popup_text_rows(&buf, game),
+            vec![
+                " MCP servers",
+                " ● github  ready  12 tools",
+                " ✕ linear  unavailable  0 tools",
+                "   EOF while reading handshake",
+            ]
+        );
+
+        // Past the cap the tail collapses; the card must not grow without bound.
+        for i in 0..6 {
+            servers.push(row(&format!("extra-{i}"), McpServerDisplayStatus::Ready, 1));
+        }
+        let (buf, game) = render_rack_card(super::super::state::McpRackSnapshot {
+            servers,
+            init_connected: 0,
+            init_total: 0,
+            init_active: false,
+            rows_gen: 2,
+        });
+        let rows = popup_text_rows(&buf, game);
+        assert_eq!(rows.first().map(String::as_str), Some(" MCP servers"));
+        assert_eq!(rows.last().map(String::as_str), Some(" +2 more"));
     }
 
     /// B5: the hover card is placed with a 1-cell SE drop shadow, so clamping

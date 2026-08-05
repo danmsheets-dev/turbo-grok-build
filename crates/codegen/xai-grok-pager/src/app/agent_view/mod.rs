@@ -1317,6 +1317,27 @@ pub struct AgentView {
     /// MCP servers, cleared when `x.ai/mcp_initialized` arrives.
     /// Shown in the turn status line while the agent is idle.
     pub(crate) mcp_init_progress: Option<McpInitProgress>,
+    /// Per-server MCP status, cached **outside** the extensions modal.
+    ///
+    /// Full status (`McpServerInfo`) used to live only in
+    /// `ExtensionsModalState.mcps_data`, so it existed only while `/mcps` was
+    /// open and live `x.ai/mcp/server_status` pushes were dropped the rest of
+    /// the time. The Game Mode rack tooltip needs it with no modal open, so the
+    /// distilled rows are cached here and written from both paths:
+    /// `TaskResult::McpsListLoaded` (full list) and `handle_mcp_server_status`
+    /// (per-row push).
+    ///
+    /// `None` means *never fetched* — `Some(vec![])` is the distinct, legitimate
+    /// "this agent has no MCP servers" answer, and only the former asks Game
+    /// Mode to trigger a fetch.
+    pub(crate) mcp_status_cache: Option<Vec<crate::views::mcps_modal::McpStatusRow>>,
+    /// Bumped on every write to [`Self::mcp_status_cache`].
+    ///
+    /// Game Mode mirrors the rows into its own overlay snapshot (the painter
+    /// only sees `GameModeState`) and re-clones them only when this moves —
+    /// same trick as `acp_synced_generation`, so a ~12 Hz sync costs one `u64`
+    /// compare instead of a `Vec<String>` clone.
+    pub(crate) mcp_status_gen: u64,
     /// Last synced ACP command generation. When this differs from
     /// `session.available_commands_generation`, `sync_acp_commands()`
     /// is called on the prompt. Starts at 0 so bootstrap (generation 1)

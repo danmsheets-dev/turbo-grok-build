@@ -275,6 +275,8 @@ impl AgentView {
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
             mcp_init_progress: None,
+            mcp_status_cache: None,
+            mcp_status_gen: 0,
             acp_synced_generation: 0,
             hovered_permission_item: None,
             last_permission_click: None,

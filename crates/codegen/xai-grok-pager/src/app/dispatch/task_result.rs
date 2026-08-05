@@ -743,15 +743,25 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::AuthCancelComplete => vec![],
         TaskResult::McpsListLoaded { agent_id, result } => {
             use crate::views::extensions_modal::TabDataState;
-            if let Some(agent) = app.agents.get_mut(&agent_id)
-                && let Some(ref mut modal) = agent.extensions_modal
-            {
-                modal.pending_action = None;
-                modal.pending_entry_index = None;
-                modal.mcps_data = match result {
-                    Ok(response) => TabDataState::Loaded(response),
-                    Err(e) => TabDataState::Error(e),
-                };
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                // Always refresh the modal-independent status cache: it is the
+                // only per-server MCP data Game Mode's rack tooltip can read,
+                // and this fetch may have been triggered with no modal open at
+                // all (see `AppView::tick`). An `Err` leaves the previous rows
+                // in place rather than blanking a good cache.
+                if let Ok(ref servers) = result {
+                    agent.mcp_status_cache =
+                        Some(crate::views::mcps_modal::distill_status_rows(servers));
+                    agent.mcp_status_gen = agent.mcp_status_gen.wrapping_add(1);
+                }
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.pending_action = None;
+                    modal.pending_entry_index = None;
+                    modal.mcps_data = match result {
+                        Ok(response) => TabDataState::Loaded(response),
+                        Err(e) => TabDataState::Error(e),
+                    };
+                }
             }
             vec![]
         }

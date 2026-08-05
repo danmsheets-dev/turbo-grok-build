@@ -18,6 +18,15 @@ pub const DESK_COUNT: usize = 6;
 /// cadence would repaint identical text.
 const HUD_REFRESH_TICKS: u64 = 12;
 
+/// How long one MCP rack LED burst stays lit after a tool call (RC16 §4 #5).
+///
+/// Long enough for the chase to read as motion — the LEDs step on the
+/// `(tick / 4)` bucket, ~333 ms at the Slow cadence, so 1.2 s is ~4 steps — and
+/// short enough that the worst-case wakeup tail it can add to an otherwise
+/// frozen room stays inside ~14 Slow ticks (see
+/// [`GameModeState::rack_burst_active`]).
+const RACK_BURST: Duration = Duration::from_millis(1200);
+
 /// Snapshot of one subagent for the room (decoupled from pager types).
 #[derive(Debug, Clone)]
 pub struct DeskAgentSnapshot {
@@ -116,16 +125,19 @@ pub enum SupervisorPhase {
 /// What the pointer (or Tab focus) is currently over.
 ///
 /// Hit-tested against the rects captured at paint time (`last_desks`,
-/// `last_supervisor`). Purely an *overlay* concern: the tooltip and focus ring
-/// are painted after the halfblock blit, so no variant may ever reach
-/// [`GameModeState::visual_fingerprint`].
+/// `last_supervisor`, `last_mcp_rack`). Purely an *overlay* concern: the tooltip
+/// and focus ring are painted after the halfblock blit, so no variant may ever
+/// reach [`GameModeState::visual_fingerprint`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoverTarget {
     /// Seated subagent desk, by index into `desks`.
     Desk(usize),
     /// The Supervisor (main agent) at the rug.
     Supervisor,
-    // A `McpRack` variant lands with the composed rack (RC16 §3 step 2/3).
+    /// The MCP server rack on the right wall. Pixel office only — the Unicode
+    /// and Compact tiers compose no rack, and `last_mcp_rack` stays a zero-size
+    /// `Rect` there, which never hit-tests.
+    McpRack,
 }
 
 /// Live Supervisor facts behind the Supervisor hover card — **overlay data**.
@@ -159,6 +171,30 @@ pub struct SupervisorSnapshot {
     pub branch: Option<String>,
 }
 
+/// Live MCP fleet facts behind the rack hover card — **overlay data**.
+///
+/// Mirrors `AgentView::mcp_status_cache` into the room because the painter only
+/// ever sees a `GameModeState`. Same contract as [`SupervisorSnapshot`]: never
+/// hashed into [`GameModeState::visual_fingerprint`], never marks redraw dirty.
+///
+/// The rows are re-cloned only when `AgentView::mcp_status_gen` moves, so a
+/// steady ~12 Hz sync costs one `u64` compare — see
+/// [`super::refresh_mcp_snapshot`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct McpRackSnapshot {
+    /// Distilled per-server rows; empty until the first `mcp/list` lands.
+    pub servers: Vec<crate::views::mcps_modal::McpStatusRow>,
+    /// `x.ai/mcp/init_progress` counts — the startup fallback the card shows
+    /// while `servers` is still empty.
+    pub init_connected: u32,
+    pub init_total: u32,
+    /// Whether the shell is still connecting servers (`mcp_init_progress` is
+    /// live and visible).
+    pub init_active: bool,
+    /// `AgentView::mcp_status_gen` that `servers` was cloned at.
+    pub(crate) rows_gen: u64,
+}
+
 /// Full Game Mode UI state owned by `AgentView`.
 #[derive(Debug)]
 pub struct GameModeState {
@@ -180,6 +216,13 @@ pub struct GameModeState {
     pub overflow_count: usize,
     /// Sticky NEEDS ATTENTION until this instant (spec: brief, not forever).
     pub attention_until: Option<Instant>,
+    /// MCP rack LED burst armed until this instant (RC16 §4 #5).
+    ///
+    /// Armed by [`Self::sync_from_snapshots`] whenever a seated desk's
+    /// `tool_calls` counter *increases*, i.e. by real work, and consumed on the
+    /// expiry edge in [`Self::tick_anim`]. See [`Self::rack_burst_active`] for
+    /// the fingerprint and wakeup contract.
+    pub(crate) rack_active_until: Option<Instant>,
     /// Skin assignment counter.
     next_skin: u8,
     /// Full-res mockup (decoded once).
@@ -225,8 +268,19 @@ pub struct GameModeState {
     /// Last painted supervisor rect (for hover hit-testing) — derived from the
     /// compose anchors in the pixel office, from `layout.supervisor` in unicode.
     pub last_supervisor: ratatui::layout::Rect,
+    /// Last painted MCP rack rect (for hover hit-testing). Zero-size whenever
+    /// the pixel office did not paint — the rack exists only there.
+    pub last_mcp_rack: ratatui::layout::Rect,
     /// Supervisor tooltip data, refreshed by the sync path (overlay-only).
     pub supervisor_info: SupervisorSnapshot,
+    /// MCP rack tooltip data, refreshed by the sync path (overlay-only).
+    pub mcp_info: McpRackSnapshot,
+    /// Whether this Game Mode session already asked the shell for `mcp/list`.
+    ///
+    /// One request per open, so a shell that never answers (or answers with an
+    /// error) cannot be re-asked ~12×/second for as long as the office stays
+    /// up. Cleared by [`Self::toggle`] on the way in.
+    pub(crate) mcp_fetch_dispatched: bool,
     /// Failed child IDs already used to arm `attention_until` (transition-only).
     attention_armed_ids: std::collections::HashSet<String>,
     /// Set when UI needs a redraw (tick/sync/hover); consumed by AppView::tick.
@@ -267,6 +321,7 @@ impl GameModeState {
             last_tick: Instant::now(),
             overflow_count: 0,
             attention_until: None,
+            rack_active_until: None,
             next_skin: 0,
             pixel_bg_full: None,
             pixel_bg_scaled: None,
@@ -285,7 +340,10 @@ impl GameModeState {
             last_stage: None,
             last_desks: [ratatui::layout::Rect::default(); 6],
             last_supervisor: ratatui::layout::Rect::default(),
+            last_mcp_rack: ratatui::layout::Rect::default(),
             supervisor_info: SupervisorSnapshot::default(),
+            mcp_info: McpRackSnapshot::default(),
+            mcp_fetch_dispatched: false,
             attention_armed_ids: std::collections::HashSet::new(),
             redraw_dirty: false,
             last_sync_at: None,
@@ -365,7 +423,10 @@ impl GameModeState {
         {
             return Some(HoverTarget::Desk(i));
         }
-        hit(self.last_supervisor).then_some(HoverTarget::Supervisor)
+        if hit(self.last_supervisor) {
+            return Some(HoverTarget::Supervisor);
+        }
+        hit(self.last_mcp_rack).then_some(HoverTarget::McpRack)
     }
 
     pub fn clear_hover(&mut self) {
@@ -472,6 +533,9 @@ impl GameModeState {
     ///    moves with it ([`phase_anim_t_is_visible`]) — not for the seated desk
     ///    blink, which uses the tick frame bucket.
     /// 5. Scaled BG cache is independent — see [`Self::ensure_pixel_frame`].
+    /// 6. `mcp_info` is excluded for the same reason as `supervisor_info` — the
+    ///    rack *card* is an overlay. Only the derived
+    ///    [`Self::rack_burst_active`] bool, which the composed LEDs read, is in.
     fn visual_fingerprint(&self, cell_w: u16, cell_h: u16) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -479,6 +543,10 @@ impl GameModeState {
         cell_h.hash(&mut h);
         super::sprites_pixel::effective_pixel_scale(cell_w, cell_h).hash(&mut h);
         (self.supervisor as u8).hash(&mut h);
+        // One bool: the rack's idle art vs its lit art. Quantized by
+        // construction — a deadline compared against `now` can only ever be
+        // on or off, so this cannot force a recompose per tick.
+        self.rack_burst_active().hash(&mut h);
         // Coarse sprite frame bucket (~ tick÷4) only when compose samples it.
         if self.pixel_needs_tick_frame() {
             (self.tick / 4).hash(&mut h);
@@ -600,6 +668,10 @@ impl GameModeState {
             // Nothing was synced while hidden: force a full rebuild on reopen.
             self.last_sync_sig = None;
             self.last_phase_sig = None;
+            // Re-arm the one-shot `mcp/list` request (RC16 §3 step 3): reopening
+            // is the user asking to look at the room again, and the cheapest
+            // retry for a fetch that previously failed.
+            self.mcp_fetch_dispatched = false;
             self.mark_redraw_dirty();
         } else {
             // PERF (RC16 PERF-7): a hidden office must impose no standing cost.
@@ -651,9 +723,47 @@ impl GameModeState {
         if self.attention_until.is_some() {
             return true;
         }
+        // Same shape for the MCP rack burst: `is_some()`, not `> now`, so
+        // exactly one `tick_anim` observes the expiry, repaints the darkened
+        // rack and only then lets the room park (see [`Self::rack_burst_active`]).
+        if self.rack_active_until.is_some() {
+            return true;
+        }
         // Seated desks animate (typing, walks, celebrate/fail beats) and own the
         // hover/focus ring — an empty room has neither.
         self.desks.iter().any(|d| d.is_occupied())
+    }
+
+    /// Whether the MCP rack's LEDs are lit this frame (RC16 §4 #5).
+    ///
+    /// FINGERPRINT: this bool **is** hashed by [`Self::visual_fingerprint`] —
+    /// unlike the phase-derived predicate it replaced, `rack_active_until` is
+    /// state of its own, so the idle↔lit edge would otherwise never recompose.
+    /// It costs exactly two extra recomposes per burst (on, then off): the
+    /// deadline is compared against `now`, so the hashed value is a single bit
+    /// that flips twice and can never split a tick.
+    ///
+    /// WAKEUP BUDGET: **~0 in the normal case, ≤ 15 wakeups per burst tail in
+    /// the worst case.** Tool calls come from a *running* subagent, and a
+    /// seated working desk already holds [`Self::needs_animation_tick`] true
+    /// and already recomposes every `tick / 4` bucket — so a burst armed while
+    /// work is happening rides ticks the office was going to spend anyway. The
+    /// only incremental cost is the tail: if every desk retires inside the
+    /// [`RACK_BURST`] window, the room stays on the ~12 Hz Slow tick for the
+    /// remainder of it instead of parking — at most `RACK_BURST` ÷
+    /// `SLOW_TICK_INTERVAL` ≈ 14 extra wakeups, once, per burst. That tail is
+    /// the price of the expiry being observable at all; see
+    /// [`Self::tick_anim`], which consumes it on the edge.
+    ///
+    /// IDLE-FREEZE: deliberately **not** wired into
+    /// [`Self::pixel_needs_tick_frame`]. Unfreezing the sprite bucket for a
+    /// burst would also unfreeze the idle supervisor's two-frame pose and the
+    /// thinking bubble — the exact relaxation RC13 forbids. So a burst in an
+    /// otherwise frozen room shows a *lit but still* rack; the chase only runs
+    /// while the room is animating for its own reasons, which is when tool
+    /// calls actually happen.
+    pub(crate) fn rack_burst_active(&self) -> bool {
+        self.rack_active_until.is_some_and(|t| t > Instant::now())
     }
 
     /// Whether the room can be left alone when the subagent data is unchanged.
@@ -763,6 +873,7 @@ impl GameModeState {
         }
 
         // Update existing seats / detect finishes.
+        let mut tool_call_seen = false;
         for i in 0..DESK_COUNT {
             let Some(sid) = self.desks[i].child_session_id.clone() else {
                 continue;
@@ -782,6 +893,14 @@ impl GameModeState {
                 }
                 self.desks[i].elapsed = snap.elapsed;
                 self.desks[i].tokens = snap.tokens;
+                // Real work lights the MCP rack (RC16 §4 #5). The desk's own
+                // `tool_calls` *is* the previous sync's value until the line
+                // below overwrites it, so the increment edge needs no extra
+                // field — and it is an edge, not a level, so a desk parked at
+                // 12 calls does not hold the LEDs on forever.
+                if snap.tool_calls > self.desks[i].tool_calls {
+                    tool_call_seen = true;
+                }
                 self.desks[i].tool_calls = snap.tool_calls;
                 self.desks[i].failed = snap.failed;
 
@@ -864,6 +983,17 @@ impl GameModeState {
                     self.seat_agent(idx, snap, tier);
                 }
             }
+        }
+
+        // Arm / re-arm the rack burst. Marking dirty only on the dark→lit edge
+        // is enough: a re-arm inside a live burst changes no pixels (the chase
+        // rides the `tick / 4` bucket the working room already repaints on),
+        // while the edge itself flips the composed rack art.
+        if tool_call_seen {
+            if !self.rack_burst_active() {
+                self.mark_redraw_dirty();
+            }
+            self.rack_active_until = Some(Instant::now() + RACK_BURST);
         }
 
         self.overflow_count = self.door_queue.len();
@@ -1011,6 +1141,17 @@ impl GameModeState {
         if !self.room_is_settled() {
             self.last_sync_sig = None;
             self.last_phase_sig = None;
+        }
+        // Consume an expired rack burst on the *edge*, exactly like
+        // `attention_until` (see `sync_from_snapshots`) but here, because
+        // nothing a *sync* derives depends on it — the rack art is read
+        // straight off `rack_burst_active` at compose time. `tick_anim` runs on
+        // every Slow tick the room is awake for, and `needs_animation_tick`
+        // tests `is_some()`, so exactly one tick observes the expiry, repaints
+        // the darkened rack, and only then lets the room park (RC16 PERF-1).
+        if self.rack_active_until.is_some_and(|t| t <= Instant::now()) {
+            self.rack_active_until = None;
+            self.mark_redraw_dirty();
         }
         let tick_before = self.tick;
         let needs_frames = self.pixel_needs_tick_frame();
@@ -1500,6 +1641,65 @@ mod tests {
         assert_eq!(s.hover, Some(HoverTarget::Supervisor));
     }
 
+    /// The MCP rack is the third hover target, and it exists only where the
+    /// pixel office painted one: a zero-size `last_mcp_rack` — what
+    /// `render_game_mode` publishes for the Unicode and Compact tiers — must
+    /// never hit-test, at any coordinate including the origin.
+    #[test]
+    fn update_hover_selects_the_mcp_rack_only_when_one_was_painted() {
+        let mut s = GameModeState::new();
+        s.last_supervisor = ratatui::layout::Rect::new(40, 5, 12, 3);
+
+        assert!(
+            !s.update_hover(0, 0),
+            "an unpainted rack must not be hoverable at the origin"
+        );
+        assert_eq!(s.hover, None);
+
+        s.last_mcp_rack = ratatui::layout::Rect::new(90, 4, 10, 9);
+        assert!(s.update_hover(94, 8), "entering the rack dirties");
+        assert_eq!(s.hover, Some(HoverTarget::McpRack));
+        assert_eq!(s.hover_screen, Some((94, 8)), "card anchors on entry");
+        assert!(!s.update_hover(95, 9), "micro-move on the rack is clean");
+
+        assert!(s.update_hover(44, 6), "supervisor ← rack dirties");
+        assert_eq!(s.hover, Some(HoverTarget::Supervisor));
+    }
+
+    /// The rack card is an overlay like the Supervisor's: neither the hovered
+    /// rack nor the live server rows behind it may reach the fingerprint.
+    #[test]
+    fn mcp_rack_hover_and_snapshot_stay_out_of_the_fingerprint() {
+        use crate::views::mcps_modal::{McpServerDisplayStatus, McpStatusRow};
+
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("t".into());
+        s.desks[0].phase = ActorPhase::AtDeskThinking;
+        let fp0 = s.visual_fingerprint(80, 24);
+
+        s.last_mcp_rack = ratatui::layout::Rect::new(90, 4, 10, 9);
+        assert!(s.update_hover(94, 8));
+        assert_eq!(s.hover, Some(HoverTarget::McpRack));
+        s.mcp_info = McpRackSnapshot {
+            servers: vec![McpStatusRow {
+                name: "github".into(),
+                display_name: None,
+                status: McpServerDisplayStatus::Unavailable,
+                tool_count: 0,
+                status_detail: Some("EOF while reading handshake".into()),
+            }],
+            init_connected: 3,
+            init_total: 4,
+            init_active: true,
+            rows_gen: 7,
+        };
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            fp0,
+            "rack hover + tooltip snapshot must not dirty pixel fingerprint"
+        );
+    }
+
     /// Tab cycles **seats only** (documented on `keyboard_focus`): hovering the
     /// Supervisor and pressing Tab lands on a desk, and Tab focus keeps winning
     /// over the mouse until the pointer enters a target itself.
@@ -1703,74 +1903,122 @@ mod tests {
         assert!(s.room_is_settled(), "a consumed window settles the room");
     }
 
-    /// RC16 §3 step 2: the MCP rack's LEDs light on the idle→active *edge* and
-    /// go dark with the room. `compose::rack_is_active` is a pure function of
-    /// inputs the fingerprint already hashes, so the edge recomposes for free —
-    /// and a pure idle tick still must not, or the rack would have re-broken the
-    /// idle-freeze invariant the coffee steam and the thinking bubble died to.
+    /// RC16 §4 #5: the MCP rack's LEDs answer to **real tool calls**, and only
+    /// to those. A busy room with no tool traffic leaves the rack dark (that is
+    /// the whole difference from the §3 step 2 placeholder), the armed burst is
+    /// hashed so its edges recompose, and an idle tick inside the burst must
+    /// still not blink anything — the idle-freeze invariant the coffee steam
+    /// and the thinking bubble died to is not relaxed here.
     #[test]
-    fn mcp_rack_lights_on_the_active_edge_and_freezes_with_the_room() {
+    fn mcp_rack_lights_only_on_real_tool_calls() {
         use super::super::compose::rack_is_active;
 
         let mut s = GameModeState::new();
         s.desks[0].child_session_id = Some("t".into());
-        s.desks[0].phase = ActorPhase::AtDeskThinking;
-        s.supervisor = SupervisorPhase::Idle;
+        s.desks[0].phase = ActorPhase::AtDeskWorking;
+        s.supervisor = SupervisorPhase::Working;
         assert!(
             !rack_is_active(&s),
-            "a thinking-only room must leave the rack dark"
+            "a busy room that has called no tools must leave the rack dark"
         );
         let fp0 = s.visual_fingerprint(80, 24);
-        s.tick = s.tick.wrapping_add(40);
+
+        s.rack_active_until = Some(Instant::now() + RACK_BURST);
+        assert!(rack_is_active(&s), "an armed burst lights the rack");
+        let fp_lit = s.visual_fingerprint(80, 24);
+        assert_ne!(fp_lit, fp0, "the dark→lit edge must recompose");
+
+        s.rack_active_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(!rack_is_active(&s), "an expired burst goes dark");
         assert_eq!(
             s.visual_fingerprint(80, 24),
             fp0,
-            "an idle tick must not blink the rack"
+            "the lit→dark edge must recompose back to the idle art"
         );
 
-        s.desks[0].phase = ActorPhase::AtDeskWorking;
-        assert!(rack_is_active(&s), "a typing desk lights the rack");
-        assert_ne!(
-            s.visual_fingerprint(80, 24),
-            fp0,
-            "the idle→active edge must recompose"
+        // A burst must never unfreeze a room that is otherwise frozen: the
+        // rack is lit but *still*, exactly like every other sprite there.
+        let mut frozen = GameModeState::new();
+        frozen.desks[0].child_session_id = Some("t".into());
+        frozen.desks[0].phase = ActorPhase::AtDeskThinking;
+        frozen.rack_active_until = Some(Instant::now() + RACK_BURST);
+        assert!(
+            !frozen.pixel_needs_tick_frame(),
+            "an armed burst must not unfreeze the sprite bucket"
+        );
+        let lit = frozen.visual_fingerprint(80, 24);
+        frozen.tick = frozen.tick.wrapping_add(40);
+        assert_eq!(
+            frozen.visual_fingerprint(80, 24),
+            lit,
+            "a pure tick inside a burst must not recompose"
+        );
+    }
+
+    /// The wakeup contract: an armed burst holds the loop awake (so somebody
+    /// observes the expiry), `tick_anim` consumes that expiry on the edge and
+    /// repaints the darkened rack, and the room then parks again. A level test
+    /// here — `> now` instead of `is_some()` — would let the loop park while
+    /// the rack was still composed lit, which is exactly how `attention_until`
+    /// stranded NEEDS ATTENTION on the wall.
+    #[test]
+    fn expired_rack_burst_is_consumed_and_lets_the_room_park() {
+        let mut s = GameModeState::new();
+        s.last_sync_at = Some(Instant::now());
+        assert!(!s.needs_animation_tick(), "control: empty room parks");
+
+        s.rack_active_until = Some(Instant::now() + RACK_BURST);
+        assert!(s.needs_animation_tick(), "an armed burst holds the loop");
+
+        // Deadline passed, nothing has consumed it yet: still awake.
+        s.rack_active_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(
+            s.needs_animation_tick(),
+            "an expired-but-unconsumed burst still owes the rack a repaint"
         );
 
-        // The whole "free animation" claim rests on this: every state that
-        // lights the rack already samples (and therefore hashes) the `tick / 4`
-        // bucket the chase rides, and already keeps the loop awake.
-        for phase in [
-            ActorPhase::AtDeskWorking,
-            ActorPhase::AtDeskThinking,
-            ActorPhase::SpawnWalk,
-            ActorPhase::WalkToBoss,
-            ActorPhase::Handoff,
-            ActorPhase::ExitDoor,
-            ActorPhase::Celebrate,
-            ActorPhase::FailBeat,
-        ] {
-            for sup in [
-                SupervisorPhase::Idle,
-                SupervisorPhase::Working,
-                SupervisorPhase::Reviewing,
-                SupervisorPhase::Waiting,
-            ] {
-                let mut c = GameModeState::new();
-                c.desks[0].child_session_id = Some("d".into());
-                c.desks[0].phase = phase;
-                c.supervisor = sup;
-                if rack_is_active(&c) {
-                    assert!(
-                        c.pixel_needs_tick_frame(),
-                        "{phase:?}/{sup:?}: an active rack must ride a hashed tick bucket"
-                    );
-                    assert!(
-                        c.needs_animation_tick(),
-                        "{phase:?}/{sup:?}: an active rack must not need its own wakeup"
-                    );
-                }
-            }
-        }
+        s.take_redraw_dirty();
+        s.tick_anim(GameTier::Comfort);
+        assert!(
+            s.rack_active_until.is_none(),
+            "tick_anim must consume the expiry"
+        );
+        assert!(
+            s.take_redraw_dirty(),
+            "the darkened rack must be repainted once"
+        );
+        assert!(
+            !s.needs_animation_tick(),
+            "a consumed burst must let the room park again (PERF-1)"
+        );
+    }
+
+    /// A tool-call increment on a seated desk arms the burst; a *level* (the
+    /// same count re-reported every sync) does not, or a subagent that called
+    /// one tool would hold the LEDs on for its whole life.
+    #[test]
+    fn tool_call_increment_arms_the_rack_burst() {
+        let mut s = GameModeState::new();
+        let mut a = snap("a", true);
+        a.tool_calls = 0;
+        s.sync_from_snapshots(&[a.clone()], false, GameTier::Comfort, false);
+        assert!(
+            s.rack_active_until.is_none(),
+            "seating alone must not arm the rack"
+        );
+
+        a.tool_calls = 1;
+        s.sync_from_snapshots(&[a.clone()], false, GameTier::Comfort, false);
+        assert!(s.rack_burst_active(), "a tool call must light the rack");
+
+        // Same count again: the arm is an edge, so let the window lapse and
+        // prove an unchanged counter does not re-arm it.
+        s.rack_active_until = Some(Instant::now() - Duration::from_millis(1));
+        s.sync_from_snapshots(&[a], false, GameTier::Comfort, false);
+        assert!(
+            !s.rack_burst_active(),
+            "an unchanged tool count must not re-arm the burst"
+        );
     }
 
     #[test]

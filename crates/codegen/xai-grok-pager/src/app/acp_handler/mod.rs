@@ -93,6 +93,7 @@ use background::{
 use follow_ups::handle_follow_ups;
 pub(crate) use interactions::handle_ask_user_question;
 use interactions::handle_exit_plan_mode;
+pub(crate) use mcp::agent_has_pending_mcps_fetch;
 use mcp::{
     handle_mcp_init_progress, handle_mcp_server_status, handle_mcp_servers_updated,
     handle_mcp_tools_changed, push_server_status_enabled,

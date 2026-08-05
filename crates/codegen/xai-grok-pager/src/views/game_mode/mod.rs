@@ -26,7 +26,7 @@ pub use sprites_pixel::{
 };
 pub use state::{
     ActorPhase, DESK_COUNT, DeskAgentSnapshot, DeskSlot, GameModeState, HoverTarget,
-    SupervisorPhase, SupervisorSnapshot,
+    McpRackSnapshot, SupervisorPhase, SupervisorSnapshot,
 };
 pub use wall::WallMode;
 
@@ -230,6 +230,7 @@ pub fn sync_game_mode(agent: &mut AgentView, stage_width: u16, stage_height: u16
         // room are unchanged and says nothing about the model, the turn timer
         // or the context window (see [`SupervisorSnapshot`]).
         refresh_supervisor_snapshot(agent, working, waiting_on_user);
+        refresh_mcp_snapshot(agent);
         let sig = subagent_signature(&agent.subagent_sessions, working, waiting_on_user, tier);
         // Identical inputs + a room with nothing in flight ⇒ the sync is a
         // provable no-op; skip the rebuild entirely (RC16 PERF-2).
@@ -286,6 +287,57 @@ fn refresh_supervisor_snapshot(agent: &mut AgentView, working: bool, waiting_on_
     if let Some(branch) = branch {
         snap.branch = branch;
     }
+}
+
+/// Whether Game Mode should ask the shell for this agent's MCP server list.
+///
+/// The Ctrl+G toggle dispatches no [`crate::app::actions::Effect`] at all, and
+/// `mcp_status_cache` is otherwise only filled by opening `/mcps` — so an
+/// office opened in a fresh session would show its rack tooltip the startup
+/// counts forever. The caller ([`crate::app::app_view::AppView::tick`]) owns
+/// the request because only it can reach `pending_effects`; it also re-checks
+/// `agent_has_pending_mcps_fetch` so a modal fetch already in flight is not
+/// duplicated, and flips `mcp_fetch_dispatched` only once it has actually
+/// pushed the effect. One request per Game Mode open, never a per-tick storm.
+pub fn wants_mcp_list_fetch(agent: &AgentView) -> bool {
+    agent.game_mode.open
+        && !agent.game_mode.mcp_fetch_dispatched
+        && agent.mcp_status_cache.is_none()
+}
+
+/// Mark the one-shot `mcp/list` request as sent for this Game Mode open.
+pub fn mark_mcp_list_fetch_dispatched(agent: &mut AgentView) {
+    agent.game_mode.mcp_fetch_dispatched = true;
+}
+
+/// Refresh the MCP rack hover card's data from the live agent.
+///
+/// Overlay-only, exactly like [`refresh_supervisor_snapshot`]: nothing here
+/// marks redraw dirty and nothing here reaches
+/// [`GameModeState::visual_fingerprint`] (the composed LEDs read
+/// `rack_active_until`, which is room state, not this snapshot).
+///
+/// Cost is a generation compare per due sync. The rows are only cloned when
+/// `AgentView::mcp_status_gen` moves — i.e. on an `mcp/list` response or a
+/// `server_status` push, both rare — so the steady state is one `u64` compare
+/// plus two `u32` copies, not a `Vec<String>` clone at ~12 Hz.
+fn refresh_mcp_snapshot(agent: &mut AgentView) {
+    let rows_gen = agent.mcp_status_gen;
+    let rows = (agent.game_mode.mcp_info.rows_gen != rows_gen)
+        .then(|| agent.mcp_status_cache.clone().unwrap_or_default());
+    let (connected, total, active) = agent
+        .mcp_init_progress
+        .as_ref()
+        .map(|p| (p.connected, p.total, p.is_visible()))
+        .unwrap_or((0, 0, false));
+    let snap = &mut agent.game_mode.mcp_info;
+    if let Some(rows) = rows {
+        snap.servers = rows;
+        snap.rows_gen = rows_gen;
+    }
+    snap.init_connected = connected;
+    snap.init_total = total;
+    snap.init_active = active;
 }
 
 /// Rebuild snapshots, reseat the room, and mark redraw when the office changed.
