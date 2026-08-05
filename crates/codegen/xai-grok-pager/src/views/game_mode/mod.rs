@@ -384,6 +384,16 @@ mod tests {
             .map(|t| t - sync_gate() - Duration::from_millis(1));
     }
 
+    /// Hold the animation gate shut across the next `sync_game_mode`.
+    ///
+    /// Tests that assert "an unchanged room must not repaint" are otherwise
+    /// racing real wall time: if the anim gate happens to open between two
+    /// statements, `tick_anim` advances a sprite bucket and marks the room
+    /// dirty for a reason the test never intended to exercise.
+    fn freeze_anim_gate(agent: &mut AgentView) {
+        agent.game_mode.last_tick = std::time::Instant::now();
+    }
+
     /// PERF-2: an unchanged (insert-only, ever-growing) subagent map must not
     /// pay for a snapshot rebuild + sort + reseat on every tick.
     #[test]
@@ -439,6 +449,9 @@ mod tests {
         for i in 0..10u32 {
             let info = agent.subagent_sessions.get_mut("child-1").unwrap();
             info.tool_call_count = Some(i);
+            // Pin the window open-end to *now* so a slow machine cannot let the
+            // gate elapse mid-loop and turn this into a flake.
+            agent.game_mode.last_sync_at = Some(std::time::Instant::now());
             sync_game_mode(&mut agent, 100, 20);
         }
         assert_eq!(
@@ -609,6 +622,7 @@ mod tests {
         // signature — the control below proves nothing else moves, which is
         // what makes the final assertion about `+N` and nothing else.
         open_sync_gate(&mut agent);
+        freeze_anim_gate(&mut agent);
         assert!(
             !sync_game_mode(&mut agent, 100, 20),
             "control: an unchanged room must not repaint"
@@ -619,6 +633,7 @@ mod tests {
             crate::app::agent_view::test_fixtures::running_subagent_info("child-overflow"),
         );
         open_sync_gate(&mut agent);
+        freeze_anim_gate(&mut agent);
         let dirty = sync_game_mode(&mut agent, 100, 20);
 
         assert_eq!(agent.game_mode.overflow_count, 1, "must queue at the door");

@@ -569,8 +569,10 @@ impl GameModeState {
         if !self.handoff_queue.is_empty() || !self.door_queue.is_empty() {
             return true;
         }
-        // Armed attention window: the wall must flip back when it expires.
-        if self.attention_until.is_some_and(|t| t > Instant::now()) {
+        // Armed attention window: the wall must flip back when it expires, so
+        // stay awake until a sync has *consumed* the expiry (see
+        // `sync_from_snapshots`) — not merely until the deadline passes.
+        if self.attention_until.is_some() {
             return true;
         }
         // Seated desks animate (typing, walks, celebrate/fail beats) and own the
@@ -591,7 +593,7 @@ impl GameModeState {
         if !self.handoff_queue.is_empty() || !self.door_queue.is_empty() {
             return false;
         }
-        if self.attention_until.is_some_and(|t| t > Instant::now()) {
+        if self.attention_until.is_some() {
             return false;
         }
         self.desks.iter().all(|d| {
@@ -614,6 +616,20 @@ impl GameModeState {
         tier: GameTier,
         waiting_on_user: bool,
     ) {
+        // Consume an expired attention window on the *edge*, not by level test.
+        //
+        // RC16: `room_is_settled` and `needs_animation_tick` both key off
+        // `attention_until`. If both merely tested `> now` they would flip in the
+        // same instant: this sync would be skipped as settled (leaving `wall` on
+        // its last `NeedsAttention` value, since the wall is only re-derived at
+        // the end of this fn) while the loop simultaneously parked — stranding
+        // NEEDS ATTENTION on screen forever. Clearing it here, with both
+        // predicates testing `is_some()`, guarantees exactly one sync observes
+        // the expiry, re-derives the wall, and only then lets the room park.
+        if self.attention_until.is_some_and(|t| t <= Instant::now()) {
+            self.attention_until = None;
+        }
+
         // Compact mid-walk: snap-complete handoffs (spec §7.8).
         //
         // No supervisor phase is set here: [`Self::update_supervisor`] runs
@@ -803,10 +819,10 @@ impl GameModeState {
     /// PERF (RC16 PERF-7): called when Game Mode is toggled closed. Hidden, the
     /// office used to keep ~8-10 MB resident for the rest of the process
     /// (`pixel_bg_full` alone is 1448×1086 RGBA ≈ 6.3 MB). `pixel_bg_full` is
-    /// dropped too: re-decoding the embedded PNG on reopen measures ~11 ms
-    /// (release), on a path that already pays 26-190 ms to rescale the
-    /// background for the new stage — so the reopen hitch grows by well under
-    /// half, in exchange for releasing the largest buffer.
+    /// dropped too: reopening re-decodes the embedded PNG, which is expected to
+    /// be small next to the background rescale that same path already performs
+    /// for the new stage — but neither has been benchmarked, so treat the
+    /// trade-off as reasoned, not measured.
     pub fn release_pixel_memory(&mut self) {
         self.invalidate_pixel_cache();
         self.pixel_bg_full = None;
@@ -1236,6 +1252,53 @@ mod tests {
         assert_eq!(s.attention_until, Some(until), "re-sync must not re-arm");
     }
 
+    /// RC16 regression: the attention expiry must be consumed by exactly one
+    /// sync, which re-derives the wall, *before* the room is allowed to park.
+    ///
+    /// The original PERF-1 + PERF-2 pairing level-tested `attention_until > now`
+    /// in both `room_is_settled` and `needs_animation_tick`, so both flipped in
+    /// the same instant: the sync that owed the wall a re-derive was skipped as
+    /// "settled" while the loop parked, stranding NEEDS ATTENTION on screen for
+    /// the rest of the session.
+    #[test]
+    fn expired_attention_is_consumed_before_the_room_parks() {
+        let mut s = GameModeState::new();
+        let mut fail = snap("bad", false);
+        fail.failed = true;
+        s.sync_from_snapshots(&[fail], false, GameTier::Comfort, false);
+        assert_eq!(s.wall, WallMode::NeedsAttention, "failure arms the wall");
+        assert!(s.attention_until.is_some(), "window armed");
+
+        // Deadline passes. The room must NOT be considered settled or parkable
+        // yet — no sync has re-derived the wall.
+        s.attention_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(
+            !s.room_is_settled(),
+            "the owed wall re-derive must force the next sync to run"
+        );
+        assert!(
+            s.needs_animation_tick(),
+            "the loop must stay awake to deliver that sync"
+        );
+
+        // That one sync consumes the expiry and flips the wall back.
+        s.sync_from_snapshots(&[], false, GameTier::Comfort, false);
+        assert_eq!(s.attention_until, None, "expiry consumed exactly once");
+        assert_ne!(
+            s.wall,
+            WallMode::NeedsAttention,
+            "the wall must not strand on NEEDS ATTENTION"
+        );
+
+        // Only now may the room settle and the event loop park. (`sync_game_mode`
+        // owns the redraw-dirty edge from the wall change; this layer owns the
+        // settle/park predicates, so pin the sync bookkeeping it would have set.)
+        assert!(s.room_is_settled(), "consumed window settles the room");
+        s.last_sync_at = Some(Instant::now());
+        s.take_redraw_dirty();
+        assert!(!s.needs_animation_tick(), "and the loop may finally park");
+    }
+
     /// P11: the armed set is now probed by `&str` and only allocates an owned
     /// id on the arming transition. The set semantics it carries must not
     /// drift — a distinct new failure arms, and an id that leaves the map is
@@ -1376,10 +1439,17 @@ mod tests {
             attention.needs_animation_tick(),
             "armed attention window must expire on a tick"
         );
+        // Past the deadline but not yet consumed: the room must stay awake long
+        // enough for one sync to re-derive the wall, or NEEDS ATTENTION strands.
         attention.attention_until = Some(Instant::now() - Duration::from_secs(1));
         assert!(
+            attention.needs_animation_tick(),
+            "an unconsumed expiry must still tick so the wall can flip back"
+        );
+        attention.attention_until = None;
+        assert!(
             !attention.needs_animation_tick(),
-            "expired attention window must not keep ticking"
+            "once the expiry is consumed the room may park"
         );
 
         let mut dirty = base();
@@ -1433,7 +1503,12 @@ mod tests {
         s.attention_until = Some(Instant::now() + Duration::from_secs(5));
         assert!(!s.room_is_settled(), "the wall flips back at expiry");
         s.attention_until = Some(Instant::now() - Duration::from_secs(1));
-        assert!(s.room_is_settled(), "an expired window is already applied");
+        assert!(
+            !s.room_is_settled(),
+            "an expired-but-unconsumed window still owes the wall a re-derive"
+        );
+        s.attention_until = None;
+        assert!(s.room_is_settled(), "a consumed window settles the room");
     }
 
     #[test]
