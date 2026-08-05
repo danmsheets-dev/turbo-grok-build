@@ -220,6 +220,12 @@ fn px(img: &mut RgbaImage, x: i32, y: i32, c: [u8; 4]) {
     img.put_pixel(x as u32, y as u32, Rgba(c));
 }
 
+/// Scale a colour to `pct`% of itself, keeping alpha (shadow / highlight steps).
+fn shade(c: [u8; 4], pct: u16) -> [u8; 4] {
+    let m = |v: u8| (u16::from(v) * pct / 100).min(255) as u8;
+    [m(c[0]), m(c[1]), m(c[2]), c[3]]
+}
+
 fn fill_rect(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, c: [u8; 4]) {
     for dy in 0..h {
         for dx in 0..w {
@@ -275,46 +281,91 @@ const MONITOR_GLOW: [[u8; 3]; 4] = [
     [56, 120, 96],
 ];
 
-/// Square monitor bezel. `active` scrolls code when true.
-pub fn sprite_square_monitor(active: bool, frame: u8) -> RgbaImage {
+/// Error-mode counterpart of [`MONITOR_GLOW`] (RC16 §4 #1).
+///
+/// Indexed by `frame % 2` — the period the error screen blinks at — so the red
+/// spill costs no cache keys either. Deliberately red-dominant: the fail beat
+/// has to read as "this desk broke" from across a downsampled office.
+const MONITOR_ERROR_GLOW: [[u8; 3]; 2] = [[40, 8, 12], [96, 14, 20]];
+
+/// What a monitor screen is showing.
+///
+/// `Off` is the dark empty-desk screen, `Active` scrolls code, and `Error`
+/// (RC16 §4 #1) stacks red error bars for [`sprite_developer_fail`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorMode {
+    Off,
+    Active,
+    Error,
+}
+
+/// Square monitor bezel, per [`MonitorMode`].
+pub fn sprite_square_monitor(mode: MonitorMode, frame: u8) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(12, 12, Rgba(CLEAR));
     let bezel = [40, 44, 56, 255];
     let edge = OUTLINE;
     filled_body(&mut img, 0, 0, 12, 11, bezel);
     fill_rect(&mut img, 4, 11, 4, 1, edge); // stand
-    if !active {
-        fill_rect(&mut img, 2, 2, 8, 7, [20, 26, 34, 255]);
-        fill_rect(&mut img, 3, 3, 2, 1, [40, 48, 60, 255]);
-        return img;
-    }
-    fill_rect(&mut img, 2, 2, 8, 7, [12, 20, 28, 255]);
-    let greens = [
-        [64, 232, 120, 255],
-        [80, 200, 255, 255],
-        [255, 200, 80, 255],
-        [200, 120, 255, 255],
-    ];
-    let scroll = (frame % 4) as i32;
-    for row in 0..4 {
-        let y = 3 + row;
-        let len = 2 + ((row + scroll) % 4);
-        fill_rect(
-            &mut img,
-            3,
-            y,
-            len.min(6),
-            1,
-            greens[(row as usize + frame as usize) % 4],
-        );
-    }
-    if frame % 2 == 0 {
-        px(&mut img, 9, 8, [220, 255, 220, 255]);
-    }
+    // Each arm draws its screen and yields the rim spill for that mode.
+    let g = match mode {
+        MonitorMode::Off => {
+            fill_rect(&mut img, 2, 2, 8, 7, [20, 26, 34, 255]);
+            fill_rect(&mut img, 3, 3, 2, 1, [40, 48, 60, 255]);
+            return img;
+        }
+        MonitorMode::Active => {
+            fill_rect(&mut img, 2, 2, 8, 7, [12, 20, 28, 255]);
+            let greens = [
+                [64, 232, 120, 255],
+                [80, 200, 255, 255],
+                [255, 200, 80, 255],
+                [200, 120, 255, 255],
+            ];
+            let scroll = (frame % 4) as i32;
+            for row in 0..4 {
+                let y = 3 + row;
+                let len = 2 + ((row + scroll) % 4);
+                fill_rect(
+                    &mut img,
+                    3,
+                    y,
+                    len.min(6),
+                    1,
+                    greens[(row as usize + frame as usize) % 4],
+                );
+            }
+            if frame % 2 == 0 {
+                px(&mut img, 9, 8, [220, 255, 220, 255]);
+            }
+            MONITOR_GLOW[(frame % 4) as usize]
+        }
+        MonitorMode::Error => {
+            fill_rect(&mut img, 2, 2, 8, 7, [30, 12, 16, 255]);
+            let bar = [255, 72, 72, 255];
+            let bar_d = [168, 40, 48, 255];
+            // A stack of stack-trace bars; the top one is the blinking beat.
+            for row in 0..3i32 {
+                let y = 3 + row * 2;
+                let len = 6 - row;
+                fill_rect(
+                    &mut img,
+                    3,
+                    y,
+                    len,
+                    1,
+                    if row == 0 && frame % 2 == 0 { bar } else { bar_d },
+                );
+            }
+            if frame % 2 == 0 {
+                px(&mut img, 9, 3, [255, 220, 220, 255]);
+            }
+            MONITOR_ERROR_GLOW[(frame % 2) as usize]
+        }
+    };
     // Glow rim: the screen's light spilling onto the bezel, brightening and
-    // dimming across the four frames the caller already animates. The bezel is
+    // dimming across the frames the caller already animates. The bezel is
     // 2px thick on every side (screen is 8×7 inside a 12×11 body), which is the
     // minimum that survives the Nearest downsample to terminal cells.
-    let g = MONITOR_GLOW[(frame % 4) as usize];
     for y in 0..11i32 {
         for x in 0..12i32 {
             if (2..10).contains(&x) && (2..9).contains(&y) {
@@ -407,7 +458,7 @@ pub fn sprite_empty_desk() -> RgbaImage {
     fill_rect(&mut img, 32, 12, 2, 2, [64, 160, 80, 255]);
     fill_rect(&mut img, 32, 14, 2, 2, [160, 100, 60, 255]);
     // monitor
-    let mon = sprite_square_monitor(false, 0);
+    let mon = sprite_square_monitor(MonitorMode::Off, 0);
     blit_local(&mut img, &mon, 18, 1);
     // office chair
     filled_body(&mut img, 1, 14, 9, 8, chair);
@@ -477,7 +528,7 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
     px(&mut img, 32, 17, [80, 80, 100, 255]);
 
     // Active widescreen-ish monitor (reuse square + side glow)
-    let mon = sprite_square_monitor(true, if typing { frame } else { 0 });
+    let mon = sprite_square_monitor(MonitorMode::Active, if typing { frame } else { 0 });
     blit_local(&mut img, &mon, 19, 1);
     // second slim monitor edge (dual-monitor vibe)
     filled_body(&mut img, 30, 3, 4, 9, [40, 44, 56, 255]);
@@ -562,6 +613,177 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
         px(&mut img, 15, 1, OUTLINE);
         px(&mut img, 17, 1, OUTLINE);
     }
+    img
+}
+
+/// Canonical `frame` for [`sprite_developer_fail`] (RC16 §4 #1) — the shudder
+/// and the error monitor's blink both read `frame % 2`, so the period is **2**.
+pub fn fail_frame_key(frame: u8) -> u8 {
+    frame % 2
+}
+
+/// Developer after a failed subagent: head in hands, red error monitor.
+///
+/// Same station furniture as [`sprite_developer_at_desk`] (the desk must not
+/// move when the phase flips), but the figure is hunched with both palms over
+/// its face and the keyboard is dead. Two frames, a 1px shudder apart.
+pub fn sprite_developer_fail(pal: DevPalette, frame: u8) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(36, 32, Rgba(CLEAR));
+    let wood = [184, 128, 72, 255];
+    let wood_d = [128, 84, 44, 255];
+    let wood_h = [208, 156, 96, 255];
+    let chair = [56, 64, 88, 255];
+    let chair_d = [40, 48, 68, 255];
+    let metal = [88, 96, 112, 255];
+
+    // Desk
+    filled_body(&mut img, 12, 15, 22, 8, wood);
+    fill_rect(&mut img, 14, 16, 18, 1, wood_h);
+    filled_body(&mut img, 13, 19, 7, 5, wood_d);
+    filled_body(&mut img, 26, 19, 7, 5, wood_d);
+    fill_rect(&mut img, 14, 27, 2, 3, wood_d);
+    fill_rect(&mut img, 30, 27, 2, 3, wood_d);
+    // Abandoned keyboard — no key ever lights on this pose.
+    filled_body(&mut img, 18, 19, 10, 3, [40, 44, 56, 255]);
+    for kx in 0..5 {
+        px(&mut img, 19 + kx * 2, 20, [72, 80, 96, 255]);
+    }
+    // mouse
+    filled_body(&mut img, 29, 19, 3, 2, [36, 40, 52, 255]);
+    // sticky note / papers
+    filled_body(&mut img, 31, 16, 3, 3, [255, 240, 140, 255]);
+    px(&mut img, 32, 17, [80, 80, 100, 255]);
+
+    // Red error monitor + a second screen that went dark red with it
+    let mon = sprite_square_monitor(MonitorMode::Error, frame);
+    blit_local(&mut img, &mon, 19, 1);
+    filled_body(&mut img, 30, 3, 4, 9, [40, 44, 56, 255]);
+    fill_rect(&mut img, 31, 4, 2, 6, [56, 16, 22, 255]);
+
+    // Chair
+    filled_body(&mut img, 1, 14, 10, 9, chair);
+    fill_rect(&mut img, 2, 15, 8, 3, chair_d);
+    fill_rect(&mut img, 4, 25, 4, 2, metal);
+    px(&mut img, 2, 27, metal);
+    px(&mut img, 9, 27, metal);
+
+    // Slumped body: the torso stays on the chair and everything above it drops
+    // into the hands, shuddering 1px between the two frames.
+    filled_body(&mut img, 3, 13, 8, 8, pal.shirt);
+    px(&mut img, 6, 15, pal.accent);
+    let hy = 7 + (frame % 2) as i32;
+    filled_body(&mut img, 4, hy, 7, 8, pal.skin);
+    fill_rect(&mut img, 4, hy - 1, 7, 3, pal.hair);
+    px(&mut img, 3, hy + 1, pal.hair);
+    px(&mut img, 11, hy + 1, pal.hair);
+    // Both palms clamped over the *whole* face: no eyes, no mouth, which is the
+    // entire pose. Shaded a step off the skin — palms drawn in the plain skin
+    // tone merged into the head and read as an ordinary face with a wide mouth,
+    // and OUTLINE finger pixels read as eyes.
+    let palm = shade(pal.skin, 82);
+    fill_rect(&mut img, 3, hy + 3, 9, 5, palm);
+    fill_rect(&mut img, 3, hy + 3, 9, 1, shade(pal.skin, 108));
+    for finger in [5, 7, 9] {
+        fill_rect(&mut img, finger, hy + 4, 1, 4, shade(pal.skin, 58));
+    }
+    // Forearms rising from the torso into the palms.
+    fill_rect(&mut img, 2, hy + 8, 3, 3, pal.shirt);
+    fill_rect(&mut img, 9, hy + 8, 3, 3, pal.shirt);
+    // legs under desk
+    fill_rect(&mut img, 4, 21, 2, 6, pal.pants);
+    fill_rect(&mut img, 8, 21, 2, 6, pal.pants);
+    fill_rect(&mut img, 3, 26, 3, 2, OUTLINE);
+    fill_rect(&mut img, 8, 26, 3, 2, OUTLINE);
+    img
+}
+
+/// Canonical `frame` for [`sprite_developer_celebrate`] (RC16 §4 #2) — the hop
+/// and the arm raise both read `frame % 2`, so the period is **2**.
+pub fn celebrate_frame_key(frame: u8) -> u8 {
+    frame % 2
+}
+
+/// Developer out of the chair with both arms up after a successful subagent.
+///
+/// The chair is drawn empty behind the figure so the pose reads as *standing*,
+/// and the monitor is pinned to the [`MONITOR_GLOW`] compile-flash frame: a
+/// frame-dependent monitor would push this sprite's period from 2 to 4 and
+/// double its cache footprint for a screen nobody is looking at.
+pub fn sprite_developer_celebrate(pal: DevPalette, frame: u8) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(36, 32, Rgba(CLEAR));
+    let wood = [184, 128, 72, 255];
+    let wood_d = [128, 84, 44, 255];
+    let wood_h = [208, 156, 96, 255];
+    let chair = [56, 64, 88, 255];
+    let chair_d = [40, 48, 68, 255];
+    let metal = [88, 96, 112, 255];
+
+    // Desk
+    filled_body(&mut img, 12, 15, 22, 8, wood);
+    fill_rect(&mut img, 14, 16, 18, 1, wood_h);
+    filled_body(&mut img, 13, 19, 7, 5, wood_d);
+    filled_body(&mut img, 26, 19, 7, 5, wood_d);
+    fill_rect(&mut img, 14, 27, 2, 3, wood_d);
+    fill_rect(&mut img, 30, 27, 2, 3, wood_d);
+    filled_body(&mut img, 18, 19, 10, 3, [40, 44, 56, 255]);
+    for kx in 0..5 {
+        px(&mut img, 19 + kx * 2, 20, [72, 80, 96, 255]);
+    }
+    filled_body(&mut img, 29, 19, 3, 2, [36, 40, 52, 255]);
+    filled_body(&mut img, 31, 16, 3, 3, [255, 240, 140, 255]);
+    px(&mut img, 32, 17, [80, 80, 100, 255]);
+
+    // Monitor stuck on the green compile flash, plus the slim second screen.
+    let mon = sprite_square_monitor(MonitorMode::Active, 3);
+    blit_local(&mut img, &mon, 19, 1);
+    filled_body(&mut img, 30, 3, 4, 9, [40, 44, 56, 255]);
+    fill_rect(&mut img, 31, 4, 2, 6, [20, 48, 40, 255]);
+
+    // Empty chair — the figure has jumped clear of it.
+    filled_body(&mut img, 1, 14, 10, 9, chair);
+    fill_rect(&mut img, 2, 15, 8, 3, chair_d);
+    fill_rect(&mut img, 4, 25, 4, 2, metal);
+    px(&mut img, 2, 27, metal);
+    px(&mut img, 9, 27, metal);
+
+    // 2px hop between the frames; the arms swing a further 4px on top of it so
+    // the \o/ is unmistakable at terminal resolution.
+    let hop = (frame % 2) as i32 * 2;
+    filled_body(&mut img, 3, 11 - hop, 8, 9, pal.shirt);
+    fill_rect(
+        &mut img,
+        5,
+        11 - hop,
+        4,
+        1,
+        [
+            pal.shirt[0].saturating_add(20),
+            pal.shirt[1].saturating_add(20),
+            pal.shirt[2].saturating_add(20),
+            255,
+        ],
+    );
+    px(&mut img, 6, 13 - hop, pal.accent);
+    // Head, tipped back
+    filled_body(&mut img, 4, 3 - hop, 7, 8, pal.skin);
+    fill_rect(&mut img, 4, 2 - hop, 7, 3, pal.hair);
+    px(&mut img, 3, 4 - hop, pal.hair);
+    px(&mut img, 11, 4 - hop, pal.hair);
+    // Eyes squeezed shut + open grin
+    fill_rect(&mut img, 5, 6 - hop, 2, 1, OUTLINE);
+    fill_rect(&mut img, 8, 6 - hop, 2, 1, OUTLINE);
+    fill_rect(&mut img, 6, 9 - hop, 3, 2, [160, 70, 70, 255]);
+    // Arms: sleeve off the shoulder, bare hand above and outboard of it.
+    let arm_y = 6 - hop * 2;
+    fill_rect(&mut img, 2, arm_y + 3, 2, 4, pal.shirt);
+    fill_rect(&mut img, 1, arm_y, 2, 4, pal.skin);
+    fill_rect(&mut img, 11, arm_y + 3, 2, 4, pal.shirt);
+    fill_rect(&mut img, 12, arm_y, 2, 4, pal.skin);
+    // Legs, off the seat
+    fill_rect(&mut img, 4, 20 - hop, 2, 6, pal.pants);
+    fill_rect(&mut img, 8, 20 - hop, 2, 6, pal.pants);
+    fill_rect(&mut img, 3, 25 - hop, 3, 2, OUTLINE);
+    fill_rect(&mut img, 8, 25 - hop, 3, 2, OUTLINE);
     img
 }
 
@@ -908,7 +1130,7 @@ mod tests {
         assert!(!sprite_developer_at_desk(DevPalette::by_index(0), true, 1)
             .as_raw()
             .is_empty());
-        let mon = sprite_square_monitor(true, 0);
+        let mon = sprite_square_monitor(MonitorMode::Active, 0);
         assert_eq!(mon.width(), mon.height());
         // Detailed desk sprites — keep within composable bounds
         assert!(sprite_empty_desk().width() <= 40);
@@ -996,6 +1218,18 @@ mod tests {
                     "supervisor phase={phase} frame={frame} != key={key}"
                 );
             }
+            let key = fail_frame_key(frame);
+            assert_eq!(
+                sprite_developer_fail(pal, frame).into_raw(),
+                sprite_developer_fail(pal, key).into_raw(),
+                "fail frame={frame} != key={key}"
+            );
+            let key = celebrate_frame_key(frame);
+            assert_eq!(
+                sprite_developer_celebrate(pal, frame).into_raw(),
+                sprite_developer_celebrate(pal, key).into_raw(),
+                "celebrate frame={frame} != key={key}"
+            );
         }
     }
 
@@ -1038,6 +1272,24 @@ mod tests {
             2,
             "walk must have 2 distinct frames"
         );
+        assert_eq!(
+            distinct(
+                (0..2u8)
+                    .map(|f| sprite_developer_fail(pal, f).into_raw())
+                    .collect()
+            ),
+            2,
+            "the debug-rage pose must have 2 distinct frames"
+        );
+        assert_eq!(
+            distinct(
+                (0..2u8)
+                    .map(|f| sprite_developer_celebrate(pal, f).into_raw())
+                    .collect()
+            ),
+            2,
+            "the celebrate pose must have 2 distinct frames"
+        );
         for (phase, period) in [(0u8, 2u8), (1, 6), (2, 3)] {
             assert_eq!(
                 distinct(
@@ -1063,7 +1315,7 @@ mod tests {
             u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])
         };
         let lums: Vec<u32> = (0..4u8)
-            .map(|f| bezel_lum(&sprite_square_monitor(true, f)))
+            .map(|f| bezel_lum(&sprite_square_monitor(MonitorMode::Active, f)))
             .collect();
         assert!(
             lums.iter().collect::<std::collections::HashSet<_>>().len() == 4,
@@ -1076,14 +1328,17 @@ mod tests {
         );
 
         // Inactive monitors keep the flat bezel (empty desk art is unchanged).
-        let off = sprite_square_monitor(false, 0);
-        assert_eq!(bezel_lum(&off), bezel_lum(&sprite_square_monitor(false, 3)));
+        let off = sprite_square_monitor(MonitorMode::Off, 0);
+        assert_eq!(
+            bezel_lum(&off),
+            bezel_lum(&sprite_square_monitor(MonitorMode::Off, 3))
+        );
 
         // The rim must not bleed into the screen interior: (2,2) is inside the
         // screen and left of the scrolling code, so it stays the base color.
         for f in 0..4u8 {
             assert_eq!(
-                sprite_square_monitor(true, f).get_pixel(2, 2).0,
+                sprite_square_monitor(MonitorMode::Active, f).get_pixel(2, 2).0,
                 [12, 20, 28, 255],
                 "frame {f}: glow washed the screen instead of rimming it"
             );
@@ -1099,6 +1354,111 @@ mod tests {
             })
             .collect();
         assert_eq!(dev, lums, "typing dev must show the same bezel glow ramp");
+    }
+
+    /// RC16 §4 #1: the fail beat must be its own pose — the face buried in both
+    /// palms (so no eye highlight survives) over a red error monitor — not the
+    /// ordinary seated developer with a flash painted over him.
+    #[test]
+    fn fail_pose_buries_the_face_and_reddens_the_monitor() {
+        let pal = DevPalette::by_index(2);
+        let f0 = sprite_developer_fail(pal, 0);
+        let f1 = sprite_developer_fail(pal, 1);
+        assert_ne!(f0.as_raw(), f1.as_raw(), "the shudder must move pixels");
+        assert_ne!(
+            f0.as_raw(),
+            sprite_developer_at_desk(pal, false, 0).as_raw(),
+            "the fail beat must not reuse the ordinary seated pose"
+        );
+
+        // The seated developer has a white eye highlight; this pose has no eyes.
+        let white = |img: &RgbaImage| img.pixels().any(|p| p.0 == [255, 255, 255, 255]);
+        assert!(white(&sprite_developer_at_desk(pal, false, 0)));
+        assert!(!white(&f0), "frame 0: the palms must cover the eyes");
+        assert!(!white(&f1), "frame 1: the palms must cover the eyes");
+
+        // ...and the palms really cover the face, in a tone that separates them
+        // from the head: plain-skin palms merged into it and read as a face.
+        for (img, frame) in [(&f0, 0u8), (&f1, 1)] {
+            let hy = 7 + u32::from(frame % 2);
+            for y in (hy + 3)..(hy + 8) {
+                for x in 4..11u32 {
+                    let p = img.get_pixel(x, y).0;
+                    assert_ne!(p, pal.skin, "frame {frame}: bare face at ({x},{y})");
+                    assert_ne!(p, OUTLINE, "frame {frame}: an eye survived at ({x},{y})");
+                }
+            }
+        }
+
+        // Error screen and its rim spill are red-dominant, and the bar blinks.
+        let err0 = sprite_square_monitor(MonitorMode::Error, 0);
+        let err1 = sprite_square_monitor(MonitorMode::Error, 1);
+        assert_ne!(err0.as_raw(), err1.as_raw(), "the error bar must blink");
+        for img in [&err0, &err1] {
+            let screen = img.get_pixel(2, 2).0;
+            assert!(
+                screen[0] > screen[1] && screen[0] > screen[2],
+                "error screen must be red-dominant, got {screen:?}"
+            );
+            let bezel = img.get_pixel(6, 0).0;
+            assert!(
+                bezel[0] > bezel[1] && bezel[0] > bezel[2],
+                "error glow must spill red onto the bezel, got {bezel:?}"
+            );
+        }
+        // ...and the other modes are untouched by the new branch.
+        let active = sprite_square_monitor(MonitorMode::Active, 0).get_pixel(2, 2).0;
+        assert!(active[2] > active[0], "active screen must stay cool-toned");
+        assert_eq!(
+            sprite_square_monitor(MonitorMode::Off, 0).get_pixel(2, 2).0,
+            [20, 26, 34, 255],
+            "an off screen must not pick up any glow"
+        );
+    }
+
+    /// RC16 §4 #2: the celebrate pose must raise both arms clear of the
+    /// shoulders and throw them higher on the second frame — two frames that
+    /// differ only by a hop would read as a twitch, not a cheer.
+    #[test]
+    fn celebrate_pose_throws_both_arms_up() {
+        let pal = DevPalette::by_index(0);
+        // Arm columns only: the head spans x4..10 and the torso x3..10, so skin
+        // found outside those columns can only be a raised hand.
+        let arm_cols = [[1u32, 2], [12, 13]];
+        let arm_top = |img: &RgbaImage| -> Option<u32> {
+            (0..img.height()).find(|y| {
+                arm_cols
+                    .iter()
+                    .flatten()
+                    .any(|x| img.get_pixel(*x, *y).0 == pal.skin)
+            })
+        };
+        let f0 = sprite_developer_celebrate(pal, 0);
+        let f1 = sprite_developer_celebrate(pal, 1);
+        let t0 = arm_top(&f0).expect("frame 0 must raise an arm");
+        let t1 = arm_top(&f1).expect("frame 1 must raise an arm");
+        assert!(t1 < t0, "frame 1 must throw the arms higher ({t1} vs {t0})");
+
+        // Both arms, not one.
+        for (img, label) in [(&f0, 0), (&f1, 1)] {
+            for cols in arm_cols {
+                assert!(
+                    (0..img.height())
+                        .any(|y| cols.iter().any(|x| img.get_pixel(*x, y).0 == pal.skin)),
+                    "frame {label}: columns {cols:?} have no raised hand"
+                );
+            }
+        }
+        // The chair is still drawn behind the figure — this pose is standing.
+        assert!(
+            f0.pixels().any(|p| p.0 == [56, 64, 88, 255]),
+            "the empty chair must still be drawn"
+        );
+        assert_ne!(
+            f0.as_raw(),
+            sprite_developer_at_desk(pal, false, 0).as_raw(),
+            "celebrate must not reuse the ordinary seated pose"
+        );
     }
 
     /// RC16 §4 #6: two distinct door states, both within the composable size

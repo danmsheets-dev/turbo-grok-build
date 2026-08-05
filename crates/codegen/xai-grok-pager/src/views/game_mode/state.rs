@@ -1207,8 +1207,19 @@ fn resample_nearest_into(dst: &mut RgbaImage, src: &RgbaImage) {
 ///
 /// Single source of truth for two gates that must not drift apart:
 /// [`GameModeState::visual_fingerprint`] (what forces a recompose) and
-/// [`GameModeState::tick_anim`] (what forces a repaint). Celebrate/FailBeat FX
-/// sample the frame bucket, not `anim_t`, so they stay out.
+/// [`GameModeState::tick_anim`] (what forces a repaint). FailBeat samples the
+/// frame bucket, not `anim_t`, so it stays out: its 900 ms span already covers
+/// ~3 `tick / 4` edges, which is enough to alternate a 2-frame pose for free.
+///
+/// Celebrate is in because 400 ms is **not** enough — it covers barely one
+/// bucket edge, so both its pose and its confetti would have shown a single
+/// frame (RC16 §4 #2). Both now read `anim_t`
+/// ([`super::compose::celebrate_pose_frame`],
+/// [`super::compose::paint_fx_confetti`]), which costs ~5 recomposes per
+/// subagent success — one per Slow tick of the phase — inside a
+/// Celebrate→WalkToBoss→Handoff→ExitDoor sequence whose other 2.1 s already
+/// recompose every tick. Lengthening Celebrate to ~1 s so the bucket could
+/// drive it was the alternative; it would have delayed every handoff by 600 ms.
 ///
 /// Handoff was excluded by RC16 BUG-3-bonus because
 /// [`super::compose::walk_position`] pins the walker on the rug, making those
@@ -1228,6 +1239,7 @@ fn phase_anim_t_is_visible(phase: ActorPhase) -> bool {
             | ActorPhase::WalkToBoss
             | ActorPhase::ExitDoor
             | ActorPhase::Handoff
+            | ActorPhase::Celebrate
     )
 }
 
@@ -1709,6 +1721,8 @@ mod tests {
     /// (which `tick_anim` spins every tick) must never force a recompose.
     /// Handoff is in the moving set again: the walker is still pinned on the
     /// rug, but the papers FX arcs off `anim_t` (see `phase_anim_t_is_visible`).
+    /// Celebrate joined it for the same reason — its pose and confetti are both
+    /// too fast for the `tick / 4` bucket (RC16 §4 #2).
     #[test]
     fn only_moving_walk_phases_hash_anim_t() {
         let mut s = GameModeState::new();
@@ -1723,11 +1737,24 @@ mod tests {
             "a seated desk's anim_t must not dirty the pixel fingerprint"
         );
 
+        // ...and neither does a fail beat, which rides the tick/4 bucket: its
+        // 900 ms span already covers ~3 bucket edges.
+        s.desks[0].phase = ActorPhase::FailBeat;
+        s.desks[0].anim_t = 0.0;
+        let fp_fail = s.visual_fingerprint(80, 24);
+        s.desks[0].anim_t = 0.5;
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            fp_fail,
+            "the fail beat animates off the frame bucket, not anim_t"
+        );
+
         for phase in [
             ActorPhase::SpawnWalk,
             ActorPhase::WalkToBoss,
             ActorPhase::ExitDoor,
             ActorPhase::Handoff,
+            ActorPhase::Celebrate,
         ] {
             s.desks[0].phase = phase;
             s.desks[0].anim_t = 0.0;

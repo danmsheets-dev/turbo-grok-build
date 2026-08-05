@@ -8,7 +8,8 @@ use image::imageops::FilterType;
 use image::RgbaImage;
 
 use super::sprites_pixel::{
-    DevPalette, blit, dev_at_desk_frame_key, scale_nn, sprite_coffee, sprite_developer_at_desk,
+    DevPalette, blit, celebrate_frame_key, dev_at_desk_frame_key, fail_frame_key, scale_nn,
+    sprite_coffee, sprite_developer_at_desk, sprite_developer_celebrate, sprite_developer_fail,
     sprite_developer_walk, sprite_door, sprite_empty_desk, sprite_plant, sprite_supervisor,
     stamp_floor_patch_sampled, supervisor_frame_key, walk_frame_key,
 };
@@ -141,14 +142,15 @@ use std::sync::Arc;
 
 /// Cache cap, in entries.
 ///
-/// Measured worst case per scale-set is **74** live keys: 36 seated devs
-/// (6 skins × (4 typing frames + 2 idle poses)), 24 walkers (6 skins × 2 packet
+/// Measured worst case per scale-set is **98** live keys: 36 seated devs
+/// (6 skins × (4 typing frames + 2 idle poses)), 12 debug-rage devs and 12
+/// celebrating devs (6 skins × 2 frames each), 24 walkers (6 skins × 2 packet
 /// × 2 frames), 9 supervisors (2 idle + 4 working + 3 reviewing reachable from
 /// the `(tick/4)%4` frame counter), 2 doors (open / closed) and 3 statics
 /// (empty desk, plant, coffee). Before RC16 P8 frame quantization the character
 /// set alone needed 111, which is why a 128-entry cap thrashed.
 ///
-/// 256 leaves room for two full scale-sets (148, i.e. mid-resize) plus ~76 keys
+/// 256 leaves room for two full scale-sets (196, i.e. mid-resize) plus ~60 keys
 /// of headroom for upcoming animation sprites. It is a backstop only:
 /// [`sprite_cache_begin_pass`] drops stale scales eagerly, so the map normally
 /// sits at one scale-set.
@@ -283,6 +285,28 @@ fn cached_dev_at_desk(skin: u8, typing: bool, frame: u8, sc: u32) -> Arc<RgbaIma
     })
 }
 
+/// +12 keys per scale-set (6 skins × 2 [`fail_frame_key`] frames).
+fn cached_dev_fail(skin: u8, frame: u8, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let frame = fail_frame_key(frame);
+    let key = (0xD3u64 << 56) | ((skin as u64) << 40) | ((frame as u64) << 24) | sc as u64;
+    cache_get_or_insert(key, sc, || {
+        let pal = DevPalette::by_index(skin);
+        scale_nn(&sprite_developer_fail(pal, frame), sc)
+    })
+}
+
+/// +12 keys per scale-set (6 skins × 2 [`celebrate_frame_key`] frames).
+fn cached_dev_celebrate(skin: u8, frame: u8, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let frame = celebrate_frame_key(frame);
+    let key = (0xD4u64 << 56) | ((skin as u64) << 40) | ((frame as u64) << 24) | sc as u64;
+    cache_get_or_insert(key, sc, || {
+        let pal = DevPalette::by_index(skin);
+        scale_nn(&sprite_developer_celebrate(pal, frame), sc)
+    })
+}
+
 fn cached_walk(skin: u8, frame: u8, with_packet: bool, sc: u32) -> Arc<RgbaImage> {
     let sc = sc.max(1);
     let frame = walk_frame_key(frame);
@@ -374,53 +398,71 @@ fn paint_boss_rug(canvas: &mut RgbaImage, cx: i32, cy: i32, cover_w: i32, cover_
 // Focus ring is painted as a ratatui cell overlay in `render.rs` so hover-only
 // frames never force a full pixel recompose (see GameModeState::visual_fingerprint).
 
-/// Celebrate sparkles / fail flash over a seated developer.
-fn paint_fx_celebrate(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
-    let colors = [
+/// Pose frame for [`sprite_developer_celebrate`], driven by the desk's `anim_t`.
+///
+/// TIMING NOTE (RC16 §4 #2): Celebrate lasts 400 ms — about 5 Slow ticks — but
+/// the `tick / 4` sprite bucket every other pose rides advances only every
+/// ~330 ms, so a bucket-driven celebrate pose showed **one** frame for the whole
+/// celebration. `anim_t` is per-desk and advances every tick, and
+/// [`super::state`]'s `phase_anim_t_is_visible` now hashes it for Celebrate, so
+/// the arms pump three times across the phase — at the cost of recomposing per
+/// tick *only* while a desk is celebrating. Lengthening the phase to ~1 s
+/// was the alternative; it would have delayed every handoff walk by 600 ms to
+/// buy a slower animation.
+///
+/// FINGERPRINT NOTE: the flip points (0.25 / 0.5 / 0.75) are bucket-aligned
+/// against the fingerprint's `(anim_t * 20.0) as u8` quantization exactly like
+/// [`door_is_open`] — 4 divides 20 — so two `anim_t` values that share a hash
+/// bucket can never disagree about the pose.
+fn celebrate_pose_frame(anim_t: f32) -> u8 {
+    ((anim_t.clamp(0.0, 1.0) * 4.0) as u8) % 2
+}
+
+/// Falling multi-colour confetti over a celebrating desk (RC16 §4 #2).
+///
+/// Procedural like [`paint_fx_handoff_papers`] — no sprite, so zero cache keys.
+/// `t` is the desk's `anim_t`; each piece is released a little later than the
+/// one before it and all of them have landed by `t = 1`, so the burst empties
+/// instead of freezing mid-air when the phase ends.
+///
+/// Pieces are >= 3px square for the same reason the handoff sheets are: the
+/// composed frame is Nearest-downsampled by `effective_pixel_scale` (2 or 3),
+/// and a 2px feature can fall between samples at scale 3.
+fn paint_fx_confetti(canvas: &mut RgbaImage, cx: i32, cy: i32, t: f32, w: u32, h: u32) {
+    const PIECES: usize = 10;
+    const LAG: f32 = 0.06;
+    const COLORS: [[u8; 4]; 5] = [
         [255, 220, 96, 255],
         [120, 255, 180, 255],
         [120, 200, 255, 255],
         [255, 120, 180, 255],
+        [200, 140, 255, 255],
     ];
-    for i in 0..6 {
-        let a = (frame as i32 * 40 + i * 55) % 360;
-        let rad = (a as f32).to_radians();
-        let r = 10 + (frame as i32 % 3);
-        let x = cx + (rad.cos() * r as f32) as i32;
-        let y = cy - 8 + (rad.sin() * r as f32) as i32;
-        if x >= 0 && y >= 0 {
-            let (cw, ch) = canvas.dimensions();
-            if (x as u32) < cw && (y as u32) < ch {
-                canvas.put_pixel(x as u32, y as u32, image::Rgba(colors[(i as usize) % 4]));
-            }
+    let span = (w as f32 * 0.07).max(10.0);
+    let fall = (h as f32 * 0.16).max(12.0);
+    let quad = ((w as f32 * 0.010) as i32).clamp(3, 5);
+    let (cw, ch) = canvas.dimensions();
+    for i in 0..PIECES {
+        let p = (t * (1.0 + LAG * (PIECES - 1) as f32) - LAG * i as f32).clamp(0.0, 1.0);
+        if p <= 0.0 || p >= 1.0 {
+            continue;
         }
-    }
-}
-
-fn paint_fx_fail(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
-    if frame % 2 != 0 {
-        return;
-    }
-    // Red alert flash above monitor
-    for dx in -4..5 {
-        for dy in -10..-6 {
-            let x = cx + dx;
-            let y = cy + dy;
-            if x >= 0 && y >= 0 {
-                let (cw, ch) = canvas.dimensions();
-                if (x as u32) < cw && (y as u32) < ch {
-                    let p = canvas.get_pixel(x as u32, y as u32).0;
-                    canvas.put_pixel(
-                        x as u32,
-                        y as u32,
-                        image::Rgba([
-                            p[0].saturating_add(80),
-                            p[1].saturating_sub(20),
-                            p[2].saturating_sub(20),
-                            255,
-                        ]),
-                    );
+        // Deterministic spread: 7 is coprime with PIECES, so every piece gets
+        // its own lane across the desk instead of a clump.
+        let lane = ((i * 7) % PIECES) as f32 / PIECES as f32 - 0.5;
+        let sway = (p * std::f32::consts::PI * 2.0 + i as f32).sin() * span * 0.08;
+        let x = cx as f32 + lane * span + sway;
+        // Gravity: slow release, quick landing.
+        let y = cy as f32 - fall + fall * p * (0.55 + 0.45 * p);
+        let c = COLORS[i % COLORS.len()];
+        for dy in 0..quad {
+            for dx in 0..quad {
+                let sx = x as i32 + dx;
+                let sy = y as i32 + dy;
+                if sx < 0 || sy < 0 || sx as u32 >= cw || sy as u32 >= ch {
+                    continue;
                 }
+                canvas.put_pixel(sx as u32, sy as u32, image::Rgba(c));
             }
         }
     }
@@ -428,7 +470,7 @@ fn paint_fx_fail(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
 
 /// Papers changing hands during [`ActorPhase::Handoff`].
 ///
-/// Procedural like [`paint_fx_celebrate`] — no sprite, so zero cache keys. `t`
+/// Procedural like [`paint_fx_confetti`] — no sprite, so zero cache keys. `t`
 /// is the desk's `anim_t`; each sheet lags the one before it so the burst reads
 /// as a small stack crossing to the supervisor's desk instead of one blob.
 ///
@@ -697,25 +739,34 @@ pub fn compose_cell_frame_into(
             }
             ActorPhase::Celebrate => {
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
-                let spr = cached_dev_at_desk(desk.skin, false, frame, sc.max(1));
+                // Pose off `anim_t`, not the sprite bucket — see
+                // [`celebrate_pose_frame`] for why the bucket is too coarse here.
+                let spr = cached_dev_celebrate(
+                    desk.skin,
+                    celebrate_pose_frame(desk.anim_t),
+                    sc.max(1),
+                );
                 blit(
             canvas,
             spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
-                paint_fx_celebrate(canvas, cx, cy, frame);
+                paint_fx_confetti(canvas, cx, cy, desk.anim_t, w, h);
             }
             ActorPhase::FailBeat => {
+                // No FX pass: the red alert rectangle this used to paint sat
+                // exactly on the monitor and hid the error screen the pose now
+                // carries. The blinking error bar and its red bezel spill *are*
+                // the beat (see `sprites_pixel::sprite_developer_fail`).
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
-                let spr = cached_dev_at_desk(desk.skin, false, 0, sc.max(1));
+                let spr = cached_dev_fail(desk.skin, frame, sc.max(1));
                 blit(
             canvas,
             spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
-                paint_fx_fail(canvas, cx, cy, frame);
             }
             ActorPhase::SpawnWalk => {
                 // Slide from door (left) toward desk using anim_t (matches Unicode path).
@@ -1003,14 +1054,21 @@ mod tests {
                 cached_supervisor(phase, frame, 1);
             }
         }
+        for skin in 0..6u8 {
+            for frame in 0..4u8 {
+                cached_dev_fail(skin, frame, 1);
+                cached_dev_celebrate(skin, frame, 1);
+            }
+        }
         for open in [true, false] {
             cached_door(open, 1);
         }
         cached_empty_desk(1);
         cached_plant(1);
         cached_coffee(1);
-        // 36 seated devs + 24 walkers + 9 supervisors + 2 doors + 3 statics.
-        assert_eq!(sprite_cache_len(), 74);
+        // 36 seated devs + 12 debug-rage + 12 celebrate + 24 walkers
+        // + 9 supervisors + 2 doors + 3 statics.
+        assert_eq!(sprite_cache_len(), 98);
         assert!(
             sprite_cache_len() * 2 <= SPRITE_CACHE_CAP,
             "cap must hold two scale-sets across a resize"
@@ -1102,6 +1160,66 @@ mod tests {
         // Endpoints are empty: the sheets are in flight, never parked.
         assert!(render(0.0).iter().all(|b| *b == 0));
         assert!(render(1.0).iter().all(|b| *b == 0));
+    }
+
+    /// RC16 §4 #2: the celebrate pose is driven by `anim_t`, so it is bound by
+    /// the same rule the door is — two `anim_t` values that share the
+    /// fingerprint's `(anim_t * 20.0) as u8` bucket must never render different
+    /// poses, or the office shows a frame the fingerprint cannot distinguish.
+    #[test]
+    fn celebrate_pose_never_splits_an_anim_t_hash_bucket() {
+        let mut per_bucket: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+        for step in 0..=1000u32 {
+            let t = step as f32 / 1000.0;
+            let bucket = (t * 20.0) as u8;
+            let pose = celebrate_pose_frame(t);
+            if let Some(prev) = per_bucket.insert(bucket, pose) {
+                assert_eq!(prev, pose, "bucket {bucket} disagrees about the pose at t={t}");
+            }
+        }
+        // ...and the pose really does pump across the phase, which is the whole
+        // point: the `tick / 4` bucket advances ~once in its 400 ms, so a
+        // bucket-driven pose was a 2-frame animation showing 1 frame. The six
+        // samples below are the `anim_t` values the ~12 Hz `tick_anim` produces
+        // over a 400 ms Celebrate.
+        let poses: Vec<u8> = (0..=5)
+            .map(|i| celebrate_pose_frame(i as f32 / 5.0))
+            .collect();
+        assert_eq!(poses, vec![0, 0, 1, 0, 1, 0], "got {poses:?}");
+        let flips = poses.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(flips >= 3, "the arms must pump, got {poses:?}");
+        assert_eq!(celebrate_pose_frame(1.0), 0, "the phase ends on frame 0");
+        assert_eq!(celebrate_pose_frame(-1.0), 0, "clamped below");
+    }
+
+    /// The confetti is procedural: it must stay inside the canvas whatever the
+    /// desk anchor is, must fall as `anim_t` advances, and must have cleared the
+    /// frame by the time the phase ends (otherwise it freezes mid-air on the
+    /// last composed frame).
+    #[test]
+    fn confetti_falls_and_clears_by_the_end_of_the_phase() {
+        let mut canvas = RgbaImage::new(64, 48);
+        for (cx, cy) in [(-40, -40), (200, 200), (0, 0)] {
+            paint_fx_confetti(&mut canvas, cx, cy, 0.5, 64, 48);
+        }
+
+        let render = |t: f32| {
+            let mut c = RgbaImage::new(64, 48);
+            paint_fx_confetti(&mut c, 32, 32, t, 64, 48);
+            c.into_raw()
+        };
+        let early = render(0.25);
+        assert!(early.iter().any(|b| *b != 0), "the burst must draw pieces");
+        assert_ne!(early, render(0.6), "the fall must advance with anim_t");
+        assert!(render(0.0).iter().all(|b| *b == 0), "nothing before release");
+        assert!(render(1.0).iter().all(|b| *b == 0), "all pieces must land");
+
+        // Multi-colour by construction: a single-colour burst is just sparkles.
+        let mut c = RgbaImage::new(64, 48);
+        paint_fx_confetti(&mut c, 32, 32, 0.5, 64, 48);
+        let colors: std::collections::HashSet<[u8; 4]> =
+            c.pixels().map(|p| p.0).filter(|p| p[3] != 0).collect();
+        assert!(colors.len() >= 3, "confetti must be multi-colour, got {colors:?}");
     }
 
     #[test]
