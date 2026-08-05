@@ -414,8 +414,12 @@ pub fn truncate_status_detail(detail: &str) -> String {
 /// In practice `build_mcp_catalog` deduplicates by name before the
 /// list reaches the pager, so this is dead-code in production.
 ///
-/// Returns `true` when a row was actually mutated; the caller can use
-/// this signal to decide whether a redraw is warranted.
+/// Returns `true` when a **matching row was found** (and therefore
+/// written), not whether any field actually differed — the caller uses
+/// it to decide whether a redraw is warranted, and a redraw of the open
+/// modal is cheap enough that the extra compare is not worth it. The
+/// distilled sibling [`patch_status_row`] does compare, because its
+/// `true` feeds a whole-Vec clone.
 pub fn patch_server_row(
     servers: &mut [McpServerInfo],
     name: &str,
@@ -486,8 +490,17 @@ pub fn distill_status_rows(servers: &[McpServerInfo]) -> Vec<McpStatusRow> {
 ///
 /// Same contract: find by `name`, always apply `status` + `status_detail`
 /// (including clearing it), apply `tool_count` only when the push actually
-/// carried a tools list, and silently no-op on an unknown name. Returns
-/// whether a row changed.
+/// carried a tools list, and silently no-op on an unknown name.
+///
+/// Returns whether a field actually **changed**, and unlike
+/// [`patch_server_row`] that is a real compare, not "a row was found". The
+/// caller (`acp_handler::mcp::handle_mcp_server_status`) bumps
+/// `AgentView::mcp_status_gen` on `true`, and Game Mode's
+/// `refresh_mcp_snapshot` reacts to a bumped generation by re-cloning the whole
+/// `Vec<McpStatusRow>` into the overlay snapshot. A repeated identical
+/// `server_status` push — which is the common case, since the shell re-pushes
+/// on every reconnect — would otherwise cost a full Vec clone for no visible
+/// difference.
 pub fn patch_status_row(
     rows: &mut [McpStatusRow],
     name: &str,
@@ -498,12 +511,23 @@ pub fn patch_status_row(
     let Some(row) = rows.iter_mut().find(|s| s.name == name) else {
         return false;
     };
-    row.status = new_status;
-    row.status_detail = status_detail.as_deref().map(truncate_status_detail);
-    if let Some(count) = new_tool_count {
-        row.tool_count = count;
+    let new_detail = status_detail.as_deref().map(truncate_status_detail);
+    let mut changed = false;
+    if row.status != new_status {
+        row.status = new_status;
+        changed = true;
     }
-    true
+    if row.status_detail != new_detail {
+        row.status_detail = new_detail;
+        changed = true;
+    }
+    if let Some(count) = new_tool_count
+        && row.tool_count != count
+    {
+        row.tool_count = count;
+        changed = true;
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -877,6 +901,90 @@ mod tests {
             servers[0].status_detail.is_none(),
             "recovery push must clear prior failure detail"
         );
+    }
+
+    /// `patch_status_row`'s `true` feeds a whole-`Vec` clone (via
+    /// `AgentView::mcp_status_gen` → Game Mode's `refresh_mcp_snapshot`), so it
+    /// must report a real change and not merely "a row with that name exists".
+    /// The shell re-pushes `server_status` on every reconnect, so the repeated
+    /// identical push is the common case, not the exotic one.
+    #[test]
+    fn patch_status_row_reports_only_real_changes() {
+        let mut rows = vec![McpStatusRow {
+            name: "alpha".into(),
+            display_name: None,
+            status: McpServerDisplayStatus::Initializing,
+            tool_count: 0,
+            status_detail: None,
+        }];
+
+        assert!(
+            patch_status_row(
+                &mut rows,
+                "alpha",
+                McpServerDisplayStatus::Ready,
+                Some(4),
+                None
+            ),
+            "Initializing → Ready is a change"
+        );
+        assert_eq!(rows[0].status, McpServerDisplayStatus::Ready);
+        assert_eq!(rows[0].tool_count, 4);
+
+        assert!(
+            !patch_status_row(
+                &mut rows,
+                "alpha",
+                McpServerDisplayStatus::Ready,
+                Some(4),
+                None
+            ),
+            "a byte-identical repeat push must not claim a change"
+        );
+
+        // `tool_count` is only compared when the push carried a tools list, so
+        // a status-only repeat is still no change.
+        assert!(!patch_status_row(
+            &mut rows,
+            "alpha",
+            McpServerDisplayStatus::Ready,
+            None,
+            None
+        ));
+
+        // ...and each field on its own is enough to flip it.
+        assert!(patch_status_row(
+            &mut rows,
+            "alpha",
+            McpServerDisplayStatus::Ready,
+            Some(5),
+            None
+        ));
+        assert!(
+            patch_status_row(
+                &mut rows,
+                "alpha",
+                McpServerDisplayStatus::Ready,
+                None,
+                Some("connection refused".into())
+            ),
+            "a newly-arrived failure detail is a change"
+        );
+        assert_eq!(rows[0].status_detail.as_deref(), Some("connection refused"));
+        assert!(
+            patch_status_row(&mut rows, "alpha", McpServerDisplayStatus::Ready, None, None),
+            "clearing the detail on recovery is a change"
+        );
+        assert!(rows[0].status_detail.is_none());
+
+        // Unknown name is still a silent no-op.
+        assert!(!patch_status_row(
+            &mut rows,
+            "nope",
+            McpServerDisplayStatus::Unavailable,
+            None,
+            None
+        ));
     }
 
     #[test]

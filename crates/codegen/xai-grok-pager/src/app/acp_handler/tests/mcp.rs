@@ -827,6 +827,17 @@
             app.pending_effects.is_empty(),
             "closed-modal cheap path must still schedule no effects"
         );
+
+        // ...and an identical repeat push must not bump the generation again:
+        // Game Mode re-clones the whole `Vec<McpStatusRow>` on a bumped gen, so
+        // "found a row" is not good enough — it has to be a real change. The
+        // shell re-pushes on reconnect, so this is the common case.
+        let gen_after_first = app.agents[&AgentId(0)].mcp_status_gen;
+        let _ = handle_mcp_server_status(&notif, &mut app);
+        assert_eq!(
+            app.agents[&AgentId(0)].mcp_status_gen, gen_after_first,
+            "a repeated identical push must not force a snapshot re-clone"
+        );
     }
 
     /// The cache is a per-ROOT-agent view of this agent's fleet, exactly like

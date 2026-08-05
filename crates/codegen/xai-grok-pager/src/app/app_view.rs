@@ -5711,10 +5711,13 @@ impl AppView {
                 }
             }
         }
-        // Reuses the extensions modal's per-agent coalescing guard, so an
-        // /mcps fetch already in flight wins and Game Mode simply reads the
-        // cache it lands in. `mark_..._dispatched` only fires on the push, so a
-        // coalesced tick retries on the next one instead of losing the request.
+        // Reuses the extensions modal's per-agent coalescing guard so a fetch
+        // queued in *this* iteration wins and Game Mode simply reads the cache
+        // it lands in. It scans `pending_effects`, which the event loop drains
+        // every iteration, so it is a same-iteration guard, not an in-flight
+        // one — see `wants_mcp_list_fetch` for what that does and does not
+        // buy. `mark_..._dispatched` only fires on the push, so a coalesced
+        // tick retries on the next one instead of losing the request.
         if let Some((agent_id, session_id)) = game_mode_mcps_fetch
             && !crate::app::acp_handler::agent_has_pending_mcps_fetch(self, agent_id)
         {

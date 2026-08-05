@@ -15,7 +15,9 @@ use super::sprites::{
     developer_lines, door_lines, empty_desk_lines, floor_style, plant_span, rug_style,
     supervisor_lines, wall_bg,
 };
-use super::state::{ActorPhase, DeskSlot, GameModeState, HoverTarget, SupervisorPhase};
+use super::state::{
+    ActorPhase, DeskSlot, GameModeState, HoverTarget, SupervisorPhase, local_clock_bucket,
+};
 use super::wall::WallMode;
 
 /// Render game mode into `area` (region above composer).
@@ -279,10 +281,19 @@ fn supervisor_popup_lines(state: &GameModeState) -> Vec<(String, Style)> {
     lines
 }
 
-/// Rows the rack card prints before it collapses the rest into `+N more`.
+/// Body lines the rack card may print before it collapses the rest into
+/// `+N more`.
 ///
-/// Six is the tallest the card can get without out-growing the desk card it
-/// shares a placement routine with (6 body lines + title + 2 border rows).
+/// A budget on **emitted lines**, not on servers, and that distinction is the
+/// whole point: a non-Ready server prints a second, indented detail line, so a
+/// per-server cap of six let six unavailable servers emit twelve rows plus the
+/// tail. [`paint_popup`] clips per cell, so nothing painted out of bounds, but
+/// on a short stage the card covered the office and lost its bottom border.
+///
+/// Counting detail lines and the `+N more` tail against the same budget makes
+/// the bound real: the card is at most `1 title + MCP_POPUP_MAX_ROWS body + 2
+/// border rows` = 9 cells tall, whatever the fleet looks like — which is what
+/// keeps it from out-growing the desk card it shares [`paint_popup`] with.
 const MCP_POPUP_MAX_ROWS: usize = 6;
 
 /// Status glyph for one MCP server row.
@@ -329,12 +340,27 @@ fn mcp_rack_popup_lines(state: &GameModeState) -> Vec<(String, Style)> {
         return lines;
     }
 
-    let shown = info.servers.len().min(MCP_POPUP_MAX_ROWS);
-    for row in &info.servers[..shown] {
+    // Budget is on emitted body lines, not on servers: a non-Ready row costs
+    // two (see [`MCP_POPUP_MAX_ROWS`]). One line is held back for the `+N more`
+    // tail whenever servers would be left over, so the tail always fits.
+    let total = info.servers.len();
+    let mut emitted = 0usize;
+    let mut shown = 0usize;
+    for (i, row) in info.servers.iter().enumerate() {
         let ready = matches!(
             row.status,
             crate::views::mcps_modal::McpServerDisplayStatus::Ready
         );
+        let detail = if ready {
+            None
+        } else {
+            row.status_detail.as_deref()
+        };
+        let cost = 1 + usize::from(detail.is_some());
+        let reserve = usize::from(i + 1 < total);
+        if emitted + cost + reserve > MCP_POPUP_MAX_ROWS {
+            break;
+        }
         lines.push((
             format!(
                 " {} {}  {}  {} tools",
@@ -346,17 +372,14 @@ fn mcp_rack_popup_lines(state: &GameModeState) -> Vec<(String, Style)> {
             if ready { body } else { popup_title_style() },
         ));
         // Why it is not ready, when the shell told us.
-        if !ready
-            && let Some(detail) = row.status_detail.as_deref()
-        {
+        if let Some(detail) = detail {
             lines.push((format!("   {}", truncate_mid(detail, 32)), body));
         }
+        emitted += cost;
+        shown += 1;
     }
-    if info.servers.len() > shown {
-        lines.push((
-            format!(" +{} more", info.servers.len() - shown),
-            body,
-        ));
+    if shown < total {
+        lines.push((format!(" +{} more", total - shown), body));
     }
     lines
 }
@@ -517,7 +540,7 @@ fn render_unicode_office(buf: &mut Buffer, layout: &GameLayout, state: &GameMode
     fill_stage_margins(buf, layout);
     paint_floor(buf, layout.content, layout.tier);
 
-    paint_wall_display(buf, layout.wall, state.wall, state.tick, state.clock_hm, layout);
+    paint_wall_display(buf, layout.wall, state.wall, state.tick, layout);
     paint_supervisor(buf, layout, state);
     paint_handoff_zone(buf, layout.handoff, state);
     for (i, desk_rect) in layout.desks.iter().enumerate() {
@@ -570,12 +593,27 @@ fn paint_floor(buf: &mut Buffer, area: Rect, tier: GameTier) {
     }
 }
 
+/// Paint the wall strip: mode title, wall clock, and the shelf trinkets.
+///
+/// The clock is read **live** here rather than from
+/// [`GameModeState::clock_hm`], and that is load-bearing. `clock_hm` is only
+/// refreshed by `tick_anim`'s ambient step, and the ambient wake
+/// (`needs_ambient_tick`) is gated on the last paint having drawn the pixel
+/// office — which is false in exactly the two tiers this function serves
+/// (Compact and the Unicode fallback). An idle office in either tier parks at
+/// `TickDemand::None`, so a `clock_hm` read would freeze at whatever time the
+/// room last animated and quietly show the wrong hour.
+///
+/// A live read is free here and cannot be free in the pixel office: this text
+/// is a ratatui buffer overlay painted after the halfblock blit, so it never
+/// reaches `visual_fingerprint` and costs zero extra wakeups. `clock_hm` stays
+/// the fingerprint input for the *pixel* office's hands and hour tint, where
+/// the value must be hashable.
 fn paint_wall_display(
     buf: &mut Buffer,
     area: Rect,
     mode: WallMode,
     tick: u64,
-    clock_hm: (u8, u8),
     layout: &GameLayout,
 ) {
     if area.height == 0 || area.width == 0 {
@@ -605,7 +643,7 @@ fn paint_wall_display(
     }
 
     let title = mode.title();
-    let clock = format_clock(clock_hm);
+    let clock = format_clock(local_clock_bucket());
     let title_line = if layout.tier.uses_office_art() {
         format!("══ {title} ══")
     } else {
@@ -646,10 +684,11 @@ fn paint_wall_display(
 ///
 /// It used to be a decorative `tick / 12` session timer, which RC16 BUG-2 ran at
 /// half speed and RC16 PERF-1 then froze outright whenever the room parked. Now
-/// it shows the same `(hour, ten-minute)` bucket the pixel office draws hands
-/// from, so the two offices agree and neither depends on the tick rate. Painted
-/// as a buffer overlay, so it refreshes with whatever repaints next — which for
-/// an idle office is the ambient step, ~every 3 s.
+/// it formats the same `(hour, ten-minute)` bucket the pixel office draws hands
+/// from, so the two offices agree and neither depends on the tick rate. Its
+/// caller ([`paint_wall_display`]) samples that bucket live at paint time, so
+/// the text is correct on the very first repaint of a room that has never
+/// ticked.
 fn format_clock(clock_hm: (u8, u8)) -> String {
     let (h, tenmin) = clock_hm;
     format!("{:02}:{:02}", h % 24, (tenmin.min(5)) * 10)
@@ -1169,6 +1208,11 @@ mod tests {
     /// Once the cache is populated the card is one row per server, with the
     /// truncated failure detail under the rows that are not Ready, and a
     /// `+N more` tail past [`MCP_POPUP_MAX_ROWS`].
+    ///
+    /// The height bound is the one claim the constant makes, so it is asserted
+    /// for a *worst case* fleet — every server unavailable with a detail line,
+    /// i.e. two emitted lines each. A per-server cap used to let that render a
+    /// 16-row card.
     #[test]
     fn mcp_rack_tooltip_renders_one_row_per_server() {
         use crate::views::mcps_modal::{McpServerDisplayStatus, McpStatusRow};
@@ -1205,6 +1249,8 @@ mod tests {
         );
 
         // Past the cap the tail collapses; the card must not grow without bound.
+        // github(1) + linear(2) + extra-0(1) + extra-1(1) = 5 emitted lines,
+        // and the sixth is held back so the tail fits inside the budget.
         for i in 0..6 {
             servers.push(row(&format!("extra-{i}"), McpServerDisplayStatus::Ready, 1));
         }
@@ -1217,7 +1263,39 @@ mod tests {
         });
         let rows = popup_text_rows(&buf, game);
         assert_eq!(rows.first().map(String::as_str), Some(" MCP servers"));
-        assert_eq!(rows.last().map(String::as_str), Some(" +2 more"));
+        assert_eq!(rows.last().map(String::as_str), Some(" +4 more"));
+        assert_eq!(
+            rows.len(),
+            1 + MCP_POPUP_MAX_ROWS,
+            "title + at most MCP_POPUP_MAX_ROWS body lines: {rows:?}"
+        );
+
+        // Worst case for the bound: every row is non-Ready *and* carries a
+        // detail, so each server costs two emitted lines. The per-server cap
+        // this replaced rendered 13 rows here.
+        let unavailable: Vec<_> = (0..8)
+            .map(|i| McpStatusRow {
+                status_detail: Some(format!("handshake failed ({i})")),
+                ..row(&format!("down-{i}"), McpServerDisplayStatus::Unavailable, 0)
+            })
+            .collect();
+        let (buf, game) = render_rack_card(super::super::state::McpRackSnapshot {
+            servers: unavailable,
+            init_connected: 0,
+            init_total: 0,
+            init_active: false,
+            rows_gen: 3,
+        });
+        let rows = popup_text_rows(&buf, game);
+        assert!(
+            rows.len() <= 1 + MCP_POPUP_MAX_ROWS,
+            "all-unavailable fleet blew the height bound: {rows:?}"
+        );
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some(" +6 more"),
+            "the collapsed tail must count the servers, not the lines: {rows:?}"
+        );
     }
 
     /// B5: the hover card is placed with a 1-cell SE drop shadow, so clamping
@@ -1339,5 +1417,78 @@ mod tests {
         assert_eq!(format_clock((23, 5)), "23:50");
         // Out-of-range input is clamped, never panics or renders ":60".
         assert_eq!(format_clock((24, 9)), "00:50");
+    }
+
+    /// The `hh:mm` the wall strip actually painted, read back off the buffer.
+    ///
+    /// Located by the 🕐 glyph, then filtered to the digits and colon that
+    /// follow it — the clock is right-aligned at the end of the wall row, so
+    /// nothing else on the row can contaminate the scan.
+    fn painted_wall_clock(buf: &Buffer, area: Rect) -> String {
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if buf.cell((x, y)).map(|c| c.symbol()) != Some("🕐") {
+                    continue;
+                }
+                return (x..area.x + area.width)
+                    .filter_map(|cx| buf.cell((cx, y)).map(|c| c.symbol()))
+                    .flat_map(|s| s.chars())
+                    .filter(|c| c.is_ascii_digit() || *c == ':')
+                    .collect();
+            }
+        }
+        panic!("no wall clock painted");
+    }
+
+    /// RC16 §4 #12 regression: the wall clock must be sampled **at paint time**,
+    /// not read from the tick-refreshed `clock_hm`.
+    ///
+    /// `clock_hm` is only refreshed by `tick_anim`'s ambient step, and the
+    /// ambient wake is gated on `last_pixel_painted` — false in exactly the two
+    /// tiers this office serves. So an idle Compact/Unicode room never ticks,
+    /// and a `clock_hm` read would park the strip at whatever time the room
+    /// last animated: a plausible-looking clock showing the wrong hour. The
+    /// pure `format_clock` test above cannot see that; only the paint site can.
+    #[test]
+    fn wall_clock_is_live_at_paint_time_in_a_room_that_never_ticked() {
+        use super::super::state::local_clock_bucket;
+
+        let game = Rect::new(2, 3, 100, 24);
+        let mut buf = Buffer::empty(Rect::new(
+            0,
+            0,
+            game.x + game.width + 4,
+            game.y + game.height + 4,
+        ));
+        let mut state = GameModeState::new();
+        state.pixel_mode = false;
+        state.open = true;
+        // A room that has never animated: no ticks, and `clock_hm` left at a
+        // stale hour that no amount of waiting will refresh in this tier.
+        assert_eq!(state.tick, 0, "this office must not have ticked");
+        let stale = ((local_clock_bucket().0 + 7) % 24, 0u8);
+        state.clock_hm = stale;
+
+        let before = local_clock_bucket();
+        render_game_mode(&mut buf, game, &mut state);
+        let after = local_clock_bucket();
+
+        let painted = painted_wall_clock(&buf, game);
+        assert!(
+            painted == format_clock(before) || painted == format_clock(after),
+            "wall clock painted {painted:?}, expected live local time \
+             {:?} (the ten-minute bucket may have rolled mid-test)",
+            format_clock(after)
+        );
+        assert_ne!(
+            painted,
+            format_clock(stale),
+            "the wall clock froze at the stale `clock_hm` instead of reading live"
+        );
+        assert_eq!(
+            state.clock_hm, stale,
+            "painting must not refresh `clock_hm` — it is the pixel office's \
+             fingerprint input and only `tick_anim` may move it"
+        );
     }
 }

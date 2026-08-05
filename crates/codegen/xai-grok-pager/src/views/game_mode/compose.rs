@@ -979,16 +979,6 @@ fn desk_typing_frame(tick: u64, desk: usize, busy: BusyLevel) -> u8 {
     desk_frame(((tick / busy.frame_divisor()) % 4) as u8, desk)
 }
 
-/// Whether the office door stands open this frame.
-///
-/// FINGERPRINT NOTE: a pure function of inputs
-/// [`GameModeState::visual_fingerprint`] already hashes — every desk's
-/// occupancy and phase, plus, for SpawnWalk/ExitDoor, its `anim_t` quantized to
-/// `(anim_t * 20.0) as u8`. Both thresholds are bucket-aligned (`< 0.25` is
-/// bucket `< 5`, `>= 0.75` is bucket `>= 15`), so two `anim_t` values that
-/// share a hash bucket can never disagree about the door. That is what makes
-/// the door free: no new fingerprint input, and both phases already recompose
-/// every tick.
 /// Whether the MCP rack's LEDs chase this frame (RC16 §4 #5).
 ///
 /// The signal is **real tool-call traffic**: a seated desk's `tool_calls`
@@ -1002,8 +992,12 @@ fn desk_typing_frame(tick: u64, desk: usize, busy: BusyLevel) -> u8 {
 /// new state, not a re-derivation of hashed inputs), it costs two recomposes
 /// per burst, and the only wakeups it can add are the tail of a burst whose
 /// desks all retired inside the window.
-pub(super) fn rack_is_active(state: &GameModeState) -> bool {
-    state.rack_burst_active()
+///
+/// Observed at `now`, which is the same `Instant` the frame's fingerprint was
+/// hashed at — see fingerprint invariant 10 on
+/// [`super::state::GameModeState::visual_fingerprint`].
+pub(super) fn rack_is_active(state: &GameModeState, now: std::time::Instant) -> bool {
+    state.rack_burst_active(now)
 }
 
 /// Cell rect covering the composed MCP rack — its hover hit box.
@@ -1036,6 +1030,16 @@ pub(super) fn rack_hit_rect(stage: ratatui::layout::Rect) -> ratatui::layout::Re
     }
 }
 
+/// Whether the office door stands open this frame.
+///
+/// FINGERPRINT NOTE: a pure function of inputs
+/// [`GameModeState::visual_fingerprint`] already hashes — every desk's
+/// occupancy and phase, plus, for SpawnWalk/ExitDoor, its `anim_t` quantized to
+/// `(anim_t * 20.0) as u8`. Both thresholds are bucket-aligned (`< 0.25` is
+/// bucket `< 5`, `>= 0.75` is bucket `>= 15`), so two `anim_t` values that
+/// share a hash bucket can never disagree about the door. That is what makes
+/// the door free: no new fingerprint input, and both phases already recompose
+/// every tick.
 fn door_is_open(state: &GameModeState) -> bool {
     state.desks.iter().any(|d| {
         d.is_occupied()
@@ -1106,6 +1110,26 @@ pub fn compose_cell_frame_into(
     state: &GameModeState,
     tick: u64,
 ) {
+    compose_cell_frame_into_at(canvas, bg_scaled, state, tick, std::time::Instant::now());
+}
+
+/// [`compose_cell_frame_into`] with the frame's clock sample supplied.
+///
+/// `now` is the second scalar the pass needs alongside `tick`: two of the
+/// inputs it composes (the MCP rack's lit/dark art and the success wave's crest
+/// position) are derived from wall-clock deadlines, and the fingerprint the
+/// result gets cached under hashes exactly those two. Taking a separate
+/// `Instant::now()` here let a burst deadline or a 150 ms wave bucket fall
+/// between the two reads, composing pixels one bucket ahead of their own cache
+/// key. [`super::state::GameModeState::ensure_pixel_frame`] snapshots one
+/// `Instant` and passes it to both.
+pub fn compose_cell_frame_into_at(
+    canvas: &mut RgbaImage,
+    bg_scaled: &RgbaImage,
+    state: &GameModeState,
+    tick: u64,
+    now: std::time::Instant,
+) {
     let (bw, bh) = bg_scaled.dimensions();
     if canvas.dimensions() != (bw, bh) {
         *canvas = RgbaImage::new(bw, bh);
@@ -1147,7 +1171,7 @@ pub fn compose_cell_frame_into(
         // rack, so a carpet patch would run floor tiles up the wall, and
         // [`rack_scale`] keeps the sprite inside that footprint so there is no
         // stray baked furniture to erase in the first place.
-        let rack = cached_rack(rack_is_active(state), frame, rack_sc);
+        let rack = cached_rack(rack_is_active(state, now), frame, rack_sc);
         blit(
             canvas,
             rack.as_ref(),
@@ -1380,7 +1404,7 @@ pub fn compose_cell_frame_into(
 
     // Last, over everything: the one-shot success sweep is *lighting*, so it
     // has to lift the desks and the boss as well as the room (RC16 §4 #8).
-    if let Some(t) = state.success_wave_t() {
+    if let Some(t) = state.success_wave_t(now) {
         paint_fx_success_wave(canvas, t, w);
     }
 }
@@ -1473,8 +1497,6 @@ mod tests {
         cache_get_or_insert((0xFFu64 << 56) | i, scale, || RgbaImage::new(1, 1))
     }
 
-    /// P8(a): frames that render identical art must share one entry. The walk
-    /// sprite only has two limb poses, so frame 0 and frame 2 are the same
     /// The supervisor hover box must sit on the sprite the compose pass draws,
     /// not next to it: same centre anchor, same footprint fractions, always
     /// inside the stage it was derived from.
@@ -1554,6 +1576,8 @@ mod tests {
         );
     }
 
+    /// P8(a): frames that render identical art must share one entry. The walk
+    /// sprite only has two limb poses, so frame 0 and frame 2 are the same
     /// picture — keying on the raw frame stored it twice.
     #[test]
     fn equivalent_frames_share_one_cache_entry() {
@@ -1651,53 +1675,92 @@ mod tests {
         }
     }
 
-    /// The number the cap is budgeted against: every sprite the office can ask
-    /// for at one stage size. Raise [`SPRITE_CACHE_CAP`] before adding sprites
-    /// that push this past half the cap.
-    #[test]
-    fn worst_case_working_set_per_scale() {
-        sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
+    /// Every sprite the office can ask for at one stage size, at each family's
+    /// own scale — the argument order matches [`sprite_cache_begin_pass`].
+    fn touch_every_sprite(scales: [u32; 6]) {
+        let [sc, walk_sc, prop_sc, sup_sc, rack_sc, roomba_sc] = scales;
+        sprite_cache_begin_pass(scales);
         // frame is `(tick / 4) % 4`, so 0..4 is the whole reachable domain.
         for skin in 0..6u8 {
             for frame in 0..4u8 {
-                cached_dev_at_desk(skin, true, frame, 1);
-                cached_dev_at_desk(skin, false, frame, 1);
-                cached_walk(skin, frame, true, 1);
-                cached_walk(skin, frame, false, 1);
+                cached_dev_at_desk(skin, true, frame, sc);
+                cached_dev_at_desk(skin, false, frame, sc);
+                cached_walk(skin, frame, true, walk_sc);
+                cached_walk(skin, frame, false, walk_sc);
             }
         }
         for phase in 0..3u8 {
             for frame in 0..4u8 {
-                cached_supervisor(phase, frame, 1);
+                cached_supervisor(phase, frame, sup_sc);
             }
         }
         for skin in 0..6u8 {
             for frame in 0..4u8 {
-                cached_dev_fail(skin, frame, 1);
-                cached_dev_celebrate(skin, frame, 1);
+                cached_dev_fail(skin, frame, sc);
+                cached_dev_celebrate(skin, frame, sc);
             }
         }
         for open in [true, false] {
-            cached_door(open, 1);
+            cached_door(open, prop_sc);
         }
         for active in [true, false] {
             for frame in 0..4u8 {
-                cached_rack(active, frame, 1);
+                cached_rack(active, frame, rack_sc);
             }
         }
         for frame in 0..4u8 {
-            cached_roomba(frame, 1);
+            cached_roomba(frame, roomba_sc);
         }
-        cached_empty_desk(1);
-        cached_plant(1);
-        cached_coffee(1);
+        cached_empty_desk(sc);
+        cached_plant(prop_sc);
+        cached_coffee(prop_sc);
+    }
+
+    /// The number the cap is budgeted against: every sprite the office can ask
+    /// for at one stage size. Raise [`SPRITE_CACHE_CAP`] before adding sprites
+    /// that push this past half the cap.
+    ///
+    /// Exercised at **differing** scales as well as the uniform case, because
+    /// the office really runs six independently derived scale families (`sc` /
+    /// `walk_sc` / `prop_sc` / `sup_sc` / `rack_sc` / `roomba_sc`, see
+    /// [`compose_cell_frame_into_at`]) and they routinely disagree at real
+    /// stage sizes. A scale-1-only run would still have read 105 even if two
+    /// families shared a key namespace and silently aliased each other.
+    #[test]
+    fn worst_case_working_set_per_scale() {
+        sprite_cache_reset();
+        touch_every_sprite([1; 6]);
         // 36 seated devs + 12 debug-rage + 12 celebrate + 24 walkers
         // + 9 supervisors + 2 doors + 5 racks + 2 floor robots + 3 statics.
         assert_eq!(sprite_cache_len(), 105);
         assert!(
             sprite_cache_len() * 2 <= SPRITE_CACHE_CAP,
             "cap must hold two scale-sets across a resize"
+        );
+
+        // Six different scales, one per family — the shape the office is
+        // actually in at most stage sizes. Same 105 keys: fewer would mean two
+        // families collide, more would mean a family leaked a second scale.
+        sprite_cache_reset();
+        touch_every_sprite([1, 2, 3, 4, 5, 2]);
+        assert_eq!(
+            sprite_cache_len(),
+            105,
+            "a mixed-scale office must ask for exactly the same working set"
+        );
+        assert!(
+            sprite_cache_len() * 2 <= SPRITE_CACHE_CAP,
+            "cap must hold two scale-sets across a resize"
+        );
+
+        // ...and collapsing those five scales onto one (the resize case) leaves
+        // the same 105, not the union of both passes: `sprite_cache_begin_pass`
+        // retires every scale that dropped out of the live set.
+        touch_every_sprite([2; 6]);
+        assert_eq!(
+            sprite_cache_len(),
+            105,
+            "a resize must retire the scales that left the live set"
         );
     }
 
@@ -2032,7 +2095,7 @@ mod tests {
             let cover = rack_cover_px(w, h);
 
             let idle = GameModeState::new();
-            assert!(!rack_is_active(&idle));
+            assert!(!rack_is_active(&idle, std::time::Instant::now()));
             let idle_frame = compose_cell_frame(&bg, &idle, 0);
             assert!(
                 differing(&bg, &idle_frame, cover) > 0,
@@ -2046,7 +2109,7 @@ mod tests {
             // merely existing — arm the burst the way a sync would.
             busy.rack_active_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-            assert!(rack_is_active(&busy));
+            assert!(rack_is_active(&busy, std::time::Instant::now()));
             let busy0 = compose_cell_frame(&bg, &busy, 0);
             assert!(
                 differing(&idle_frame, &busy0, cover) > 0,

@@ -12,10 +12,9 @@ pub const DESK_COUNT: usize = 6;
 
 /// Ticks between forced HUD repaints in tiers that paint per-desk monitor text.
 ///
-/// ~1 s at the ~12 Hz Slow tick — the same divisor `render::format_clock` uses.
-/// The HUD shows whole-second data (`mm:ss`, tokens, tool calls), and the sync
-/// signature buckets `elapsed` to whole seconds too (RC16 PERF-2), so a finer
-/// cadence would repaint identical text.
+/// ~1 s at the ~12 Hz Slow tick. The HUD shows whole-second data (`mm:ss`,
+/// tokens, tool calls), and the sync signature buckets `elapsed` to whole
+/// seconds too (RC16 PERF-2), so a finer cadence would repaint identical text.
 const HUD_REFRESH_TICKS: u64 = 12;
 
 /// How long one MCP rack LED burst stays lit after a tool call (RC16 §4 #5).
@@ -785,7 +784,15 @@ impl GameModeState {
     ///    `tick / 4` edge in a room that is already animating, i.e. on ticks the
     ///    bucket in invariant 8 already moved the fingerprint on. In a frozen
     ///    room it is a constant, so invariant 1 is untouched.
-    fn visual_fingerprint(&self, cell_w: u16, cell_h: u16) -> u64 {
+    /// 10. The two **time-derived** inputs (the rack burst bool and the wave
+    ///    bucket) are read at a caller-supplied `now`, never from their own
+    ///    `Instant::now()`. Compose reads the same two facts, and both used to
+    ///    take their own clock sample: a deadline or a 150 ms wave bucket
+    ///    falling between the two reads composed pixels one bucket ahead of the
+    ///    fingerprint they were then cached under. See
+    ///    [`Self::ensure_pixel_frame`], which snapshots one `Instant` and
+    ///    threads it into both.
+    fn visual_fingerprint(&self, cell_w: u16, cell_h: u16, now: Instant) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         cell_w.hash(&mut h);
@@ -795,10 +802,10 @@ impl GameModeState {
         // One bool: the rack's idle art vs its lit art. Quantized by
         // construction — a deadline compared against `now` can only ever be
         // on or off, so this cannot force a recompose per tick.
-        self.rack_burst_active().hash(&mut h);
+        self.rack_burst_active(now).hash(&mut h);
         // One-shot golden sweep: `None` once it expires, so the fingerprint
         // returns to its pre-wave value and the room parks (see invariant 7).
-        self.success_wave_bucket_at(Instant::now()).hash(&mut h);
+        self.success_wave_bucket_at(now).hash(&mut h);
         // Wall clock hands + the day/night tint band both derive from this pair
         // and nothing finer, so the clock costs at most 6 recomposes/hour.
         self.clock_hm.hash(&mut h);
@@ -849,11 +856,19 @@ impl GameModeState {
     /// the office BG only when cell size or `pixel_scale()` changes (never on
     /// hover-only or pure-idle tick frames). Builds halfblock cell cache once
     /// per fingerprint so HIT paints skip image sampling.
+    ///
+    /// COHERENCE: takes **one** clock sample for the whole frame and threads it
+    /// into both the fingerprint and the compose pass (fingerprint invariant
+    /// 10). Both derive the rack-burst bool and the success-wave bucket from
+    /// time; sampling the clock separately in each let a deadline or a 150 ms
+    /// bucket land between them and cache the composed pixels under a
+    /// fingerprint describing the *other* side of the edge.
     pub fn ensure_pixel_frame(&mut self, cell_w: u16, cell_h: u16) -> bool {
         if !self.pixel_mode || cell_w == 0 || cell_h == 0 {
             return false;
         }
-        let fp = self.visual_fingerprint(cell_w, cell_h);
+        let now = Instant::now();
+        let fp = self.visual_fingerprint(cell_w, cell_h, now);
         // Hit: terminal paint + cell cache present (high-res scratch optional).
         if self.pixel_frame_fp == fp
             && self.pixel_paint.is_some()
@@ -917,7 +932,7 @@ impl GameModeState {
             .pixel_compose_scratch
             .take()
             .unwrap_or_else(|| RgbaImage::new(bg.width(), bg.height()));
-        super::compose::compose_cell_frame_into(&mut scratch, &bg, self, tick);
+        super::compose::compose_cell_frame_into_at(&mut scratch, &bg, self, tick, now);
         // Terminal-res paint buffer for halfblock (use_direct — no per-paint resize).
         //
         // PERF (RC16 PERF-5): both the paint buffer and the cell cache are
@@ -988,8 +1003,18 @@ impl GameModeState {
     /// loop at [`crate::app::app_view::TickDemand::Slow`] (~12 Hz) forever. A
     /// frozen room — no seated desks, Idle/Waiting supervisor, empty queues, no
     /// armed attention window, nothing dirty — produces zero visual change per
-    /// tick, so it must contribute **no** tick demand and let the app park at
-    /// `TickDemand::None`.
+    /// Slow tick, so it must contribute **no** `Slow` demand.
+    ///
+    /// What the app parks at then depends on the tier, because the ambient
+    /// batch (RC16 §4 #7 / #12) gave the pixel office animations that exist
+    /// *only* in a room nothing else is animating:
+    /// - **Pixel office on screen:** [`Self::needs_ambient_tick`] takes over and
+    ///   the app settles at [`crate::app::app_view::TickDemand::Ambient`]
+    ///   (~0.33 wakeups/sec) — the standing cost of the idle coffee sip, the
+    ///   Supervisor's steam and the composed wall-clock hands.
+    /// - **Compact / Unicode fallback:** neither draws that art, so the ambient
+    ///   wake is gated off too and the app really does park at
+    ///   `TickDemand::None`.
     ///
     /// **Synced room state only.** Live agent liveness (a turn that just
     /// started, a background subagent still running) is not visible here and is
@@ -1062,8 +1087,13 @@ impl GameModeState {
     /// office would otherwise have spent parked. It buys 10 recomposes (one per
     /// [`SUCCESS_WAVE_BUCKET_MS`]) and then the room parks — pinned by
     /// `expired_success_wave_is_consumed_and_lets_the_room_park`.
-    pub(crate) fn success_wave_t(&self) -> Option<f32> {
-        let bucket = self.success_wave_bucket_at(Instant::now())?;
+    ///
+    /// Takes the observation instant rather than sampling its own clock, for
+    /// the same reason as [`Self::rack_burst_active`]: a 150 ms bucket boundary
+    /// crossed between the fingerprint and the compose pass would put the
+    /// composed crest one step ahead of its own cache key (invariant 10).
+    pub(crate) fn success_wave_t(&self, at: Instant) -> Option<f32> {
+        let bucket = self.success_wave_bucket_at(at)?;
         Some(f32::from(bucket) / (SUCCESS_WAVE_BUCKETS - 1) as f32)
     }
 
@@ -1095,8 +1125,13 @@ impl GameModeState {
     /// otherwise frozen room shows a *lit but still* rack; the chase only runs
     /// while the room is animating for its own reasons, which is when tool
     /// calls actually happen.
-    pub(crate) fn rack_burst_active(&self) -> bool {
-        self.rack_active_until.is_some_and(|t| t > Instant::now())
+    ///
+    /// Takes the observation instant rather than sampling its own clock:
+    /// compose reads the same fact to pick the rack art and must not land on
+    /// the other side of the deadline from the fingerprint it is cached under
+    /// (fingerprint invariant 10).
+    pub(crate) fn rack_burst_active(&self, at: Instant) -> bool {
+        self.rack_active_until.is_some_and(|t| t > at)
     }
 
     /// Slow ambient sprite frame: flips 0↔1 once per [`AMBIENT_PERIOD`].
@@ -1174,6 +1209,13 @@ impl GameModeState {
     /// either of them would buy nothing. A never-painted office also parks —
     /// opening one marks redraw dirty, which is the wake that produces the first
     /// paint.
+    ///
+    /// The corollary: in those two tiers [`Self::clock_hm`] is never refreshed,
+    /// because nothing ever calls [`Self::tick_anim`]. Nothing may read it
+    /// there. The Unicode office's wall-strip clock therefore samples
+    /// [`local_clock_bucket`] live at paint time instead — it is a ratatui
+    /// overlay, so a live read reaches no fingerprint and needs no wake (see
+    /// [`super::render::paint_wall_display`]).
     pub fn needs_ambient_tick(&self) -> bool {
         self.pixel_mode && self.last_pixel_painted
     }
@@ -1406,7 +1448,7 @@ impl GameModeState {
         // rides the `tick / 4` bucket the working room already repaints on),
         // while the edge itself flips the composed rack art.
         if tool_call_seen {
-            if !self.rack_burst_active() {
+            if !self.rack_burst_active(Instant::now()) {
                 self.mark_redraw_dirty();
             }
             self.rack_active_until = Some(Instant::now() + RACK_BURST);
@@ -1560,9 +1602,15 @@ impl GameModeState {
     }
 
     /// Advance animations. Call once per `SLOW_TICK_INTERVAL` (~12 Hz) while the
-    /// room animates ([`Self::needs_animation_tick`]) — `render.rs::format_clock`
-    /// derives its decorative seconds as `tick/12`, so that clock stands still
-    /// while a frozen room is parked (RC16 PERF-1).
+    /// room animates ([`Self::needs_animation_tick`]), or once per
+    /// `AMBIENT_TICK_INTERVAL` (~3 s) while a parked pixel office still wants
+    /// ambient steps ([`Self::needs_ambient_tick`]).
+    ///
+    /// Nothing user-visible may depend on this being called at all: a frozen
+    /// Compact/Unicode room gets neither cadence (RC16 PERF-1). That is why the
+    /// wall-strip clock samples [`local_clock_bucket`] at paint time rather
+    /// than reading the [`Self::clock_hm`] this refreshes — `clock_hm` exists
+    /// for the *pixel* office, whose composed hands need a fingerprint input.
     ///
     /// Marks redraw dirty when visual output may change (working desks, walks,
     /// focus pulse edge, per-desk HUD text) — see the dirty gate below for the
@@ -1883,7 +1931,17 @@ fn phase_anim_t_is_visible(phase: ActorPhase) -> bool {
 /// The ten-minute quantization is the whole perf contract: it is what the
 /// fingerprint hashes and what the composed hands are drawn from, so the clock
 /// can force at most 6 recomposes per hour.
-fn local_clock_bucket() -> (u8, u8) {
+///
+/// Two readers, for two different reasons. The pixel office reads it *through*
+/// [`GameModeState::clock_hm`], because its hands and hour tint are composed
+/// pixels and must therefore be a fingerprint input. The Unicode office's wall
+/// strip calls this directly at paint time
+/// ([`super::render::paint_wall_display`]): that text is a ratatui overlay
+/// painted after the halfblock blit, so a live read can never reach the
+/// fingerprint, and it keeps the strip honest in the two tiers
+/// ([`GameModeState::needs_ambient_tick`] excludes them) where nothing ever
+/// refreshes `clock_hm`.
+pub(super) fn local_clock_bucket() -> (u8, u8) {
     use chrono::Timelike;
     let now = chrono::Local::now();
     ((now.hour() % 24) as u8, (now.minute() / 10) as u8)
@@ -2180,7 +2238,7 @@ mod tests {
         let mut s = GameModeState::new();
         s.desks[0].child_session_id = Some("t".into());
         s.desks[0].phase = ActorPhase::AtDeskThinking;
-        let fp0 = s.visual_fingerprint(80, 24);
+        let fp0 = s.visual_fingerprint(80, 24, Instant::now());
 
         s.last_mcp_rack = ratatui::layout::Rect::new(90, 4, 10, 9);
         assert!(s.update_hover(94, 8));
@@ -2199,7 +2257,7 @@ mod tests {
             rows_gen: 7,
         };
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp0,
             "rack hover + tooltip snapshot must not dirty pixel fingerprint"
         );
@@ -2242,13 +2300,13 @@ mod tests {
         s.desks[0].phase = ActorPhase::AtDeskThinking;
         s.desks[0].skin = 1;
         s.supervisor = SupervisorPhase::Idle;
-        let fp0 = s.visual_fingerprint(80, 24);
+        let fp0 = s.visual_fingerprint(80, 24, Instant::now());
         s.tick = s.tick.wrapping_add(40);
         s.hover = Some(HoverTarget::Desk(0));
         s.hover_screen = Some((10, 10));
         s.overflow_count = 3;
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp0,
             "idle/thinking + hover must not dirty pixel fingerprint"
         );
@@ -2269,7 +2327,7 @@ mod tests {
             branch: Some("rc16-game-mode".to_string()),
         };
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp0,
             "supervisor hover + tooltip snapshot must not dirty pixel fingerprint"
         );
@@ -2278,11 +2336,11 @@ mod tests {
         // ambient step. The ~12 Hz tick bucket above is still frozen — 40 ticks
         // changed nothing — and only the ambient step moves the frame.
         s.ambient_step = s.ambient_step.wrapping_add(1);
-        let fp_sip = s.visual_fingerprint(80, 24);
+        let fp_sip = s.visual_fingerprint(80, 24, Instant::now());
         assert_ne!(fp_sip, fp0, "the ambient step must reach the idle office");
         s.tick = s.tick.wrapping_add(40);
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp_sip,
             "…and within one ambient step the office must still be frozen"
         );
@@ -2290,7 +2348,7 @@ mod tests {
         // The wall clock is the other new input, at ≤6 buckets/hour.
         s.clock_hm = (s.clock_hm.0.wrapping_add(1) % 24, s.clock_hm.1);
         assert_ne!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp_sip,
             "the hour must move the hands (and the day/night tint)"
         );
@@ -2308,10 +2366,10 @@ mod tests {
         s.desks[0].phase = ActorPhase::AtDeskWorking;
         // Pin the clock so this cannot straddle a ten-minute bucket edge.
         s.clock_hm = (10, 3);
-        let fp0 = s.visual_fingerprint(80, 24);
+        let fp0 = s.visual_fingerprint(80, 24, Instant::now());
         s.ambient_step = s.ambient_step.wrapping_add(1);
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp0,
             "no composed sprite reads the ambient step here"
         );
@@ -2320,10 +2378,10 @@ mod tests {
         // sprite is drawn from it.
         s.desks[1].child_session_id = Some("t".into());
         s.desks[1].phase = ActorPhase::AtDeskThinking;
-        let fp1 = s.visual_fingerprint(80, 24);
+        let fp1 = s.visual_fingerprint(80, 24, Instant::now());
         s.ambient_step = s.ambient_step.wrapping_add(1);
         assert_ne!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp1,
             "a thinking desk sips coffee even while the boss works"
         );
@@ -2560,20 +2618,26 @@ mod tests {
         s.desks[0].phase = ActorPhase::AtDeskWorking;
         s.supervisor = SupervisorPhase::Working;
         assert!(
-            !rack_is_active(&s),
+            !rack_is_active(&s, Instant::now()),
             "a busy room that has called no tools must leave the rack dark"
         );
-        let fp0 = s.visual_fingerprint(80, 24);
+        let fp0 = s.visual_fingerprint(80, 24, Instant::now());
 
         s.rack_active_until = Some(Instant::now() + RACK_BURST);
-        assert!(rack_is_active(&s), "an armed burst lights the rack");
-        let fp_lit = s.visual_fingerprint(80, 24);
+        assert!(
+            rack_is_active(&s, Instant::now()),
+            "an armed burst lights the rack"
+        );
+        let fp_lit = s.visual_fingerprint(80, 24, Instant::now());
         assert_ne!(fp_lit, fp0, "the dark→lit edge must recompose");
 
         s.rack_active_until = Some(Instant::now() - Duration::from_millis(1));
-        assert!(!rack_is_active(&s), "an expired burst goes dark");
+        assert!(
+            !rack_is_active(&s, Instant::now()),
+            "an expired burst goes dark"
+        );
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp0,
             "the lit→dark edge must recompose back to the idle art"
         );
@@ -2588,12 +2652,78 @@ mod tests {
             !frozen.pixel_needs_tick_frame(),
             "an armed burst must not unfreeze the sprite bucket"
         );
-        let lit = frozen.visual_fingerprint(80, 24);
+        let lit = frozen.visual_fingerprint(80, 24, Instant::now());
         frozen.tick = frozen.tick.wrapping_add(40);
         assert_eq!(
-            frozen.visual_fingerprint(80, 24),
+            frozen.visual_fingerprint(80, 24, Instant::now()),
             lit,
             "a pure tick inside a burst must not recompose"
+        );
+    }
+
+    /// Fingerprint invariant 10: the two time-derived inputs must be read at a
+    /// caller-supplied instant, not from their own `Instant::now()`.
+    ///
+    /// `visual_fingerprint` hashes the rack-burst bool and the success-wave
+    /// bucket; compose reads the same two facts to draw the LEDs and the crest.
+    /// While each sampled its own clock, a burst deadline or a 150 ms wave
+    /// bucket falling between the two reads composed pixels one bucket ahead of
+    /// the fingerprint they were then cached under — a stale frame at every
+    /// burst edge, self-healing only on the next `ensure_pixel_frame`.
+    /// `ensure_pixel_frame` now snapshots one `Instant` and threads it into
+    /// both, which is only sound if every reader honours the argument.
+    #[test]
+    fn time_derived_fingerprint_inputs_follow_the_supplied_instant() {
+        use super::super::compose::rack_is_active;
+
+        let mut s = GameModeState::new();
+        s.clock_hm = (10, 3);
+
+        // Both deadlines sit just in the past, so the *wall clock* says dark
+        // and expired while an instant from before them says lit and running.
+        let deadline = Instant::now() - Duration::from_millis(10);
+        let inside = deadline - Duration::from_millis(5);
+        s.rack_active_until = Some(deadline);
+        s.success_fx_until = Some(deadline);
+
+        assert!(
+            !s.rack_burst_active(Instant::now()),
+            "wall clock: the burst has expired"
+        );
+        assert!(
+            !rack_is_active(&s, Instant::now()),
+            "...and compose agrees at the wall clock"
+        );
+        assert!(
+            rack_is_active(&s, inside),
+            "compose must answer for the instant it was handed, not `now`"
+        );
+        assert!(
+            s.rack_burst_active(inside),
+            "the fingerprint's reader must do the same"
+        );
+        assert!(
+            s.success_wave_t(Instant::now()).is_none(),
+            "wall clock: the wave is over"
+        );
+        assert!(
+            s.success_wave_t(inside).is_some(),
+            "the crest must answer for the instant it was handed"
+        );
+
+        // ...and the fingerprint moves with that argument, so a frame composed
+        // at `inside` cannot be cached under a fingerprint taken at `now`.
+        assert_ne!(
+            s.visual_fingerprint(80, 24, inside),
+            s.visual_fingerprint(80, 24, Instant::now()),
+            "straddling both deadlines must change the fingerprint"
+        );
+        // Pure in its instant: repeated calls with the same argument agree even
+        // though real time keeps moving underneath them.
+        assert_eq!(
+            s.visual_fingerprint(80, 24, inside),
+            s.visual_fingerprint(80, 24, inside),
+            "the fingerprint must not read a clock of its own"
         );
     }
 
@@ -2651,14 +2781,17 @@ mod tests {
 
         a.tool_calls = 1;
         s.sync_from_snapshots(&[a.clone()], false, GameTier::Comfort, false);
-        assert!(s.rack_burst_active(), "a tool call must light the rack");
+        assert!(
+            s.rack_burst_active(Instant::now()),
+            "a tool call must light the rack"
+        );
 
         // Same count again: the arm is an edge, so let the window lapse and
         // prove an unchanged counter does not re-arm it.
         s.rack_active_until = Some(Instant::now() - Duration::from_millis(1));
         s.sync_from_snapshots(&[a], false, GameTier::Comfort, false);
         assert!(
-            !s.rack_burst_active(),
+            !s.rack_burst_active(Instant::now()),
             "an unchanged tool count must not re-arm the burst"
         );
     }
@@ -2683,7 +2816,7 @@ mod tests {
         s.sync_from_snapshots(&[], false, GameTier::Compact, false);
         assert_eq!(s.wall, WallMode::WorkFinished);
         let armed = s.success_fx_until.expect("WORK FINISHED must sweep");
-        assert!(s.success_wave_t().is_some(), "and it must be live");
+        assert!(s.success_wave_t(Instant::now()).is_some(), "and it must be live");
 
         // The wall stays on WorkFinished for the rest of the session: further
         // syncs must not push the deadline out.
@@ -2720,17 +2853,17 @@ mod tests {
         s.last_sync_at = Some(Instant::now());
         s.clock_hm = (10, 3);
         s.take_redraw_dirty();
-        let quiet = s.visual_fingerprint(80, 24);
+        let quiet = s.visual_fingerprint(80, 24, Instant::now());
         assert!(!s.needs_animation_tick(), "control: an empty room parks");
 
         s.success_fx_until = Some(Instant::now() + SUCCESS_WAVE);
         assert!(s.needs_animation_tick(), "an armed wave holds the loop");
-        let early = s.visual_fingerprint(80, 24);
+        let early = s.visual_fingerprint(80, 24, Instant::now());
         assert_ne!(early, quiet, "the sweep must recompose");
         // Half-way through: a different bucket, so a different frame.
         s.success_fx_until = Some(Instant::now() + SUCCESS_WAVE / 2);
         assert_ne!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             early,
             "the crest must move with the bucket"
         );
@@ -2738,7 +2871,7 @@ mod tests {
         // Deadline passed, nothing has consumed it yet.
         s.success_fx_until = Some(Instant::now() - Duration::from_millis(1));
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             quiet,
             "an elapsed wave must fingerprint exactly like the pre-wave room"
         );
@@ -2758,7 +2891,7 @@ mod tests {
             !s.needs_animation_tick(),
             "and then the room must park again (PERF-1)"
         );
-        assert_eq!(s.visual_fingerprint(80, 24), quiet);
+        assert_eq!(s.visual_fingerprint(80, 24, Instant::now()), quiet);
     }
 
     /// The recompose budget, stated as a test: one full sweep costs
@@ -2785,8 +2918,12 @@ mod tests {
                 marks += 1;
             }
         }
-        assert!(
-            marks <= SUCCESS_WAVE_BUCKETS,
+        // `assert_eq`, not `<=`: a one-sided bound also passes at zero marks,
+        // i.e. on a wave that never repaints at all. The budget is a floor as
+        // much as a ceiling — nine bucket advances plus the one repaint that
+        // clears the crest at expiry.
+        assert_eq!(
+            marks, SUCCESS_WAVE_BUCKETS,
             "{marks} repaints for {SUCCESS_WAVE_BUCKETS} composable frames"
         );
         assert_eq!(
@@ -2897,18 +3034,18 @@ mod tests {
 
         // A hot desk recomposes twice as often; a normal one is unchanged.
         let mut hot = seated(BusyLevel::Hot);
-        let fp0 = hot.visual_fingerprint(80, 24);
+        let fp0 = hot.visual_fingerprint(80, 24, Instant::now());
         hot.tick = 2;
-        assert_ne!(hot.visual_fingerprint(80, 24), fp0, "hot moves at tick/2");
+        assert_ne!(hot.visual_fingerprint(80, 24, Instant::now()), fp0, "hot moves at tick/2");
         let mut normal = seated(BusyLevel::Normal);
-        let fp1 = normal.visual_fingerprint(80, 24);
+        let fp1 = normal.visual_fingerprint(80, 24, Instant::now());
         normal.tick = 2;
-        assert_eq!(normal.visual_fingerprint(80, 24), fp1, "normal at tick/4");
+        assert_eq!(normal.visual_fingerprint(80, 24, Instant::now()), fp1, "normal at tick/4");
 
         // The level itself is an input: same tick, different cadence bucket.
         assert_ne!(
-            seated(BusyLevel::Hot).visual_fingerprint(80, 24),
-            seated(BusyLevel::Normal).visual_fingerprint(80, 24),
+            seated(BusyLevel::Hot).visual_fingerprint(80, 24, Instant::now()),
+            seated(BusyLevel::Normal).visual_fingerprint(80, 24, Instant::now()),
             "the composed keyboard differs, so the level must be hashed"
         );
 
@@ -2916,10 +3053,10 @@ mod tests {
         // throughput must never dirty a frozen room (RC13 idle freeze).
         let mut think = seated(BusyLevel::Normal);
         think.desks[0].phase = ActorPhase::AtDeskThinking;
-        let idle = think.visual_fingerprint(80, 24);
+        let idle = think.visual_fingerprint(80, 24, Instant::now());
         think.desks[0].busy = BusyLevel::Hot;
         assert_eq!(
-            think.visual_fingerprint(80, 24),
+            think.visual_fingerprint(80, 24, Instant::now()),
             idle,
             "a thinking desk composes no keyboard"
         );
@@ -2945,11 +3082,11 @@ mod tests {
         s.desks[0].child_session_id = Some("w".into());
         s.desks[0].phase = ActorPhase::AtDeskWorking;
         s.supervisor = SupervisorPhase::Waiting;
-        let fp0 = s.visual_fingerprint(80, 24);
+        let fp0 = s.visual_fingerprint(80, 24, Instant::now());
         s.tick = 3; // still same ÷4 bucket as 0
-        assert_eq!(s.visual_fingerprint(80, 24), fp0);
+        assert_eq!(s.visual_fingerprint(80, 24, Instant::now()), fp0);
         s.tick = 4; // next bucket
-        assert_ne!(s.visual_fingerprint(80, 24), fp0);
+        assert_ne!(s.visual_fingerprint(80, 24, Instant::now()), fp0);
     }
 
     /// Only phases whose composited output moves with `anim_t` may hash it.
@@ -2965,10 +3102,10 @@ mod tests {
         s.desks[0].child_session_id = Some("h".into());
         s.desks[0].phase = ActorPhase::AtDeskWorking;
         s.desks[0].anim_t = 0.0;
-        let fp0 = s.visual_fingerprint(80, 24);
+        let fp0 = s.visual_fingerprint(80, 24, Instant::now());
         s.desks[0].anim_t = 1.0;
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp0,
             "a seated desk's anim_t must not dirty the pixel fingerprint"
         );
@@ -2977,10 +3114,10 @@ mod tests {
         // 900 ms span already covers ~3 bucket edges.
         s.desks[0].phase = ActorPhase::FailBeat;
         s.desks[0].anim_t = 0.0;
-        let fp_fail = s.visual_fingerprint(80, 24);
+        let fp_fail = s.visual_fingerprint(80, 24, Instant::now());
         s.desks[0].anim_t = 0.5;
         assert_eq!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp_fail,
             "the fail beat animates off the frame bucket, not anim_t"
         );
@@ -2994,10 +3131,10 @@ mod tests {
         ] {
             s.desks[0].phase = phase;
             s.desks[0].anim_t = 0.0;
-            let fp = s.visual_fingerprint(80, 24);
+            let fp = s.visual_fingerprint(80, 24, Instant::now());
             s.desks[0].anim_t = 0.5;
             assert_ne!(
-                s.visual_fingerprint(80, 24),
+                s.visual_fingerprint(80, 24, Instant::now()),
                 fp,
                 "{phase:?} moves with anim_t and must recompose"
             );
@@ -3184,10 +3321,10 @@ mod tests {
         let mut s = GameModeState::new();
         s.desks[0].child_session_id = Some("w".into());
         s.desks[0].phase = ActorPhase::AtDeskWorking;
-        let fp = s.visual_fingerprint(80, 24);
+        let fp = s.visual_fingerprint(80, 24, Instant::now());
         s.roomba_step += 1;
         assert_ne!(
-            s.visual_fingerprint(80, 24),
+            s.visual_fingerprint(80, 24, Instant::now()),
             fp,
             "a patrol step must recompose or the robot would never move"
         );
@@ -3206,12 +3343,12 @@ mod tests {
         let mut idle = GameModeState::new();
         idle.desks[0].child_session_id = Some("t".into());
         idle.desks[0].phase = ActorPhase::AtDeskThinking;
-        let fp = idle.visual_fingerprint(80, 24);
+        let fp = idle.visual_fingerprint(80, 24, Instant::now());
         for _ in 0..24 {
             idle.tick_anim(GameTier::Normal);
         }
         assert_eq!(
-            idle.visual_fingerprint(80, 24),
+            idle.visual_fingerprint(80, 24, Instant::now()),
             fp,
             "the robot must not break the thinking-room freeze"
         );

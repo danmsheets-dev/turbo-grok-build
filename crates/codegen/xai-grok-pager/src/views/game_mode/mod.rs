@@ -298,10 +298,27 @@ fn refresh_supervisor_snapshot(agent: &mut AgentView, working: bool, waiting_on_
 /// `mcp_status_cache` is otherwise only filled by opening `/mcps` — so an
 /// office opened in a fresh session would show its rack tooltip the startup
 /// counts forever. The caller ([`crate::app::app_view::AppView::tick`]) owns
-/// the request because only it can reach `pending_effects`; it also re-checks
-/// `agent_has_pending_mcps_fetch` so a modal fetch already in flight is not
-/// duplicated, and flips `mcp_fetch_dispatched` only once it has actually
-/// pushed the effect. One request per Game Mode open, never a per-tick storm.
+/// the request because only it can reach `pending_effects`, and it flips
+/// `mcp_fetch_dispatched` only once it has actually pushed the effect.
+///
+/// GUARANTEE: **at most one request per Game Mode open**, and never a per-tick
+/// storm — `mcp_fetch_dispatched` is the flag that carries it, and it survives
+/// the effect being drained (pinned by
+/// `app_view::tests::game_mode_open_fetches_the_mcp_list_exactly_once`).
+///
+/// NOT a guarantee: that a `/mcps` fetch already on the wire is never
+/// duplicated. The caller also checks `agent_has_pending_mcps_fetch`, but that
+/// only scans `pending_effects`, which the event loop drains with `mem::take`
+/// every iteration — so it is a *same-iteration* guard, not an in-flight one. A
+/// modal fetch drained on an earlier iteration whose `McpsListLoaded` has not
+/// landed yet is invisible here, and Game Mode will issue its own
+/// `x.ai/mcp/list`. That is bounded at one extra request per open (the flag
+/// above stops any further ones) and both responses distil into the same cache,
+/// so the cost is one redundant round trip in a narrow race. Closing it
+/// properly needs an in-flight marker maintained at all nine `FetchMcpsList`
+/// push sites and cleared on the task result; a marker that leaked would
+/// strand the rack on startup counts forever — a strictly worse failure than
+/// the duplicate.
 pub fn wants_mcp_list_fetch(agent: &AgentView) -> bool {
     agent.game_mode.open
         && !agent.game_mode.mcp_fetch_dispatched
