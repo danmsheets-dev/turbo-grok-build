@@ -5,6 +5,15 @@ Update this file when closing an issue or shipping a release.
 
 Last reviewed: 2026-08-03 (RC13 Game Mode perf + worktree soft-preserve docs).
 
+## RC16 — Game Mode audit fixes
+
+Source landed on `rc16-game-mode`. Audit: [RC16_GAME_MODE_AUDIT.md](./RC16_GAME_MODE_AUDIT.md).
+
+| Topic | Notes |
+|-------|--------|
+| Tick/paint tier off-by-one (BUG-1) | `sync_game_mode` now takes the **stage** (status strip already peeled) instead of a paint area it peeled a second time. Callers derive it from `game_mode::stage_rect`, so the tick tier equals the painted tier by construction. Previously a 19-row paint area painted Normal while every tick ran the Compact snap-complete branch, permanently killing walks/celebrates/handoffs at that height. |
+| Anim cadence ~6 Hz → ~12 Hz (BUG-2) | The `tick_anim` gate is derived from `SLOW_TICK_INTERVAL` (minus an 8 ms jitter margin) instead of a hardcoded 90 ms that sat above the 83 ms interval and dropped every other tick. Restores the documented ~12 Hz, un-halves the unicode wall clock (`tick/12`), and removes the silent speed-up when unrelated UI forced `TickDemand::Fast`. A unit test pins `gate <= SLOW_TICK_INTERVAL`. |
+
 ## RC13 — Workspace Tree inject + tombstone + Game Mode perf
 
 Source landed for **0.2.114-r14** (rebuild/install required to take effect in the binary).
@@ -17,7 +26,7 @@ Prior line: r13 Workspace Tree inject + Game Mode perf; r14 web_fetch + workflow
 | Live marker prune | RUNNING trees with fresh `.grok-subagent-live` are never keep-N pruned. |
 | Workspace Tree inject | Budgeted `<workspace_tree_card>` on session prompt; tools + `/tree` + `turbo tree`. Docs: `docs/workspace-tree.md`. |
 | Keep-N prune | Soft-preserved peers pruned by `GROK_SUBAGENT_KEEP_N` (default 3; `0` = age-only) + free-space guard (`GROK_MIN_FREE_GB`, default 40). |
-| Game Mode perf | Terminal-res `pixel_paint` cache (no per-paint scale-3 resize); Game Mode open prefers `TickDemand::Slow` (not Fast from hidden tasks/turn); anim advances on `AppView::tick`; hover dirty-if-changed; dual-audit P1 bugs fixed (SpawnWalk, WaitingOnYou, attention, focus, playground). |
+| Game Mode perf | Terminal-res `pixel_paint` cache (no per-paint scale-3 resize); Game Mode open prefers `TickDemand::Slow` (not Fast from hidden tasks/turn); anim advances on `AppView::tick`; hover dirty-if-changed; dual-audit P1 bugs fixed (SpawnWalk, WaitingOnYou, attention, focus, playground). **Correction (RC16):** the anim step landed behind a hardcoded 90 ms gate sitting *above* the 83 ms `SLOW_TICK_INTERVAL`, so RC13–RC15 actually animated at ~6 Hz (and the unicode wall clock ran at half real-time), not the documented ~10–12 Hz. Fixed in RC16 — see below. |
 | Residual accepted | Shell confine is policy-level, not OS FS jail. True incremental tree freshness is still Phase 2. |
 
 ## Added: Auto Developer Log

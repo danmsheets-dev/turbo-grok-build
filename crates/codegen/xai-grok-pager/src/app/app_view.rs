@@ -5552,14 +5552,16 @@ impl AppView {
             // Game Mode owns Slow-tick animation (Terra freeze fix). Redraw only
             // when sync/tick marks dirty — frozen idle rooms skip full office paint.
             if agent.game_mode.open {
-                // Prefer last painted scrollback size so tick tier matches paint
-                // (avoids Normal↔Compact thrash that snap-clears walks/handoffs).
-                let (sw, sh) = if let Some(stage) = agent.game_mode.last_stage {
-                    (stage.width.max(20), stage.height.max(8))
-                } else {
+                // Feed sync the last painted **stage** (status strip already
+                // peeled) so the tick tier equals the painted tier by
+                // construction — a second peel here flipped Normal↔Compact at
+                // the boundary and snap-cleared walks/handoffs.
+                let stage = agent.game_mode.last_stage.unwrap_or_else(|| {
                     let (tw, th) = agent.last_terminal_size;
-                    (tw.max(20), th.saturating_sub(3).max(8))
-                };
+                    let area = ratatui::layout::Rect::new(0, 0, tw, th.saturating_sub(3));
+                    crate::views::game_mode::stage_rect(area)
+                });
+                let (sw, sh) = (stage.width.max(20), stage.height.max(8));
                 needs_redraw |= crate::views::game_mode::sync_game_mode(agent, sw, sh);
             }
             needs_redraw |= agent.scrollback.tick();

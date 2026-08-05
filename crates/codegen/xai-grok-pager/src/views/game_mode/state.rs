@@ -781,7 +781,8 @@ impl GameModeState {
         };
     }
 
-    /// Advance animations. Call ~12–15 Hz while open.
+    /// Advance animations. Call once per `SLOW_TICK_INTERVAL` (~12 Hz) while
+    /// open — `render.rs::format_clock` derives wall-clock seconds as `tick/12`.
     ///
     /// Marks redraw dirty when visual output may change (working desks, walks,
     /// focus pulse edge).

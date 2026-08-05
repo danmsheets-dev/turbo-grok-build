@@ -1631,11 +1631,10 @@ impl AgentView {
         if self.game_mode.open {
             // Tick owns sync; paint only catches up when stale (single-owner).
             if self.game_mode.needs_paint_sync() {
-                crate::views::game_mode::sync_game_mode(
-                    self,
-                    layout.scrollback.width,
-                    layout.scrollback.height,
-                );
+                // sync takes the *stage* (status strip peeled) — same rect
+                // render_game_mode derives — so both tiers agree.
+                let stage = crate::views::game_mode::stage_rect(layout.scrollback);
+                crate::views::game_mode::sync_game_mode(self, stage.width, stage.height);
             }
             crate::views::game_mode::render_game_mode(buf, layout.scrollback, &mut self.game_mode);
             self.clear_scrollback_selection_state();

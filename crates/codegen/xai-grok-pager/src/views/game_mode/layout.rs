@@ -80,6 +80,23 @@ pub fn game_tier(stage: Rect) -> GameTier {
     }
 }
 
+/// Stage rect for `area`: the region above the composer minus the 1-row status
+/// strip peeled off its bottom.
+///
+/// Single source of truth for the peel. The paint path ([`compute`]) and every
+/// non-paint consumer (the `AppView::tick` sync path) must derive the tier from
+/// the same stage — peeling twice put the tick tier one row below the painted
+/// one and snap-cleared walks at the `MIN_STAGE_H` boundary (RC16 BUG-1).
+pub fn stage_rect(area: Rect) -> Rect {
+    let strip_h = STATUS_STRIP_H.min(area.height);
+    Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(strip_h),
+    }
+}
+
 /// Compute full layout. `area` is the region above the agent composer.
 pub fn compute(area: Rect) -> GameLayout {
     if area.width == 0 || area.height == 0 {
@@ -87,19 +104,12 @@ pub fn compute(area: Rect) -> GameLayout {
     }
 
     // Peel status strip from bottom of area.
-    let strip_h = STATUS_STRIP_H.min(area.height);
-    let stage_h = area.height.saturating_sub(strip_h);
-    let stage = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: stage_h,
-    };
+    let stage = stage_rect(area);
     let status_strip = Rect {
         x: area.x,
-        y: area.y.saturating_add(stage_h),
+        y: area.y.saturating_add(stage.height),
         width: area.width,
-        height: strip_h,
+        height: STATUS_STRIP_H.min(area.height),
     };
 
     let tier = game_tier(stage);
@@ -353,6 +363,45 @@ mod tests {
         let layout = compute(area(60, 22));
         assert_eq!(layout.tier, GameTier::Compact);
         assert_eq!(layout.desks.len(), 6);
+    }
+
+    /// BUG-1 regression: the tier the tick path derives from the stored stage
+    /// must equal the tier the paint path assigned, for every geometry.
+    #[test]
+    fn tick_tier_matches_paint_tier() {
+        for w in [40u16, 60, 71, 72, 100, 119, 120, 130, 159, 160, 200] {
+            for h in 8u16..=50 {
+                let a = area(w, h);
+                let paint = compute(a);
+                // AppView::tick feeds `last_stage` (= paint stage) back into
+                // sync_game_mode, which tiers it with `game_tier` directly.
+                let tick = game_tier(Rect::new(
+                    0,
+                    0,
+                    paint.stage.width.max(20),
+                    paint.stage.height.max(8),
+                ));
+                assert_eq!(paint.tier, tick, "tier mismatch at {w}x{h}");
+                assert_eq!(paint.stage, stage_rect(a), "stage mismatch at {w}x{h}");
+            }
+        }
+    }
+
+    /// Pins the failure the double peel produced: at exactly `MIN_STAGE_H + 1`
+    /// rows the paint path is Normal but re-peeling the stage yields Compact,
+    /// whose sync branch snap-clears every walk/handoff.
+    #[test]
+    fn double_peel_would_flip_tier_at_min_stage_boundary() {
+        let a = area(100, 19);
+        let paint = compute(a);
+        assert_eq!(paint.tier, GameTier::Normal);
+        assert_eq!(paint.stage.height, MIN_STAGE_H);
+        assert_eq!(
+            compute(paint.stage).tier,
+            GameTier::Compact,
+            "double peel must be the thing we avoid, not the thing we ship"
+        );
+        assert_eq!(game_tier(paint.stage), paint.tier);
     }
 
     #[test]
