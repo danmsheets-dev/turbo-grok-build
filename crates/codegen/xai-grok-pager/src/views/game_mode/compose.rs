@@ -8,8 +8,9 @@ use image::imageops::FilterType;
 use image::RgbaImage;
 
 use super::sprites_pixel::{
-    DevPalette, blit, scale_nn, sprite_coffee, sprite_developer_at_desk, sprite_developer_walk,
-    sprite_empty_desk, sprite_plant, sprite_supervisor, stamp_floor_patch_sampled,
+    DevPalette, blit, dev_at_desk_frame_key, scale_nn, sprite_coffee, sprite_developer_at_desk,
+    sprite_developer_walk, sprite_empty_desk, sprite_plant, sprite_supervisor,
+    stamp_floor_patch_sampled, supervisor_frame_key, walk_frame_key,
 };
 use super::state::{ActorPhase, GameModeState, SupervisorPhase};
 
@@ -84,73 +85,188 @@ fn desk_scale(w: u32) -> u32 {
 // Thread-local scaled sprite cache — Arc so blit does not clone every frame.
 //
 // PERF INVARIANT: compose_cell_frame must stay cheap on tick-only frames.
-// Keys are stable per (kind, skin, frame, scale); plant/coffee are static.
+// Keys are stable per (kind, skin, canonical frame, scale); plant/coffee are
+// static. The frame in a key is always the sprite's *canonical* frame (see
+// `sprites_pixel::{dev_at_desk_frame_key, walk_frame_key, supervisor_frame_key}`)
+// so frames that render identical art share one entry (RC16 P8).
 use std::sync::Arc;
-thread_local! {
-    static SPRITE_CACHE: std::cell::RefCell<std::collections::HashMap<u64, Arc<RgbaImage>>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+
+/// Cache cap, in entries.
+///
+/// Measured worst case per scale-set after RC16 P8 frame quantization is **72**
+/// live keys: 36 seated devs (6 skins × (4 typing frames + 2 idle poses)),
+/// 24 walkers (6 skins × 2 packet × 2 frames), 9 supervisors (2 idle + 4 working
+/// + 3 reviewing reachable from the `(tick/4)%4` frame counter) and 3 statics
+/// (empty desk, plant, coffee). Before quantization the same set needed 111,
+/// which is why a 128-entry cap thrashed.
+///
+/// 256 leaves room for two full scale-sets (144, i.e. mid-resize) plus ~80 keys
+/// of headroom for upcoming animation sprites. It is a backstop only:
+/// [`sprite_cache_begin_pass`] drops stale scales eagerly, so the map normally
+/// sits at one scale-set.
+const SPRITE_CACHE_CAP: usize = 256;
+
+struct CachedSprite {
+    img: Arc<RgbaImage>,
+    /// Scale this sprite was rasterised at — stale scales are evicted first.
+    scale: u32,
+    /// Monotonic counter of the last read (LRU ordering).
+    used: u64,
 }
 
-fn cache_get_or_insert(key: u64, build: impl FnOnce() -> RgbaImage) -> Arc<RgbaImage> {
-    SPRITE_CACHE.with(|c| {
-        let mut map = c.borrow_mut();
-        // Cap cache so palette/scale churn cannot grow unbounded.
-        if map.len() > 128 {
-            map.clear();
+#[derive(Default)]
+struct SpriteCache {
+    map: std::collections::HashMap<u64, CachedSprite>,
+    clock: u64,
+    /// Bitmask of the scales the current compose pass uses; bit `s` is set for
+    /// scale `s`. Zero means "unknown", which keeps every entry live.
+    live_scales: u64,
+}
+
+impl SpriteCache {
+    fn scale_is_live(&self, scale: u32) -> bool {
+        self.live_scales == 0 || self.live_scales & scale_bit(scale) != 0
+    }
+
+    /// Evict one entry: any stale-scale entry first, otherwise the LRU.
+    ///
+    /// O(len) but only runs on insert past the cap, which the eager stale-scale
+    /// sweep makes rare. It never clears the whole map, so the sprites the
+    /// current pass has already blitted survive an overflow.
+    fn evict_one(&mut self) {
+        let victim = self
+            .map
+            .iter()
+            .min_by_key(|(_, e)| (self.scale_is_live(e.scale), e.used))
+            .map(|(k, _)| *k);
+        if let Some(k) = victim {
+            self.map.remove(&k);
         }
-        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(build())))
+    }
+}
+
+/// Bit for `scale` in [`SpriteCache::live_scales`] (scales are 1..=5 today).
+fn scale_bit(scale: u32) -> u64 {
+    1u64 << scale.min(63)
+}
+
+thread_local! {
+    static SPRITE_CACHE: std::cell::RefCell<SpriteCache> =
+        std::cell::RefCell::new(SpriteCache::default());
+}
+
+/// Declare the scales this compose pass will draw at and drop everything built
+/// at any other scale (RC16 P8).
+///
+/// A resize changes every derived scale at once, so the previous stage's entries
+/// become garbage in a single step. Dropping them here keeps the map at ~one
+/// scale-set; the old clear-at-128 eviction instead wiped the sprites the new
+/// stage had *just* rasterised, turning a resize into a rebuild storm.
+fn sprite_cache_begin_pass(scales: [u32; 4]) {
+    let live = scales.iter().fold(0u64, |m, s| m | scale_bit(*s));
+    SPRITE_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.live_scales == live {
+            return;
+        }
+        c.live_scales = live;
+        c.map.retain(|_, e| live & scale_bit(e.scale) != 0);
+    });
+}
+
+fn cache_get_or_insert(key: u64, scale: u32, build: impl FnOnce() -> RgbaImage) -> Arc<RgbaImage> {
+    SPRITE_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.clock += 1;
+        let now = c.clock;
+        if let Some(e) = c.map.get_mut(&key) {
+            e.used = now;
+            return Arc::clone(&e.img);
+        }
+        while c.map.len() >= SPRITE_CACHE_CAP {
+            c.evict_one();
+        }
+        let img = Arc::new(build());
+        c.map.insert(
+            key,
+            CachedSprite {
+                img: Arc::clone(&img),
+                scale,
+                used: now,
+            },
+        );
+        img
     })
 }
 
+#[cfg(test)]
+fn sprite_cache_reset() {
+    SPRITE_CACHE.with(|c| *c.borrow_mut() = SpriteCache::default());
+}
+
+#[cfg(test)]
+fn sprite_cache_len() -> usize {
+    SPRITE_CACHE.with(|c| c.borrow().map.len())
+}
+
+#[cfg(test)]
+fn sprite_cache_has_scale(scale: u32) -> bool {
+    SPRITE_CACHE.with(|c| c.borrow().map.values().any(|e| e.scale == scale))
+}
+
 fn cached_empty_desk(sc: u32) -> Arc<RgbaImage> {
-    cache_get_or_insert(0xE0u64 << 56 | sc as u64, || {
-        scale_nn(&sprite_empty_desk(), sc.max(1))
+    let sc = sc.max(1);
+    cache_get_or_insert(0xE0u64 << 56 | sc as u64, sc, || {
+        scale_nn(&sprite_empty_desk(), sc)
     })
 }
 
 fn cached_dev_at_desk(skin: u8, typing: bool, frame: u8, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let frame = dev_at_desk_frame_key(typing, frame);
     let key = (0xD1u64 << 56)
         | ((skin as u64) << 40)
         | ((typing as u64) << 32)
         | ((frame as u64) << 24)
         | sc as u64;
-    cache_get_or_insert(key, || {
+    cache_get_or_insert(key, sc, || {
         let pal = DevPalette::by_index(skin);
-        scale_nn(&sprite_developer_at_desk(pal, typing, frame), sc.max(1))
+        scale_nn(&sprite_developer_at_desk(pal, typing, frame), sc)
     })
 }
 
 fn cached_walk(skin: u8, frame: u8, with_packet: bool, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let frame = walk_frame_key(frame);
     let key = (0xD2u64 << 56)
         | ((skin as u64) << 40)
         | ((with_packet as u64) << 32)
         | ((frame as u64) << 24)
         | sc as u64;
-    cache_get_or_insert(key, || {
+    cache_get_or_insert(key, sc, || {
         let pal = DevPalette::by_index(skin);
-        scale_nn(
-            &sprite_developer_walk(pal, frame, with_packet),
-            sc.max(1),
-        )
+        scale_nn(&sprite_developer_walk(pal, frame, with_packet), sc)
     })
 }
 
 fn cached_supervisor(phase: u8, frame: u8, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let frame = supervisor_frame_key(phase, frame);
     let key = (0xA0u64 << 56) | ((phase as u64) << 32) | ((frame as u64) << 24) | sc as u64;
-    cache_get_or_insert(key, || {
-        scale_nn(&sprite_supervisor(phase, frame), sc.max(1))
-    })
+    cache_get_or_insert(key, sc, || scale_nn(&sprite_supervisor(phase, frame), sc))
 }
 
 fn cached_plant(sc: u32) -> Arc<RgbaImage> {
-    cache_get_or_insert(0xF1u64 << 56 | sc as u64, || {
-        scale_nn(&sprite_plant(), sc.max(1))
+    let sc = sc.max(1);
+    cache_get_or_insert(0xF1u64 << 56 | sc as u64, sc, || {
+        scale_nn(&sprite_plant(), sc)
     })
 }
 
 fn cached_coffee(sc: u32) -> Arc<RgbaImage> {
-    cache_get_or_insert(0xC0u64 << 56 | sc as u64, || {
-        scale_nn(&sprite_coffee(), sc.max(1))
+    let sc = sc.max(1);
+    cache_get_or_insert(0xC0u64 << 56 | sc as u64, sc, || {
+        scale_nn(&sprite_coffee(), sc)
     })
 }
 
@@ -324,9 +440,13 @@ pub fn compose_cell_frame_into(
     let _ = image::imageops::replace(canvas, bg_scaled, 0, 0);
     let (w, h) = canvas.dimensions();
     let frame = ((tick / 4) % 4) as u8;
-    let sc = desk_scale(w);
-    let walk_sc = ((w as f32 * 0.05) / 14.0).max(1.0).round().min(5.0) as u32;
-    let prop_sc = sc.max(1).min(3);
+    let sc = desk_scale(w).max(1);
+    let walk_sc = (((w as f32 * 0.05) / 14.0).max(1.0).round().min(5.0) as u32).max(1);
+    let prop_sc = sc.min(3);
+    let sup_sc = (((w as f32 * 0.072) / 26.0).max(1.0).round().min(5.0) as u32).max(1);
+    // RC16 P8: retire sprites rasterised for a previous stage size before this
+    // pass touches the cache, so a resize cannot push the live set over the cap.
+    sprite_cache_begin_pass([sc, walk_sc, prop_sc, sup_sc]);
 
     // Ambient props (plants / coffee) near room edges — cached static sprites.
     {
@@ -379,8 +499,7 @@ pub fn compose_cell_frame_into(
         } else {
             frame
         };
-        let ssc = ((w as f32 * 0.072) / 26.0).max(1.0).round().min(5.0) as u32;
-        let spr = cached_supervisor(phase, sup_frame, ssc.max(1));
+        let spr = cached_supervisor(phase, sup_frame, sup_sc);
         blit(
             canvas,
             spr.as_ref(),
@@ -578,6 +697,142 @@ mod tests {
             let p = walk_position(ActorPhase::Handoff, t, cx, cy, w, h);
             assert_eq!((p.0 as i32, p.1 as i32), (sup_x as i32, sup_y as i32));
         }
+    }
+
+    /// Cheap synthetic cache entry — the eviction tests only care about keys.
+    fn junk(i: u64, scale: u32) -> Arc<RgbaImage> {
+        cache_get_or_insert((0xFFu64 << 56) | i, scale, || RgbaImage::new(1, 1))
+    }
+
+    /// P8(a): frames that render identical art must share one entry. The walk
+    /// sprite only has two limb poses, so frame 0 and frame 2 are the same
+    /// picture — keying on the raw frame stored it twice.
+    #[test]
+    fn equivalent_frames_share_one_cache_entry() {
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1]);
+
+        let walk0 = cached_walk(0, 0, false, 1);
+        let walk2 = cached_walk(0, 2, false, 1);
+        assert_eq!(sprite_cache_len(), 1, "walk 0/2 are the same pose");
+        assert!(Arc::ptr_eq(&walk0, &walk2));
+        let walk1 = cached_walk(0, 1, false, 1);
+        assert_eq!(sprite_cache_len(), 2, "walk 1 is the other pose");
+        assert!(!Arc::ptr_eq(&walk0, &walk1));
+
+        // Idle developers only alternate the thought bubble at `frame % 4 < 2`.
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1]);
+        let idle: Vec<_> = (0..4u8)
+            .map(|f| cached_dev_at_desk(0, false, f, 1))
+            .collect();
+        assert_eq!(sprite_cache_len(), 2, "idle dev has 2 poses, not 4");
+        assert!(Arc::ptr_eq(&idle[0], &idle[1]));
+        assert!(Arc::ptr_eq(&idle[2], &idle[3]));
+
+        // Idle/waiting supervisors only alternate the coffee steam.
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1]);
+        for f in 0..4u8 {
+            cached_supervisor(0, f, 1);
+        }
+        assert_eq!(sprite_cache_len(), 2, "idle supervisor has 2 steam frames");
+
+        // Typing developers really do animate on all four frames.
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1]);
+        for f in 0..4u8 {
+            cached_dev_at_desk(0, true, f, 1);
+        }
+        assert_eq!(sprite_cache_len(), 4, "typing dev must not collapse");
+    }
+
+    /// P8(b): eviction must not destroy the working set. The old cache called
+    /// `clear()` at 128 entries, so a sprite the current frame was still
+    /// blitting vanished mid-pass and had to be rebuilt immediately.
+    #[test]
+    fn overflow_keeps_sprites_the_current_pass_is_using() {
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1]);
+        let keep = cached_empty_desk(1);
+        for i in 0..(SPRITE_CACHE_CAP as u64 * 2) {
+            junk(i, 1);
+            assert!(
+                Arc::ptr_eq(&keep, &cached_empty_desk(1)),
+                "in-use sprite was evicted after {i} overflow inserts"
+            );
+        }
+    }
+
+    /// P8(c): a resize retires the previous stage's scale wholesale.
+    #[test]
+    fn scale_change_drops_stale_scale_entries() {
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1]);
+        let small = cached_empty_desk(1);
+        cached_plant(1);
+        assert_eq!(sprite_cache_len(), 2);
+
+        sprite_cache_begin_pass([2, 2, 2, 2]);
+        assert_eq!(sprite_cache_len(), 0, "old scale is garbage after a resize");
+        let big = cached_empty_desk(2);
+        assert!(!Arc::ptr_eq(&small, &big));
+
+        // A pass that still uses a scale keeps that scale's entries.
+        sprite_cache_begin_pass([2, 3, 3, 3]);
+        assert!(sprite_cache_has_scale(2), "scale 2 is still live");
+        cached_plant(3);
+        sprite_cache_begin_pass([2, 3, 3, 3]);
+        assert_eq!(
+            sprite_cache_len(),
+            2,
+            "an unchanged scale set evicts nothing"
+        );
+    }
+
+    /// P8(d): churn across scales and keys stays bounded.
+    #[test]
+    fn cache_never_grows_past_the_cap() {
+        sprite_cache_reset();
+        for scale in 1..=5u32 {
+            sprite_cache_begin_pass([scale, scale, scale, scale]);
+            for i in 0..(SPRITE_CACHE_CAP as u64 * 2) {
+                junk(i, scale);
+                assert!(sprite_cache_len() <= SPRITE_CACHE_CAP);
+            }
+        }
+    }
+
+    /// The number the cap is budgeted against: every sprite the office can ask
+    /// for at one stage size. Raise [`SPRITE_CACHE_CAP`] before adding sprites
+    /// that push this past half the cap.
+    #[test]
+    fn worst_case_working_set_per_scale() {
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1]);
+        // frame is `(tick / 4) % 4`, so 0..4 is the whole reachable domain.
+        for skin in 0..6u8 {
+            for frame in 0..4u8 {
+                cached_dev_at_desk(skin, true, frame, 1);
+                cached_dev_at_desk(skin, false, frame, 1);
+                cached_walk(skin, frame, true, 1);
+                cached_walk(skin, frame, false, 1);
+            }
+        }
+        for phase in 0..3u8 {
+            for frame in 0..4u8 {
+                cached_supervisor(phase, frame, 1);
+            }
+        }
+        cached_empty_desk(1);
+        cached_plant(1);
+        cached_coffee(1);
+        // 36 seated devs + 24 walkers + 9 supervisors + 3 statics.
+        assert_eq!(sprite_cache_len(), 72);
+        assert!(
+            sprite_cache_len() * 2 <= SPRITE_CACHE_CAP,
+            "cap must hold two scale-sets across a resize"
+        );
     }
 
     #[test]

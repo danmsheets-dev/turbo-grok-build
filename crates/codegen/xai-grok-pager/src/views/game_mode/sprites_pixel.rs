@@ -352,6 +352,25 @@ pub fn sprite_empty_desk() -> RgbaImage {
     img
 }
 
+/// Canonical `frame` for [`sprite_developer_at_desk`] (RC16 P8).
+///
+/// Two frames with the same key render byte-identical images, so the compose
+/// sprite cache keys on this instead of the raw frame and stores no duplicates.
+/// Declared here so it cannot drift from the sprite body:
+/// - typing reads `frame % 2` (keys, mouse, arms, slim monitor) and forwards
+///   `frame` to [`sprite_square_monitor`], which reads `% 4` — period **4**;
+/// - idle pins the monitor to frame 0 and only reads `frame % 4 < 2` — **2**
+///   distinct poses, so odd frames collapse onto their even neighbour.
+pub fn dev_at_desk_frame_key(typing: bool, frame: u8) -> u8 {
+    if typing {
+        frame % 4
+    } else if frame % 4 < 2 {
+        0
+    } else {
+        2
+    }
+}
+
 /// Developer at desk: detailed figure, animated typing, active monitor.
 pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(36, 32, Rgba(CLEAR));
@@ -477,6 +496,12 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
     img
 }
 
+/// Canonical `frame` for [`sprite_developer_walk`] (RC16 P8) — the limb swap is
+/// the only frame-dependent art, so the period is **2**.
+pub fn walk_frame_key(frame: u8) -> u8 {
+    frame % 2
+}
+
 /// Developer walking (optionally carrying a packet).
 pub fn sprite_developer_walk(pal: DevPalette, frame: u8, with_packet: bool) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(16, 24, Rgba(CLEAR));
@@ -510,6 +535,18 @@ pub fn sprite_developer_walk(pal: DevPalette, frame: u8, with_packet: bool) -> R
         blit_local(&mut img, &packet, 10, 10);
     }
     img
+}
+
+/// Canonical `frame` for [`sprite_supervisor`] (RC16 P8), per phase:
+/// - **1** (working) scrolls code at `% 3` and bobs the hands at `% 2` — period 6;
+/// - **2** (reviewing) only scrolls code — period 3;
+/// - anything else (idle/waiting) only alternates the coffee steam — period 2.
+pub fn supervisor_frame_key(phase: u8, frame: u8) -> u8 {
+    match phase {
+        1 => frame % 6,
+        2 => frame % 3,
+        _ => frame % 2,
+    }
 }
 
 /// Supervisor: phase 0 idle, 1 working, 2 reviewing — boss gold accents + horns.
@@ -856,6 +893,92 @@ mod tests {
                 .filter(|(x, y)| img.get_pixel(*x, *y).0 == pal.skin)
                 .count();
             assert!(skin > 0, "frame {frame}: typing arm has no skin left");
+        }
+    }
+
+    /// RC16 P8: the compose sprite cache keys on the declared canonical frame,
+    /// so a key collision MUST mean pixel-identical art. Pin every declared
+    /// period against the real sprite bodies so they cannot drift apart.
+    #[test]
+    fn frame_keys_only_collide_on_identical_art() {
+        let pal = DevPalette::by_index(3);
+        for frame in 0..24u8 {
+            for typing in [true, false] {
+                let key = dev_at_desk_frame_key(typing, frame);
+                assert_eq!(
+                    sprite_developer_at_desk(pal, typing, frame).into_raw(),
+                    sprite_developer_at_desk(pal, typing, key).into_raw(),
+                    "dev_at_desk typing={typing} frame={frame} != key={key}"
+                );
+            }
+            for with_packet in [true, false] {
+                let key = walk_frame_key(frame);
+                assert_eq!(
+                    sprite_developer_walk(pal, frame, with_packet).into_raw(),
+                    sprite_developer_walk(pal, key, with_packet).into_raw(),
+                    "walk packet={with_packet} frame={frame} != key={key}"
+                );
+            }
+            for phase in 0..4u8 {
+                let key = supervisor_frame_key(phase, frame);
+                assert_eq!(
+                    sprite_supervisor(phase, frame).into_raw(),
+                    sprite_supervisor(phase, key).into_raw(),
+                    "supervisor phase={phase} frame={frame} != key={key}"
+                );
+            }
+        }
+    }
+
+    /// The other half of the contract: a period that is too *coarse* would
+    /// silently freeze an animation. Every declared key value must render art
+    /// that differs from at least one sibling key.
+    #[test]
+    fn frame_keys_are_not_coarser_than_the_animation() {
+        let pal = DevPalette::by_index(0);
+        let distinct = |imgs: Vec<Vec<u8>>| -> usize {
+            imgs.into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        };
+        assert_eq!(
+            distinct(
+                (0..4u8)
+                    .map(|f| sprite_developer_at_desk(pal, true, f).into_raw())
+                    .collect()
+            ),
+            4,
+            "typing dev must have 4 distinct frames"
+        );
+        assert_eq!(
+            distinct(
+                [0u8, 2]
+                    .iter()
+                    .map(|f| sprite_developer_at_desk(pal, false, *f).into_raw())
+                    .collect()
+            ),
+            2,
+            "idle dev must have 2 distinct poses"
+        );
+        assert_eq!(
+            distinct(
+                (0..2u8)
+                    .map(|f| sprite_developer_walk(pal, f, false).into_raw())
+                    .collect()
+            ),
+            2,
+            "walk must have 2 distinct frames"
+        );
+        for (phase, period) in [(0u8, 2u8), (1, 6), (2, 3)] {
+            assert_eq!(
+                distinct(
+                    (0..period)
+                        .map(|f| sprite_supervisor(phase, f).into_raw())
+                        .collect()
+                ),
+                usize::from(period),
+                "supervisor phase {phase} must have {period} distinct frames"
+            );
         }
     }
 
