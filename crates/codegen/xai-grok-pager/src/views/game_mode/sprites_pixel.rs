@@ -120,6 +120,11 @@ impl DevPalette {
 
 const CLEAR: [u8; 4] = [0, 0, 0, 0];
 const OUTLINE: [u8; 4] = [24, 28, 36, 255];
+/// Ceramic + brew of the desk mug (RC16 §4 #7). Shared by both idle poses of
+/// [`sprite_developer_at_desk`] so the mug does not change colour when it moves
+/// from the desktop to the developer's face.
+const MUG: [u8; 4] = [232, 236, 244, 255];
+const COFFEE: [u8; 4] = [96, 56, 36, 255];
 
 // Floor stamp helpers: runtime desk clears sample the office carpet; tests too.
 mod floor_stamp {
@@ -481,6 +486,11 @@ pub fn sprite_empty_desk() -> RgbaImage {
 ///   `frame` to [`sprite_square_monitor`], which reads `% 4` — period **4**;
 /// - idle pins the monitor to frame 0 and only reads `frame % 4 < 2` — **2**
 ///   distinct poses, so odd frames collapse onto their even neighbour.
+///
+/// RC16 §4 #7 gave the two idle poses their content (mug on the desk + thinking
+/// bubble, versus mug raised to the face for a sip) **without** widening the
+/// period: the sip reads the same `frame % 4 < 2` discriminator the bubble
+/// always did, so the coffee cycle costs zero additional cache keys.
 pub fn dev_at_desk_frame_key(typing: bool, frame: u8) -> u8 {
     if typing {
         frame % 4
@@ -586,6 +596,7 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
         px(&mut img, 8, 10, [180, 90, 90, 255]);
     }
     // arms to keyboard
+    let sipping = !typing && frame % 4 >= 2;
     if typing {
         let y = 16 + (frame % 2) as i32;
         // No outline at this thickness: `outline_rect` paints the top *and*
@@ -595,6 +606,20 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
         fill_rect(&mut img, 11, y, 6, 2, pal.skin);
         // sleeve
         fill_rect(&mut img, 10, y, 2, 2, pal.shirt);
+    } else if sipping {
+        // Coffee sip (RC16 §4 #7): the forearm folds up and the mug that sits on
+        // the desk in the other idle pose is at the face instead. Drawn after
+        // the head so it reads as being in front of it.
+        //
+        // `fill_rect`, not `filled_body`: a 1px outline around a 4px sprite is
+        // seven eighths of the sprite, and the mug came out as a dark smudge
+        // that read like a beard — the same trap as the typing arm (RC16 B6) and
+        // the fail pose's palms.
+        fill_rect(&mut img, 10, 15, 2, 3, pal.shirt); // sleeve
+        fill_rect(&mut img, 10, 12, 2, 3, pal.skin); // forearm
+        fill_rect(&mut img, 8, 8, 4, 4, MUG);
+        fill_rect(&mut img, 8, 8, 4, 1, COFFEE); // brew at the rim
+        px(&mut img, 12, 10, MUG); // handle
     } else {
         fill_rect(&mut img, 11, 17, 5, 2, pal.skin);
         fill_rect(&mut img, 10, 17, 2, 2, pal.shirt);
@@ -605,13 +630,21 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
     fill_rect(&mut img, 3, 26, 3, 2, OUTLINE);
     fill_rect(&mut img, 8, 26, 3, 2, OUTLINE);
 
-    // thinking bubble when not typing
-    if !typing && frame % 4 < 2 {
+    // Thinking bubble + the mug parked on the desk: the other half of the idle
+    // cycle from the sip above. Both hang off the same `frame % 4 < 2` test, so
+    // the mug is never in two places at once and the pose count stays at 2.
+    if !typing && !sipping {
         px(&mut img, 12, 2, [230, 230, 240, 255]);
         px(&mut img, 13, 1, [230, 230, 240, 255]);
         filled_body(&mut img, 14, 0, 5, 3, [240, 240, 248, 255]);
         px(&mut img, 15, 1, OUTLINE);
         px(&mut img, 17, 1, OUTLINE);
+        // Mug on the desktop, clear of the keyboard (y 19..) and the resting
+        // arm (which ends at x 15). Solid, for the same reason the raised mug
+        // above is.
+        fill_rect(&mut img, 17, 15, 3, 3, MUG);
+        fill_rect(&mut img, 17, 15, 3, 1, COFFEE); // brew seen from above
+        px(&mut img, 20, 16, MUG); // handle
     }
     img
 }
@@ -936,11 +969,16 @@ pub fn sprite_supervisor(phase: u8, frame: u8) -> RgbaImage {
             fill_rect(&mut img, 25, 14, 3, 3, [100, 56, 32, 255]);
             px(&mut img, 29, 15, [200, 200, 210, 255]);
             fill_rect(&mut img, 21, 14, 2, 2, skin);
-            // steam
+            // Steam. Two pixels wide, not one: this animation has been in the
+            // sprite since RC13 and nobody ever saw it, first because compose
+            // pinned the idle frame to 0 (RC16 §4 #7 un-pins it) and second
+            // because a 1px wisp cannot survive the Nearest downsample.
             if frame % 2 == 0 {
-                px(&mut img, 25, 11, [230, 230, 240, 200]);
+                fill_rect(&mut img, 25, 11, 2, 1, [230, 230, 240, 220]);
+                px(&mut img, 26, 10, [230, 230, 240, 170]);
             } else {
-                px(&mut img, 27, 10, [230, 230, 240, 180]);
+                fill_rect(&mut img, 26, 10, 2, 1, [230, 230, 240, 220]);
+                px(&mut img, 25, 11, [230, 230, 240, 170]);
             }
             // tiny desk plant
             fill_rect(&mut img, 30, 15, 2, 2, [64, 160, 80, 255]);

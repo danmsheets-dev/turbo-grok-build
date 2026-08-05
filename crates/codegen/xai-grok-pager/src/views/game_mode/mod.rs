@@ -203,8 +203,11 @@ pub fn supervisor_is_working(agent: &AgentView) -> bool {
 /// `tick_anim` keeps its own [`anim_tick_gate`] and still runs on every call.
 ///
 /// PERF: AppView keeps Game Mode on [`crate::app::app_view::TickDemand::Slow`]
-/// (~12 Hz) **only while the room can animate** ([`GameModeState::needs_animation_tick`]);
-/// a frozen office parks the loop entirely (RC16 PERF-1). Pixel recompose is
+/// (~12 Hz) **only while the room can animate** ([`GameModeState::needs_animation_tick`]).
+/// A frozen office drops to [`crate::app::app_view::TickDemand::Ambient`]
+/// (~0.33 Hz) for the coffee sip / steam / wall clock
+/// ([`GameModeState::needs_ambient_tick`], RC16 §4 #7), and to `None` outright
+/// once the pixel office is not on screen (RC16 PERF-1). Pixel recompose is
 /// fingerprint-gated; redraw is dirty-gated so frozen idle rooms do not force a
 /// full office paint every Slow tick.
 ///

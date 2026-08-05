@@ -248,11 +248,20 @@ impl DashboardReturn {
     }
 }
 /// Tick cadence demanded by the current view state — see
-/// [`AppView::tick_demand`]. Ordered: `None < Slow < Fast`.
+/// [`AppView::tick_demand`]. Ordered: `None < Ambient < Slow < Fast`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TickDemand {
     /// Nothing animates or polls: the event loop parks (zero wakeups).
     None,
+    /// Only *ambient* work is pending: an animation that runs at its own
+    /// multi-second cadence in a view that is otherwise frozen. Ticks at
+    /// [`AMBIENT_TICK_INTERVAL`], ~36× cheaper than [`Slow`](Self::Slow).
+    ///
+    /// Introduced for Game Mode's idle office (RC16 §4 #7 / #12): the coffee
+    /// sip, the Supervisor's steam and the wall clock have to advance in a room
+    /// [`TickDemand::None`] would park, but waking such a room 12×/second to
+    /// move a mug would undo RC16 PERF-1 outright.
+    Ambient,
     /// Only low-frequency work is pending (welcome logo shimmer at ~12fps,
     /// Game Mode office animations while the agent is otherwise idle, and the
     /// macOS Cmd link-hover poll): tick at [`SLOW_TICK_INTERVAL`].
@@ -264,6 +273,14 @@ pub enum TickDemand {
 /// `SHIMMER_FPS` so slow ticks sample every shimmer frame, and bounds the
 /// latency of the macOS Cmd link-hover underline.
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
+/// Tick cadence for [`TickDemand::Ambient`] (~0.33 Hz).
+///
+/// The wakeup budget for every animation that must run in an otherwise-parked
+/// view. Chosen against Game Mode's idle office: a coffee sip or a minute hand
+/// reads fine at a ~3 s beat, and 0.33 wakeups/sec is a rounding error next to
+/// the ~12/sec an open office cost before RC16 PERF-1. Must stay **longer** than
+/// `game_mode::state`'s own `AMBIENT_PERIOD` gate, or jitter halves the rate.
+pub const AMBIENT_TICK_INTERVAL: Duration = Duration::from_millis(3000);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
 const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(2);
@@ -6018,6 +6035,14 @@ impl AppView {
                     {
                         return TickDemand::Slow;
                     }
+                    // ...and a room with *only* ambient art left to move (the
+                    // coffee sip, the Supervisor's steam, the wall clock) wakes
+                    // at its own ~3 s cadence instead of parking (RC16 §4 #7 /
+                    // #12). Deliberately below `Slow`: this must never be the
+                    // reason the office animates at 12 Hz.
+                    if agent.game_mode.needs_ambient_tick() {
+                        return TickDemand::Ambient;
+                    }
                 } else if agent.tasks.needs_tick()
                     || agent.scrollback.needs_animation()
                     || !agent.session.state.is_idle()
@@ -7095,6 +7120,39 @@ pub(crate) mod tests {
             app.tick_demand(),
             TickDemand::Slow,
             "a running turn must wake the office (and stay off Fast)"
+        );
+    }
+
+    /// RC16 §4 #7 / #12: a frozen office that has actually painted the pixel
+    /// room still has ambient art to move (coffee sip, Supervisor steam, wall
+    /// clock hands), so it must wake — at [`AMBIENT_TICK_INTERVAL`], never at
+    /// the ~12 Hz Slow cadence PERF-1 exists to avoid.
+    #[test]
+    fn tick_demand_game_mode_ambient_is_slower_than_slow() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        app.agents.get_mut(&id).unwrap().game_mode.open = true;
+        crate::views::game_mode::sync_game_mode(app.agents.get_mut(&id).unwrap(), 100, 20);
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "an office that has never painted the pixel room parks outright"
+        );
+
+        // What `render::render_game_mode` publishes after a pixel paint.
+        app.agents.get_mut(&id).unwrap().game_mode.last_pixel_painted = true;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Ambient,
+            "a painted, frozen office animates at the ambient cadence"
+        );
+        assert!(
+            TickDemand::None < TickDemand::Ambient && TickDemand::Ambient < TickDemand::Slow,
+            "Ambient must order between parking and the Slow loop"
+        );
+        assert!(
+            AMBIENT_TICK_INTERVAL >= SLOW_TICK_INTERVAL * 8,
+            "the ambient wake must be an order of magnitude cheaper than Slow"
         );
     }
 

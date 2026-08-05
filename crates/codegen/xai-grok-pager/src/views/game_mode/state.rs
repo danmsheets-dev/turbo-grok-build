@@ -27,6 +27,20 @@ const HUD_REFRESH_TICKS: u64 = 12;
 /// [`GameModeState::rack_burst_active`]).
 const RACK_BURST: Duration = Duration::from_millis(1200);
 
+/// Minimum wall-clock gap between ambient animation steps (RC16 §4 #7 / #12).
+///
+/// The ambient step is what drives the two animations that only exist in a room
+/// nothing else is animating: the thinking developer's coffee sip (with the
+/// thinking bubble that rides the same sprite key) and the idle Supervisor's
+/// coffee steam. It also re-reads the wall clock for [`GameModeState::clock_hm`].
+///
+/// Deliberately **shorter** than [`crate::app::app_view::AMBIENT_TICK_INTERVAL`],
+/// the cadence the event loop wakes a parked office at. If the two were equal,
+/// scheduler jitter would leave `elapsed` a hair under the gate on most wakes
+/// and the animation would run at half the intended rate — exactly the 90 ms
+/// gate vs 83 ms tick failure RC16 BUG-2 documented.
+const AMBIENT_PERIOD: Duration = Duration::from_millis(2500);
+
 /// Snapshot of one subagent for the room (decoupled from pager types).
 #[derive(Debug, Clone)]
 pub struct DeskAgentSnapshot {
@@ -223,6 +237,24 @@ pub struct GameModeState {
     /// expiry edge in [`Self::tick_anim`]. See [`Self::rack_burst_active`] for
     /// the fingerprint and wakeup contract.
     pub(crate) rack_active_until: Option<Instant>,
+    /// Slow ambient animation step (RC16 §4 #7).
+    ///
+    /// Wall-clock driven, **not** derived from `tick`: an office the event loop
+    /// has parked only wakes at [`crate::app::app_view::AMBIENT_TICK_INTERVAL`],
+    /// so `tick` no longer advances at a fixed rate there and a `tick / N`
+    /// bucket would drift with the room's own business. Advanced by
+    /// [`Self::tick_anim`] once per [`AMBIENT_PERIOD`]; read by
+    /// [`Self::ambient_frame`].
+    pub(crate) ambient_step: u64,
+    /// When [`Self::ambient_step`] last advanced.
+    pub(crate) ambient_at: Instant,
+    /// Local wall clock, quantized to `(hour 0..24, ten-minute 0..6)`.
+    ///
+    /// The quantization *is* the fingerprint contract (RC16 §4 #12): the composed
+    /// hands are derived from this pair and nothing finer, so at most 6 clock
+    /// recomposes per hour are possible. Re-read on the ambient step, so it is at
+    /// most [`AMBIENT_PERIOD`] stale.
+    pub(crate) clock_hm: (u8, u8),
     /// Skin assignment counter.
     next_skin: u8,
     /// Full-res mockup (decoded once).
@@ -236,6 +268,15 @@ pub struct GameModeState {
     pub(crate) pixel_cell_h: u16,
     /// `pixel_scale()` captured when `pixel_bg_scaled` was last built.
     pub(crate) pixel_bg_scale: u32,
+    /// Hour tint band baked into `pixel_bg_scaled` (RC16 §4 #12).
+    ///
+    /// PERF: the day/night tint is applied **once, to the cached background**,
+    /// not per compose — a full-canvas blend on every fingerprint miss would
+    /// have cost an extra O(canvas) pass during every walk. Sprites are blitted
+    /// after, so they stay lit by their own monitors while the room's daylight
+    /// changes, and the floor stamps sample the tinted BG so they match.
+    /// A band change rebuilds the scaled BG exactly like a resize does.
+    pub(crate) pixel_bg_tint: u8,
     /// High-res composited frame (`cell * PIXEL_SCALE`).
     pub(crate) pixel_frame: Option<RgbaImage>,
     /// Terminal halfblock source (`cell_w × cell_h*2`) — downsampled once per
@@ -271,6 +312,13 @@ pub struct GameModeState {
     /// Last painted MCP rack rect (for hover hit-testing). Zero-size whenever
     /// the pixel office did not paint — the rack exists only there.
     pub last_mcp_rack: ratatui::layout::Rect,
+    /// Whether the last paint actually drew the **pixel** office.
+    ///
+    /// Set by `render::render_game_mode` beside `last_mcp_rack`. The ambient
+    /// animations (sip, steam, wall clock) are pixel-office art only, so this is
+    /// what keeps [`Self::needs_ambient_tick`] from waking a Compact card grid
+    /// or a Unicode fallback for animations it does not draw.
+    pub(crate) last_pixel_painted: bool,
     /// Supervisor tooltip data, refreshed by the sync path (overlay-only).
     pub supervisor_info: SupervisorSnapshot,
     /// MCP rack tooltip data, refreshed by the sync path (overlay-only).
@@ -322,12 +370,16 @@ impl GameModeState {
             overflow_count: 0,
             attention_until: None,
             rack_active_until: None,
+            ambient_step: 0,
+            ambient_at: Instant::now(),
+            clock_hm: local_clock_bucket(),
             next_skin: 0,
             pixel_bg_full: None,
             pixel_bg_scaled: None,
             pixel_cell_w: 0,
             pixel_cell_h: 0,
             pixel_bg_scale: 0,
+            pixel_bg_tint: 0,
             pixel_frame: None,
             pixel_paint: None,
             pixel_halfblock: None,
@@ -341,6 +393,7 @@ impl GameModeState {
             last_desks: [ratatui::layout::Rect::default(); 6],
             last_supervisor: ratatui::layout::Rect::default(),
             last_mcp_rack: ratatui::layout::Rect::default(),
+            last_pixel_painted: false,
             supervisor_info: SupervisorSnapshot::default(),
             mcp_info: McpRackSnapshot::default(),
             mcp_fetch_dispatched: false,
@@ -522,7 +575,12 @@ impl GameModeState {
     ///
     /// PERF INVARIANTS (RC13):
     /// 1. Pure `tick_anim` while all desks are empty/thinking and the supervisor
-    ///    is Idle/Waiting must keep `pixel_frame_fp` stable (no recompose).
+    ///    is Idle/Waiting must keep `pixel_frame_fp` stable (no recompose)
+    ///    **within one [`AMBIENT_PERIOD`]**. RC16 §4 #7 relaxes the RC13
+    ///    invariant by exactly that much and no more: an idle room recomposes on
+    ///    the slow ambient step edge (~0.4 Hz), never on the ~12 Hz tick, and the
+    ///    `tick / 4` sprite bucket stays frozen — the ambient art rides
+    ///    [`Self::ambient_step`], a separate wall-clock counter.
     /// 2. `hover` / `hover_screen` / `supervisor_info` are **excluded** — focus
     ///    ring + hover card are painted as buffer overlays after halfblock
     ///    paint, so neither the hovered target nor the live model/turn/context
@@ -547,6 +605,16 @@ impl GameModeState {
         // construction — a deadline compared against `now` can only ever be
         // on or off, so this cannot force a recompose per tick.
         self.rack_burst_active().hash(&mut h);
+        // Wall clock hands + the day/night tint band both derive from this pair
+        // and nothing finer, so the clock costs at most 6 recomposes/hour.
+        self.clock_hm.hash(&mut h);
+        // Slow ambient bucket (~ one step per AMBIENT_PERIOD) only when a
+        // composed sprite reads it — see [`Self::ambient_is_visible`].
+        if self.ambient_is_visible() {
+            self.ambient_step.hash(&mut h);
+        } else {
+            0u64.hash(&mut h);
+        }
         // Coarse sprite frame bucket (~ tick÷4) only when compose samples it.
         if self.pixel_needs_tick_frame() {
             (self.tick / 4).hash(&mut h);
@@ -598,11 +666,15 @@ impl GameModeState {
             }
         }
 
-        // Rescale BG only when terminal cell size or pixel_scale asset factor changes.
+        // Rescale BG only when terminal cell size, pixel_scale asset factor, or
+        // the day/night tint band changes (RC16 §4 #12 — the tint is baked into
+        // the cached BG, see `pixel_bg_tint`).
         let scale = super::sprites_pixel::effective_pixel_scale(cell_w, cell_h).max(1);
+        let tint = super::compose::hour_tint_band(self.clock_hm.0);
         if self.pixel_cell_w != cell_w
             || self.pixel_cell_h != cell_h
             || self.pixel_bg_scale != scale
+            || self.pixel_bg_tint != tint
             || self.pixel_bg_scaled.is_none()
         {
             let Some(full) = self.pixel_bg_full.as_ref() else {
@@ -610,11 +682,14 @@ impl GameModeState {
             };
             // Temporarily pin scale for this compose via thread-local? scale_bg uses
             // pixel_scale() — ensure effective scale is applied by sprites_pixel helper.
-            self.pixel_bg_scaled =
-                Some(super::compose::scale_bg_to_cells_with_scale(full, cell_w, cell_h, scale));
+            let mut scaled =
+                super::compose::scale_bg_to_cells_with_scale(full, cell_w, cell_h, scale);
+            super::compose::apply_hour_tint(&mut scaled, tint);
+            self.pixel_bg_scaled = Some(scaled);
             self.pixel_cell_w = cell_w;
             self.pixel_cell_h = cell_h;
             self.pixel_bg_scale = scale;
+            self.pixel_bg_tint = tint;
             self.pixel_paint = None;
             self.pixel_halfblock = None;
         }
@@ -672,9 +747,17 @@ impl GameModeState {
             // is the user asking to look at the room again, and the cheapest
             // retry for a fetch that previously failed.
             self.mcp_fetch_dispatched = false;
+            // The office was not ticking while hidden, so the wall clock is as
+            // stale as the time it spent closed — re-read it before the first
+            // paint rather than showing the old hands for one AMBIENT_PERIOD.
+            self.clock_hm = local_clock_bucket();
+            self.ambient_at = Instant::now();
             self.mark_redraw_dirty();
         } else {
-            // PERF (RC16 PERF-7): a hidden office must impose no standing cost.
+            // PERF (RC16 PERF-7): a hidden office must impose no standing cost,
+            // and a hidden office is not painting the pixel art the ambient wake
+            // exists for (see [`Self::needs_ambient_tick`]).
+            self.last_pixel_painted = false;
             self.release_pixel_memory();
         }
     }
@@ -764,6 +847,63 @@ impl GameModeState {
     /// calls actually happen.
     pub(crate) fn rack_burst_active(&self) -> bool {
         self.rack_active_until.is_some_and(|t| t > Instant::now())
+    }
+
+    /// Slow ambient sprite frame: flips 0↔1 once per [`AMBIENT_PERIOD`].
+    ///
+    /// Fed to the two sprites the office pins to frame 0 today — the idle/waiting
+    /// Supervisor (which reads `frame % 2` for its coffee steam) and the
+    /// non-typing developer (which reads `frame % 4 < 2` for the thinking bubble
+    /// and, now, the coffee sip). Compose doubles it for the developer so it
+    /// lands on the two canonical keys [`super::sprites_pixel::dev_at_desk_frame_key`]
+    /// already declares — **zero new cache keys**.
+    pub(crate) fn ambient_frame(&self) -> u8 {
+        (self.ambient_step % 2) as u8
+    }
+
+    /// Whether any composed sprite actually reads [`Self::ambient_frame`].
+    ///
+    /// Mirrors [`Self::pixel_needs_tick_frame`]'s job for the slow bucket: the
+    /// step is hashed into [`Self::visual_fingerprint`] only when it is visible,
+    /// so a fully busy room (Working supervisor, every desk typing) does not pay
+    /// an extra recompose every [`AMBIENT_PERIOD`] for pixels nothing draws.
+    fn ambient_is_visible(&self) -> bool {
+        if matches!(
+            self.supervisor,
+            SupervisorPhase::Idle | SupervisorPhase::Waiting
+        ) {
+            return true;
+        }
+        self.desks
+            .iter()
+            .any(|d| d.is_occupied() && matches!(d.phase, ActorPhase::AtDeskThinking))
+    }
+
+    /// Whether a room that has nothing else to animate still needs slow ticks.
+    ///
+    /// RULE 3 (RC16 §4 #7 / #12): [`Self::needs_animation_tick`] parks the event
+    /// loop, so an ambient animation that only satisfied the fingerprint would
+    /// still freeze — the ticks that advance it would never happen. This is the
+    /// wake path, and `AppView::tick_demand` maps it to
+    /// [`crate::app::app_view::TickDemand::Ambient`], **not** `Slow`.
+    ///
+    /// WAKEUP BUDGET: **~0.33 wakeups/sec** (one per
+    /// [`crate::app::app_view::AMBIENT_TICK_INTERVAL`] = 3 s) for as long as the
+    /// pixel office is on screen. That is the whole standing cost of relaxing the
+    /// RC13 idle-freeze: 36× cheaper than the ~12/sec an open office cost before
+    /// RC16 PERF-1, and it buys three animations that were shipped-but-dead (the
+    /// Supervisor's idle coffee steam, the thinking bubble blink) or impossible
+    /// (a real wall clock). Each wake costs one `AppView::tick` body, whose
+    /// Game Mode sync is itself skip-gated (RC16 PERF-2/3), plus one recompose
+    /// when the ambient step is visible.
+    ///
+    /// Gated on the last paint really having drawn the pixel office: Compact is a
+    /// card grid and the Unicode fallback draws none of this art, so waking
+    /// either of them would buy nothing. A never-painted office also parks —
+    /// opening one marks redraw dirty, which is the wake that produces the first
+    /// paint.
+    pub fn needs_ambient_tick(&self) -> bool {
+        self.pixel_mode && self.last_pixel_painted
     }
 
     /// Whether the room can be left alone when the subagent data is unchanged.
@@ -1047,6 +1187,7 @@ impl GameModeState {
         self.pixel_cell_w = 0;
         self.pixel_cell_h = 0;
         self.pixel_bg_scale = 0;
+        self.pixel_bg_tint = 0;
     }
 
     fn begin_success_finish(&mut self, desk: usize, tier: GameTier) {
@@ -1152,6 +1293,24 @@ impl GameModeState {
         if self.rack_active_until.is_some_and(|t| t <= Instant::now()) {
             self.rack_active_until = None;
             self.mark_redraw_dirty();
+        }
+        // Slow ambient step (RC16 §4 #7 / #12). Wall-clock gated, so it runs at
+        // the same rate whether the room is awake at ~12 Hz for its own reasons
+        // or parked on the ambient wake — and it re-reads the clock at the only
+        // cadence [`Self::clock_hm`]'s quantization can distinguish anyway.
+        //
+        // Dirty is marked only when composed pixels can actually differ: the
+        // sip / steam frame when something draws it, the clock when its bucket
+        // moved. A fully busy office therefore pays nothing for this.
+        if self.ambient_at.elapsed() >= AMBIENT_PERIOD {
+            self.ambient_at = Instant::now();
+            self.ambient_step = self.ambient_step.wrapping_add(1);
+            let clock = local_clock_bucket();
+            let clock_moved = clock != self.clock_hm;
+            self.clock_hm = clock;
+            if self.ambient_is_visible() || clock_moved {
+                self.mark_redraw_dirty();
+            }
         }
         let tick_before = self.tick;
         let needs_frames = self.pixel_needs_tick_frame();
@@ -1382,6 +1541,22 @@ fn phase_anim_t_is_visible(phase: ActorPhase) -> bool {
             | ActorPhase::Handoff
             | ActorPhase::Celebrate
     )
+}
+
+/// Local wall clock as `(hour 0..24, ten-minute 0..6)` (RC16 §4 #12).
+///
+/// `chrono` is already a dependency of this crate (`acp::tracker` reads
+/// `Local::now()`), so the real local time costs no new dependency — and `std`
+/// alone cannot do it: `SystemTime` is UTC and carries no zone offset, which
+/// would put the office clock and the day/night tint hours off for most users.
+///
+/// The ten-minute quantization is the whole perf contract: it is what the
+/// fingerprint hashes and what the composed hands are drawn from, so the clock
+/// can force at most 6 recomposes per hour.
+fn local_clock_bucket() -> (u8, u8) {
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    ((now.hour() % 24) as u8, (now.minute() / 10) as u8)
 }
 
 /// Case-insensitive `contains("think")` over the live activity label.
@@ -1768,11 +1943,118 @@ mod tests {
             fp0,
             "supervisor hover + tooltip snapshot must not dirty pixel fingerprint"
         );
+
+        // RC16 §4 #7 relaxes this by exactly one input and no more: the slow
+        // ambient step. The ~12 Hz tick bucket above is still frozen — 40 ticks
+        // changed nothing — and only the ambient step moves the frame.
+        s.ambient_step = s.ambient_step.wrapping_add(1);
+        let fp_sip = s.visual_fingerprint(80, 24);
+        assert_ne!(fp_sip, fp0, "the ambient step must reach the idle office");
+        s.tick = s.tick.wrapping_add(40);
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            fp_sip,
+            "…and within one ambient step the office must still be frozen"
+        );
+
+        // The wall clock is the other new input, at ≤6 buckets/hour.
+        s.clock_hm = (s.clock_hm.0.wrapping_add(1) % 24, s.clock_hm.1);
+        assert_ne!(
+            s.visual_fingerprint(80, 24),
+            fp_sip,
+            "the hour must move the hands (and the day/night tint)"
+        );
     }
 
-    /// RC16 PERF-1: a synced, frozen room must not ask for ticks — that is what
-    /// lets `AppView::tick_demand` park the loop at `None` while the office is
-    /// open. A fresh (never-synced) room always does.
+    /// The ambient step is the *only* relaxation, and a room whose composed art
+    /// does not read it must not pay for it — a fully busy office already
+    /// recomposes on every `tick / 4` bucket and gains nothing from a second
+    /// clock ticking underneath it.
+    #[test]
+    fn busy_room_does_not_hash_the_ambient_step() {
+        let mut s = GameModeState::new();
+        s.supervisor = SupervisorPhase::Working;
+        s.desks[0].child_session_id = Some("w".into());
+        s.desks[0].phase = ActorPhase::AtDeskWorking;
+        // Pin the clock so this cannot straddle a ten-minute bucket edge.
+        s.clock_hm = (10, 3);
+        let fp0 = s.visual_fingerprint(80, 24);
+        s.ambient_step = s.ambient_step.wrapping_add(1);
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            fp0,
+            "no composed sprite reads the ambient step here"
+        );
+
+        // ...but a single thinking desk brings it back, because that desk's
+        // sprite is drawn from it.
+        s.desks[1].child_session_id = Some("t".into());
+        s.desks[1].phase = ActorPhase::AtDeskThinking;
+        let fp1 = s.visual_fingerprint(80, 24);
+        s.ambient_step = s.ambient_step.wrapping_add(1);
+        assert_ne!(
+            s.visual_fingerprint(80, 24),
+            fp1,
+            "a thinking desk sips coffee even while the boss works"
+        );
+    }
+
+    /// RC16 §4 #7 / #12: the ambient step is wall-clock gated, **not** derived
+    /// from `tick`. A parked office only wakes every `AMBIENT_TICK_INTERVAL`, so
+    /// a `tick / N` bucket would run at whatever rate the room happened to be
+    /// ticking at. This pins both halves: ticks alone never advance it, and one
+    /// elapsed period advances it exactly once.
+    #[test]
+    fn ambient_step_is_wall_clock_gated_not_tick_gated() {
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("t".into());
+        s.desks[0].phase = ActorPhase::AtDeskThinking;
+        let step0 = s.ambient_step;
+
+        for _ in 0..64 {
+            s.tick_anim(GameTier::Normal);
+        }
+        assert_eq!(
+            s.ambient_step, step0,
+            "64 back-to-back ticks are still inside one ambient period"
+        );
+
+        s.ambient_at = Instant::now() - AMBIENT_PERIOD;
+        s.tick_anim(GameTier::Normal);
+        assert_eq!(
+            s.ambient_step,
+            step0.wrapping_add(1),
+            "an elapsed period advances the step exactly once"
+        );
+        s.tick_anim(GameTier::Normal);
+        assert_eq!(
+            s.ambient_step,
+            step0.wrapping_add(1),
+            "and the gate re-arms — one step per period, not per tick"
+        );
+
+        // The gate must be shorter than the loop cadence that wakes a parked
+        // office, or jitter drops every other step (the RC16 BUG-2 shape).
+        assert!(
+            AMBIENT_PERIOD < crate::app::app_view::AMBIENT_TICK_INTERVAL,
+            "ambient gate must not be able to miss its own wake"
+        );
+        // ...and the whole point is that this is *slow*: an idle office must
+        // stay far under one recompose per second.
+        assert!(
+            AMBIENT_PERIOD >= Duration::from_millis(2500),
+            "an idle office must not recompose faster than ~0.4 Hz"
+        );
+    }
+
+    /// RC16 PERF-1: a synced, frozen room must not ask for **Slow** ticks — that
+    /// is what keeps `AppView::tick_demand` off the ~12 Hz loop while the office
+    /// is open. A fresh (never-synced) room always does.
+    ///
+    /// RC16 §4 #7 adds the second half of the contract: such a room is no longer
+    /// entirely still (coffee sip, steam, wall clock), so it asks for the much
+    /// slower `TickDemand::Ambient` instead — and only once the pixel office has
+    /// actually painted, since none of that art exists anywhere else.
     #[test]
     fn needs_animation_tick_false_for_frozen_room() {
         let mut s = GameModeState::new();
@@ -1786,6 +2068,36 @@ mod tests {
         assert!(
             !s.needs_animation_tick(),
             "empty room + idle supervisor must let the loop park"
+        );
+
+        // Never painted: nothing to animate, so not even ambient ticks.
+        assert!(
+            !s.needs_ambient_tick(),
+            "an office that has not painted the pixel room must park outright"
+        );
+        s.last_pixel_painted = true;
+        assert!(
+            s.needs_ambient_tick(),
+            "a painted, frozen pixel office animates — slowly"
+        );
+        assert!(
+            !s.needs_animation_tick(),
+            "…and must NOT be promoted back onto the ~12 Hz Slow tick for it"
+        );
+
+        // The Unicode fallback and Compact draw none of the ambient art.
+        s.pixel_mode = false;
+        assert!(
+            !s.needs_ambient_tick(),
+            "a Unicode office has no sip, no steam and no clock hands to move"
+        );
+        s.pixel_mode = true;
+        s.open = true;
+        s.toggle();
+        assert!(!s.open);
+        assert!(
+            !s.needs_ambient_tick(),
+            "closing the office must drop the ambient wake with the pixel buffers"
         );
     }
 
@@ -2125,14 +2437,56 @@ mod tests {
             "unicode fallback HUD must refresh too"
         );
 
-        // ...and the pixel office keeps its idle freeze (RC13 invariant).
+        // ...and the pixel office keeps its idle freeze (RC13 invariant), now
+        // bounded by the ambient period rather than by "forever": 24 ticks are
+        // ~2 s of Slow ticks, i.e. inside one AMBIENT_PERIOD.
         let mut p = GameModeState::new();
         p.desks[0].child_session_id = Some("t".into());
         p.desks[0].phase = ActorPhase::AtDeskThinking;
         assert_eq!(
             dirty_marks_over(&mut p, GameTier::Normal, HUD_REFRESH_TICKS * 2),
             0,
-            "thinking-only pixel office must not repaint at all"
+            "thinking-only pixel office must not repaint within an ambient period"
+        );
+
+        // On the ambient edge it repaints exactly once — the coffee sip — and
+        // then goes straight back to still.
+        p.ambient_at = Instant::now() - AMBIENT_PERIOD;
+        assert_eq!(
+            dirty_marks_over(&mut p, GameTier::Normal, HUD_REFRESH_TICKS * 2),
+            1,
+            "the ambient step must buy exactly one repaint, not a cadence change"
+        );
+    }
+
+    /// RC16 §4 #7 wakeup budget, stated as a test: an idle pixel office spends
+    /// one repaint per [`AMBIENT_PERIOD`] and nothing else. At the
+    /// `AMBIENT_TICK_INTERVAL` the loop actually wakes it at, that is ~0.33
+    /// repaints/sec — versus the ~12/sec an open office cost before RC16 PERF-1.
+    #[test]
+    fn idle_office_repaint_budget_is_one_per_ambient_period() {
+        let mut s = GameModeState::new();
+        s.supervisor = SupervisorPhase::Idle;
+        s.last_pixel_painted = true;
+        // Pin the clock so a ten-minute boundary cannot add a repaint.
+        s.clock_hm = (10, 3);
+        s.take_redraw_dirty();
+
+        let mut marks = 0;
+        for _ in 0..5 {
+            // One simulated ambient wake: the loop parked in between, so exactly
+            // one tick_anim runs per period.
+            s.ambient_at = Instant::now() - AMBIENT_PERIOD;
+            s.clock_hm = (10, 3);
+            s.tick_anim(GameTier::Normal);
+            if s.take_redraw_dirty() {
+                marks += 1;
+            }
+        }
+        assert_eq!(marks, 5, "each ambient wake repaints the room exactly once");
+        assert_eq!(
+            s.ambient_step, 5,
+            "…and advances the sip / steam exactly once"
         );
     }
 

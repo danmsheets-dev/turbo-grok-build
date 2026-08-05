@@ -81,6 +81,11 @@ pub fn render_game_mode(buf: &mut Buffer, area: Rect, state: &mut GameModeState)
     } else {
         Rect::default()
     };
+    // Same signal, for the ambient wake rather than for hit-testing: the coffee
+    // sip, the Supervisor's steam and the wall-clock hands are pixel-office art,
+    // so only a pixel paint earns the ~0.33 Hz tick that animates them (see
+    // `GameModeState::needs_ambient_tick`).
+    state.last_pixel_painted = pixel_painted;
 
     // Overlay-only chrome (never invalidates pixel_frame / scaled BG).
     paint_focus_ring_overlay(buf, &layout, state);
@@ -512,7 +517,7 @@ fn render_unicode_office(buf: &mut Buffer, layout: &GameLayout, state: &GameMode
     fill_stage_margins(buf, layout);
     paint_floor(buf, layout.content, layout.tier);
 
-    paint_wall_display(buf, layout.wall, state.wall, state.tick, layout);
+    paint_wall_display(buf, layout.wall, state.wall, state.tick, state.clock_hm, layout);
     paint_supervisor(buf, layout, state);
     paint_handoff_zone(buf, layout.handoff, state);
     for (i, desk_rect) in layout.desks.iter().enumerate() {
@@ -570,6 +575,7 @@ fn paint_wall_display(
     area: Rect,
     mode: WallMode,
     tick: u64,
+    clock_hm: (u8, u8),
     layout: &GameLayout,
 ) {
     if area.height == 0 || area.width == 0 {
@@ -599,7 +605,7 @@ fn paint_wall_display(
     }
 
     let title = mode.title();
-    let clock = format_clock(tick);
+    let clock = format_clock(clock_hm);
     let title_line = if layout.tier.uses_office_art() {
         format!("══ {title} ══")
     } else {
@@ -636,12 +642,17 @@ fn paint_wall_display(
     }
 }
 
-fn format_clock(tick: u64) -> String {
-    // Decorative session clock from tick (not wall clock — fine for vibe).
-    let secs = tick / 12; // ~15Hz → seconds-ish
-    let m = secs / 60;
-    let s = secs % 60;
-    format!("{m:02}:{s:02}")
+/// Wall-strip clock for the Unicode office — real local time (RC16 §4 #12).
+///
+/// It used to be a decorative `tick / 12` session timer, which RC16 BUG-2 ran at
+/// half speed and RC16 PERF-1 then froze outright whenever the room parked. Now
+/// it shows the same `(hour, ten-minute)` bucket the pixel office draws hands
+/// from, so the two offices agree and neither depends on the tick rate. Painted
+/// as a buffer overlay, so it refreshes with whatever repaints next — which for
+/// an idle office is the ambient step, ~every 3 s.
+fn format_clock(clock_hm: (u8, u8)) -> String {
+    let (h, tenmin) = clock_hm;
+    format!("{:02}:{:02}", h % 24, (tenmin.min(5)) * 10)
 }
 
 fn paint_supervisor(buf: &mut Buffer, layout: &GameLayout, state: &GameModeState) {
@@ -1315,5 +1326,18 @@ mod tests {
         assert_eq!(symbol_at(&buf, 0, 0), "日");
         assert_eq!(symbol_at(&buf, 2, 0), "a");
         assert_eq!(symbol_at(&buf, 3, 0), "b");
+    }
+
+    /// RC16 §4 #12: the Unicode office's wall clock now shows the same real
+    /// local time bucket the pixel office draws hands from. It used to be a
+    /// `tick / 12` session timer, which BUG-2 ran at half speed and PERF-1 then
+    /// froze outright — so it must no longer depend on `tick` at all.
+    #[test]
+    fn unicode_wall_clock_shows_the_real_ten_minute_bucket() {
+        assert_eq!(format_clock((0, 0)), "00:00");
+        assert_eq!(format_clock((9, 3)), "09:30");
+        assert_eq!(format_clock((23, 5)), "23:50");
+        // Out-of-range input is clamped, never panics or renders ":60".
+        assert_eq!(format_clock((24, 9)), "00:50");
     }
 }

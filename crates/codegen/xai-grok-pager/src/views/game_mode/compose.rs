@@ -94,6 +94,26 @@ const RACK_ANCHOR: (f32, f32) = (0.947, 0.318);
 const RACK_COVER_W_FRAC: f32 = 0.087;
 const RACK_COVER_H_FRAC: f32 = 0.283;
 
+/// Centre of the wall clock's face, as a fraction of the canvas.
+///
+/// Like [`RACK_ANCHOR`], this is the mockup's own prop: `office_bg.png` bakes a
+/// round wall clock — permanently reading 4 o'clock — above the boss's rug, its
+/// white face spanning x 684..738, y 135..183 of 1448×1086. RC16 §4 #12 makes it
+/// tell the time by wiping that face and drawing the hands from the local clock
+/// ([`super::state::GameModeState::clock_hm`]), so the room keeps exactly one
+/// clock and needs no new geometry.
+const CLOCK_ANCHOR: (f32, f32) = (0.491, 0.146);
+
+/// Size of the baked clock's white face, as fractions of the canvas.
+///
+/// Fractions of *each* axis, not a radius: the compose canvas is
+/// `cell_w*scale × cell_h*2*scale` and its aspect ratio does not match the
+/// mockup's, so the baked circle is already an ellipse by the time sprites land
+/// on it. Deriving both semi-axes from their own axis is what keeps the drawn
+/// hands inside the drawn bezel at every stage shape.
+const CLOCK_FACE_W_FRAC: f32 = 0.038;
+const CLOCK_FACE_H_FRAC: f32 = 0.045;
+
 /// Cell rect covering the composed supervisor — the pixel office's hover hit box.
 ///
 /// Derived from the same fractions the compose pass places the sprite with
@@ -603,6 +623,142 @@ fn paint_fx_handoff_papers(canvas: &mut RgbaImage, cx: i32, cy: i32, t: f32, w: 
     }
 }
 
+/// Day/night tints, indexed by [`hour_tint_band`]: `(rgb, blend percent)`.
+///
+/// Deliberately weak. The office art is already low-contrast at terminal
+/// resolution and a heavy wash turns the carpet to mud; the point is that the
+/// room *reads* different at 2am than at 2pm, not that it is hard to see.
+const HOUR_TINTS: [([u8; 3], i32); 4] = [
+    ([0, 0, 0], 0),          // 09–16 working day: untinted
+    ([255, 214, 170], 10),   // 05–08 dawn: pale warm
+    ([255, 160, 88], 14),    // 17–19 evening: low sun
+    ([80, 112, 190], 20),    // 20–04 night: cool moonlight
+];
+
+/// Which [`HOUR_TINTS`] band a local hour falls in (RC16 §4 #12).
+///
+/// A pure function of the hour, which
+/// [`super::state::GameModeState::visual_fingerprint`] already hashes as part of
+/// `clock_hm` — so the band needs no fingerprint input of its own and can change
+/// at most once an hour.
+pub(super) fn hour_tint_band(hour: u8) -> u8 {
+    match hour % 24 {
+        5..=8 => 1,
+        9..=16 => 0,
+        17..=19 => 2,
+        _ => 3,
+    }
+}
+
+/// Blend a day/night tint into an already-scaled office background, in place.
+///
+/// PERF: called from `GameModeState::ensure_pixel_frame` on the **background
+/// rebuild** path only — i.e. on a resize or an hour-band change, a handful of
+/// times a day — never per compose. A full-canvas blend on every fingerprint
+/// miss would have added an O(canvas) pass to every walk frame, which is exactly
+/// the cost RC16 PERF-4 already complains about.
+pub(super) fn apply_hour_tint(img: &mut RgbaImage, band: u8) {
+    let (tint, pct) = HOUR_TINTS[usize::from(band).min(HOUR_TINTS.len() - 1)];
+    if pct == 0 {
+        return;
+    }
+    for p in img.pixels_mut() {
+        for i in 0..3 {
+            let c = i32::from(p.0[i]);
+            p.0[i] = (c + (i32::from(tint[i]) - c) * pct / 100) as u8;
+        }
+    }
+}
+
+/// Hands on the mockup's baked wall clock, from the local time (RC16 §4 #12).
+///
+/// Procedural like [`paint_fx_confetti`] — **zero cache keys**. Caching a sprite
+/// per minute would have meant 288 entries (24 h × 6 ten-minute steps × idle/lit
+/// variants), well past [`SPRITE_CACHE_CAP`].
+///
+/// `tenmin` is the minute *bucket* (0..6), not the minute: the hands are derived
+/// from exactly the pair the fingerprint hashes, so a hand position that the
+/// fingerprint cannot distinguish cannot exist. The hour hand still creeps
+/// between hours because it reads the bucket too.
+///
+/// The baked face is wiped first — its painted hands reach ~94% of the face
+/// radius, so there is no way to erase them without also taking the numerals,
+/// and four quadrant ticks read better than numerals at a face this small.
+///
+/// SIZE NOTE: on the smallest stage the pixel office paints (72×18 cells → a
+/// 216×108 canvas) the whole face is ~8×5 px and the hands degrade to a
+/// direction smudge. That is inherent to the prop's size in the mockup, not to
+/// this drawing: hands thick enough to survive the Nearest downsample there
+/// would be wider than the face. It reads as a clock from ~120 cells up.
+fn paint_wall_clock(canvas: &mut RgbaImage, hour: u8, tenmin: u8, w: u32, h: u32) {
+    const FACE: [u8; 4] = [236, 241, 247, 255];
+    const TICK: [u8; 4] = [128, 152, 186, 255];
+    const HAND: [u8; 4] = [26, 28, 38, 255];
+
+    let (cw, ch) = canvas.dimensions();
+    let cx = w as f32 * CLOCK_ANCHOR.0;
+    let cy = h as f32 * CLOCK_ANCHOR.1;
+    let rx = (w as f32 * CLOCK_FACE_W_FRAC / 2.0).max(2.0);
+    let ry = (h as f32 * CLOCK_FACE_H_FRAC / 2.0).max(2.0);
+
+    let mut put = |x: f32, y: f32, size: i32, c: [u8; 4]| {
+        for dy in 0..size {
+            for dx in 0..size {
+                let sx = x as i32 + dx;
+                let sy = y as i32 + dy;
+                if sx < 0 || sy < 0 || sx as u32 >= cw || sy as u32 >= ch {
+                    continue;
+                }
+                canvas.put_pixel(sx as u32, sy as u32, image::Rgba(c));
+            }
+        }
+    };
+
+    // Wipe the baked hands + numerals off the face.
+    for dy in -(ry as i32)..=(ry as i32) {
+        for dx in -(rx as i32)..=(rx as i32) {
+            let nx = dx as f32 / rx;
+            let ny = dy as f32 / ry;
+            if nx * nx + ny * ny > 1.0 {
+                continue;
+            }
+            put(cx + dx as f32, cy + dy as f32, 1, FACE);
+        }
+    }
+
+    // FX thinner than the downsample factor can vanish entirely, so scale the
+    // stroke with the canvas the same way the papers / confetti quads do.
+    let thick = ((w as f32 * 0.006) as i32).clamp(2, 4);
+    // Quadrant ticks at 12 / 3 / 6 / 9.
+    for (tx, ty) in [(0.0, -0.82), (0.82, 0.0), (0.0, 0.82), (-0.82, 0.0)] {
+        put(
+            cx + tx * rx - thick as f32 / 2.0,
+            cy + ty * ry - thick as f32 / 2.0,
+            thick.min(2),
+            TICK,
+        );
+    }
+
+    let mut hand = |turns: f32, len: f32, size: i32| {
+        let a = turns * std::f32::consts::TAU;
+        let (dx, dy) = (a.sin(), -a.cos());
+        // Step in canvas pixels so the stroke is continuous on both axes.
+        let steps = (rx.max(ry) * len).ceil().max(1.0) as i32;
+        for s in 0..=steps {
+            let f = s as f32 / steps as f32 * len;
+            put(
+                cx + dx * rx * f - size as f32 / 2.0,
+                cy + dy * ry * f - size as f32 / 2.0,
+                size,
+                HAND,
+            );
+        }
+    };
+    let minutes = f32::from(tenmin.min(5)) * 10.0;
+    hand(minutes / 60.0, 0.82, thick.min(3));
+    hand((f32::from(hour % 12) + minutes / 60.0) / 12.0, 0.52, thick);
+}
+
 /// Door x in canvas pixels.
 fn door_x(w: u32) -> f32 {
     w as f32 * DOOR_X_FRAC
@@ -728,7 +884,9 @@ fn walk_position(phase: ActorPhase, anim_t: f32, cx: i32, cy: i32, w: u32, h: u3
 /// - Does **not** paint hover focus ring (buffer overlay in `render.rs`).
 /// - Does **not** paint status strip / hover popup (buffer overlays).
 /// - Ambient plant/coffee and character sprites come from the scaled cache.
-/// - Idle/Waiting supervisor uses frame 0 so pure-idle ticks can freeze.
+/// - Idle/Waiting supervisor and thinking desks stay off the `tick / 4` bucket
+///   so pure-idle ticks still freeze; they read the much slower
+///   `GameModeState::ambient_frame` instead (RC16 §4 #7).
 pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u64) -> RgbaImage {
     let mut canvas = RgbaImage::new(bg_scaled.width(), bg_scaled.height());
     compose_cell_frame_into(&mut canvas, bg_scaled, state, tick);
@@ -766,6 +924,10 @@ pub fn compose_cell_frame_into(
     // overlaps it at large prop scales instead of being erased by it; the rack
     // follows so the mug keeps its existing z-order in front of everything.
     {
+        // Wall clock first: it is the furthest-back prop (painted on the wall)
+        // and the supervisor stands in front of it at squat canvas aspects.
+        let (hour, tenmin) = state.clock_hm;
+        paint_wall_clock(canvas, hour, tenmin, w, h);
         let door = cached_door(door_is_open(state), prop_sc);
         blit(
             canvas,
@@ -828,12 +990,17 @@ pub fn compose_cell_frame_into(
             SupervisorPhase::Reviewing => 2,
             SupervisorPhase::Idle | SupervisorPhase::Waiting => 0,
         };
-        // Freeze idle/waiting pose so pure tick animation can skip recompose.
+        // The idle/waiting pose stays off the ~12 Hz `tick / 4` bucket — that is
+        // still the RC13 freeze — but it now rides the slow ambient step, so the
+        // coffee steam that has been in this sprite since RC13 and never once
+        // moved finally alternates (RC16 §4 #7). `supervisor_frame_key` reads
+        // `frame % 2` for phase 0, which is exactly the ambient frame's domain,
+        // so this adds no cache key.
         let sup_frame = if matches!(
             state.supervisor,
             SupervisorPhase::Idle | SupervisorPhase::Waiting
         ) {
-            0
+            state.ambient_frame()
         } else {
             frame
         };
@@ -956,7 +1123,13 @@ pub fn compose_cell_frame_into(
             }
             ActorPhase::AtDeskThinking => {
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
-                let spr = cached_dev_at_desk(desk.skin, false, 0, sc.max(1));
+                // Slow ambient frame, not the `tick / 4` bucket (RC16 §4 #7):
+                // doubling it lands on 0 / 2, the two canonical keys
+                // `dev_at_desk_frame_key` already collapses idle frames onto —
+                // mug-on-desk + thinking bubble, and mug-at-the-face sip. Zero
+                // new cache keys, and the bubble blink that RC13 froze is alive.
+                let spr =
+                    cached_dev_at_desk(desk.skin, false, state.ambient_frame() * 2, sc.max(1));
                 blit(
                     canvas,
                     spr.as_ref(),
@@ -1659,6 +1832,210 @@ mod tests {
         assert_eq!(sprite_cache_len(), 4, "the chase must not collapse");
     }
 
+    /// RC16 §4 #12: the hands must land on the mockup's own baked clock face —
+    /// the whole design is "make the existing prop tell the time", so a drifted
+    /// anchor would paint a second clock on bare wall. Checked as: the composed
+    /// frame differs from the background inside the face, the hands move with
+    /// the hour, and the face never reaches the Supervisor's floor stamp.
+    #[test]
+    fn wall_clock_lands_on_the_baked_face_and_clears_the_room() {
+        let full = load_office_background().expect("bg");
+
+        for (cw, ch) in [(72u16, 18u16), (80, 24), (120, 34), (200, 60), (240, 20)] {
+            let scale =
+                crate::views::game_mode::sprites_pixel::effective_pixel_scale(cw, ch).max(1);
+            let bg = scale_bg_to_cells_with_scale(&full, cw, ch, scale);
+            let (w, h) = bg.dimensions();
+            let (fw, fh) = (w as f32, h as f32);
+            let face = (
+                fw * CLOCK_ANCHOR.0 - fw * CLOCK_FACE_W_FRAC / 2.0,
+                fh * CLOCK_ANCHOR.1 - fh * CLOCK_FACE_H_FRAC / 2.0,
+                fw * CLOCK_FACE_W_FRAC,
+                fh * CLOCK_FACE_H_FRAC,
+            );
+            assert!(
+                face.0 >= 0.0 && face.1 >= 0.0 && face.0 + face.2 <= fw && face.1 + face.3 <= fh,
+                "{cw}×{ch}: clock face {face:?} left the canvas"
+            );
+
+            // The hands are drawn — and they move with the hour.
+            let mut three = GameModeState::new();
+            three.clock_hm = (3, 0);
+            let mut nine = GameModeState::new();
+            nine.clock_hm = (9, 0);
+            let f3 = compose_cell_frame(&bg, &three, 0);
+            let f9 = compose_cell_frame(&bg, &nine, 0);
+            let differing = |a: &RgbaImage, b: &RgbaImage| {
+                let mut n = 0usize;
+                for y in (face.1 as u32)..((face.1 + face.3) as u32).min(h) {
+                    for x in (face.0 as u32)..((face.0 + face.2) as u32).min(w) {
+                        if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            };
+            assert!(
+                differing(&bg, &f3) > 0,
+                "{cw}×{ch}: nothing was composed onto the clock face"
+            );
+            assert!(
+                differing(&f3, &f9) > 0,
+                "{cw}×{ch}: 03:00 and 09:00 must not draw the same hands"
+            );
+
+            // The face must clear the Supervisor's *cover* footprint — the rug
+            // and the floor stamp under it. That stamp is the only thing in the
+            // room that would erase wall pixels the clock is drawn on, and it
+            // must never reach the clock at any canvas shape.
+            //
+            // The Supervisor **sprite** is a different matter: it is a fixed
+            // 34×30 blitted at a width-derived scale, so on a very short canvas
+            // (a 240×20-cell stage is 720×120 px) the boss is half the room tall
+            // and stands in front of the wall clock. That is correct z-order —
+            // compose draws props before characters on purpose — and it is why
+            // this asserts on the footprint and not on the sprite.
+            let cover = (
+                fw * SUPERVISOR_ANCHOR.0 - fw * SUPERVISOR_COVER_W_FRAC / 2.0,
+                fh * SUPERVISOR_ANCHOR.1 - fh * SUPERVISOR_COVER_H_FRAC / 2.0,
+                fw * SUPERVISOR_COVER_W_FRAC,
+                fh * SUPERVISOR_COVER_H_FRAC,
+            );
+            assert!(
+                !rects_overlap(face, cover),
+                "{cw}×{ch}: clock face {face:?} is inside the boss rug {cover:?}"
+            );
+        }
+    }
+
+    /// The clock is procedural on purpose: a cached sprite per reachable minute
+    /// would be 24 × 6 = 144 keys, more than the entire current working set.
+    #[test]
+    fn wall_clock_costs_no_cache_keys() {
+        let full = load_office_background().expect("bg");
+        let bg = scale_bg_to_cells(&full, 80, 24);
+        sprite_cache_reset();
+        let mut s = GameModeState::new();
+        s.clock_hm = (0, 0);
+        let _ = compose_cell_frame(&bg, &s, 0);
+        let base = sprite_cache_len();
+        for hour in 0..24u8 {
+            for tenmin in 0..6u8 {
+                s.clock_hm = (hour, tenmin);
+                let _ = compose_cell_frame(&bg, &s, 0);
+            }
+        }
+        assert_eq!(
+            sprite_cache_len(),
+            base,
+            "every clock face must be procedural"
+        );
+    }
+
+    /// RC16 §4 #12: the tint bands must cover the whole day, the working day
+    /// must stay untinted (zero cost, and the office is read at its own colours
+    /// when people are actually looking at it), and the blend must stay in gamut.
+    #[test]
+    fn hour_tint_bands_cover_the_day_and_stay_in_gamut() {
+        for hour in 0..24u8 {
+            let band = hour_tint_band(hour);
+            assert!(usize::from(band) < HOUR_TINTS.len(), "hour {hour}");
+            assert_eq!(
+                band,
+                hour_tint_band(hour + 24),
+                "hour {hour}: band must wrap"
+            );
+        }
+        assert_eq!(hour_tint_band(12), 0, "midday is untinted");
+        assert_eq!(hour_tint_band(2), 3, "2am is night");
+        assert_eq!(hour_tint_band(18), 2, "6pm is evening");
+
+        // Band 0 is a true no-op — that is what makes the daytime office free.
+        let mut day = RgbaImage::from_pixel(4, 4, image::Rgba([61, 157, 157, 255]));
+        apply_hour_tint(&mut day, 0);
+        assert!(day.pixels().all(|p| p.0 == [61, 157, 157, 255]));
+
+        // Every other band shifts colour, keeps alpha, and never wraps a channel.
+        for band in 1..HOUR_TINTS.len() as u8 {
+            for base in [[0u8, 0, 0, 255], [255, 255, 255, 255], [61, 157, 157, 128]] {
+                let mut img = RgbaImage::from_pixel(2, 2, image::Rgba(base));
+                apply_hour_tint(&mut img, band);
+                let got = img.get_pixel(0, 0).0;
+                assert_ne!(got, base, "band {band} must tint {base:?}");
+                assert_eq!(got[3], base[3], "band {band} must not touch alpha");
+                let (tint, pct) = HOUR_TINTS[usize::from(band)];
+                for i in 0..3 {
+                    let lo = i32::from(base[i]).min(i32::from(tint[i]));
+                    let hi = i32::from(base[i]).max(i32::from(tint[i]));
+                    assert!(
+                        (lo..=hi).contains(&i32::from(got[i])),
+                        "band {band} ({pct}%) channel {i} left [{lo}, {hi}]: {got:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// RC16 §4 #7: the two ambient sprites must actually change between ambient
+    /// steps — and must do so **without** the `tick / 4` bucket moving, which is
+    /// the whole point (the idle office stays frozen at ~12 Hz and animates at
+    /// ~0.4 Hz instead).
+    #[test]
+    fn ambient_step_moves_the_sip_and_the_steam_at_a_frozen_tick() {
+        let full = load_office_background().expect("bg");
+        let bg = scale_bg_to_cells(&full, 120, 34);
+
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("t".into());
+        s.desks[0].phase = ActorPhase::AtDeskThinking;
+        s.supervisor = SupervisorPhase::Idle;
+
+        s.ambient_step = 0;
+        let a0 = compose_cell_frame(&bg, &s, 0);
+        s.ambient_step = 1;
+        let a1 = compose_cell_frame(&bg, &s, 0);
+        assert_ne!(
+            a0.as_raw(),
+            a1.as_raw(),
+            "the ambient step must move the sip / steam at tick 0"
+        );
+        s.ambient_step = 2;
+        let a2 = compose_cell_frame(&bg, &s, 0);
+        assert_eq!(
+            a0.as_raw(),
+            a2.as_raw(),
+            "the ambient cycle is two poses, so step 2 must return to step 0"
+        );
+    }
+
+    /// ...and it must cost nothing in the cache: the ambient frame is doubled
+    /// onto the two canonical idle keys `dev_at_desk_frame_key` already had, and
+    /// the supervisor's idle key domain is `frame % 2`.
+    #[test]
+    fn ambient_poses_reuse_the_existing_idle_cache_keys() {
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        for frame in 0..4u8 {
+            cached_dev_at_desk(0, false, frame, 1);
+            cached_supervisor(0, frame, 1);
+        }
+        let all_frames = sprite_cache_len();
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        for step in 0..8u64 {
+            let ambient = (step % 2) as u8;
+            cached_dev_at_desk(0, false, ambient * 2, 1);
+            cached_supervisor(0, ambient, 1);
+        }
+        assert_eq!(
+            sprite_cache_len(),
+            all_frames,
+            "the ambient frame must not reach outside the idle key domain"
+        );
+        assert_eq!(all_frames, 4, "2 idle dev poses + 2 idle supervisor poses");
+    }
+
     #[test]
     fn compose_cell_frame_matches_bg_size() {
         let full = load_office_background().unwrap();
@@ -1668,4 +2045,3 @@ mod tests {
         assert_eq!(frame.dimensions(), bg.dimensions());
     }
 }
-

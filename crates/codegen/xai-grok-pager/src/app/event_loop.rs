@@ -3136,6 +3136,11 @@ fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interval: Duratio
             crate::app::app_view::TickDemand::Slow => {
                 interval.max(crate::app::app_view::SLOW_TICK_INTERVAL)
             }
+            // Ambient animation only (Game Mode's idle office): several seconds
+            // between wakes, never the Slow loop.
+            crate::app::app_view::TickDemand::Ambient => {
+                interval.max(crate::app::app_view::AMBIENT_TICK_INTERVAL)
+            }
         };
         *tick_at = Some(Instant::now() + interval);
     }
