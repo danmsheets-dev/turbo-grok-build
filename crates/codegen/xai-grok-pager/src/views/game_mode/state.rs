@@ -169,6 +169,17 @@ pub struct GameModeState {
     redraw_dirty: bool,
     /// Last full snapshot+sync time (paint skips if recent — single sync owner).
     pub(crate) last_sync_at: Option<Instant>,
+    /// Signature of the subagent map + sync inputs behind the last rebuild.
+    ///
+    /// PERF (RC16 PERF-2): `None` forces the next sync to rebuild (open/toggle).
+    pub(crate) last_sync_sig: Option<u64>,
+    /// Desk phase signature as of the end of the last sync — reused as the
+    /// "before" value next sync so it is hashed once per sync, not twice.
+    pub(crate) last_phase_sig: Option<u64>,
+    /// Snapshot rebuilds actually performed (skips do not count).
+    ///
+    /// Observability for the RC16 PERF-2/PERF-3 gates; asserted by tests.
+    pub(crate) sync_rebuilds: u64,
 }
 
 impl Default for GameModeState {
@@ -212,6 +223,9 @@ impl GameModeState {
             attention_armed_ids: std::collections::HashSet::new(),
             redraw_dirty: false,
             last_sync_at: None,
+            last_sync_sig: None,
+            last_phase_sig: None,
+            sync_rebuilds: 0,
         }
     }
 
@@ -506,11 +520,18 @@ impl GameModeState {
         if self.open {
             self.last_tick = Instant::now();
             self.last_sync_at = None;
+            // Nothing was synced while hidden: force a full rebuild on reopen.
+            self.last_sync_sig = None;
+            self.last_phase_sig = None;
             self.mark_redraw_dirty();
         }
     }
 
     /// Whether a paint-side sync should run (tick already synced recently).
+    ///
+    /// A lower bound only: the rebuild itself is additionally gated by
+    /// `sync_gate` (RC16 PERF-3), so an early paint-side call may find nothing
+    /// to do and return without touching the room.
     pub fn needs_paint_sync(&self) -> bool {
         match self.last_sync_at {
             None => true,
@@ -551,6 +572,31 @@ impl GameModeState {
         // Seated desks animate (typing, walks, celebrate/fail beats) and own the
         // hover/focus ring — an empty room has neither.
         self.desks.iter().any(|d| d.is_occupied())
+    }
+
+    /// Whether the room can be left alone when the subagent data is unchanged.
+    ///
+    /// PERF (RC16 PERF-2): [`Self::sync_from_snapshots`] is a no-op for
+    /// byte-identical snapshots *only* while nothing in the room moves on its
+    /// own. In-flight sequences do move: `tick_anim` promotes walks and clears
+    /// desks between syncs, which frees seats for the door queue, retires the
+    /// handoff queue and re-derives the supervisor + wall. An armed attention
+    /// window likewise flips the wall back when it expires. Any of those means
+    /// the next sync must actually run.
+    pub(crate) fn room_is_settled(&self) -> bool {
+        if !self.handoff_queue.is_empty() || !self.door_queue.is_empty() {
+            return false;
+        }
+        if self.attention_until.is_some_and(|t| t > Instant::now()) {
+            return false;
+        }
+        self.desks.iter().all(|d| {
+            d.is_empty()
+                || matches!(
+                    d.phase,
+                    ActorPhase::AtDeskWorking | ActorPhase::AtDeskThinking
+                )
+        })
     }
 
     /// Sync seats from current subagent snapshots + whether main agent is streaming.
@@ -617,12 +663,21 @@ impl GameModeState {
                 continue;
             };
             if let Some(snap) = agents.iter().find(|a| a.child_session_id == sid) {
-                self.desks[i].label = snap.label.clone();
-                self.desks[i].subagent_type = snap.subagent_type.clone();
+                // PERF (RC16 PERF-2): compare before assigning — these three are
+                // byte-identical on almost every sync, and `clone_from` on a
+                // mismatch reuses the existing buffer instead of allocating.
+                if self.desks[i].label != snap.label {
+                    self.desks[i].label.clone_from(&snap.label);
+                }
+                if self.desks[i].subagent_type != snap.subagent_type {
+                    self.desks[i].subagent_type.clone_from(&snap.subagent_type);
+                }
+                if self.desks[i].activity != snap.activity {
+                    self.desks[i].activity.clone_from(&snap.activity);
+                }
                 self.desks[i].elapsed = snap.elapsed;
                 self.desks[i].tokens = snap.tokens;
                 self.desks[i].tool_calls = snap.tool_calls;
-                self.desks[i].activity = snap.activity.clone();
                 self.desks[i].failed = snap.failed;
 
                 if snap.running {
@@ -633,7 +688,7 @@ impl GameModeState {
                             | ActorPhase::AtDeskThinking
                             | ActorPhase::SpawnWalk
                     ) {
-                        let thinking = snap.activity.to_ascii_lowercase().contains("think");
+                        let thinking = activity_is_thinking(&snap.activity);
                         if !matches!(self.desks[i].phase, ActorPhase::SpawnWalk) {
                             self.desks[i].phase = if thinking {
                                 ActorPhase::AtDeskThinking
@@ -824,6 +879,17 @@ impl GameModeState {
     /// Marks redraw dirty when visual output may change (working desks, walks,
     /// focus pulse edge).
     pub fn tick_anim(&mut self, tier: GameTier) {
+        // Structural changes below (phase transitions, desk clears, handoff
+        // promotion) are inputs to `sync_from_snapshots`: they free seats, drain
+        // the handoff queue and re-derive the supervisor + wall. Invalidate the
+        // cached sync signatures so the next sync cannot be skipped (RC16
+        // PERF-2). A settled room only advances `anim_t`, which no sync input
+        // reads — and every structural branch here needs a phase or a queue
+        // entry that [`Self::room_is_settled`] already rejects.
+        if !self.room_is_settled() {
+            self.last_sync_sig = None;
+            self.last_phase_sig = None;
+        }
         let tick_before = self.tick;
         let needs_frames = self.pixel_needs_tick_frame();
         let had_focus = self.focus_desk().is_some();
@@ -959,6 +1025,17 @@ impl GameModeState {
     pub fn active_desk_count(&self) -> usize {
         self.desks.iter().filter(|d| d.is_occupied()).count()
     }
+}
+
+/// Case-insensitive `contains("think")` over the live activity label.
+///
+/// PERF (RC16 PERF-2): runs once per running desk per sync — the previous
+/// `to_ascii_lowercase().contains(..)` allocated a String each time.
+fn activity_is_thinking(activity: &str) -> bool {
+    activity
+        .as_bytes()
+        .windows(5)
+        .any(|w| w.eq_ignore_ascii_case(b"think"))
 }
 
 #[cfg(test)]
@@ -1151,6 +1228,52 @@ mod tests {
             dirty.needs_animation_tick(),
             "pending redraw must be flushed"
         );
+    }
+
+    /// PERF-2: the allocation-free replacement for
+    /// `to_ascii_lowercase().contains("think")` must match the same labels.
+    #[test]
+    fn activity_thinking_matches_case_insensitively() {
+        assert!(activity_is_thinking("Thinking"));
+        assert!(activity_is_thinking("still THINKing about it"));
+        assert!(activity_is_thinking("think"));
+        assert!(!activity_is_thinking("Running: cargo build"));
+        assert!(!activity_is_thinking("thin"));
+        assert!(!activity_is_thinking(""));
+    }
+
+    /// PERF-2: a settled room is one where re-running the sync with identical
+    /// snapshots provably changes nothing — anything in flight is not settled.
+    #[test]
+    fn room_is_settled_only_without_work_in_flight() {
+        let mut s = GameModeState::new();
+        assert!(s.room_is_settled(), "empty room is settled");
+
+        s.sync_from_snapshots(&[snap("a", true)], false, GameTier::Compact, false);
+        assert!(
+            s.room_is_settled(),
+            "a seated desk that is only typing is settled"
+        );
+
+        s.desks[0].phase = ActorPhase::AtDeskThinking;
+        assert!(s.room_is_settled(), "a thinking desk is settled");
+
+        s.desks[0].phase = ActorPhase::WalkToBoss;
+        assert!(!s.room_is_settled(), "a walk clears the desk between syncs");
+
+        s.desks[0].phase = ActorPhase::AtDeskWorking;
+        s.handoff_queue.push_back(0);
+        assert!(!s.room_is_settled(), "a queued handoff still has to start");
+        s.handoff_queue.clear();
+
+        s.door_queue.push_back("q".into());
+        assert!(!s.room_is_settled(), "overflow still has to be promoted");
+        s.door_queue.clear();
+
+        s.attention_until = Some(Instant::now() + Duration::from_secs(5));
+        assert!(!s.room_is_settled(), "the wall flips back at expiry");
+        s.attention_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(s.room_is_settled(), "an expired window is already applied");
     }
 
     #[test]
