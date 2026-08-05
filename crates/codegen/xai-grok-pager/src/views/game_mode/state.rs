@@ -518,6 +518,41 @@ impl GameModeState {
         }
     }
 
+    /// Whether the room still has something to animate or reconcile.
+    ///
+    /// PERF INVARIANT (RC16 PERF-1): an open Game Mode used to hold the event
+    /// loop at [`crate::app::app_view::TickDemand::Slow`] (~12 Hz) forever. A
+    /// frozen room — no seated desks, Idle/Waiting supervisor, empty queues, no
+    /// armed attention window, nothing dirty — produces zero visual change per
+    /// tick, so it must contribute **no** tick demand and let the app park at
+    /// `TickDemand::None`.
+    ///
+    /// **Synced room state only.** Live agent liveness (a turn that just
+    /// started, a background subagent still running) is not visible here and is
+    /// checked by the caller (`AppView::tick_demand`) — parking on state that
+    /// has not been synced into the room yet would strand the office.
+    pub fn needs_animation_tick(&self) -> bool {
+        if self.redraw_dirty || self.last_sync_at.is_none() {
+            return true;
+        }
+        if matches!(
+            self.supervisor,
+            SupervisorPhase::Working | SupervisorPhase::Reviewing
+        ) {
+            return true;
+        }
+        if !self.handoff_queue.is_empty() || !self.door_queue.is_empty() {
+            return true;
+        }
+        // Armed attention window: the wall must flip back when it expires.
+        if self.attention_until.is_some_and(|t| t > Instant::now()) {
+            return true;
+        }
+        // Seated desks animate (typing, walks, celebrate/fail beats) and own the
+        // hover/focus ring — an empty room has neither.
+        self.desks.iter().any(|d| d.is_occupied())
+    }
+
     /// Sync seats from current subagent snapshots + whether main agent is streaming.
     ///
     /// `waiting_on_user`: permission queue / question UI needs human input
@@ -781,8 +816,10 @@ impl GameModeState {
         };
     }
 
-    /// Advance animations. Call once per `SLOW_TICK_INTERVAL` (~12 Hz) while
-    /// open — `render.rs::format_clock` derives wall-clock seconds as `tick/12`.
+    /// Advance animations. Call once per `SLOW_TICK_INTERVAL` (~12 Hz) while the
+    /// room animates ([`Self::needs_animation_tick`]) — `render.rs::format_clock`
+    /// derives its decorative seconds as `tick/12`, so that clock stands still
+    /// while a frozen room is parked (RC16 PERF-1).
     ///
     /// Marks redraw dirty when visual output may change (working desks, walks,
     /// focus pulse edge).
@@ -1038,6 +1075,81 @@ mod tests {
             s.visual_fingerprint(80, 24),
             fp0,
             "idle/thinking + hover must not dirty pixel fingerprint"
+        );
+    }
+
+    /// RC16 PERF-1: a synced, frozen room must not ask for ticks — that is what
+    /// lets `AppView::tick_demand` park the loop at `None` while the office is
+    /// open. A fresh (never-synced) room always does.
+    #[test]
+    fn needs_animation_tick_false_for_frozen_room() {
+        let mut s = GameModeState::new();
+        assert!(
+            s.needs_animation_tick(),
+            "never-synced room must sync at least once"
+        );
+        s.sync_from_snapshots(&[], false, GameTier::Comfort, false);
+        s.last_sync_at = Some(Instant::now());
+        s.take_redraw_dirty();
+        assert!(
+            !s.needs_animation_tick(),
+            "empty room + idle supervisor must let the loop park"
+        );
+    }
+
+    /// Every input that can still change the office keeps the tick alive.
+    #[test]
+    fn needs_animation_tick_true_while_room_can_change() {
+        let base = || {
+            let mut s = GameModeState::new();
+            s.sync_from_snapshots(&[], false, GameTier::Comfort, false);
+            s.last_sync_at = Some(Instant::now());
+            s.take_redraw_dirty();
+            s
+        };
+        let mut occupied = base();
+        occupied.desks[0].child_session_id = Some("a".into());
+        assert!(occupied.needs_animation_tick(), "seated desk animates");
+
+        let mut working = base();
+        working.supervisor = SupervisorPhase::Working;
+        assert!(
+            working.needs_animation_tick(),
+            "working supervisor animates"
+        );
+
+        let mut reviewing = base();
+        reviewing.supervisor = SupervisorPhase::Reviewing;
+        assert!(
+            reviewing.needs_animation_tick(),
+            "reviewing supervisor animates"
+        );
+
+        let mut queued = base();
+        queued.handoff_queue.push_back(0);
+        assert!(queued.needs_animation_tick(), "pending handoff animates");
+
+        let mut overflow = base();
+        overflow.door_queue.push_back("q".into());
+        assert!(overflow.needs_animation_tick(), "door queue must drain");
+
+        let mut attention = base();
+        attention.attention_until = Some(Instant::now() + Duration::from_secs(5));
+        assert!(
+            attention.needs_animation_tick(),
+            "armed attention window must expire on a tick"
+        );
+        attention.attention_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(
+            !attention.needs_animation_tick(),
+            "expired attention window must not keep ticking"
+        );
+
+        let mut dirty = base();
+        dirty.mark_redraw_dirty();
+        assert!(
+            dirty.needs_animation_tick(),
+            "pending redraw must be flushed"
         );
     }
 

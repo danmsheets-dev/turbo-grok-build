@@ -106,8 +106,10 @@ pub fn supervisor_is_working(agent: &AgentView) -> bool {
 /// Paint path should call only when [`GameModeState::needs_paint_sync`].
 ///
 /// PERF: AppView keeps Game Mode on [`crate::app::app_view::TickDemand::Slow`]
-/// (~12 Hz). Pixel recompose is fingerprint-gated; redraw is dirty-gated so
-/// frozen idle rooms do not force a full office paint every Slow tick.
+/// (~12 Hz) **only while the room can animate** ([`GameModeState::needs_animation_tick`]);
+/// a frozen office parks the loop entirely (RC16 PERF-1). Pixel recompose is
+/// fingerprint-gated; redraw is dirty-gated so frozen idle rooms do not force a
+/// full office paint every Slow tick.
 ///
 /// `stage_width`/`stage_height` are the **stage** dims — the paint area with the
 /// status strip already peeled ([`stage_rect`]) — so the tier here equals the

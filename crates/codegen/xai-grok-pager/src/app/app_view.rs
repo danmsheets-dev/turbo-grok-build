@@ -5967,11 +5967,27 @@ impl AppView {
                 // while the spectator view is open and nothing else demands Fast.
                 // Pixel recompose is fingerprint-gated inside game_mode::state so
                 // pure tick + hover do not rebuild the scaled BG every frame.
+                //
+                // PERF (RC16 PERF-1): a **frozen** room adds no demand at all —
+                // an office with no seated desks, an Idle/Waiting supervisor and
+                // nothing dirty parks the loop instead of waking it ~12×/sec for
+                // as long as the view stays open. The two live checks are the
+                // wake path: they see a turn starting (or a background subagent
+                // still running) *before* the next sync seats it, so the room can
+                // never park on state it has not reconciled yet. Every other
+                // mutation (key/mouse input, resize, ACP notification, Ctrl+G
+                // toggle) re-runs `schedule_tick` from the event loop.
                 if game_open {
-                    return TickDemand::Slow;
-                }
-                // Non–Game Mode: turn/tasks still need Fast when active.
-                if agent.tasks.needs_tick()
+                    if agent.game_mode.needs_animation_tick()
+                        || crate::views::game_mode::supervisor_is_working(agent)
+                        || agent
+                            .subagent_sessions
+                            .values()
+                            .any(crate::app::subagent::SubagentInfo::is_running)
+                    {
+                        return TickDemand::Slow;
+                    }
+                } else if agent.tasks.needs_tick()
                     || agent.scrollback.needs_animation()
                     || !agent.session.state.is_idle()
                     || agent.subagent_views.iter().any(|(sid, child)| {
@@ -5979,6 +5995,7 @@ impl AppView {
                             && child.scrollback.needs_animation()
                     })
                 {
+                    // Non–Game Mode: turn/tasks still need Fast when active.
                     return TickDemand::Fast;
                 }
                 if cfg!(target_os = "macos")
@@ -6952,6 +6969,58 @@ pub(crate) mod tests {
             "settled picker must not keep demanding ticks"
         );
     }
+    /// RC16 PERF-1: an open Game Mode must not pin the event loop. A frozen
+    /// room — no seated desks, Idle supervisor, nothing dirty — adds no demand
+    /// at all; a freshly toggled room (never synced) and a room with a working
+    /// desk both stay on Slow.
+    #[test]
+    fn tick_demand_game_mode_parks_when_office_is_frozen() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
+        app.agents.get_mut(&id).unwrap().game_mode.open = true;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Slow,
+            "a freshly opened office must still sync once"
+        );
+        crate::views::game_mode::sync_game_mode(app.agents.get_mut(&id).unwrap(), 100, 20);
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "frozen office must let the loop park (PERF-1)"
+        );
+        {
+            let gm = &mut app.agents.get_mut(&id).unwrap().game_mode;
+            gm.desks[0].child_session_id = Some("child-1".into());
+            gm.desks[0].phase = crate::views::game_mode::ActorPhase::AtDeskWorking;
+        }
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Slow,
+            "an occupied working desk animates on Slow"
+        );
+    }
+
+    /// PERF-1 wake path: a turn that starts while the office is parked must
+    /// re-arm ticks *before* the next sync seats the supervisor — otherwise the
+    /// room would stay frozen for the whole turn. Game Mode still never inherits
+    /// Fast from a running turn (dual-audit P0).
+    #[test]
+    fn tick_demand_game_mode_wakes_on_running_turn_before_sync() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        app.agents.get_mut(&id).unwrap().game_mode.open = true;
+        crate::views::game_mode::sync_game_mode(app.agents.get_mut(&id).unwrap(), 100, 20);
+        assert_eq!(app.tick_demand(), TickDemand::None, "frozen office parks");
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Slow,
+            "a running turn must wake the office (and stay off Fast)"
+        );
+    }
+
     /// An idle agent view demands no ticks at all; the macOS Cmd link-hover
     /// poll (when it is the only pending work) demands Slow, never Fast.
     #[test]
