@@ -1125,6 +1125,69 @@ pub fn sprite_coffee() -> RgbaImage {
     img
 }
 
+/// Canonical `frame` for [`sprite_roomba`] (RC16 §4 #11).
+///
+/// The sprite reads `frame % 2` and nothing else — the status lamp blinks and
+/// the side brush swaps corners on the same discriminator — so the whole period
+/// is **2** and the floor robot costs two cache keys per scale.
+pub fn roomba_frame_key(frame: u8) -> u8 {
+    frame % 2
+}
+
+/// Office floor-cleaning robot: a squat disc with a status lamp and a side brush.
+///
+/// Composed by [`super::compose`] on the strip of carpet nearest the viewer, and
+/// blitted *after* the desks because that strip is in front of them (RC16 §4 #11).
+///
+/// FEATURE SIZE: both animated elements are 2×2 sprite pixels. The robot draws at
+/// scale 1 on ordinary terminals and the composed frame is then Nearest-
+/// downsampled by [`effective_pixel_scale`] (2 or 3), so a 1px lamp could fall
+/// between samples and leave a dead grey lozenge — the same trap
+/// [`sprite_mcp_server`] hit. The lamp is **3×3**, not the 2×2 minimum the rest
+/// of this file uses: Nearest picks `floor((out + 0.5) * 3)`, i.e. one source row
+/// in every three, and a 2px band really does fall between those samples at some
+/// canvas heights (it did, measured, at a 300×180 canvas — the robot rendered as
+/// a grey lozenge with no light on it at all). Only a 3px span is guaranteed to
+/// contain a sample on both axes, and the lamp is the one feature that says the
+/// robot is alive. The bumper ring is a mid grey rather than a bright one for a
+/// related reason: at terminal resolution the whole robot is ~5×3 pixels, so
+/// whatever is brightest *becomes* the robot.
+pub fn sprite_roomba(frame: u8) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(14, 8, Rgba(CLEAR));
+    // Deliberately dark and low-contrast except for the lamp. Once the office is
+    // downsampled the whole robot is ~5×3 terminal pixels, so whatever is
+    // brightest *is* the robot — a pale bumper ring read as a grey lozenge with
+    // no character at all until it was taken down to a mid grey.
+    let shell = [52, 58, 74, 255];
+    let shell_hi = [74, 82, 100, 255];
+    let shell_d = [34, 38, 50, 255];
+    let bumper = [104, 112, 132, 255];
+    let bristle = [188, 160, 96, 255];
+    let lit = frame % 2 == 0;
+
+    // Disc seen from a low angle: lit top, bumper ring at its widest, dark
+    // underside, then a soft contact shadow so it sits on the carpet.
+    fill_rect(&mut img, 3, 0, 8, 1, shell_hi);
+    fill_rect(&mut img, 1, 1, 12, 1, shell_hi);
+    fill_rect(&mut img, 0, 2, 14, 1, shell);
+    fill_rect(&mut img, 0, 3, 14, 2, bumper);
+    fill_rect(&mut img, 1, 5, 12, 1, shell_d);
+    fill_rect(&mut img, 3, 6, 8, 1, [26, 30, 40, 200]);
+    fill_rect(&mut img, 4, 7, 6, 1, [22, 26, 34, 120]);
+
+    // Status lamp: a 3×3 dome, the one thing that has to survive the downsample.
+    let lamp = if lit {
+        [128, 255, 184, 255]
+    } else {
+        [40, 128, 92, 255]
+    };
+    fill_rect(&mut img, 6, 1, 3, 3, lamp);
+    // Side brush, alternating corners — a second animated feature so the robot
+    // still reads as *moving* on the frame where the lamp is between blinks.
+    fill_rect(&mut img, if lit { 0 } else { 12 }, 4, 2, 2, bristle);
+    img
+}
+
 fn blit_local(dest: &mut RgbaImage, sprite: &RgbaImage, dx: i32, dy: i32) {
     blit(dest, sprite, dx, dy);
 }
@@ -1354,6 +1417,47 @@ mod tests {
                 sprite_developer_celebrate(pal, key).into_raw(),
                 "celebrate frame={frame} != key={key}"
             );
+            let key = roomba_frame_key(frame);
+            assert_eq!(
+                sprite_roomba(frame).into_raw(),
+                sprite_roomba(key).into_raw(),
+                "roomba frame={frame} != key={key}"
+            );
+        }
+    }
+
+    /// RC16 §4 #11: the floor robot is ~5×3 pixels once the office is
+    /// downsampled, so its lamp is the whole animation. Nearest picks one source
+    /// row (and column) in every `effective_pixel_scale`, which is 3 on ordinary
+    /// terminals — so the lamp must span 3px on **both** axes or a stage whose
+    /// geometry lands the samples between its rows renders a lightless lozenge.
+    #[test]
+    fn roomba_lamp_survives_a_stride_three_downsample() {
+        let a = sprite_roomba(0);
+        let b = sprite_roomba(1);
+        assert_eq!(a.dimensions(), (14, 8));
+        assert_ne!(a.as_raw(), b.as_raw(), "the two frames must differ");
+
+        // Every 3×3 sample phase must see the lamp change.
+        for oy in 0..3u32 {
+            for ox in 0..3u32 {
+                let mut moved = false;
+                let mut y = oy;
+                while y < 8 {
+                    let mut x = ox;
+                    while x < 14 {
+                        if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                            moved = true;
+                        }
+                        x += 3;
+                    }
+                    y += 3;
+                }
+                assert!(
+                    moved,
+                    "sample phase ({ox}, {oy}) sees no animation at all"
+                );
+            }
         }
     }
 

@@ -381,6 +381,27 @@ pub struct GameModeState {
     pub(crate) ambient_step: u64,
     /// When [`Self::ambient_step`] last advanced.
     pub(crate) ambient_at: Instant,
+    /// Patrol step of the floor robot (RC16 §4 #11).
+    ///
+    /// ZERO-COST CONTRACT — the whole point of this animation, do not relax it:
+    /// advanced by [`Self::tick_anim`] **only on a `tick / 4` bucket edge and
+    /// only while [`Self::pixel_needs_tick_frame`] is already true**, i.e. only
+    /// while the room is animating (and therefore repainting) for its own
+    /// reasons. That gives three properties at once:
+    /// 1. **No new wakeups.** [`Self::needs_animation_tick`] is untouched; a
+    ///    frozen room still parks at `TickDemand::None` and the robot parks with
+    ///    it, wherever it had got to.
+    /// 2. **No new recomposes.** Every tick this advances on already marks
+    ///    redraw dirty via the `frame_edge` gate below (the bucket divisor is 4
+    ///    or finer, so a `tick / 4` edge is always also a frame edge).
+    /// 3. **Quantized by construction.** The composed position is
+    ///    [`super::compose::roomba_position`] of this counter and nothing finer,
+    ///    so a position [`Self::visual_fingerprint`] cannot distinguish cannot
+    ///    exist.
+    ///
+    /// Making it wander while the room is idle would trip both the RC13
+    /// idle-freeze (Rule 2) and the RC16 PERF-1 parking (Rule 3) at once.
+    pub(crate) roomba_step: u64,
     /// Local wall clock, quantized to `(hour 0..24, ten-minute 0..6)`.
     ///
     /// The quantization *is* the fingerprint contract (RC16 §4 #12): the composed
@@ -506,6 +527,7 @@ impl GameModeState {
             success_fx_until: None,
             ambient_step: 0,
             ambient_at: Instant::now(),
+            roomba_step: 0,
             clock_hm: local_clock_bucket(),
             next_skin: 0,
             pixel_bg_full: None,
@@ -758,6 +780,11 @@ impl GameModeState {
     ///    composes it, together with the finest tick bucket in use
     ///    ([`Self::frame_bucket_divisor`]) — hashing the level without the
     ///    finer bucket would freeze a hot desk's extra frames.
+    /// 9. The floor robot's [`Self::roomba_step`] (RC16 §4 #11) is hashed
+    ///    unconditionally and still costs nothing: it can only advance on a
+    ///    `tick / 4` edge in a room that is already animating, i.e. on ticks the
+    ///    bucket in invariant 8 already moved the fingerprint on. In a frozen
+    ///    room it is a constant, so invariant 1 is untouched.
     fn visual_fingerprint(&self, cell_w: u16, cell_h: u16) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -789,6 +816,13 @@ impl GameModeState {
         } else {
             0u64.hash(&mut h);
         }
+        // Floor robot: hashed unconditionally, and free anyway — the counter can
+        // only move on a tick the branch above already moved on (see invariant
+        // 9 and the doc on `roomba_step`). Hashing it only while the room
+        // animates would leave the *parked* position resting on the fact that
+        // `pixel_frame_fp` holds one value rather than a set, which is true but
+        // far too subtle to build a freeze invariant on.
+        self.roomba_step.hash(&mut h);
         for d in &self.desks {
             d.child_session_id.hash(&mut h);
             (d.phase as u8).hash(&mut h);
@@ -1075,6 +1109,28 @@ impl GameModeState {
     /// already declares — **zero new cache keys**.
     pub(crate) fn ambient_frame(&self) -> u8 {
         (self.ambient_step % 2) as u8
+    }
+
+    /// Sprite frame of the floor robot: flips 0↔1 with every patrol step.
+    ///
+    /// Inside [`super::sprites_pixel::roomba_frame_key`]'s declared period of 2,
+    /// so the robot's blinking lamp and swapping brush cost **two** cache keys
+    /// and no more.
+    pub(crate) fn roomba_frame(&self) -> u8 {
+        (self.roomba_step % 2) as u8
+    }
+
+    /// Whether the floor robot is travelling rather than parked (RC16 §4 #11).
+    ///
+    /// Exactly [`Self::pixel_needs_tick_frame`] — the predicate that gates the
+    /// step counter — exposed to `compose` so the dust trail is painted only
+    /// while the robot is actually moving. Safe as a compose input for the same
+    /// reason the predicate itself is: every value it reads (the supervisor
+    /// phase, each desk's occupancy and phase) is hashed individually by
+    /// [`Self::visual_fingerprint`], so two rooms that disagree about it also
+    /// disagree about the fingerprint.
+    pub(crate) fn roomba_is_moving(&self) -> bool {
+        self.pixel_needs_tick_frame()
     }
 
     /// Whether any composed sprite actually reads [`Self::ambient_frame`].
@@ -1584,6 +1640,16 @@ impl GameModeState {
         let frame_edge = (tick_before / frame_div) != (self.tick / frame_div);
         if had_focus && bucket_edge {
             self.mark_redraw_dirty();
+        }
+        // Floor robot (RC16 §4 #11): one patrol step per `tick / 4` bucket, and
+        // **only** while the room already samples that bucket. Deliberately no
+        // `mark_redraw_dirty` of its own — `frame_div` is 4 or finer, so every
+        // edge this fires on is already a `frame_edge` below, and marking here
+        // would double-count on the very path RC16 PERF-6 exists to thin out.
+        // When the room freezes the robot simply stops where it is; sending it
+        // home would mean animating a parked office.
+        if needs_frames && bucket_edge {
+            self.roomba_step = self.roomba_step.wrapping_add(1);
         }
         // Which office the paint path will draw (`render::render_game_mode`):
         // the pixel stage needs ≥40×8 cells, which every office tier already
@@ -3065,6 +3131,89 @@ mod tests {
             dirty_marks_over(&mut walking, GameTier::Normal, 8),
             8,
             "a walk moves every tick and must repaint every tick"
+        );
+    }
+
+    /// RC16 §4 #11's entire claim, in one test: the floor robot advances **only**
+    /// on a `tick / 4` bucket edge in a room that is already animating. That is
+    /// what makes it free — no `needs_animation_tick` change (so no wakeups), and
+    /// no dirty mark of its own (the bucket edge it rides already marked one).
+    #[test]
+    fn roomba_advances_only_while_the_room_already_animates() {
+        // Frozen: nobody home.
+        let mut empty = GameModeState::new();
+        assert_eq!(dirty_marks_over(&mut empty, GameTier::Normal, 24), 0);
+        assert_eq!(empty.roomba_step, 0, "an empty office parks the robot");
+
+        // Frozen: thinking-only. The RC13 invariant — and the robot with it.
+        let mut thinking = GameModeState::new();
+        thinking.desks[0].child_session_id = Some("t".into());
+        thinking.desks[0].phase = ActorPhase::AtDeskThinking;
+        assert!(!thinking.roomba_is_moving());
+        assert_eq!(dirty_marks_over(&mut thinking, GameTier::Normal, 24), 0);
+        assert_eq!(
+            thinking.roomba_step, 0,
+            "a thinking-only room must not move the robot"
+        );
+
+        // Animating: one step per bucket, and not one extra repaint for it.
+        let mut working = GameModeState::new();
+        working.desks[0].child_session_id = Some("w".into());
+        working.desks[0].phase = ActorPhase::AtDeskWorking;
+        assert!(working.roomba_is_moving());
+        assert_eq!(
+            dirty_marks_over(&mut working, GameTier::Normal, 8),
+            2,
+            "the robot must not add repaints to the PERF-6 bucket cadence"
+        );
+        assert_eq!(working.roomba_step, 2, "one patrol step per tick/4 bucket");
+
+        // ...and it parks where it stands the moment the room freezes, rather
+        // than driving itself home (which would mean animating a parked office).
+        working.desks[0].child_session_id = None;
+        working.desks[0].phase = ActorPhase::AtDeskThinking;
+        assert_eq!(dirty_marks_over(&mut working, GameTier::Normal, 24), 0);
+        assert_eq!(working.roomba_step, 2, "a frozen room leaves the robot put");
+    }
+
+    /// The other half of the contract: the position must be *visible* to the
+    /// fingerprint (or the patrol would compose and never paint) and must be
+    /// constant in a frozen room (or the RC13 freeze would be gone).
+    #[test]
+    fn roomba_step_is_fingerprinted_but_never_moves_an_idle_room() {
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("w".into());
+        s.desks[0].phase = ActorPhase::AtDeskWorking;
+        let fp = s.visual_fingerprint(80, 24);
+        s.roomba_step += 1;
+        assert_ne!(
+            s.visual_fingerprint(80, 24),
+            fp,
+            "a patrol step must recompose or the robot would never move"
+        );
+
+        // A hot desk samples `tick / 2`, so its frame edges are a superset of the
+        // `tick / 4` edges the robot rides — it can never step on a tick the
+        // fingerprint did not already move on.
+        for level in [BusyLevel::Calm, BusyLevel::Normal, BusyLevel::Hot] {
+            assert_eq!(
+                4 % level.frame_divisor().min(4),
+                0,
+                "{level:?}: the frame bucket must divide the robot's tick/4 step"
+            );
+        }
+
+        let mut idle = GameModeState::new();
+        idle.desks[0].child_session_id = Some("t".into());
+        idle.desks[0].phase = ActorPhase::AtDeskThinking;
+        let fp = idle.visual_fingerprint(80, 24);
+        for _ in 0..24 {
+            idle.tick_anim(GameTier::Normal);
+        }
+        assert_eq!(
+            idle.visual_fingerprint(80, 24),
+            fp,
+            "the robot must not break the thinking-room freeze"
         );
     }
 

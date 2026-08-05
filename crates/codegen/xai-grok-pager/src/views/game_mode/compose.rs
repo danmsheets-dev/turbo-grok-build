@@ -9,9 +9,9 @@ use image::RgbaImage;
 
 use super::sprites_pixel::{
     DevPalette, blit, celebrate_frame_key, dev_at_desk_frame_key, fail_frame_key,
-    mcp_rack_frame_key, scale_nn, sprite_coffee, sprite_developer_at_desk,
+    mcp_rack_frame_key, roomba_frame_key, scale_nn, sprite_coffee, sprite_developer_at_desk,
     sprite_developer_celebrate, sprite_developer_fail, sprite_developer_walk, sprite_door,
-    sprite_empty_desk, sprite_mcp_server, sprite_plant, sprite_supervisor,
+    sprite_empty_desk, sprite_mcp_server, sprite_plant, sprite_roomba, sprite_supervisor,
     stamp_floor_patch_sampled, supervisor_frame_key, walk_frame_key,
 };
 use super::state::{ActorPhase, BusyLevel, GameModeState, SupervisorPhase};
@@ -113,6 +113,38 @@ const CLOCK_ANCHOR: (f32, f32) = (0.491, 0.146);
 /// hands inside the drawn bezel at every stage shape.
 const CLOCK_FACE_W_FRAC: f32 = 0.038;
 const CLOCK_FACE_H_FRAC: f32 = 0.045;
+
+/// Ends of the floor robot's patrol, as fractions of canvas width (RC16 §4 #11).
+///
+/// The path is the strip of carpet *nearest the viewer*, which is why it may run
+/// the full width of the room instead of hiding in the margin bands the plants
+/// live in: nothing is in front of it, so painting it after the desks is the
+/// y-sort. See the blit site in [`compose_cell_frame_into`].
+const ROOMBA_X_MIN_FRAC: f32 = 0.07;
+const ROOMBA_X_MAX_FRAC: f32 = 0.93;
+
+/// Gap between the robot's contact shadow and the bottom edge of the canvas.
+const ROOMBA_FLOOR_GAP_FRAC: f32 = 0.02;
+
+/// Largest share of the canvas height the robot's sprite may occupy.
+///
+/// Together with [`ROOMBA_FLOOR_GAP_FRAC`] this is what keeps the patrol strip
+/// below the desk row's floor stamp at *every* stage shape: the robot's top sits
+/// at `h - gap - sprite_h`, i.e. no higher than `(1 - 0.02 - 0.10)h = 0.88h`,
+/// and the lower desk row's clear area ends at `0.78h + 0.17h/2 = 0.865h`.
+/// A very wide, very short canvas is the case that needs the clamp — there
+/// [`prop_scale`] alone would hand the robot a scale-2 sprite a fifth of the
+/// room tall.
+const ROOMBA_MAX_H_FRAC: f32 = 0.10;
+
+/// Steps in one end-to-end sweep of the patrol (RC16 §4 #11).
+///
+/// The robot advances one step per `tick / 4` bucket — the bucket the office
+/// already samples and already hashes — so 48 steps is ~16 s per crossing at the
+/// ~12 Hz Slow tick and ~32 s for a round trip. Slow on purpose: at 3 steps/sec
+/// a shorter path would hop the robot further than its own width per composed
+/// frame, which reads as teleporting rather than as cleaning.
+const ROOMBA_PATH_STEPS: u64 = 48;
 
 /// Cell rect covering the composed supervisor — the pixel office's hover hit box.
 ///
@@ -233,6 +265,50 @@ fn rack_scale(w: u32, h: u32) -> u32 {
     fit.floor().clamp(1.0, 5.0) as u32
 }
 
+/// Scale for the 14×8 [`sprite_roomba`] on a `w`×`h` canvas (RC16 §4 #11).
+///
+/// [`prop_scale`] with a height fit floored on top, for the same reason
+/// [`rack_scale`] floors: the robot's whole claim is that its patrol strip sits
+/// *below* the desks' clear areas, and that claim has to hold at every stage
+/// shape rather than at the ones that happen to round down. See
+/// [`ROOMBA_MAX_H_FRAC`] for the arithmetic.
+fn roomba_scale(w: u32, h: u32) -> u32 {
+    let fit = (h as f32 * ROOMBA_MAX_H_FRAC / 8.0).floor().max(1.0) as u32;
+    prop_scale(w).min(fit).max(1)
+}
+
+/// Robot centre in canvas pixels for `step` — a ping-pong along the front strip.
+///
+/// `spr_h` is the *scaled* sprite height, so the y is bottom-anchored and fits by
+/// construction on every canvas instead of being a fraction that can overflow a
+/// short one.
+///
+/// FINGERPRINT NOTE: `step` is
+/// [`super::state::GameModeState::roomba_step`], which only ever advances on a
+/// `tick / 4` bucket edge and only while the room is already animating — so the
+/// position is quantized by construction and the value is hashed. See the doc on
+/// that field for the zero-cost argument.
+pub(super) fn roomba_position(step: u64, w: u32, h: u32, spr_h: u32) -> (f32, f32) {
+    let span = ROOMBA_PATH_STEPS.max(1);
+    let p = step % (span * 2);
+    // Triangle wave: out on the first half of the cycle, back on the second.
+    let t = if p < span {
+        p as f32 / span as f32
+    } else {
+        2.0 - p as f32 / span as f32
+    };
+    let x = w as f32 * (ROOMBA_X_MIN_FRAC + t * (ROOMBA_X_MAX_FRAC - ROOMBA_X_MIN_FRAC));
+    let gap = (h as f32 * ROOMBA_FLOOR_GAP_FRAC).floor().max(1.0);
+    let y = h as f32 - gap - spr_h as f32 / 2.0;
+    (x, y)
+}
+
+/// Whether the robot is travelling right at `step` (dust trails the other way).
+fn roomba_moves_right(step: u64) -> bool {
+    let span = ROOMBA_PATH_STEPS.max(1);
+    step % (span * 2) < span
+}
+
 // Thread-local scaled sprite cache — Arc so blit does not clone every frame.
 //
 // PERF INVARIANT: compose_cell_frame must stay cheap on tick-only frames.
@@ -244,16 +320,17 @@ use std::sync::Arc;
 
 /// Cache cap, in entries.
 ///
-/// Measured worst case per scale-set is **103** live keys: 36 seated devs
+/// Measured worst case per scale-set is **105** live keys: 36 seated devs
 /// (6 skins × (4 typing frames + 2 idle poses)), 12 debug-rage devs and 12
 /// celebrating devs (6 skins × 2 frames each), 24 walkers (6 skins × 2 packet
 /// × 2 frames), 9 supervisors (2 idle + 4 working + 3 reviewing reachable from
 /// the `(tick/4)%4` frame counter), 2 doors (open / closed), 5 MCP racks (idle
-/// plus the 4 active frames the same counter reaches) and 3 statics (empty desk,
-/// plant, coffee). Before RC16 P8 frame quantization the character set alone
-/// needed 111, which is why a 128-entry cap thrashed.
+/// plus the 4 active frames the same counter reaches), 2 floor robots (the two
+/// [`roomba_frame_key`] frames) and 3 statics (empty desk, plant, coffee).
+/// Before RC16 P8 frame quantization the character set alone needed 111, which
+/// is why a 128-entry cap thrashed.
 ///
-/// 256 leaves room for two full scale-sets (206, i.e. mid-resize) plus ~50 keys
+/// 256 leaves room for two full scale-sets (210, i.e. mid-resize) plus ~46 keys
 /// of headroom for upcoming animation sprites. It is a backstop only:
 /// [`sprite_cache_begin_pass`] drops stale scales eagerly, so the map normally
 /// sits at one scale-set.
@@ -315,7 +392,7 @@ thread_local! {
 /// become garbage in a single step. Dropping them here keeps the map at ~one
 /// scale-set; the old clear-at-128 eviction instead wiped the sprites the new
 /// stage had *just* rasterised, turning a resize into a rebuild storm.
-fn sprite_cache_begin_pass(scales: [u32; 5]) {
+fn sprite_cache_begin_pass(scales: [u32; 6]) {
     let live = scales.iter().fold(0u64, |m, s| m | scale_bit(*s));
     SPRITE_CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -453,6 +530,14 @@ fn cached_rack(active: bool, frame: u8, sc: u32) -> Arc<RgbaImage> {
     let frame = mcp_rack_frame_key(active, frame);
     let key = (0xB0u64 << 56) | ((active as u64) << 32) | ((frame as u64) << 24) | sc as u64;
     cache_get_or_insert(key, sc, || scale_nn(&sprite_mcp_server(active, frame), sc))
+}
+
+/// +2 keys per scale-set (the two [`roomba_frame_key`] frames).
+fn cached_roomba(frame: u8, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let frame = roomba_frame_key(frame);
+    let key = (0xF2u64 << 56) | ((frame as u64) << 24) | sc as u64;
+    cache_get_or_insert(key, sc, || scale_nn(&sprite_roomba(frame), sc))
 }
 
 /// +2 keys per scale-set (open / closed) — the door has no frame counter, so
@@ -618,6 +703,50 @@ fn paint_fx_handoff_papers(canvas: &mut RgbaImage, cx: i32, cy: i32, t: f32, w: 
                 // One ink line per sheet so it reads as paper, not a white blob.
                 let c = if dy == quad / 2 && dx > 0 { ink } else { paper };
                 canvas.put_pixel(sx as u32, sy as u32, image::Rgba(c));
+            }
+        }
+    }
+}
+
+/// Dust the floor robot kicks up behind itself (RC16 §4 #11).
+///
+/// Procedural like [`paint_fx_confetti`] — no sprite, so **zero cache keys**.
+/// The puffs trail the direction of travel and fade with distance, which is what
+/// makes a 3-steps-per-second sprite read as *moving* rather than as popping
+/// between positions.
+///
+/// The caller only paints this while the room is animating: a parked robot does
+/// not kick up dust, and painting it would put pixels in a frozen frame that
+/// nothing would ever repaint.
+///
+/// Puffs are >= 2px square and scale with `sc` for the reason every FX in this
+/// file does — the composed frame is Nearest-downsampled by
+/// `effective_pixel_scale` (2 or 3) and a 1px feature can vanish entirely.
+fn paint_fx_roomba_dust(canvas: &mut RgbaImage, cx: i32, cy: i32, step: u64, sc: u32) {
+    const PUFFS: i32 = 3;
+    const DUST: [i32; 3] = [214, 226, 232];
+    let sc = sc.max(1) as i32;
+    let quad = 2 * sc;
+    // Behind = the way it came from.
+    let dir = if roomba_moves_right(step) { -1 } else { 1 };
+    let (cw, ch) = canvas.dimensions();
+    for i in 0..PUFFS {
+        let x = cx + dir * (7 * sc + i * quad * 2);
+        // Low against the carpet, at the robot's skirt rather than its lamp.
+        let y = cy + sc;
+        let pct = 46 - 14 * i;
+        for dy in 0..quad {
+            for dx in 0..quad {
+                let sx = x + dx - quad / 2;
+                let sy = y + dy;
+                if sx < 0 || sy < 0 || sx as u32 >= cw || sy as u32 >= ch {
+                    continue;
+                }
+                let p = canvas.get_pixel_mut(sx as u32, sy as u32);
+                for k in 0..3 {
+                    let c = i32::from(p.0[k]);
+                    p.0[k] = (c + (DUST[k] - c) * pct / 100) as u8;
+                }
             }
         }
     }
@@ -990,9 +1119,12 @@ pub fn compose_cell_frame_into(
     let prop_sc = prop_scale(w);
     let sup_sc = (((w as f32 * 0.072) / 26.0).max(1.0).round().min(5.0) as u32).max(1);
     let rack_sc = rack_scale(w, h);
+    let roomba_sc = roomba_scale(w, h);
     // RC16 P8: retire sprites rasterised for a previous stage size before this
     // pass touches the cache, so a resize cannot push the live set over the cap.
-    sprite_cache_begin_pass([sc, walk_sc, prop_sc, sup_sc, rack_sc]);
+    // The robot derives its own scale from the canvas height, so — exactly like
+    // the rack — that scale has to be declared live or a resize could strand it.
+    sprite_cache_begin_pass([sc, walk_sc, prop_sc, sup_sc, rack_sc, roomba_sc]);
 
     // Ambient props (door / rack / plants / coffee) near room edges — cached
     // sprites. The door goes down first so the plant that shares its column
@@ -1223,6 +1355,29 @@ pub fn compose_cell_frame_into(
         }
     }
 
+    // The floor robot, after the desks (RC16 §4 #11).
+    //
+    // This is not a break in the props→supervisor→desks order, it is the y-sort:
+    // the patrol strip is the carpet nearest the viewer (see
+    // [`ROOMBA_MAX_H_FRAC`] for why it stays below every desk's clear area), so
+    // everything in the room is *behind* it and painting it last is what puts
+    // it in front. No floor stamp either — the pass resets the whole canvas from
+    // `bg_scaled` on every frame, so a sprite that moves cannot smear a trail of
+    // itself the way it would on a persistent canvas.
+    {
+        let spr = cached_roomba(state.roomba_frame(), roomba_sc);
+        let (rx, ry) = roomba_position(state.roomba_step, w, h, spr.height());
+        if state.roomba_is_moving() {
+            paint_fx_roomba_dust(canvas, rx as i32, ry as i32, state.roomba_step, roomba_sc);
+        }
+        blit(
+            canvas,
+            spr.as_ref(),
+            rx as i32 - spr.width() as i32 / 2,
+            ry as i32 - spr.height() as i32 / 2,
+        );
+    }
+
     // Last, over everything: the one-shot success sweep is *lighting*, so it
     // has to lift the desks and the boss as well as the room (RC16 §4 #8).
     if let Some(t) = state.success_wave_t() {
@@ -1403,7 +1558,7 @@ mod tests {
     #[test]
     fn equivalent_frames_share_one_cache_entry() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
 
         let walk0 = cached_walk(0, 0, false, 1);
         let walk2 = cached_walk(0, 2, false, 1);
@@ -1415,7 +1570,7 @@ mod tests {
 
         // Idle developers only alternate the thought bubble at `frame % 4 < 2`.
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         let idle: Vec<_> = (0..4u8)
             .map(|f| cached_dev_at_desk(0, false, f, 1))
             .collect();
@@ -1425,7 +1580,7 @@ mod tests {
 
         // Idle/waiting supervisors only alternate the coffee steam.
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         for f in 0..4u8 {
             cached_supervisor(0, f, 1);
         }
@@ -1433,7 +1588,7 @@ mod tests {
 
         // Typing developers really do animate on all four frames.
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         for f in 0..4u8 {
             cached_dev_at_desk(0, true, f, 1);
         }
@@ -1446,7 +1601,7 @@ mod tests {
     #[test]
     fn overflow_keeps_sprites_the_current_pass_is_using() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         let keep = cached_empty_desk(1);
         for i in 0..(SPRITE_CACHE_CAP as u64 * 2) {
             junk(i, 1);
@@ -1461,21 +1616,21 @@ mod tests {
     #[test]
     fn scale_change_drops_stale_scale_entries() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         let small = cached_empty_desk(1);
         cached_plant(1);
         assert_eq!(sprite_cache_len(), 2);
 
-        sprite_cache_begin_pass([2, 2, 2, 2, 2]);
+        sprite_cache_begin_pass([2, 2, 2, 2, 2, 2]);
         assert_eq!(sprite_cache_len(), 0, "old scale is garbage after a resize");
         let big = cached_empty_desk(2);
         assert!(!Arc::ptr_eq(&small, &big));
 
         // A pass that still uses a scale keeps that scale's entries.
-        sprite_cache_begin_pass([2, 3, 3, 3, 3]);
+        sprite_cache_begin_pass([2, 3, 3, 3, 3, 3]);
         assert!(sprite_cache_has_scale(2), "scale 2 is still live");
         cached_plant(3);
-        sprite_cache_begin_pass([2, 3, 3, 3, 3]);
+        sprite_cache_begin_pass([2, 3, 3, 3, 3, 3]);
         assert_eq!(
             sprite_cache_len(),
             2,
@@ -1488,7 +1643,7 @@ mod tests {
     fn cache_never_grows_past_the_cap() {
         sprite_cache_reset();
         for scale in 1..=5u32 {
-            sprite_cache_begin_pass([scale, scale, scale, scale, scale]);
+            sprite_cache_begin_pass([scale, scale, scale, scale, scale, scale]);
             for i in 0..(SPRITE_CACHE_CAP as u64 * 2) {
                 junk(i, scale);
                 assert!(sprite_cache_len() <= SPRITE_CACHE_CAP);
@@ -1502,7 +1657,7 @@ mod tests {
     #[test]
     fn worst_case_working_set_per_scale() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         // frame is `(tick / 4) % 4`, so 0..4 is the whole reachable domain.
         for skin in 0..6u8 {
             for frame in 0..4u8 {
@@ -1531,12 +1686,15 @@ mod tests {
                 cached_rack(active, frame, 1);
             }
         }
+        for frame in 0..4u8 {
+            cached_roomba(frame, 1);
+        }
         cached_empty_desk(1);
         cached_plant(1);
         cached_coffee(1);
         // 36 seated devs + 12 debug-rage + 12 celebrate + 24 walkers
-        // + 9 supervisors + 2 doors + 5 racks + 3 statics.
-        assert_eq!(sprite_cache_len(), 103);
+        // + 9 supervisors + 2 doors + 5 racks + 2 floor robots + 3 statics.
+        assert_eq!(sprite_cache_len(), 105);
         assert!(
             sprite_cache_len() * 2 <= SPRITE_CACHE_CAP,
             "cap must hold two scale-sets across a resize"
@@ -1908,13 +2066,13 @@ mod tests {
     #[test]
     fn rack_cache_collapses_idle_frames_but_not_the_chase() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         let idle: Vec<_> = (0..4u8).map(|f| cached_rack(false, f, 1)).collect();
         assert_eq!(sprite_cache_len(), 1, "an idle rack has one frame");
         assert!(idle.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])));
 
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         for f in 0..4u8 {
             cached_rack(true, f, 1);
         }
@@ -2233,14 +2391,14 @@ mod tests {
     #[test]
     fn ambient_poses_reuse_the_existing_idle_cache_keys() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         for frame in 0..4u8 {
             cached_dev_at_desk(0, false, frame, 1);
             cached_supervisor(0, frame, 1);
         }
         let all_frames = sprite_cache_len();
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
         for step in 0..8u64 {
             let ambient = (step % 2) as u8;
             cached_dev_at_desk(0, false, ambient * 2, 1);
@@ -2252,6 +2410,132 @@ mod tests {
             "the ambient frame must not reach outside the idle key domain"
         );
         assert_eq!(all_frames, 4, "2 idle dev poses + 2 idle supervisor poses");
+    }
+
+    /// RC16 §4 #11: the robot is blitted *after* the desks, which is only the
+    /// right y-sort if its patrol really is the strip of carpet nearest the
+    /// viewer. So at every stage shape and every step of the cycle the sprite
+    /// must stay on the canvas and stay below every desk's clear area — the band
+    /// whose floor stamp is painted before it and would otherwise be stamping
+    /// carpet over the exact rows the robot is supposed to be in front of.
+    #[test]
+    fn roomba_patrol_stays_on_the_front_strip_at_every_tier() {
+        for (w, h) in tier_canvases() {
+            let sc = roomba_scale(w, h);
+            let (sw, sh) = (14 * sc, 8 * sc);
+            // Bottom of the lowest desk's clear area (`clear_desk_area`).
+            let desk_bottom = DESK_ANCHORS
+                .iter()
+                .map(|(_, ay)| h as f32 * ay + h as f32 * 0.17 / 2.0)
+                .fold(f32::MIN, f32::max);
+            let (mut min_x, mut max_x) = (f32::MAX, f32::MIN);
+            for step in 0..(ROOMBA_PATH_STEPS * 2) {
+                let (x, y) = roomba_position(step, w, h, sh);
+                let left = x - sw as f32 / 2.0;
+                let top = y - sh as f32 / 2.0;
+                assert!(
+                    left >= 0.0 && left + sw as f32 <= w as f32,
+                    "{w}×{h} step {step}: robot spans x {left}..{} off canvas",
+                    left + sw as f32
+                );
+                assert!(
+                    top >= 0.0 && top + sh as f32 <= h as f32,
+                    "{w}×{h} step {step}: robot spans y {top}..{} off canvas",
+                    top + sh as f32
+                );
+                assert!(
+                    top >= desk_bottom,
+                    "{w}×{h} step {step}: robot top {top} rides into the desk row (ends {desk_bottom})"
+                );
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+            }
+            // ...and it must actually patrol, not idle in one corner.
+            assert!(
+                max_x - min_x >= w as f32 * 0.8,
+                "{w}×{h}: sweep spans only {} of {w}",
+                max_x - min_x
+            );
+            // A closed loop: the step after the last is the first again.
+            assert_eq!(
+                roomba_position(0, w, h, sh),
+                roomba_position(ROOMBA_PATH_STEPS * 2, w, h, sh)
+            );
+            // ...and it changes direction exactly once per half cycle.
+            assert!(roomba_moves_right(0) && roomba_moves_right(ROOMBA_PATH_STEPS - 1));
+            assert!(!roomba_moves_right(ROOMBA_PATH_STEPS));
+        }
+    }
+
+    /// The robot must really be drawn, must move with its step, and must kick
+    /// dust **only** while the room is animating: a parked robot throwing dust
+    /// would be motion inside a frame nothing is left to repaint.
+    #[test]
+    fn roomba_is_composed_moves_and_only_kicks_dust_while_the_room_animates() {
+        let full = load_office_background().expect("bg");
+        let differing = |a: &RgbaImage, b: &RgbaImage, r: (f32, f32, f32, f32)| {
+            let mut n = 0usize;
+            for y in (r.1 as u32)..((r.1 + r.3) as u32).min(a.height()) {
+                for x in (r.0 as u32)..((r.0 + r.2) as u32).min(a.width()) {
+                    if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        for (cw, ch) in [(80u16, 24u16), (120, 34), (200, 60)] {
+            let scale =
+                crate::views::game_mode::sprites_pixel::effective_pixel_scale(cw, ch).max(1);
+            let bg = scale_bg_to_cells_with_scale(&full, cw, ch, scale);
+            let (w, h) = bg.dimensions();
+            // The front strip, i.e. everything below the desks.
+            let strip = (0.0, h as f32 * 0.88, w as f32, h as f32 * 0.12);
+
+            let mut busy = GameModeState::new();
+            busy.desks[0].child_session_id = Some("a".into());
+            busy.desks[0].phase = ActorPhase::AtDeskWorking;
+            assert!(busy.roomba_is_moving());
+            let a = compose_cell_frame(&bg, &busy, 0);
+            assert!(
+                differing(&bg, &a, strip) > 0,
+                "{cw}×{ch}: the robot was never drawn"
+            );
+
+            busy.roomba_step = 20;
+            let b = compose_cell_frame(&bg, &busy, 0);
+            assert!(
+                differing(&a, &b, strip) > 0,
+                "{cw}×{ch}: the robot must move with its patrol step"
+            );
+
+            // Same step, frozen room: same sprite in the same place, no dust.
+            let mut parked = GameModeState::new();
+            parked.roomba_step = 20;
+            assert!(!parked.roomba_is_moving());
+            let c = compose_cell_frame(&bg, &parked, 0);
+            assert!(
+                differing(&bg, &c, strip) > 0,
+                "{cw}×{ch}: a parked robot is still on the floor"
+            );
+            assert!(
+                differing(&b, &c, strip) > 0,
+                "{cw}×{ch}: a parked robot must not kick up dust"
+            );
+        }
+    }
+
+    /// Two cache keys for the whole patrol: the position is procedural, so only
+    /// the lamp/brush frame is ever rasterised.
+    #[test]
+    fn roomba_costs_two_cache_keys() {
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1, 1, 1]);
+        let frames: Vec<_> = (0..8u8).map(|f| cached_roomba(f, 1)).collect();
+        assert_eq!(sprite_cache_len(), 2, "the robot's frame period is 2");
+        assert!(Arc::ptr_eq(&frames[0], &frames[2]), "even frames collapse");
+        assert!(!Arc::ptr_eq(&frames[0], &frames[1]), "the lamp must blink");
     }
 
     #[test]
