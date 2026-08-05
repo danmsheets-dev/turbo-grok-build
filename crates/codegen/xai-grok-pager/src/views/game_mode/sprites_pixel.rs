@@ -950,10 +950,31 @@ pub fn sprite_supervisor(phase: u8, frame: u8) -> RgbaImage {
     img
 }
 
-/// MCP server rack. When `active`, LEDs blink and status bar pulses.
+/// Canonical `frame` for [`sprite_mcp_server`] (RC16 §3 step 2).
 ///
-/// Kept for unit tests / future ambient rack props (not composed in RC13 office).
-#[cfg(test)]
+/// Idle art reads no frame at all, so every idle frame collapses onto one key.
+/// The active art reads `frame % 2` (badge, LED brightness, link LED),
+/// `(frame + row) % 3` (the blade chase) and `frame % 4` (the pulse bar), so its
+/// period is `lcm(2, 3, 4)` = **12**. The office only ever feeds it the
+/// `(tick / 4) % 4` bucket, so 4 of those 12 are reachable in practice.
+pub fn mcp_rack_frame_key(active: bool, frame: u8) -> u8 {
+    if active { frame % 12 } else { 0 }
+}
+
+/// MCP server rack. When `active`, LEDs chase and the status bar pulses.
+///
+/// Composed by [`super::compose`] onto the "MCP SERVER" rack the mockup bakes
+/// into the right wall (RC16 §3 step 2). Until then this was `#[cfg(test)]`
+/// scaffolding with no call site.
+///
+/// FEATURE SIZE: every animated element is >= 2×2 sprite pixels. The composed
+/// frame is Nearest-downsampled by [`effective_pixel_scale`] (2 or 3) and this
+/// prop draws at scale 1 on ordinary terminals (see `compose::rack_scale`), so
+/// the 1px LEDs and 1px pulse bar it shipped with could fall between samples and
+/// leave a dead grey box. That is also why there are four 4px blade rows rather
+/// than the original six 3px ones: [`filled_body`] spends the first and last row
+/// of a bay on its outline, so a 3px bay has exactly *one* interior row and
+/// nowhere to put a 2px LED.
 pub fn sprite_mcp_server(active: bool, frame: u8) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(18, 28, Rgba(CLEAR));
     let chassis = [36, 40, 52, 255];
@@ -964,29 +985,29 @@ pub fn sprite_mcp_server(active: bool, frame: u8) -> RgbaImage {
     // Outer rack
     filled_body(&mut img, 1, 0, 16, 27, chassis);
     fill_rect(&mut img, 2, 1, 14, 1, chassis_h);
-    fill_rect(&mut img, 2, 25, 14, 1, chassis_d);
+    fill_rect(&mut img, 2, 26, 14, 1, chassis_d);
     // Feet
     fill_rect(&mut img, 2, 27, 3, 1, chassis_d);
     fill_rect(&mut img, 13, 27, 3, 1, chassis_d);
 
     // Top badge strip
     fill_rect(&mut img, 3, 2, 12, 3, bezel);
-    // "MCP" pixel marks
+    // "MCP" marks
     let badge = if active && frame % 2 == 0 {
         [120, 255, 180, 255]
     } else {
         [80, 200, 140, 255]
     };
-    for (x, y) in [(4, 3), (5, 3), (7, 3), (8, 3), (10, 3), (11, 3), (12, 3)] {
-        px(&mut img, x, y, badge);
-    }
+    fill_rect(&mut img, 4, 3, 2, 2, badge);
+    fill_rect(&mut img, 7, 3, 2, 2, badge);
+    fill_rect(&mut img, 10, 3, 3, 2, badge);
 
     // Drive bays / blade rows
-    for row in 0..6 {
-        let y = 6 + row * 3;
-        filled_body(&mut img, 3, y, 12, 3, bezel);
+    for row in 0..4 {
+        let y = 6 + row * 4;
+        filled_body(&mut img, 3, y, 12, 4, bezel);
         // left handle
-        fill_rect(&mut img, 4, y + 1, 2, 1, chassis_h);
+        fill_rect(&mut img, 4, y + 1, 2, 2, chassis_h);
         // LED cluster
         let on = if active {
             // chase pattern when MCP is mid-call
@@ -1005,22 +1026,23 @@ pub fn sprite_mcp_server(active: bool, frame: u8) -> RgbaImage {
         } else {
             [48, 56, 64, 255]
         };
-        px(&mut img, 12, y + 1, led);
-        if active && frame % 2 == 0 {
-            px(&mut img, 13, y + 1, [120, 220, 255, 255]);
+        fill_rect(&mut img, 9, y + 1, 2, 2, led);
+        let link = if active && frame % 2 == 0 {
+            [120, 220, 255, 255]
         } else {
-            px(&mut img, 13, y + 1, [40, 80, 120, 255]);
-        }
+            [40, 80, 120, 255]
+        };
+        fill_rect(&mut img, 12, y + 1, 2, 2, link);
     }
 
     // Bottom activity bar
-    fill_rect(&mut img, 3, 24, 12, 1, bezel);
+    fill_rect(&mut img, 3, 23, 12, 2, bezel);
     if active {
         let pulse = (frame % 4) as i32;
-        fill_rect(&mut img, 4 + pulse, 24, 4, 1, [80, 255, 160, 255]);
-        fill_rect(&mut img, 8 + pulse, 24, 3, 1, [80, 180, 255, 255]);
+        fill_rect(&mut img, 4 + pulse, 23, 4, 2, [80, 255, 160, 255]);
+        fill_rect(&mut img, 8 + pulse, 23, 3, 2, [80, 180, 255, 255]);
     } else {
-        fill_rect(&mut img, 4, 24, 2, 1, [48, 120, 80, 255]);
+        fill_rect(&mut img, 4, 23, 2, 2, [48, 120, 80, 255]);
     }
     img
 }
@@ -1138,6 +1160,70 @@ mod tests {
         assert_eq!(sprite_mcp_server(true, 1).width(), 18);
         assert!(!sprite_mcp_server(false, 0).as_raw().is_empty());
         assert!(!sprite_supervisor(1, 2).as_raw().is_empty());
+    }
+
+    /// RC16 §3 step 2: the rack's cache key must be the sprite's real period —
+    /// no wider (duplicate entries for identical art) and no narrower (two
+    /// different pictures sharing one entry, i.e. a frozen animation).
+    #[test]
+    fn mcp_rack_frame_key_matches_the_sprite_period() {
+        let idle: Vec<RgbaImage> = (0..24u8).map(|f| sprite_mcp_server(false, f)).collect();
+        for f in 0..24u8 {
+            assert_eq!(mcp_rack_frame_key(false, f), 0);
+            assert_eq!(
+                idle[f as usize].as_raw(),
+                idle[0].as_raw(),
+                "the idle rack must not animate (frame {f})"
+            );
+        }
+
+        let active: Vec<RgbaImage> = (0..24u8).map(|f| sprite_mcp_server(true, f)).collect();
+        for a in 0..24u8 {
+            for b in 0..24u8 {
+                let same_key = mcp_rack_frame_key(true, a) == mcp_rack_frame_key(true, b);
+                let same_art = active[a as usize].as_raw() == active[b as usize].as_raw();
+                assert_eq!(
+                    same_key, same_art,
+                    "frames {a}/{b}: key says same={same_key}, art says same={same_art}"
+                );
+            }
+        }
+        // All 12 of the active period really are distinct pictures, and none of
+        // them is the idle rack — the LEDs have to read as "MCP is busy".
+        assert_eq!(
+            (0..12u8)
+                .map(|f| active[f as usize].as_raw().clone())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            12
+        );
+        assert!((0..12u8).all(|f| active[f as usize].as_raw() != idle[0].as_raw()));
+    }
+
+    /// The rack draws at scale 1 on ordinary terminals and the composed frame is
+    /// then Nearest-downsampled by 2 or 3, so a 1px feature can fall between
+    /// samples. Every animated element must be at least 2×2.
+    #[test]
+    fn mcp_rack_animated_features_survive_the_downsample() {
+        let a = sprite_mcp_server(true, 0);
+        let b = sprite_mcp_server(true, 1);
+        let (w, h) = a.dimensions();
+        let mut runs = 0usize;
+        for y in 0..h - 1 {
+            for x in 0..w - 1 {
+                let quad = [(0u32, 0u32), (1, 0), (0, 1), (1, 1)];
+                if quad
+                    .iter()
+                    .all(|(dx, dy)| a.get_pixel(x + dx, y + dy) != b.get_pixel(x + dx, y + dy))
+                {
+                    runs += 1;
+                }
+            }
+        }
+        assert!(
+            runs > 0,
+            "no 2×2 block changes between frames — the chase would vanish at terminal res"
+        );
     }
 
     #[test]

@@ -8,9 +8,10 @@ use image::imageops::FilterType;
 use image::RgbaImage;
 
 use super::sprites_pixel::{
-    DevPalette, blit, celebrate_frame_key, dev_at_desk_frame_key, fail_frame_key, scale_nn,
-    sprite_coffee, sprite_developer_at_desk, sprite_developer_celebrate, sprite_developer_fail,
-    sprite_developer_walk, sprite_door, sprite_empty_desk, sprite_plant, sprite_supervisor,
+    DevPalette, blit, celebrate_frame_key, dev_at_desk_frame_key, fail_frame_key,
+    mcp_rack_frame_key, scale_nn, sprite_coffee, sprite_developer_at_desk,
+    sprite_developer_celebrate, sprite_developer_fail, sprite_developer_walk, sprite_door,
+    sprite_empty_desk, sprite_mcp_server, sprite_plant, sprite_supervisor,
     stamp_floor_patch_sampled, supervisor_frame_key, walk_frame_key,
 };
 use super::state::{ActorPhase, GameModeState, SupervisorPhase};
@@ -55,6 +56,43 @@ const DOOR_Y_FRAC: f32 = 0.46;
 /// Bucket-aligned on purpose — see [`door_is_open`].
 const DOOR_OPEN_ENTER_T: f32 = 0.25;
 const DOOR_OPEN_EXIT_T: f32 = 0.75;
+
+/// Top-left blit corners of the static ambient props, as canvas fractions.
+///
+/// Unlike [`DESK_ANCHORS`] / [`SUPERVISOR_ANCHOR`] / [`RACK_ANCHOR`] these are
+/// *corners*, not centres — the props are blitted straight at them. Named so the
+/// placement test can assert the rack clears them instead of re-typing literals.
+const PLANT_L_ANCHOR: (f32, f32) = (0.06, 0.62);
+const PLANT_R_ANCHOR: (f32, f32) = (0.90, 0.58);
+/// Moved down from 0.40h in RC16 §3 step 2: at 0.40h the mug floated on the wall
+/// *inside* the rack footprint below. 0.48h stands it on the carpet in front of
+/// the rack, clear of both the rack (ends 0.46h) and the right plant (0.58h).
+const COFFEE_ANCHOR: (f32, f32) = (0.88, 0.48);
+
+/// Centre of the MCP server rack, as a fraction of the canvas.
+///
+/// Measured off `office_bg.png`, which already bakes a labelled "MCP SERVER"
+/// rack into the right wall at x 1309..1435, y 192..498 of 1448×1086. The
+/// composed sprite is centred on and scaled *into* that footprint (see
+/// [`rack_scale`]) so the room keeps exactly one rack: the baked chassis frames
+/// the live blades, and the two share a palette to within a few units
+/// (baked #2B2D39 vs sprite #242834).
+///
+/// TIER NOTE: the rack is **pixel-office only**. The Unicode fallback is a
+/// wall/supervisor/handoff/desks/door stack with no spare geometry to stand a
+/// rack in, and Compact is a card grid with no office at all — a glyph there
+/// would have to displace a desk card. So the rack tooltip must be gated on
+/// `render::render_game_mode`'s `pixel_painted`, exactly like the supervisor
+/// hit rect: a default `Rect` never hit-tests.
+const RACK_ANCHOR: (f32, f32) = (0.947, 0.318);
+
+/// Footprint of the baked rack, as fractions of the canvas.
+///
+/// Also the rack's hover hit box for RC16 §3 step 3 — same contract as
+/// [`SUPERVISOR_COVER_W_FRAC`], and the reason [`rack_scale`] never lets the
+/// sprite grow past it.
+const RACK_COVER_W_FRAC: f32 = 0.087;
+const RACK_COVER_H_FRAC: f32 = 0.283;
 
 /// Cell rect covering the composed supervisor — the pixel office's hover hit box.
 ///
@@ -131,6 +169,50 @@ fn desk_scale(w: u32) -> u32 {
     ((w as f32 * 0.075) / base).max(1.0).round().min(5.0) as u32
 }
 
+/// Scale for the static ambient props (door / plants / coffee).
+fn prop_scale(w: u32) -> u32 {
+    desk_scale(w).max(1).min(3)
+}
+
+/// The baked rack's footprint in canvas pixels: `(x, y, w, h)`.
+///
+/// Single source for [`rack_scale`] and for the placement test — and, when the
+/// rack tooltip lands, for its hit rect.
+fn rack_cover_px(w: u32, h: u32) -> (f32, f32, f32, f32) {
+    let cover_w = w as f32 * RACK_COVER_W_FRAC;
+    let cover_h = h as f32 * RACK_COVER_H_FRAC;
+    (
+        w as f32 * RACK_ANCHOR.0 - cover_w / 2.0,
+        h as f32 * RACK_ANCHOR.1 - cover_h / 2.0,
+        cover_w,
+        cover_h,
+    )
+}
+
+/// Scale for the 18×28 [`sprite_mcp_server`] on a `w`×`h` canvas.
+///
+/// Derived from the baked rack's own footprint rather than from [`desk_scale`],
+/// and **floored** so the sprite always fits *inside* it. That asymmetry is
+/// deliberate: an undershoot is invisible (the baked chassis behind it is the
+/// same near-black, and its own blade rows continue the pattern) while an
+/// overshoot would push a hard dark edge onto the grey wall above and the carpet
+/// below, and — at tall canvas aspect ratios, where the height term is the
+/// larger one — could reach the coffee prop and desk 3's clear area. Fitting is
+/// what makes the placement test's "clears every desk and prop" claim hold at
+/// *every* geometry rather than at the ones that happen to round down.
+///
+/// The `max(1)` floor can only bite below ~216×108 canvas pixels, i.e. under the
+/// smallest stage the pixel office paints at the default `PIXEL_SCALE` (72×18
+/// cells) — at exactly that size 18×28 still fits the 18.8×30.6 footprint. Below
+/// it (only reachable via a `GROK_GAME_PIXEL_SCALE=2` override on a tiny
+/// terminal, where every prop is oversized for the same reason) the sprite can
+/// spill a few pixels past the footprint.
+fn rack_scale(w: u32, h: u32) -> u32 {
+    let (_, _, cover_w, cover_h) = rack_cover_px(w, h);
+    let fit = (cover_w / 18.0).min(cover_h / 28.0);
+    fit.floor().clamp(1.0, 5.0) as u32
+}
+
 // Thread-local scaled sprite cache — Arc so blit does not clone every frame.
 //
 // PERF INVARIANT: compose_cell_frame must stay cheap on tick-only frames.
@@ -142,15 +224,16 @@ use std::sync::Arc;
 
 /// Cache cap, in entries.
 ///
-/// Measured worst case per scale-set is **98** live keys: 36 seated devs
+/// Measured worst case per scale-set is **103** live keys: 36 seated devs
 /// (6 skins × (4 typing frames + 2 idle poses)), 12 debug-rage devs and 12
 /// celebrating devs (6 skins × 2 frames each), 24 walkers (6 skins × 2 packet
 /// × 2 frames), 9 supervisors (2 idle + 4 working + 3 reviewing reachable from
-/// the `(tick/4)%4` frame counter), 2 doors (open / closed) and 3 statics
-/// (empty desk, plant, coffee). Before RC16 P8 frame quantization the character
-/// set alone needed 111, which is why a 128-entry cap thrashed.
+/// the `(tick/4)%4` frame counter), 2 doors (open / closed), 5 MCP racks (idle
+/// plus the 4 active frames the same counter reaches) and 3 statics (empty desk,
+/// plant, coffee). Before RC16 P8 frame quantization the character set alone
+/// needed 111, which is why a 128-entry cap thrashed.
 ///
-/// 256 leaves room for two full scale-sets (196, i.e. mid-resize) plus ~60 keys
+/// 256 leaves room for two full scale-sets (206, i.e. mid-resize) plus ~50 keys
 /// of headroom for upcoming animation sprites. It is a backstop only:
 /// [`sprite_cache_begin_pass`] drops stale scales eagerly, so the map normally
 /// sits at one scale-set.
@@ -212,7 +295,7 @@ thread_local! {
 /// become garbage in a single step. Dropping them here keeps the map at ~one
 /// scale-set; the old clear-at-128 eviction instead wiped the sprites the new
 /// stage had *just* rasterised, turning a resize into a rebuild storm.
-fn sprite_cache_begin_pass(scales: [u32; 4]) {
+fn sprite_cache_begin_pass(scales: [u32; 5]) {
     let live = scales.iter().fold(0u64, |m, s| m | scale_bit(*s));
     SPRITE_CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -340,6 +423,16 @@ fn cached_coffee(sc: u32) -> Arc<RgbaImage> {
     cache_get_or_insert(0xC0u64 << 56 | sc as u64, sc, || {
         scale_nn(&sprite_coffee(), sc)
     })
+}
+
+/// +5 keys per scale-set: the single idle frame plus the four active frames the
+/// `(tick / 4) % 4` counter can reach ([`mcp_rack_frame_key`] collapses the
+/// sprite's full 12-frame active period onto whatever the office samples).
+fn cached_rack(active: bool, frame: u8, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let frame = mcp_rack_frame_key(active, frame);
+    let key = (0xB0u64 << 56) | ((active as u64) << 32) | ((frame as u64) << 24) | sc as u64;
+    cache_get_or_insert(key, sc, || scale_nn(&sprite_mcp_server(active, frame), sc))
 }
 
 /// +2 keys per scale-set (open / closed) — the door has no frame counter, so
@@ -536,6 +629,29 @@ fn desk_frame(frame: u8, desk: usize) -> u8 {
 /// share a hash bucket can never disagree about the door. That is what makes
 /// the door free: no new fingerprint input, and both phases already recompose
 /// every tick.
+/// Whether the MCP rack's LEDs chase this frame (RC16 §3 step 2).
+///
+/// FINGERPRINT NOTE: like [`door_is_open`], a pure function of inputs
+/// [`GameModeState::visual_fingerprint`] already hashes — the supervisor phase
+/// and every desk's occupancy + phase — so it adds **no** new fingerprint input
+/// and the idle↔active edge recomposes for free.
+///
+/// WAKEUP NOTE: every state that lights the rack (a Working supervisor, a desk
+/// typing) is already in `GameModeState::pixel_needs_tick_frame`, so the
+/// `(tick / 4)` bucket the chase rides is already hashed and the event loop is
+/// already awake for it — **zero** new `needs_animation_tick` wakeups. A frozen
+/// room composes `tick = 0` against an idle rack, i.e. one still frame, so the
+/// RC16 PERF-1 parking and the idle-freeze invariant are both untouched.
+/// Blinking the LEDs unconditionally would have broken both, which is why the
+/// rack goes dark with the room. Real MCP tool-call activity replaces this
+/// derivation in RC16 §4 #5.
+pub(super) fn rack_is_active(state: &GameModeState) -> bool {
+    matches!(state.supervisor, SupervisorPhase::Working)
+        || state.desks.iter().any(|d| {
+            d.is_occupied() && matches!(d.phase, ActorPhase::AtDeskWorking)
+        })
+}
+
 fn door_is_open(state: &GameModeState) -> bool {
     state.desks.iter().any(|d| {
         d.is_occupied()
@@ -614,15 +730,17 @@ pub fn compose_cell_frame_into(
     let frame = ((tick / 4) % 4) as u8;
     let sc = desk_scale(w).max(1);
     let walk_sc = (((w as f32 * 0.05) / 14.0).max(1.0).round().min(5.0) as u32).max(1);
-    let prop_sc = sc.min(3);
+    let prop_sc = prop_scale(w);
     let sup_sc = (((w as f32 * 0.072) / 26.0).max(1.0).round().min(5.0) as u32).max(1);
+    let rack_sc = rack_scale(w, h);
     // RC16 P8: retire sprites rasterised for a previous stage size before this
     // pass touches the cache, so a resize cannot push the live set over the cap.
-    sprite_cache_begin_pass([sc, walk_sc, prop_sc, sup_sc]);
+    sprite_cache_begin_pass([sc, walk_sc, prop_sc, sup_sc, rack_sc]);
 
-    // Ambient props (door / plants / coffee) near room edges — cached sprites.
-    // The door goes down first so the plant that shares its column overlaps it
-    // at large prop scales instead of being erased by it.
+    // Ambient props (door / rack / plants / coffee) near room edges — cached
+    // sprites. The door goes down first so the plant that shares its column
+    // overlaps it at large prop scales instead of being erased by it; the rack
+    // follows so the mug keeps its existing z-order in front of everything.
     {
         let door = cached_door(door_is_open(state), prop_sc);
         blit(
@@ -631,22 +749,37 @@ pub fn compose_cell_frame_into(
             door_x(w) as i32 - door.width() as i32 / 2,
             (h as f32 * DOOR_Y_FRAC) as i32,
         );
+        // No floor stamp before the rack, unlike the supervisor rug and
+        // `clear_desk_area`: [`RACK_ANCHOR`] is the mockup's own wall-standing
+        // rack, so a carpet patch would run floor tiles up the wall, and
+        // [`rack_scale`] keeps the sprite inside that footprint so there is no
+        // stray baked furniture to erase in the first place.
+        let rack = cached_rack(rack_is_active(state), frame, rack_sc);
+        blit(
+            canvas,
+            rack.as_ref(),
+            (w as f32 * RACK_ANCHOR.0) as i32 - rack.width() as i32 / 2,
+            (h as f32 * RACK_ANCHOR.1) as i32 - rack.height() as i32 / 2,
+        );
         let plant = cached_plant(prop_sc);
         let coffee = cached_coffee(prop_sc);
         blit(
             canvas,
-            plant.as_ref(), (w as f32 * 0.06) as i32, (h as f32 * 0.62) as i32);
+            plant.as_ref(),
+            (w as f32 * PLANT_L_ANCHOR.0) as i32,
+            (h as f32 * PLANT_L_ANCHOR.1) as i32,
+        );
         blit(
             canvas,
             plant.as_ref(),
-            (w as f32 * 0.90) as i32,
-            (h as f32 * 0.58) as i32,
+            (w as f32 * PLANT_R_ANCHOR.0) as i32,
+            (h as f32 * PLANT_R_ANCHOR.1) as i32,
         );
         blit(
             canvas,
             coffee.as_ref(),
-            (w as f32 * 0.88) as i32,
-            (h as f32 * 0.40) as i32,
+            (w as f32 * COFFEE_ANCHOR.0) as i32,
+            (h as f32 * COFFEE_ANCHOR.1) as i32,
         );
     }
 
@@ -940,7 +1073,7 @@ mod tests {
     #[test]
     fn equivalent_frames_share_one_cache_entry() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
 
         let walk0 = cached_walk(0, 0, false, 1);
         let walk2 = cached_walk(0, 2, false, 1);
@@ -952,7 +1085,7 @@ mod tests {
 
         // Idle developers only alternate the thought bubble at `frame % 4 < 2`.
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
         let idle: Vec<_> = (0..4u8)
             .map(|f| cached_dev_at_desk(0, false, f, 1))
             .collect();
@@ -962,7 +1095,7 @@ mod tests {
 
         // Idle/waiting supervisors only alternate the coffee steam.
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
         for f in 0..4u8 {
             cached_supervisor(0, f, 1);
         }
@@ -970,7 +1103,7 @@ mod tests {
 
         // Typing developers really do animate on all four frames.
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
         for f in 0..4u8 {
             cached_dev_at_desk(0, true, f, 1);
         }
@@ -983,7 +1116,7 @@ mod tests {
     #[test]
     fn overflow_keeps_sprites_the_current_pass_is_using() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
         let keep = cached_empty_desk(1);
         for i in 0..(SPRITE_CACHE_CAP as u64 * 2) {
             junk(i, 1);
@@ -998,21 +1131,21 @@ mod tests {
     #[test]
     fn scale_change_drops_stale_scale_entries() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
         let small = cached_empty_desk(1);
         cached_plant(1);
         assert_eq!(sprite_cache_len(), 2);
 
-        sprite_cache_begin_pass([2, 2, 2, 2]);
+        sprite_cache_begin_pass([2, 2, 2, 2, 2]);
         assert_eq!(sprite_cache_len(), 0, "old scale is garbage after a resize");
         let big = cached_empty_desk(2);
         assert!(!Arc::ptr_eq(&small, &big));
 
         // A pass that still uses a scale keeps that scale's entries.
-        sprite_cache_begin_pass([2, 3, 3, 3]);
+        sprite_cache_begin_pass([2, 3, 3, 3, 3]);
         assert!(sprite_cache_has_scale(2), "scale 2 is still live");
         cached_plant(3);
-        sprite_cache_begin_pass([2, 3, 3, 3]);
+        sprite_cache_begin_pass([2, 3, 3, 3, 3]);
         assert_eq!(
             sprite_cache_len(),
             2,
@@ -1025,7 +1158,7 @@ mod tests {
     fn cache_never_grows_past_the_cap() {
         sprite_cache_reset();
         for scale in 1..=5u32 {
-            sprite_cache_begin_pass([scale, scale, scale, scale]);
+            sprite_cache_begin_pass([scale, scale, scale, scale, scale]);
             for i in 0..(SPRITE_CACHE_CAP as u64 * 2) {
                 junk(i, scale);
                 assert!(sprite_cache_len() <= SPRITE_CACHE_CAP);
@@ -1039,7 +1172,7 @@ mod tests {
     #[test]
     fn worst_case_working_set_per_scale() {
         sprite_cache_reset();
-        sprite_cache_begin_pass([1, 1, 1, 1]);
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
         // frame is `(tick / 4) % 4`, so 0..4 is the whole reachable domain.
         for skin in 0..6u8 {
             for frame in 0..4u8 {
@@ -1063,12 +1196,17 @@ mod tests {
         for open in [true, false] {
             cached_door(open, 1);
         }
+        for active in [true, false] {
+            for frame in 0..4u8 {
+                cached_rack(active, frame, 1);
+            }
+        }
         cached_empty_desk(1);
         cached_plant(1);
         cached_coffee(1);
         // 36 seated devs + 12 debug-rage + 12 celebrate + 24 walkers
-        // + 9 supervisors + 2 doors + 3 statics.
-        assert_eq!(sprite_cache_len(), 98);
+        // + 9 supervisors + 2 doors + 5 racks + 3 statics.
+        assert_eq!(sprite_cache_len(), 103);
         assert!(
             sprite_cache_len() * 2 <= SPRITE_CACHE_CAP,
             "cap must hold two scale-sets across a resize"
@@ -1220,6 +1358,233 @@ mod tests {
         let colors: std::collections::HashSet<[u8; 4]> =
             c.pixels().map(|p| p.0).filter(|p| p[3] != 0).collect();
         assert!(colors.len() >= 3, "confetti must be multi-colour, got {colors:?}");
+    }
+
+    /// Canvas sizes the pixel office really paints at, one per tier plus the
+    /// awkward aspect ratios: `(cell_w, cell_h)` → `(canvas_w, canvas_h)`.
+    fn tier_canvases() -> Vec<(u32, u32)> {
+        [
+            (72u16, 18u16),  // Normal, smallest stage the pixel path accepts
+            (80, 24),        // Normal
+            (100, 30),       // Normal
+            (120, 34),       // Comfort
+            (160, 44),       // Wide
+            (200, 60),       // Wide, adaptive scale 2
+            (240, 20),       // very wide and short
+            (72, 50),        // narrow and tall
+        ]
+        .iter()
+        .map(|(cw, ch)| {
+            let s = crate::views::game_mode::sprites_pixel::effective_pixel_scale(*cw, *ch).max(1);
+            (u32::from(*cw) * s, u32::from(*ch) * 2 * s)
+        })
+        .collect()
+    }
+
+    fn rects_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+        a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+    }
+
+    /// RC16 §3 step 2: the rack lands on the mockup's own "MCP SERVER" rack and
+    /// must touch nothing else — not a desk (whose clear-stamp would erase it),
+    /// not the supervisor rug, not the door column, not a plant or the mug.
+    /// Checked against the *cover* footprint, which is both what [`rack_scale`]
+    /// fits into and the hit box the rack tooltip will hang off.
+    #[test]
+    fn rack_footprint_clears_every_desk_and_prop() {
+        let plant = sprite_plant().dimensions();
+        let coffee = sprite_coffee().dimensions();
+        let door = sprite_door(false).dimensions();
+        let sup = sprite_supervisor(0, 0).dimensions();
+        let desk = sprite_empty_desk().dimensions();
+
+        for (w, h) in tier_canvases() {
+            let (fw, fh) = (w as f32, h as f32);
+            let sc = desk_scale(w).max(1) as f32;
+            let prop_sc = prop_scale(w) as f32;
+            let sup_sc = (((fw * 0.072) / 26.0).max(1.0).round().min(5.0) as u32).max(1) as f32;
+            let (rx, ry, rw, rh) = rack_cover_px(w, h);
+            assert!(
+                rx >= 0.0 && rx + rw <= fw && ry >= 0.0 && ry + rh <= fh,
+                "{w}×{h}: rack cover ({rx}, {ry}, {rw}, {rh}) left the canvas"
+            );
+            // Checked region: the footprint (= the hit box) unioned with the
+            // sprite actually blitted, which on a very short canvas is taller
+            // than the footprint because `rack_scale` cannot go below 1.
+            let s = rack_scale(w, h) as f32;
+            let (sw, sh) = (18.0 * s, 28.0 * s);
+            let sprite = (
+                fw * RACK_ANCHOR.0 - sw / 2.0,
+                fh * RACK_ANCHOR.1 - sh / 2.0,
+                sw,
+                sh,
+            );
+            let x0 = rx.min(sprite.0);
+            let y0 = ry.min(sprite.1);
+            let cover = (
+                x0,
+                y0,
+                (rx + rw).max(sprite.0 + sprite.2) - x0,
+                (ry + rh).max(sprite.1 + sprite.3) - y0,
+            );
+
+            let mut others: Vec<(String, (f32, f32, f32, f32))> = vec![
+                (
+                    "left plant".to_string(),
+                    (
+                        fw * PLANT_L_ANCHOR.0,
+                        fh * PLANT_L_ANCHOR.1,
+                        plant.0 as f32 * prop_sc,
+                        plant.1 as f32 * prop_sc,
+                    ),
+                ),
+                (
+                    "right plant".to_string(),
+                    (
+                        fw * PLANT_R_ANCHOR.0,
+                        fh * PLANT_R_ANCHOR.1,
+                        plant.0 as f32 * prop_sc,
+                        plant.1 as f32 * prop_sc,
+                    ),
+                ),
+                (
+                    "coffee".to_string(),
+                    (
+                        fw * COFFEE_ANCHOR.0,
+                        fh * COFFEE_ANCHOR.1,
+                        coffee.0 as f32 * prop_sc,
+                        coffee.1 as f32 * prop_sc,
+                    ),
+                ),
+                (
+                    "door".to_string(),
+                    (
+                        door_x(w) - door.0 as f32 * prop_sc / 2.0,
+                        fh * DOOR_Y_FRAC,
+                        door.0 as f32 * prop_sc,
+                        door.1 as f32 * prop_sc,
+                    ),
+                ),
+            ];
+            // Supervisor: the union of the rug/clear footprint and the sprite.
+            let (sup_hw, sup_hh) = (
+                (fw * SUPERVISOR_COVER_W_FRAC / 2.0).max(sup.0 as f32 * sup_sc / 2.0),
+                (fh * SUPERVISOR_COVER_H_FRAC).max(sup.1 as f32 * sup_sc / 2.0),
+            );
+            others.push((
+                "supervisor".to_string(),
+                (
+                    fw * SUPERVISOR_ANCHOR.0 - sup_hw,
+                    fh * SUPERVISOR_ANCHOR.1 - sup_hh,
+                    sup_hw * 2.0,
+                    sup_hh * 2.0,
+                ),
+            ));
+            // Desks: the union of `clear_desk_area` and the seated sprite.
+            for (i, (ax, ay)) in DESK_ANCHORS.iter().enumerate() {
+                let hw = (fw * 0.15 / 2.0).max(desk.0 as f32 * sc / 2.0);
+                let hh = (fh * 0.17 / 2.0).max(desk.1 as f32 * sc / 2.0);
+                others.push((
+                    format!("desk {i}"),
+                    (fw * ax - hw, fh * ay - hh, hw * 2.0, hh * 2.0),
+                ));
+            }
+
+            for (name, other) in others {
+                assert!(
+                    !rects_overlap(cover, other),
+                    "{w}×{h}: rack {cover:?} collides with {name} {other:?}"
+                );
+            }
+
+            // ...and the fit rule holds: the sprite never grows past the baked
+            // footprint. The one exception is the `max(1)` clamp on a canvas too
+            // short to hold 28 rows at all, and even there the *width* — the
+            // axis every neighbour is separated on — still fits.
+            assert!(
+                sw <= rw,
+                "{w}×{h}: rack sprite is {sw} wide, footprint is {rw}"
+            );
+            if rh >= 28.0 {
+                assert!(
+                    sh <= rh,
+                    "{w}×{h}: rack sprite is {sh} tall, footprint is {rh}"
+                );
+            } else {
+                assert_eq!(s, 1.0, "{w}×{h}: only the min-scale clamp may overflow");
+            }
+        }
+    }
+
+    /// The rack must actually be drawn, at every tier — the mockup already bakes
+    /// a rack there, so "composed" means *the composed frame differs from the
+    /// background inside the rack footprint*. It must also react: idle art and
+    /// active art differ, and consecutive active frames differ (which is the
+    /// LED chase, and proves `cached_rack` is not collapsing them).
+    #[test]
+    fn rack_is_composed_and_animates_at_every_office_tier() {
+        let full = load_office_background().expect("bg");
+        let differing = |a: &RgbaImage, b: &RgbaImage, r: (f32, f32, f32, f32)| {
+            let mut n = 0usize;
+            for y in (r.1 as u32)..((r.1 + r.3) as u32).min(a.height()) {
+                for x in (r.0 as u32)..((r.0 + r.2) as u32).min(a.width()) {
+                    if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        for (cw, ch) in [(80u16, 24u16), (120, 34), (200, 60)] {
+            let scale =
+                crate::views::game_mode::sprites_pixel::effective_pixel_scale(cw, ch).max(1);
+            let bg = scale_bg_to_cells_with_scale(&full, cw, ch, scale);
+            let (w, h) = bg.dimensions();
+            let cover = rack_cover_px(w, h);
+
+            let idle = GameModeState::new();
+            assert!(!rack_is_active(&idle));
+            let idle_frame = compose_cell_frame(&bg, &idle, 0);
+            assert!(
+                differing(&bg, &idle_frame, cover) > 0,
+                "{cw}×{ch}: nothing was composed over the baked rack"
+            );
+
+            let mut busy = GameModeState::new();
+            busy.desks[0].child_session_id = Some("a".into());
+            busy.desks[0].phase = ActorPhase::AtDeskWorking;
+            assert!(rack_is_active(&busy));
+            let busy0 = compose_cell_frame(&bg, &busy, 0);
+            assert!(
+                differing(&idle_frame, &busy0, cover) > 0,
+                "{cw}×{ch}: the rack must light up when work starts"
+            );
+            // `frame` is `(tick / 4) % 4`, so tick 4 is the next LED step.
+            let busy1 = compose_cell_frame(&bg, &busy, 4);
+            assert!(
+                differing(&busy0, &busy1, cover) > 0,
+                "{cw}×{ch}: the LED chase must advance with the tick bucket"
+            );
+        }
+    }
+
+    /// The cache must store one entry for the whole idle rack and one per
+    /// reachable active frame — the same contract every animated sprite has.
+    #[test]
+    fn rack_cache_collapses_idle_frames_but_not_the_chase() {
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        let idle: Vec<_> = (0..4u8).map(|f| cached_rack(false, f, 1)).collect();
+        assert_eq!(sprite_cache_len(), 1, "an idle rack has one frame");
+        assert!(idle.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])));
+
+        sprite_cache_reset();
+        sprite_cache_begin_pass([1, 1, 1, 1, 1]);
+        for f in 0..4u8 {
+            cached_rack(true, f, 1);
+        }
+        assert_eq!(sprite_cache_len(), 4, "the chase must not collapse");
     }
 
     #[test]

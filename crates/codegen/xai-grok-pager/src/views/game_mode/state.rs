@@ -1703,6 +1703,76 @@ mod tests {
         assert!(s.room_is_settled(), "a consumed window settles the room");
     }
 
+    /// RC16 §3 step 2: the MCP rack's LEDs light on the idle→active *edge* and
+    /// go dark with the room. `compose::rack_is_active` is a pure function of
+    /// inputs the fingerprint already hashes, so the edge recomposes for free —
+    /// and a pure idle tick still must not, or the rack would have re-broken the
+    /// idle-freeze invariant the coffee steam and the thinking bubble died to.
+    #[test]
+    fn mcp_rack_lights_on_the_active_edge_and_freezes_with_the_room() {
+        use super::super::compose::rack_is_active;
+
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("t".into());
+        s.desks[0].phase = ActorPhase::AtDeskThinking;
+        s.supervisor = SupervisorPhase::Idle;
+        assert!(
+            !rack_is_active(&s),
+            "a thinking-only room must leave the rack dark"
+        );
+        let fp0 = s.visual_fingerprint(80, 24);
+        s.tick = s.tick.wrapping_add(40);
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            fp0,
+            "an idle tick must not blink the rack"
+        );
+
+        s.desks[0].phase = ActorPhase::AtDeskWorking;
+        assert!(rack_is_active(&s), "a typing desk lights the rack");
+        assert_ne!(
+            s.visual_fingerprint(80, 24),
+            fp0,
+            "the idle→active edge must recompose"
+        );
+
+        // The whole "free animation" claim rests on this: every state that
+        // lights the rack already samples (and therefore hashes) the `tick / 4`
+        // bucket the chase rides, and already keeps the loop awake.
+        for phase in [
+            ActorPhase::AtDeskWorking,
+            ActorPhase::AtDeskThinking,
+            ActorPhase::SpawnWalk,
+            ActorPhase::WalkToBoss,
+            ActorPhase::Handoff,
+            ActorPhase::ExitDoor,
+            ActorPhase::Celebrate,
+            ActorPhase::FailBeat,
+        ] {
+            for sup in [
+                SupervisorPhase::Idle,
+                SupervisorPhase::Working,
+                SupervisorPhase::Reviewing,
+                SupervisorPhase::Waiting,
+            ] {
+                let mut c = GameModeState::new();
+                c.desks[0].child_session_id = Some("d".into());
+                c.desks[0].phase = phase;
+                c.supervisor = sup;
+                if rack_is_active(&c) {
+                    assert!(
+                        c.pixel_needs_tick_frame(),
+                        "{phase:?}/{sup:?}: an active rack must ride a hashed tick bucket"
+                    );
+                    assert!(
+                        c.needs_animation_tick(),
+                        "{phase:?}/{sup:?}: an active rack must not need its own wakeup"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn fingerprint_moves_with_working_tick_bucket() {
         let mut s = GameModeState::new();
