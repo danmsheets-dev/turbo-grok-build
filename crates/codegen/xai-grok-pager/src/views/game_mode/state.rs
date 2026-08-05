@@ -647,14 +647,19 @@ impl GameModeState {
             .retain(|id| agents.iter().any(|a| a.child_session_id == *id && a.running));
 
         // Arm brief attention only on **new** failed child IDs (not every sync).
-        let failed_ids: Vec<&str> = agents
+        //
+        // PERF (RC16 P11): probe the armed set by `&str` and only allocate the
+        // owned id on the arming transition. A failed child stays in the map
+        // until the turn ends, so the old `insert(id.to_string())` allocated a
+        // String per failed child on *every* sync just to throw it away.
+        let mut new_fail = false;
+        for id in agents
             .iter()
             .filter(|a| a.failed && !a.running)
             .map(|a| a.child_session_id.as_str())
-            .collect();
-        let mut new_fail = false;
-        for id in &failed_ids {
-            if self.attention_armed_ids.insert((*id).to_string()) {
+        {
+            if !self.attention_armed_ids.contains(id) {
+                self.attention_armed_ids.insert(id.to_string());
                 new_fail = true;
             }
         }
@@ -1229,6 +1234,42 @@ mod tests {
         let until = s.attention_until.expect("armed");
         s.sync_from_snapshots(&[fail], false, GameTier::Comfort, false);
         assert_eq!(s.attention_until, Some(until), "re-sync must not re-arm");
+    }
+
+    /// P11: the armed set is now probed by `&str` and only allocates an owned
+    /// id on the arming transition. The set semantics it carries must not
+    /// drift — a distinct new failure arms, and an id that leaves the map is
+    /// forgotten so its return arms again.
+    #[test]
+    fn attention_arms_per_distinct_failed_id() {
+        let failed = |id: &str| {
+            let mut a = snap(id, false);
+            a.failed = true;
+            a
+        };
+        let mut s = GameModeState::new();
+        s.sync_from_snapshots(&[failed("bad")], false, GameTier::Comfort, false);
+        let first = s.attention_until.expect("armed");
+        assert_eq!(s.attention_armed_ids.len(), 1);
+
+        // A second, distinct failure arms again.
+        s.sync_from_snapshots(
+            &[failed("bad"), failed("worse")],
+            false,
+            GameTier::Comfort,
+            false,
+        );
+        let second = s.attention_until.expect("re-armed");
+        assert!(second > first, "a new failed id must extend attention");
+        assert_eq!(s.attention_armed_ids.len(), 2);
+
+        // Both gone from the map: the armed ids go with them...
+        s.sync_from_snapshots(&[], false, GameTier::Comfort, false);
+        assert!(s.attention_armed_ids.is_empty());
+
+        // ...so the same id failing again is a new arming transition.
+        s.sync_from_snapshots(&[failed("bad")], false, GameTier::Comfort, false);
+        assert!(s.attention_until.expect("re-armed") > second);
     }
 
     #[test]

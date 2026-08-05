@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::layout::{GameLayout, GameTier, SpriteSet, compute};
 use super::monitor::monitor_lines;
@@ -657,16 +657,27 @@ fn paint_status_strip(buf: &mut Buffer, area: Rect, state: &GameModeState, tier:
 
 // ── buffer helpers ──────────────────────────────────────────────
 
+/// Cells consumed by one painted char — never zero, so a combining mark still
+/// advances (matches the pre-RC16 behaviour of `width(ch.to_string()).max(1)`).
+///
+/// PERF (RC16 P9): the old form heap-allocated a `String` just to measure, and
+/// `set_symbol(&ch.to_string())` allocated a second one to paint. A full stage
+/// is thousands of characters per frame; `UnicodeWidthChar` + `set_char` are
+/// the pattern used by the rest of this pager's buffer painters.
+fn char_cells(ch: char) -> u16 {
+    UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16
+}
+
 fn put_line(buf: &mut Buffer, x: u16, y: u16, max_w: u16, text: &str, style: Style) {
     let mut col = x;
     let end = x.saturating_add(max_w);
     for ch in text.chars() {
-        let w = UnicodeWidthStr::width(ch.to_string().as_str()).max(1) as u16;
+        let w = char_cells(ch);
         if col.saturating_add(w) > end {
             break;
         }
         if let Some(cell) = buf.cell_mut((col, y)) {
-            cell.set_symbol(&ch.to_string());
+            cell.set_char(ch);
             cell.set_style(style);
         }
         col = col.saturating_add(w);
@@ -695,12 +706,12 @@ fn blit_lines(buf: &mut Buffer, area: Rect, lines: &[Line<'static>]) {
         let end = area.x.saturating_add(area.width);
         for span in &line.spans {
             for ch in span.content.chars() {
-                let w = UnicodeWidthStr::width(ch.to_string().as_str()).max(1) as u16;
+                let w = char_cells(ch);
                 if x.saturating_add(w) > end {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_symbol(&ch.to_string());
+                    cell.set_char(ch);
                     cell.set_style(span.style);
                 }
                 x = x.saturating_add(w);
@@ -820,5 +831,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn symbol_at(buf: &Buffer, x: u16, y: u16) -> &str {
+        buf.cell((x, y)).expect("cell in bounds").symbol()
+    }
+
+    /// P9: `put_line` no longer allocates a `String` per painted character.
+    /// The cursor advance and the right-edge clip must still be by display
+    /// width — a wide glyph that would cross `max_w` is dropped whole, not
+    /// half-painted, and a zero-width mark still consumes one cell.
+    #[test]
+    fn put_line_advances_and_clips_by_display_width() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        put_line(&mut buf, 0, 0, 8, "a日b", Style::default());
+        assert_eq!(symbol_at(&buf, 0, 0), "a");
+        assert_eq!(symbol_at(&buf, 1, 0), "日");
+        assert_eq!(symbol_at(&buf, 2, 0), " ", "wide glyph's trailing half");
+        assert_eq!(symbol_at(&buf, 3, 0), "b");
+
+        // Two columns of room: the wide glyph does not fit after 'a'.
+        let mut narrow = Buffer::empty(Rect::new(0, 0, 8, 1));
+        put_line(&mut narrow, 0, 0, 2, "a日b", Style::default());
+        assert_eq!(symbol_at(&narrow, 0, 0), "a");
+        assert_eq!(symbol_at(&narrow, 1, 0), " ", "half a 日 must never paint");
+
+        // `char_cells` floors at 1, as the old `width(..).max(1)` did.
+        assert_eq!(char_cells('\u{0301}'), 1);
+        assert_eq!(char_cells('日'), 2);
+    }
+
+    /// P9: `blit_lines` shares the same per-char advance, and a span continues
+    /// where the previous one stopped.
+    #[test]
+    fn blit_lines_advances_across_spans_by_display_width() {
+        use ratatui::text::Span;
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        let line = Line::from(vec![Span::raw("日"), Span::raw("ab")]);
+        blit_lines(&mut buf, Rect::new(0, 0, 4, 1), &[line]);
+        assert_eq!(symbol_at(&buf, 0, 0), "日");
+        assert_eq!(symbol_at(&buf, 2, 0), "a");
+        assert_eq!(symbol_at(&buf, 3, 0), "b");
     }
 }
