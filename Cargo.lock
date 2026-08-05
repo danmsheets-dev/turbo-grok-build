@@ -16316,6 +16316,7 @@ dependencies = [
  "dunce",
  "enum_delegate",
  "flate2",
+ "fs2",
  "git2",
  "globset",
  "image",

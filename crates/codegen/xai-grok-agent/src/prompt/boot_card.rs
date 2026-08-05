@@ -425,7 +425,8 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - capability gaps: feature_request_log — file when a needed product surface is missing
 - surface: spawn={spawn} · isolation={isolation} · adl=`{adl_root}` · frl=`{frl_root}`
 - CLI: `{bin} issues|features file --class …` (aliases `--error-class` / `--request-class`)
-- disk: `{bin} disk report|clean --safe` · `{bin} subagent prune` · `{bin} tree prune`
+- disk: `{bin} disk report|check|clean --safe` · `{bin} subagent prune` · `{bin} tree prune`
+- tools: `{bin} tools list [--require spawn_subagent]` (headless schema assert)
 
 {workflows}
 {adl}
@@ -440,6 +441,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - If <isolation_fallback>true</isolation_fallback>: child ran SHARED on parent — do not claim isolated; developer_log(error_class=isolation_fallback) if unexpected
 - While a worktree child is RUNNING: do not edit the same paths on the parent
 - On complete: snapshot; live tree soft-preserved by default (GROK_SUBAGENT_SOFT_PRESERVE=0 deletes)
+- Keep-N: GROK_SUBAGENT_KEEP_N (default 3; 0=age-only) · free gate: GROK_MIN_FREE_GB (default 40)
 - Keep disk always: retain_worktree=true
 - Seed default clean (HEAD); dirty: GROK_SUBAGENT_WORKTREE_SEED=dirty. Tool FS + shell operand confine = worktree
 

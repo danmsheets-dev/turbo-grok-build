@@ -62,21 +62,24 @@ is a multi-agent development runtime** built on that foundation.
 | UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) |
 | Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
-### Highlights (RC14)
+### Highlights (RC15 + disk/tools closeout)
 
-RC14 focuses on **agent research tools** and **workflow honesty** (full notes:
-[`CHANGELOG.md`](./CHANGELOG.md)):
+**RC15** synced the wire line to **0.2.119** (xAI upstream) with Windows/security
+fixes. The latest closeout (see **Unreleased** in [`CHANGELOG.md`](./CHANGELOG.md))
+hardens densify disk safety and CI schema checks:
 
-- **`web_fetch`** — fetch any public URL to cleaned markdown (article/full/raw),
-  SSRF-safe, DNS pin, challenge detection, token-aware windowing/links
-- **Workflow routing** — boot card + system prompt teach agents to launch
-  `deep-audit` / `deep-research` instead of inventing dual-subagent “audits”
-- **Natural-language soft-match** — “Can you run a deep audit on the security app”
-  launches the real Rhai workflow without a leading `/`
-- Stock **`/deepaudit`** remains the only recommended deep-audit path
+- **`turbo tools list [--require …]`** — prove `spawn_subagent` (and peers) are
+  registered after config resolve; no model turn. Honors `GROK_SUBAGENTS=0`
+- **`turbo disk report|check|clean --safe`** — free-space gate status, keep-N vs
+  worktree count, safe reclaim of `target/debug` + old soft-preserved trees
+- **Keep-N + free gate defaults** — `GROK_SUBAGENT_KEEP_N=3` (age-only when `0`);
+  `GROK_MIN_FREE_GB=40` fail-closed before isolation=worktree create
+- **Agent cargo policy** — package-scoped tests, `CARGO_INCREMENTAL=0` one-shots,
+  clean debug after ship builds (see [`AGENTS.md`](./AGENTS.md))
 
-Prior themes still ship: isolation FS jail (RC12), Workspace Tree inject (RC13),
-Game Mode (RC11), baselines + Boot Card + ADL (RC9–10), deep-audit (RC8).
+Still ships from earlier RCs: **`web_fetch`** + workflow routing (RC14), isolation
+FS jail (RC12), Workspace Tree inject (RC13), Game Mode (RC11), baselines + Boot
+Card + ADL (RC9–10), **`/deepaudit`** (RC8).
 
 Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 
@@ -89,7 +92,10 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Folder worktrees** | Subagents default to isolated git worktrees under `~/.grok/worktrees/…` | RC7 (harden RC6–RC12) |
 | **Land / diff / discard** | Promote or drop child work via tools + `turbo subagent …` | RC8–RC9 |
 | **Agent-only baselines** | Diff/land = `baseline..snapshot`, not dirty parent vs HEAD | RC9 |
-| **Soft-preserve + keep-N** | Live worktrees kept for review; disk guard + prune | RC9 / RC12 |
+| **Soft-preserve + keep-N** | Live worktrees kept for review; `GROK_SUBAGENT_KEEP_N` (default 3; `0` = age-only) | RC9 / RC12 / RC16 |
+| **Free-space gate** | Pre-spawn + `turbo disk check` (`GROK_MIN_FREE_GB`, default 40) | RC12 / RC16 |
+| **`turbo tools list`** | Headless schema assert (`--require spawn_subagent`) without a model turn | RC16 |
+| **`turbo disk`** | Report / check / safe clean (`target/debug`, old worktrees, tree store) | RC15 / RC16 |
 | **FS confine (worktree)** | Write path + shell operand jail fail closed | RC12 |
 | **`/deepaudit`** | Parallel investigate → independent verify → verified report | RC8 |
 | **`/deep-research`** | Bounded research with claim cross-check | earlier + RC14 routing |
@@ -118,7 +124,9 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **r11** | `0.2.114-r11` | **Game Mode** + Feature Request Log |
 | **r12** | `0.2.114-r12` | Isolation **FS jail**, densify lifecycle, MCP harden, Game Mode polish |
 | **r13** | `0.2.114-r13` | **Workspace Tree** inject, densify engines, Game Mode performance |
-| **r14** | `0.2.114-r14` | **`web_fetch`** + **workflow routing** (this release) |
+| **r14** | `0.2.114-r14` | **`web_fetch`** + **workflow routing** |
+| **r15** | **`0.2.119-r1`** | **Upstream 0.2.119 sync**, security + Windows correctness |
+| **r16** (in progress) | — | Disk keep-N / free gate, **`turbo tools list`**, disk check/clean |
 
 Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 
@@ -140,7 +148,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **RC14** · `0.2.114-r14` |
+| Release line | upstream cadence | **RC15** · `0.2.119-r1` (+ RC16 disk/tools closeout on `dev`) |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -171,21 +179,21 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r14
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v0.2.119-r1
 ```
 
 ```powershell
-# Windows — pin RC14
+# Windows — pin RC15
 irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
 # or from a clone after a release tag exists:
-# .\install.ps1 -Version v0.2.114-r14
+# .\install.ps1 -Version v0.2.119-r1
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
 (`%USERPROFILE%\.turbo\bin\turbo.exe` on Windows).
 
 > **Note:** Prebuilt install requires a published GitHub Release for
-> `v0.2.114-r14`. Until then, [build from source](#building-from-source) and copy
+> `v0.2.119-r1`. Until then, [build from source](#building-from-source) and copy
 > `target/release-dist/turbo` into `~/.turbo/bin`.  
 > Repo: [danmsheets-dev/turbo-grok-build](https://github.com/danmsheets-dev/turbo-grok-build).
 
@@ -254,13 +262,23 @@ Optional:
 | Env | Effect |
 |-----|--------|
 | `GROK_SUBAGENT_SOFT_PRESERVE=0` | Delete live tree immediately after snapshot |
-| `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` | Max soft-preserved live trees (default 6) |
-| `GROK_SUBAGENT_MIN_FREE_BYTES` | Free-space floor before create (default 2 GiB) |
+| `GROK_SUBAGENT_KEEP_N` | Max soft-preserved live trees (default **3**; `0` = age-only). Alias: `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` |
+| `GROK_SUBAGENT_KEEP_MAX_AGE_SECS` | Age cutoff when `KEEP_N=0` (default 86400 = 24h) |
+| `GROK_MIN_FREE_GB` | Free-space floor before worktree create / `turbo disk check` (default **40**; `0` disables). Alias: `GROK_SUBAGENT_MIN_FREE_BYTES` |
 | `GROK_SUBAGENT_WORKTREE_SEED=clean` | HEAD-only sandbox (no parent dirty copy) |
 | `retain_worktree=true` on spawn | Keep path until land/discard |
 
-Details: [`docs/RC9_FEATURES.md`](docs/RC9_FEATURES.md),
-[`CHANGELOG.md`](./CHANGELOG.md) (RC7–RC13).
+Headless schema assert (no model turn):
+
+```bash
+turbo tools list
+turbo tools list --require spawn_subagent --json
+turbo disk check            # exit 1 if free space under GROK_MIN_FREE_GB
+turbo disk report           # shows keep-N + min-free threshold status
+```
+
+Details: [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md),
+[`CHANGELOG.md`](./CHANGELOG.md) (RC7–RC16), user-guide `16-subagents.md`.
 
 ---
 

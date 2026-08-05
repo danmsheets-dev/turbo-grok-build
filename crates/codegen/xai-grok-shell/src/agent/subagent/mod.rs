@@ -2418,22 +2418,53 @@ fn live_marker_max_age() -> std::time::Duration {
 }
 
 /// Default max soft-preserved `subagent-*` trees under a project worktree base.
-/// Override with `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` (0 = no prune by count).
-/// Product default is **6** (densify sessions: large trees → bounded disk).
+///
+/// Env precedence (first set wins):
+/// - `GROK_SUBAGENT_KEEP_N` (RC2 short name)
+/// - `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` (legacy)
+///
+/// **0** = age-only prune (see [`soft_preserve_max_age`]) — not "unlimited".
+/// Product default is **3** (densify / multi-spawn cannot fill the drive).
 pub(crate) fn soft_preserve_keep_n() -> usize {
-    std::env::var("GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(6)
+    for key in ["GROK_SUBAGENT_KEEP_N", "GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N"] {
+        if let Ok(v) = std::env::var(key)
+            && let Ok(n) = v.trim().parse::<usize>()
+        {
+            return n;
+        }
+    }
+    3
 }
 
-/// Default minimum free bytes before creating a new worktree (2 GiB).
-/// Override with `GROK_SUBAGENT_MIN_FREE_BYTES` (0 = disable guard).
-pub(crate) fn min_free_bytes_for_worktree() -> u64 {
-    std::env::var("GROK_SUBAGENT_MIN_FREE_BYTES")
+/// Max age for soft-preserved trees when keep-N is 0 (age-only mode).
+/// Override with `GROK_SUBAGENT_KEEP_MAX_AGE_SECS` (default 24h).
+pub(crate) fn soft_preserve_max_age() -> std::time::Duration {
+    let secs = std::env::var("GROK_SUBAGENT_KEEP_MAX_AGE_SECS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(2 * 1024 * 1024 * 1024)
+        .unwrap_or(24 * 60 * 60);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Minimum free bytes before creating a new worktree (fail closed).
+///
+/// Env precedence (first set wins):
+/// - `GROK_MIN_FREE_GB` (RC2; GiB integer, **0 disables**)
+/// - `GROK_SUBAGENT_MIN_FREE_BYTES` (legacy absolute bytes, **0 disables**)
+///
+/// Default: **40 GiB** (monorepo release-dist / densify; set lower for light use).
+pub(crate) fn min_free_bytes_for_worktree() -> u64 {
+    if let Ok(v) = std::env::var("GROK_MIN_FREE_GB")
+        && let Ok(gb) = v.trim().parse::<u64>()
+    {
+        return gb.saturating_mul(1024 * 1024 * 1024);
+    }
+    if let Ok(v) = std::env::var("GROK_SUBAGENT_MIN_FREE_BYTES")
+        && let Ok(b) = v.trim().parse::<u64>()
+    {
+        return b;
+    }
+    40 * 1024 * 1024 * 1024
 }
 
 /// Mark a worktree as owned by a running child. Best-effort.
@@ -2531,11 +2562,70 @@ pub(crate) fn is_live_worktree_protected(worktree: &Path) -> bool {
 }
 
 pub(crate) fn prune_soft_preserved_worktrees(base: &Path) {
-    prune_soft_preserved_worktrees_with_cap(base, soft_preserve_keep_n());
+    let keep = soft_preserve_keep_n();
+    if keep == 0 {
+        // RC2: KEEP_N=0 means age-only (not unlimited retention).
+        prune_soft_preserved_worktrees_by_age(base, soft_preserve_max_age());
+    } else {
+        prune_soft_preserved_worktrees_with_cap(base, keep);
+    }
+}
+
+/// Delete **non-live** `subagent-*` directories older than `max_age` (mtime).
+/// Used when `GROK_SUBAGENT_KEEP_N=0`. Best-effort; never panics.
+pub(crate) fn prune_soft_preserved_worktrees_by_age(
+    base: &Path,
+    max_age: std::time::Duration,
+) {
+    if !base.is_dir() {
+        return;
+    }
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let Ok(rd) = std::fs::read_dir(base) else {
+        return;
+    };
+    for e in rd.flatten() {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if !e.file_name().to_string_lossy().starts_with("subagent-") {
+            continue;
+        }
+        let path = e.path();
+        if is_live_worktree_protected(&path) {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else {
+            continue;
+        };
+        let mtime = meta.modified().or_else(|_| meta.created()).ok();
+        let Some(mtime) = mtime else {
+            continue;
+        };
+        if mtime >= cutoff {
+            continue;
+        }
+        if is_live_worktree_protected(&path) {
+            continue;
+        }
+        let _ = xai_fast_worktree::remove_worktree(&path);
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        tracing::info!(
+            worktree = %path.display(),
+            max_age_secs = max_age.as_secs(),
+            "pruned soft-preserved subagent worktree (age-only, KEEP_N=0)"
+        );
+    }
 }
 
 /// Delete oldest **non-live** `subagent-*` directories under `base` until at most
 /// `keep` remain. Never deletes a tree with a fresh `.grok-subagent-live` marker.
+/// `keep == 0` is a no-op (callers that want age-only use
+/// [`prune_soft_preserved_worktrees_by_age`] / [`prune_soft_preserved_worktrees`]).
 /// Best-effort: never panics; logs on failure.
 pub(crate) fn prune_soft_preserved_worktrees_with_cap(base: &Path, keep: usize) {
     if keep == 0 || !base.is_dir() {
@@ -2605,8 +2695,9 @@ pub(crate) fn ensure_min_free_space_for_worktree(base: &Path) -> Result<(), Stri
         return Err(format!(
             "not enough free disk space to create isolated worktree \
              (available {available} bytes, need at least {min}). \
-             Pruned soft-preserved trees if possible; free disk or set \
-             GROK_SUBAGENT_MIN_FREE_BYTES=0 / GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N=N. \
+             Run `turbo disk clean --safe` and/or `turbo subagent prune`; \
+             or lower the gate with GROK_MIN_FREE_GB / GROK_SUBAGENT_MIN_FREE_BYTES=0; \
+             or raise keep-N via GROK_SUBAGENT_KEEP_N. \
              Original symptom: os error 112 / StorageFull."
         ));
     }

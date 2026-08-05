@@ -318,6 +318,34 @@ fn resume_isolation_gate_fail_closed_without_opt_in() {
     );
 }
 
+/// RC2: KEEP_N=0 age-only prune removes old non-live trees, keeps live + fresh.
+#[test]
+fn prune_soft_preserved_age_only_when_keep_zero() {
+    use super::{
+        clear_live_worktree_marker, is_live_worktree_protected, prune_soft_preserved_worktrees_by_age,
+        write_live_worktree_marker,
+    };
+    let base = tempfile::TempDir::new().unwrap();
+    let old = base.path().join("subagent-old");
+    let fresh = base.path().join("subagent-fresh");
+    let live = base.path().join("subagent-live");
+    for p in [&old, &fresh, &live] {
+        std::fs::create_dir_all(p).unwrap();
+        std::fs::write(p.join("marker.txt"), "x").unwrap();
+    }
+    write_live_worktree_marker(&live);
+    let past = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(&old, past).unwrap();
+    filetime::set_file_mtime(old.join("marker.txt"), past).unwrap();
+
+    prune_soft_preserved_worktrees_by_age(base.path(), std::time::Duration::from_secs(3600));
+
+    assert!(!old.exists(), "old non-live tree must be age-pruned");
+    assert!(fresh.exists(), "fresh non-live tree must remain");
+    assert!(live.exists() && is_live_worktree_protected(&live));
+    clear_live_worktree_marker(&live);
+}
+
 /// P0: keep-N prune must never delete a worktree still marked live (running child).
 #[test]
 fn prune_soft_preserved_skips_live_marked_worktrees() {

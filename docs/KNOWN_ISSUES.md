@@ -16,7 +16,7 @@ Prior line: r13 Workspace Tree inject + Game Mode perf; r14 web_fetch + workflow
 | Tombstone writes/shell | Missing CWD / confine root → `cwd_missing` / `worktree_tombstone`; shell preflight; no write success when path gone. |
 | Live marker prune | RUNNING trees with fresh `.grok-subagent-live` are never keep-N pruned. |
 | Workspace Tree inject | Budgeted `<workspace_tree_card>` on session prompt; tools + `/tree` + `turbo tree`. Docs: `docs/workspace-tree.md`. |
-| Keep-N prune | Soft-preserved peers pruned by `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` + free-space guard so densify waves do not fill disk. |
+| Keep-N prune | Soft-preserved peers pruned by `GROK_SUBAGENT_KEEP_N` (default 3; `0` = age-only) + free-space guard (`GROK_MIN_FREE_GB`, default 40). |
 | Game Mode perf | Terminal-res `pixel_paint` cache (no per-paint scale-3 resize); Game Mode open prefers `TickDemand::Slow` (not Fast from hidden tasks/turn); anim advances on `AppView::tick`; hover dirty-if-changed; dual-audit P1 bugs fixed (SpawnWalk, WaitingOnYou, attention, focus, playground). |
 | Residual accepted | Shell confine is policy-level, not OS FS jail. True incremental tree freshness is still Phase 2. |
 

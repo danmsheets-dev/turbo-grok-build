@@ -278,7 +278,7 @@ Subagents default to an isolated git worktree (`isolation: worktree`). This keep
 - The subagent works in its own copy of the working tree.
 - Its changes stay isolated from the parent until you merge them (via `x.ai/git/worktree/apply`, `land_subagent`, or `hyper subagent land`).
 - On completion, the worktree is **snapshotted and soft-preserved by default** (live tree kept for review / land). Set `GROK_SUBAGENT_SOFT_PRESERVE=0` to delete after snapshot; use `retain_worktree` to always keep the tree.
-- Soft-preserved peers are pruned by a keep-N / free-space guard (`GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N`, `GROK_SUBAGENT_MIN_FREE_BYTES`) so densify waves do not fill the disk.
+- Soft-preserved peers are pruned by a keep-N / free-space guard (`GROK_SUBAGENT_KEEP_N` default 3, `0` = age-only; `GROK_MIN_FREE_GB` default 40) so densify waves do not fill the disk.
 - Set `isolation: none` when the child must edit the shared parent workspace.
 - Worktree creation fails closed outside a git repo unless `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1` (that path sets `isolation_fallback` on the result — the run is **not** isolated).
 

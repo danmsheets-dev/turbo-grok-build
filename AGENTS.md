@@ -104,6 +104,16 @@ Do not delete a `build_*.txt` / `*_now.txt` that an active `Out-File` is still w
 Before `cargo test --workspace` or `cargo build --profile release-dist`:
 
 ```powershell
+# Product gate (exit 1 under GROK_MIN_FREE_GB, default 40)
+turbo disk check
+# Or dry-run safe reclaim of target/debug + old worktrees:
+turbo disk clean --safe --dry-run
+turbo disk clean --safe --if-low-space
+```
+
+Fallback without turbo:
+
+```powershell
 $freeGB = [math]::Round((Get-PSDrive H).Free / 1GB, 1)   # adjust drive
 if ($freeGB -lt 40) {
   Write-Error "Only ${freeGB} GB free — clean target\debug before continuing"
@@ -115,6 +125,8 @@ Guidelines:
 - **&lt; 20 GB free**: clean `target/debug` (and stop parallel builds) before anything large.
 - **&lt; 40 GB free**: do not start full workspace tests; package-scoped only.
 - **≥ 60 GB free**: full workspace test or `release-dist` is usually safe.
+- Prefer **package-scoped** tests (`cargo test -p … --lib`) and `CARGO_INCREMENTAL=0` for one-shot CI-style runs.
+- After a green `release-dist` ship build, reclaim debug bloat with `turbo disk clean --safe`.
 
 ### Windows-specific notes
 

@@ -538,9 +538,17 @@ pub(crate) async fn run_shell_child(
         let mut skip_worktree_create = false;
         if let Some(parent_base) = dest.parent() {
             prune_soft_preserved_worktrees(parent_base);
-            // Second prune pass if still low: drop to keep-N/2.
+            // Second prune pass if still low: drop to keep-N/2 (or age-only if KEEP_N=0).
             if ensure_min_free_space_for_worktree(parent_base).is_err() {
-                prune_soft_preserved_worktrees_with_cap(parent_base, soft_preserve_keep_n() / 2);
+                let keep = soft_preserve_keep_n();
+                if keep == 0 {
+                    prune_soft_preserved_worktrees_by_age(
+                        parent_base,
+                        soft_preserve_max_age() / 2,
+                    );
+                } else {
+                    prune_soft_preserved_worktrees_with_cap(parent_base, (keep / 2).max(1));
+                }
             }
             if let Err(msg) = ensure_min_free_space_for_worktree(parent_base) {
                 if !allow_shared_fallback {

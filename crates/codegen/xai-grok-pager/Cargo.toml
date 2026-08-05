@@ -138,6 +138,8 @@ uuid = { workspace = true, features = ["v4"] }
 # Path computation (plan file, etc.)
 dirs = { workspace = true }
 shellexpand = "3.1"
+# Free-space probes for `turbo disk` / worktree gates (cross-platform).
+fs2 = { workspace = true }
 
 # libgit2 for the startup git-info populator (no fork/exec, runs once on launch
 # in spawn_blocking; the render path never touches git directly).

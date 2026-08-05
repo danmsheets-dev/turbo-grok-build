@@ -146,6 +146,8 @@ pub enum Command {
     Tree(crate::tree_cmd::TreeArgs),
     /// Disk report and safe clean (target/debug, old worktrees, tree store)
     Disk(crate::disk_cmd::DiskArgs),
+    /// List registered model-facing tools (headless schema assert)
+    Tools(crate::tools_cmd::ToolsArgs),
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;

@@ -2213,6 +2213,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 init_tracing_simple("cli");
                 return xai_grok_pager::disk_cmd::run(disk_args);
             }
+            Command::Tools(tools_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::tools_cmd::run(tools_args);
+            }
             Command::Update {
                 check,
                 json,

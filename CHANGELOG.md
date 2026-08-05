@@ -33,6 +33,21 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [Unreleased] - RC16 disk gates + tools list
+
+### Added
+- `turbo tools list [--json] [--require NAME]` — headless schema assert for registered model-facing tools (respects `GROK_SUBAGENTS` / `[subagents] enabled`).
+- `turbo disk check [--min-free-gb N]` — fail closed under free-space gate (default `GROK_MIN_FREE_GB=40`).
+- `turbo disk clean --safe --if-low-space` — reclaim only when under the free-space gate.
+- Disk report surfaces **min free** threshold status and **keep-N** vs live `subagent-*` count.
+
+### Changed
+- Soft-preserve keep-N default **3** (`GROK_SUBAGENT_KEEP_N`; alias `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N`). **`0` = age-only** prune (`GROK_SUBAGENT_KEEP_MAX_AGE_SECS`, default 24h).
+- Pre-spawn free-space default **40 GiB** (`GROK_MIN_FREE_GB`; alias `GROK_SUBAGENT_MIN_FREE_BYTES`). Set `0` to disable.
+- Safe clean skips live-marked worktrees (`.grok-subagent-live`).
+
+---
+
 ## [0.2.119-r1] - 2026-08-04
 
 **Turbo Grok Build RC15.** The wire version jumps `0.2.114` → `0.2.119`: Turbo's
