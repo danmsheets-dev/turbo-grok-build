@@ -116,7 +116,36 @@ impl ApprovedRoot {
                 directory: Arc::new(directory),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let relative = self.relative_path(path)?;
+            let candidate = self.path.join(&relative);
+            // Reject symlinks / reparse points before canonicalize follows them.
+            let link_meta = std::fs::symlink_metadata(&candidate).ok()?;
+            if !link_meta.is_dir()
+                || link_meta.file_type().is_symlink()
+                || has_reparse_point(&link_meta)
+            {
+                return None;
+            }
+            let canonical = dunce::canonicalize(&candidate).ok()?;
+            if !canonical.starts_with(&self.path) {
+                return None;
+            }
+            let directory = windows::open_directory_path(&canonical)?;
+            let metadata = directory.metadata().ok()?;
+            if !metadata.is_dir()
+                || has_reparse_point(&metadata)
+                || !windows::directory_path_matches(&canonical, &directory)
+            {
+                return None;
+            }
+            Some(Self {
+                path: canonical,
+                directory: Arc::new(directory),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = path;
             None
@@ -128,7 +157,11 @@ impl ApprovedRoot {
         {
             unix::visit_directory_names(&self.directory, visit)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::visit_directory_names(&self.path, visit)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = visit;
             false
@@ -144,7 +177,11 @@ impl ApprovedRoot {
         {
             unix::visit_directory_names_bounded(&self.directory, max_entries, visit)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::visit_directory_names_bounded(&self.path, max_entries, visit)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (max_entries, visit);
             DirectoryVisit {

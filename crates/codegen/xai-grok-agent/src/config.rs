@@ -382,6 +382,10 @@ fn codex_toolset() -> ToolServerConfig {
 /// mutate the workspace — the read-only guarantee is enforced by the toolset,
 /// not merely by the prompt. With no `BashTool`, the background-task helpers
 /// (`KillTaskTool`/`TaskOutputTool`) are unnecessary and also omitted.
+///
+/// Also includes read-only product logs and workspace-tree tools used by RO
+/// deepaudit / explore children. Keep [`EXPLORE_TOOL_ALLOWLIST`] in lockstep
+/// so AgentBuilder's allowlist cannot strip tools that `explore_toolset` ships.
 fn explore_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
@@ -398,6 +402,18 @@ fn explore_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
+
+/// Allowlist strings for [`explore_toolset`] — must match toolset IDs so the
+/// builder does not strip RO tools that are intentionally present.
+const EXPLORE_TOOL_ALLOWLIST: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "grep",
+    "developer_log",
+    "feature_request_log",
+    "workspace_tree",
+    "resolve_path",
+];
 /// Plan-mode toolset — read-only inspection tools, no shell, no file-editing.
 ///
 /// Enforces read-only at the toolset: the agent may inspect the repo and keep
@@ -1236,7 +1252,17 @@ pub struct ResolvedMemoryDir {
     pub is_project_scoped: bool,
 }
 impl MemoryScope {
+    /// Resolve the per-agent memory directory.
+    ///
+    /// `agent_name` becomes a single path segment under `agent-memory/`.
+    /// Callers must pass a name that passes [`xai_tool_types::is_safe_agent_name`];
+    /// unsafe names are rejected here so a missed call-site check cannot
+    /// walk out of the memory root (`..`, `a/b`, `nul`, …).
     pub fn resolve_dir(self, agent_name: &str, project_cwd: &std::path::Path) -> ResolvedMemoryDir {
+        assert!(
+            xai_tool_types::is_safe_agent_name(agent_name),
+            "agent_name must be a safe path segment before resolve_dir: {agent_name:?}"
+        );
         match self {
             Self::User => ResolvedMemoryDir {
                 path: xai_grok_config::grok_home()
@@ -1693,7 +1719,10 @@ impl AgentDefinition {
             description: xai_tool_types::EXPLORE_SUBAGENT.description.to_string(),
             tool_config: explore_toolset(),
             capability_mode: Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
-            tools: vec!["read_file".into(), "list_dir".into(), "grep".into()],
+            tools: EXPLORE_TOOL_ALLOWLIST
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::EXPLORE_PROMPT.to_string()),
             inherit_skills: false,
@@ -1728,7 +1757,10 @@ impl AgentDefinition {
             description: xai_tool_types::ORACLE_SUBAGENT.description.to_string(),
             tool_config: explore_toolset(),
             capability_mode: Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
-            tools: vec!["read_file".into(), "list_dir".into(), "grep".into()],
+            tools: EXPLORE_TOOL_ALLOWLIST
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::ORACLE_PROMPT.to_string()),
             inherit_skills: false,
@@ -2173,21 +2205,37 @@ Agent.
     #[test]
     fn oracle_is_enforced_read_only_by_its_exact_toolset() {
         let def = AgentDefinition::oracle();
+        // tool_config and allowlist must stay in lockstep with explore_toolset
+        // (RO product logs + workspace-tree tools included).
         let actual: Vec<&str> = def
             .tool_config
             .tools
             .iter()
             .map(|tool| tool.id.as_str())
             .collect();
-        let expected = [
-            ToolConfig::from(&grok_build::ReadFileTool).id,
-            ToolConfig::from(&grok_build::ListDirTool).id,
-            ToolConfig::from(&grok_build::GrepTool).id,
-        ];
+        let expected: Vec<String> = explore_toolset()
+            .tools
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
         assert_eq!(
             actual,
             expected.iter().map(String::as_str).collect::<Vec<_>>()
         );
+        assert_eq!(def.tools.len(), EXPLORE_TOOL_ALLOWLIST.len());
+        for name in EXPLORE_TOOL_ALLOWLIST {
+            assert!(
+                def.tools.iter().any(|t| t == name),
+                "oracle allowlist missing {name}"
+            );
+        }
+        // No execute/write tools.
+        for forbidden in ["run_terminal_command", "bash", "search_replace", "write"] {
+            assert!(
+                !actual.iter().any(|id| id.contains(forbidden)),
+                "oracle toolset must not include {forbidden}"
+            );
+        }
         assert_eq!(
             def.capability_mode,
             Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)

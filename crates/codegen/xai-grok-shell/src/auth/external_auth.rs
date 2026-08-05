@@ -107,10 +107,25 @@ pub(crate) async fn refresh_with_command(command: &str, prev_auth: &GrokAuth) ->
 mod tests {
     use super::*;
 
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit", &code.to_string()])
+                .status()
+                .expect("cmd /C exit")
+        }
+        #[cfg(not(windows))]
+        {
+            let prog = if code == 0 { "true" } else { "false" };
+            std::process::Command::new(prog).status().expect(prog)
+        }
+    }
+
     #[test]
     fn parse_output_nonzero_exit_is_err() {
         let output = std::process::Output {
-            status: std::process::Command::new("false").status().unwrap(),
+            status: exit_status(1),
             stdout: b"token".to_vec(),
             stderr: vec![],
         };
@@ -120,7 +135,7 @@ mod tests {
     #[test]
     fn parse_output_empty_stdout_is_err() {
         let output = std::process::Output {
-            status: std::process::Command::new("true").status().unwrap(),
+            status: exit_status(0),
             stdout: b"  \n".to_vec(),
             stderr: vec![],
         };
@@ -130,7 +145,7 @@ mod tests {
     #[test]
     fn parse_output_issuer_claim_enables_xai_auth() {
         let ok = |stdout: &str| std::process::Output {
-            status: std::process::Command::new("true").status().unwrap(),
+            status: exit_status(0),
             stdout: stdout.as_bytes().to_vec(),
             stderr: vec![],
         };
@@ -170,7 +185,7 @@ mod tests {
     #[test]
     fn parse_output_json_shaped_but_invalid_is_err() {
         let output = std::process::Output {
-            status: std::process::Command::new("true").status().unwrap(),
+            status: exit_status(0),
             stdout: b"{not valid json}".to_vec(),
             stderr: vec![],
         };

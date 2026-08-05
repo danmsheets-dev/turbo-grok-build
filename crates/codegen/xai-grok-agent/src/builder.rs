@@ -1047,6 +1047,8 @@ impl AgentBuilder {
                 }
             }
         }
+        // After all tool gates (subagents off / empty catalog / empty allowlist).
+        let spawn_tool_present = tool_config.tools.iter().any(|tc| tc.id == task_tool_id);
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();
         let tool_bridge = ToolBridge::finalize_builder(
@@ -1179,6 +1181,7 @@ impl AgentBuilder {
         let display_working_dir = self
             .prompt_working_directory
             .unwrap_or_else(|| self.working_directory.to_string_lossy().into_owned());
+        // spawn_tool_present captured after Task tool gates (see above).
         let prompt_context = PromptContext {
             version: 1,
             prompt_mode: definition.prompt_mode.clone(),
@@ -1207,6 +1210,8 @@ impl AgentBuilder {
             is_non_interactive: self.is_non_interactive,
             system_prompt_label: self.system_prompt_label,
             model: self.session_model,
+            subagents_enabled: self.subagents_enabled,
+            spawn_tool_present,
         };
         let system_prompt = prompt_context
             .render(&tool_bridge)

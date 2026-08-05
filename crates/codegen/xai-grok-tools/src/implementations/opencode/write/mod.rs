@@ -98,16 +98,25 @@ impl xai_tool_runtime::Tool for WriteTool {
         input: WriteInput,
     ) -> Result<WriteOutput, xai_tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
+        use crate::types::resources::{AllowedWritePaths, enforce_allowed_write_paths};
         let resources = shared_resources(&ctx)?;
 
-        let (cwd, display_cwd, fs, notification_handle, confine_root) = {
+        let (cwd, display_cwd, fs, notification_handle, confine_root, allowed_paths) = {
             let cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
             let res = resources.lock().await;
             let display_cwd = res.get::<DisplayCwd>().map(|d| d.0.clone());
             let fs = res.require::<FileSystem>()?.0.clone();
             let notification_handle = res.require::<NotificationHandle>()?.0.clone();
             let confine_root = res.get::<ConfineRoot>().map(|c| c.0.clone());
-            (cwd, display_cwd, fs, notification_handle, confine_root)
+            let allowed_paths = res.get::<AllowedWritePaths>().map(|a| a.0.clone());
+            (
+                cwd,
+                display_cwd,
+                fs,
+                notification_handle,
+                confine_root,
+                allowed_paths,
+            )
         };
         let tool_call_id = ctx.call_id.as_str().to_owned();
 
@@ -118,23 +127,31 @@ impl xai_tool_runtime::Tool for WriteTool {
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
 
+        // Spawn allowed_paths: fail closed at write time (not only land).
+        if let Some(ref prefixes) = allowed_paths {
+            enforce_allowed_write_paths(&cwd, &path, prefixes)
+                .map_err(|e| e.into_tool_error())?;
+        }
+
         // ── Check if file exists and read old content ────────────
         let (existed, old_content) = match fs.read_file(&path).await {
             Ok(bytes) => (true, Some(String::from_utf8_lossy(&bytes).into_owned())),
             Err(_) => (false, None),
         };
 
-        // ── Create parent directories if needed ──────────────────
+        // ── Create parent directories if needed (via FS backend when confined) ──
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            // Prefer confined FS mkdir if available; fall back to host only when
+            // the backend does not implement it (LocalFs uses host under cwd).
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 let ce = crate::computer::types::ComputerError::from(e);
-                xai_tool_runtime::ToolError::execution(
+                return Err(xai_tool_runtime::ToolError::execution(
                     xai_tool_protocol::ToolId::new("write").expect("valid"),
                     ce.to_string(),
-                )
-            })?;
+                ));
+            }
         }
 
         // ── Write the file ───────────────────────────────────────

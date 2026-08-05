@@ -55,7 +55,8 @@ mod tests {
             bundle_state: &bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
-                session_cwd: None,
+            usage_command_visible: true,
+            session_cwd: None,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         };
         ReadinessCommand.run(&mut context, args)

@@ -45,6 +45,8 @@ pub struct BootCardContext {
     pub git_summary: String,
     pub os: String,
     pub subagents_enabled: bool,
+    /// Whether `spawn_subagent` is actually in the model tool schema.
+    pub spawn_tool_present: bool,
     pub binary_name: String,
     pub isolation: String,
     /// Absolute root of Auto Developer Log (for agent orientation).
@@ -68,6 +70,7 @@ impl Default for BootCardContext {
             git_summary: "no".into(),
             os: std::env::consts::OS.into(),
             subagents_enabled: true,
+            spawn_tool_present: true,
             binary_name: "turbo".into(),
             isolation: "worktree".into(),
             developer_log_dir: String::new(),
@@ -112,9 +115,17 @@ impl BootCardContext {
             model: model.to_string(),
             git_summary,
             os: std::env::consts::OS.to_string(),
-            subagents_enabled: true,
+            // Best-effort before PromptContext override: env kill-switch only.
+            // Builder always overwrites with real tool registration.
+            subagents_enabled: std::env::var("GROK_SUBAGENTS")
+                .map(|v| {
+                    let s = v.trim().to_ascii_lowercase();
+                    !matches!(s.as_str(), "0" | "false" | "off" | "no")
+                })
+                .unwrap_or(true),
+            spawn_tool_present: true,
             binary_name,
-            isolation: "worktree".into(),
+            isolation: infer_isolation_label(cwd),
             developer_log_dir,
             developer_log_enabled,
             feature_request_log_dir,
@@ -122,6 +133,21 @@ impl BootCardContext {
             workflows_enabled,
             workflow_names,
         }
+    }
+}
+
+/// Infer isolation label from the real tool CWD path.
+///
+/// Looks for `…/.grok/worktrees/…/subagent-…` (Unix or Windows separators).
+/// Does **not** claim worktree when CWD is the parent repo.
+pub fn infer_isolation_label(cwd: &Path) -> String {
+    let s = cwd.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let under_worktrees = s.contains("/.grok/worktrees/") || s.contains("/grok/worktrees/");
+    let looks_like_child = s.contains("subagent-");
+    if under_worktrees && looks_like_child {
+        "worktree".into()
+    } else {
+        "none".into()
     }
 }
 
@@ -292,9 +318,10 @@ pub fn render_boot_card(mode: BootCardMode, ctx: &BootCardContext) -> Option<Ren
         );
         let te = wrapped.chars().count().div_ceil(4);
         (wrapped, BootCardMode::Short, te)
-    } else if mode == BootCardMode::Short && token_estimate > 1600 {
+    } else if mode == BootCardMode::Short && token_estimate > 1650 {
         // Keep developer_log + workflows + recovery; soft-cap if card grows further.
-        let trimmed = truncate_to_budget(&wrapped, 1600 * 4);
+        // 1650 allows surface-truth + disk hygiene lines (RC15 smoke).
+        let trimmed = truncate_to_budget(&wrapped, 1650 * 4);
         let te = trimmed.chars().count().div_ceil(4);
         (trimmed, mode, te)
     } else {
@@ -320,11 +347,11 @@ pub fn inject_boot_card(system_prompt: &mut String, card: &RenderedBootCard) {
 fn render_child(ctx: &BootCardContext) -> String {
     format!(
         "You are a Turbo subagent. Isolation claim: isolation={isolation} (verify before writing).\n\
-         VERIFY before first write: your CWD is `{cwd}`.\n\
-         - If isolation should be worktree: CWD MUST be under ~/.grok/worktrees/.../subagent-<id> and MUST NOT be the parent repo.\n\
-         - If CWD is the parent (isolation=none or shared fallback): treat as SHARED — only edit if the task allows shared writes; else stop and developer_log(error_class=isolation_fallback).\n\
+         VERIFY before first write: your **tool CWD** is `{cwd}` (this is the real process CWD, not DisplayCwd).\n\
+         - isolation=worktree: CWD must contain `.grok/worktrees` (or `grok/worktrees`) and `subagent-` — on Windows use absolute form under USERPROFILE\\.grok\\worktrees\\…\n\
+         - isolation=none / shared fallback: CWD is the parent repo — only edit if the task allows shared writes; else stop and developer_log(error_class=isolation_fallback).\n\
          Prefer relative paths from CWD. Absolute parent paths are remapped into this CWD when isolation=worktree; do not try to write outside it.\n\
-         Edit only within capability_mode. Do not land/merge/Copy-Item into the parent. Parent recovers via snapshot + land_subagent.\n\
+         Edit only within capability_mode. Do not land/merge/Copy-Item into the parent. Parent recovers via snapshot + land from parent.\n\
          Return a concise result (paths changed + isolation verified).\n\
          Product bugs → developer_log. Missing capability → feature_request_log.\n\
          Model: {model}",
@@ -396,6 +423,9 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - delegate: spawn_subagent + await results (targeted code work, not full audit recipes)
 - product issues: developer_log — REQUIRED for Turbo product friction (not optional)
 - capability gaps: feature_request_log — file when a needed product surface is missing
+- surface: spawn={spawn} · isolation={isolation} · adl=`{adl_root}` · frl=`{frl_root}`
+- CLI: `{bin} issues|features file --class …` (aliases `--error-class` / `--request-class`)
+- disk: `{bin} disk report|clean --safe` · `{bin} subagent prune` · `{bin} tree prune`
 
 {workflows}
 {adl}
@@ -444,11 +474,17 @@ Use silently. Do the user's task."#,
         model = ctx.model,
         git = ctx.git_summary,
         os = ctx.os,
-        subs = if ctx.subagents_enabled {
+        subs = if ctx.subagents_enabled && ctx.spawn_tool_present {
             "enabled"
+        } else if ctx.subagents_enabled && !ctx.spawn_tool_present {
+            "enabled (spawn_subagent ABSENT — tool stripped; do not call it)"
         } else {
             "disabled"
         },
+        spawn = if ctx.spawn_tool_present { "yes" } else { "no" },
+        isolation = ctx.isolation,
+        adl_root = ctx.developer_log_dir,
+        frl_root = ctx.feature_request_log_dir,
         bin = bin,
         workflows = workflows,
         adl = adl,
@@ -546,6 +582,7 @@ mod tests {
             git_summary: "yes (master), dirty: yes".into(),
             os: "windows".into(),
             subagents_enabled: true,
+            spawn_tool_present: true,
             binary_name: "turbo".into(),
             isolation: "worktree".into(),
             developer_log_dir: r"C:\Users\me\.grok\developer-log".into(),
@@ -590,7 +627,7 @@ mod tests {
             "boot card must forbid DIY deep-audit via subagents"
         );
         assert!(
-            card.token_estimate <= 1600,
+            card.token_estimate <= 1650,
             "tokens={} body_len={}",
             card.token_estimate,
             card.text.len()

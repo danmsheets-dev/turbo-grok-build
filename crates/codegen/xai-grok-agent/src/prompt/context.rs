@@ -158,6 +158,18 @@ pub struct PromptContext {
     /// Session model id for boot-card `Model:` field (public slug when known).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Whether the session intends subagents (config / CLI). Boot card uses
+    /// this with [`Self::spawn_tool_present`] so "Subagents: enabled" is honest.
+    #[serde(default = "default_true_bool")]
+    pub subagents_enabled: bool,
+    /// Whether `spawn_subagent` (Task tool) is actually registered after
+    /// builder gates (empty catalog strip, audience, etc.).
+    #[serde(default = "default_true_bool")]
+    pub spawn_tool_present: bool,
+}
+
+fn default_true_bool() -> bool {
+    true
 }
 /// Default identity on trim-tool-descriptions (`You are Grok released by xAI`).
 pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "Grok";
@@ -204,6 +216,8 @@ impl Default for PromptContext {
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
             model: None,
+            subagents_enabled: true,
+            spawn_tool_present: true,
         }
     }
 }
@@ -317,9 +331,14 @@ impl PromptContext {
             PromptAudience::Primary => crate::prompt::boot_card::resolve_boot_card_mode(),
         };
         if mode != crate::prompt::boot_card::BootCardMode::Off {
+            // Prefer real tool CWD (worktree for isolation=worktree). DisplayCwd
+            // is the parent path shown to the model for orientation — using it
+            // here made child cards claim "CWD is parent" and false-flag
+            // isolation_fallback on healthy isolated children.
             let cwd = self
-                .working_directory
+                .tool_working_directory
                 .as_deref()
+                .or(self.working_directory.as_deref())
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let model = self
@@ -335,14 +354,20 @@ impl PromptContext {
                         .to_string()
                 });
             let mut ctx = crate::prompt::boot_card::BootCardContext::from_env(&cwd, &model);
-            if mode == crate::prompt::boot_card::BootCardMode::Child {
-                ctx.isolation = "worktree".into();
-            }
+            // Infer isolation from real CWD — never hardcode "worktree".
+            ctx.isolation = crate::prompt::boot_card::infer_isolation_label(&cwd);
+            // Honest subagent surface: session intent AND actual tool registration.
+            // Prefer spawn_tool_present so "Subagents: enabled" matches the schema.
+            ctx.subagents_enabled = self.spawn_tool_present && self.subagents_enabled;
+            ctx.spawn_tool_present = self.spawn_tool_present;
             if let Some(card) = crate::prompt::boot_card::render_boot_card(mode, &ctx) {
                 crate::prompt::boot_card::inject_boot_card(&mut prompt, &card);
                 tracing::info!(
                     mode = card.mode.as_str(),
                     tokens = card.token_estimate,
+                    isolation = %ctx.isolation,
+                    subagents = ctx.subagents_enabled,
+                    spawn_tool = ctx.spawn_tool_present,
                     "boot_card injected"
                 );
             }
@@ -380,6 +405,8 @@ mod tests {
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
             model: None,
+            subagents_enabled: true,
+            spawn_tool_present: true,
         }
     }
     #[test]
@@ -667,6 +694,8 @@ mod tests {
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
             model: None,
+            subagents_enabled: true,
+            spawn_tool_present: true,
         }
     }
     #[test]

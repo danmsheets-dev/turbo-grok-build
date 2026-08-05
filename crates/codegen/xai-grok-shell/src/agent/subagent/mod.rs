@@ -1517,6 +1517,11 @@ fn durable_subagent_meta(
     parent_session_id: &str,
     parent_cwd: &Path,
 ) -> Option<SubagentMeta> {
+    // Fail closed: `id` is joined under `subagents/`. Resume and other call
+    // paths must not turn `../…` / `nul` into a path component.
+    if !xai_tool_types::is_safe_task_id(id) {
+        return None;
+    }
     let parent_info = SessionInfo {
         id: acp::SessionId::new(parent_session_id),
         cwd: parent_cwd.to_string_lossy().into_owned(),

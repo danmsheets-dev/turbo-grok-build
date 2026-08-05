@@ -212,8 +212,13 @@ pub fn sanitize_cwd_value(s: &str) -> Option<String> {
 
 /// Returns `true` if the string looks like a real subagent ID rather than a
 /// model-emitted placeholder (`""`, `"null"`, `"none"`, `"undefined"`, whitespace).
+///
+/// Also requires [`xai_tool_types::is_safe_task_id`]: `resume_from` is joined
+/// into `…/subagents/<id>/meta.json`. Sentinels alone were insufficient —
+/// `../sibling` / `nul` / `a/b` would still become path components.
 pub fn is_valid_resume_id(s: &str) -> bool {
-    is_not_sentinel(s)
+    let trimmed = s.trim();
+    is_not_sentinel(trimmed) && xai_tool_types::is_safe_task_id(trimmed)
 }
 
 /// Extension methods for [`SubagentCapabilityMode`] that depend on this crate's
@@ -1266,7 +1271,10 @@ mod tests {
     }
 
     #[test]
-    fn read_only_filter_keeps_background_task_tools_when_task_tool_remains() {
+    fn read_only_filter_strips_task_and_then_orphaned_background_tools() {
+        // ReadOnly intentionally omits ToolKind::Task (RO children must not
+        // spawn nested write-capable agents). Once Task is gone, the orphan
+        // prune also drops get_task_output / kill_task.
         let mut config = ToolServerConfig {
             tools: vec![
                 tc("GrokBuild:run_terminal_cmd", ToolKind::Execute),
@@ -1289,11 +1297,32 @@ mod tests {
                 "GrokBuild:read_file",
                 "GrokBuild:list_dir",
                 "GrokBuild:grep",
-                "GrokBuild:kill_task",
-                "GrokBuild:get_task_output",
-                "GrokBuild:task",
             ]
         );
+    }
+
+    #[test]
+    fn read_write_filter_keeps_task_and_background_tools() {
+        let mut config = ToolServerConfig {
+            tools: vec![
+                tc("GrokBuild:run_terminal_cmd", ToolKind::Execute),
+                tc("GrokBuild:read_file", ToolKind::Read),
+                tc("GrokBuild:list_dir", ToolKind::List),
+                tc("GrokBuild:grep", ToolKind::Search),
+                tc("GrokBuild:kill_task", ToolKind::KillTaskAction),
+                tc("GrokBuild:get_task_output", ToolKind::BackgroundTaskAction),
+                tc("GrokBuild:task", ToolKind::Task),
+            ],
+            behavior_preset: None,
+        };
+
+        SubagentCapabilityMode::ReadWrite.filter_tool_config(&mut config);
+
+        let ids: Vec<&str> = config.tools.iter().map(|tc| tc.id.as_str()).collect();
+        assert!(ids.contains(&"GrokBuild:task"));
+        assert!(ids.contains(&"GrokBuild:get_task_output"));
+        assert!(ids.contains(&"GrokBuild:kill_task"));
+        assert!(!ids.contains(&"GrokBuild:run_terminal_cmd"));
     }
 
     #[test]
@@ -1351,6 +1380,31 @@ mod tests {
         ] {
             assert!(!is_valid_resume_id(bad), "{bad:?} should be invalid");
         }
+    }
+
+    #[test]
+    fn is_valid_resume_id_rejects_path_unsafe_ids() {
+        // Surrounding whitespace is trimmed before the path-safety check (models
+        // often emit padding); `" foo "` becomes `"foo"` and is accepted.
+        for bad in [
+            "..",
+            "../sibling",
+            "a/b",
+            "a\\b",
+            "nul",
+            "CON",
+            "id:stream",
+            "foo.",
+        ] {
+            assert!(
+                !is_valid_resume_id(bad),
+                "{bad:?} must not be joinable as a path segment"
+            );
+        }
+        assert!(
+            is_valid_resume_id("  prev-id  "),
+            "padding around a safe id is trimmed, not rejected"
+        );
     }
 
     #[test]

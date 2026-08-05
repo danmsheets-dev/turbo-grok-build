@@ -147,11 +147,14 @@ impl TrustStore {
         // non-canonical aliases (e.g. `/a/b` vs `/a/b/`) that tie on depth; on a
         // tie we require EVERY tied record to be trusted, so a contradictory edit
         // fails closed.
+        //
+        // Windows: re-canonicalize stored keys and use case-folded prefix match
+        // so `H:\Apps\repo` trusts `h:\apps\repo\worktree\…`.
         let mut best_depth: Option<usize> = None;
         let mut trusted = false;
         for (folder, record) in &self.doc.folders {
-            let folder = Path::new(folder);
-            if is_unsafe_trust_root(folder) || !workspace_key.starts_with(folder) {
+            let folder = canonicalize_or_owned(Path::new(folder));
+            if is_unsafe_trust_root(&folder) || !path_is_under_key(&workspace_key, &folder) {
                 continue;
             }
             let depth = folder.components().count();
@@ -415,7 +418,7 @@ fn git_derived_workspace_key(cwd: &Path) -> PathBuf {
 
 /// Whether `path` resolves to the user's home directory.
 pub fn is_home_dir(path: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::resolved_home_dir() else {
         return false;
     };
     canonicalize_or_owned(path) == canonicalize_or_owned(&home)
@@ -444,6 +447,26 @@ pub fn is_unsafe_trust_root(key: &Path) -> bool {
 
 fn canonicalize_or_owned(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether `path` is under `prefix` (inclusive), with Windows case-folding.
+fn path_is_under_key(path: &Path, prefix: &Path) -> bool {
+    if path.starts_with(prefix) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let p = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let pre = prefix
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        p == pre || p.starts_with(&(pre.clone() + "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn now_unix() -> Option<i64> {
@@ -1014,7 +1037,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home_guard = crate::TestEnvGuard::set("HOME", home.path());
+        let _home = crate::isolate_home_dir(home.path());
         git2::Repository::init(home.path()).unwrap();
         let civ = home.path().join("Documents").join("civ");
         std::fs::create_dir_all(&civ).unwrap();

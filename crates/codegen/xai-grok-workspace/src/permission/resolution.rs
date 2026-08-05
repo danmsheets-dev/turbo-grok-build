@@ -1716,6 +1716,11 @@ mod tests {
     /// but load returns None for each.
     #[test]
     fn discovery_with_no_settings_files() {
+        // Isolate home so a real user `~/.claude/settings.json` cannot load.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::isolate_home_dir(home.path());
+        let _grok = EnvVarGuard::set("GROK_HOME", home.path());
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
 
@@ -1739,11 +1744,11 @@ mod tests {
         // Home-is-a-git-repo (dotfiles in $HOME): for a cwd under home, the
         // repo-root walk must NOT reach $HOME and treat `~/.claude` as
         // project-tier (its env is injected into every spawned subprocess).
-        // Serialize + guard $HOME (find_repo_root reaches home via `.git`, and
-        // the guard reads dirs::home_dir()).
+        // Serialize + guard home (find_repo_root reaches home via `.git`, and
+        // the guard reads dirs::home_dir() — USERPROFILE on Windows).
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home_guard = EnvVarGuard::set("HOME", home.path());
+        let _home = crate::isolate_home_dir(home.path());
         git2::Repository::init(home.path()).unwrap();
         let claude_dir = home.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
@@ -1971,13 +1976,13 @@ mod tests {
 
     #[test]
     fn load_claude_env_empty_when_no_settings() {
-        // Isolate GROK_HOME (claude-import marker) AND HOME (global `~/.claude`)
+        // Isolate GROK_HOME (claude-import marker) AND home (global `~/.claude`)
         // so neither a dev machine's import marker nor its real `~/.claude` env
-        // can trip the empty-map assertion.
+        // can trip the empty-map assertion. Windows needs USERPROFILE too.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
-        let _real_home_guard = EnvVarGuard::set("HOME", home.path());
+        let _real_home = crate::isolate_home_dir(home.path());
         let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
         let tmp = tempfile::tempdir().unwrap();
         let env = load_claude_env_with_project(tmp.path(), true);
@@ -2896,7 +2901,7 @@ mod tests {
     fn untrusted_project_claude_permissions_are_not_honored() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home_guard = EnvVarGuard::set("HOME", home.path());
+        let _home = crate::isolate_home_dir(home.path());
         let _grok_guard = EnvVarGuard::set("GROK_HOME", home.path());
         let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
 

@@ -367,22 +367,23 @@ async fn map_apply_response(
             files,
             conflicts,
         } => {
-            // Fail closed: workspace apply may have partially written non-conflicting
-            // files; surface a clear conflict error. Prefer reporting conflicts only
-            // when mode is merge (overwrite never returns conflicts from apply).
+            // Fail closed: merge apply_worktree plans first and applies only
+            // when conflict-free (`files` should be empty). Keep partial note
+            // only if a legacy host still returns already-written paths.
             let conflict_paths: Vec<String> = conflicts.into_iter().map(|c| c.path).collect();
             let partial: Vec<String> = files.into_iter().map(|f| f.path).collect();
             update_meta_land_status(&work.meta_path, "conflict").await;
             let mut message = format!(
                 "Land of subagent `{}` via {source} hit {} conflict(s) (mode={}). \
-                 Fail closed: resolve conflicts or re-run with mode=`overwrite`.",
+                 Fail closed: nothing applied; resolve conflicts or re-run with mode=`overwrite`.",
                 work.subagent_id,
                 conflict_paths.len(),
                 mode.as_str()
             );
             if !partial.is_empty() {
                 message.push_str(&format!(
-                    " Note: apply_worktree had already applied {} non-conflicting file(s).",
+                    " Warning: host reported {} already-applied path(s) — unexpected after \
+                     plan-first merge; verify parent tree.",
                     partial.len()
                 ));
             }
@@ -469,22 +470,18 @@ async fn land_live_worktree_inprocess(
 
     refuse_land_outside_allowlist(&work.meta, &paths)?;
 
-    let mut plan: Vec<(String, Option<String>)> = Vec::new(); // path, theirs
+    let mut plan: Vec<(String, Option<Vec<u8>>)> = Vec::new(); // path, theirs
     let mut conflicts = Vec::new();
 
     for path in &paths {
         let wt_file = wt.join(path);
         let theirs = if wt_file.is_file() {
-            Some(
-                tokio::fs::read_to_string(&wt_file)
-                    .await
-                    .map_err(|e| {
-                        xai_tool_runtime::ToolError::custom(
-                            "read_failed",
-                            format!("read {}: {e}", wt_file.display()),
-                        )
-                    })?,
-            )
+            Some(tokio::fs::read(&wt_file).await.map_err(|e| {
+                xai_tool_runtime::ToolError::custom(
+                    "read_failed",
+                    format!("read {}: {e}", wt_file.display()),
+                )
+            })?)
         } else {
             None // deleted in child
         };
@@ -500,11 +497,11 @@ async fn land_live_worktree_inprocess(
             continue;
         }
 
-        // Merge: base = parent HEAD blob; ours = current parent file
+        // Merge: base = parent HEAD blob; ours = current parent file (bytes)
         let base = git_show_blob(parent, &parent_head, path).await;
         let main_file = parent.join(path);
         let ours = if main_file.is_file() {
-            tokio::fs::read_to_string(&main_file).await.ok()
+            tokio::fs::read(&main_file).await.ok()
         } else {
             None
         };
@@ -544,9 +541,7 @@ async fn land_live_worktree_inprocess(
     for (path, theirs) in plan {
         apply_file_content(parent, &path, theirs.as_deref())
             .await
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::custom("land_write_failed", e)
-            })?;
+            .map_err(|e| xai_tool_runtime::ToolError::custom("land_write_failed", e))?;
         landed.push(path);
     }
 
@@ -662,7 +657,7 @@ async fn land_snapshot_ref(
 
     refuse_land_outside_allowlist(&work.meta, &paths)?;
 
-    let mut plan: Vec<(String, Option<String>)> = Vec::new();
+    let mut plan: Vec<(String, Option<Vec<u8>>)> = Vec::new();
     let mut conflicts = Vec::new();
 
     for path in &paths {
@@ -674,7 +669,7 @@ async fn land_snapshot_ref(
         let base = git_show_blob(parent, &base_rev, path).await;
         let main_file = parent.join(path);
         let ours = if main_file.is_file() {
-            tokio::fs::read_to_string(&main_file).await.ok()
+            tokio::fs::read(&main_file).await.ok()
         } else {
             None
         };

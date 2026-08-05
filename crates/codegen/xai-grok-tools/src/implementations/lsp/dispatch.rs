@@ -136,9 +136,21 @@ impl super::LspBackend for LspBackendAdapter {
     fn ensure_started_background(&self) {
         let lsp_manager = self.lsp_manager.clone();
         let startup = self.startup.clone();
-        tokio::spawn(async move {
-            LspBackendAdapter::ensure_started_with_state(lsp_manager, startup).await;
-        });
+        // WorkspaceHandle construction (and some unit tests) can run outside a
+        // Tokio runtime. Never panic here — defer start until ensure_ready or
+        // the next background kick when a runtime exists.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    LspBackendAdapter::ensure_started_with_state(lsp_manager, startup).await;
+                });
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "LSP ensure_started_background: no Tokio runtime; deferring until ensure_ready"
+                );
+            }
+        }
     }
 
     async fn ensure_ready(&self) -> Result<(), String> {

@@ -390,8 +390,16 @@ impl InlineShellScript {
 pub(crate) fn shell_dash_c_script(words: &[ShellWord<'_>]) -> InlineShellScript {
     let dynamic_head = match words.first() {
         Some(ShellWord::Literal(program)) => {
-            let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
-            if !matches!(program, "bash" | "sh" | "dash" | "zsh" | "ksh") {
+            // Basename + strip Windows extensions so `bash.exe -c '…'`
+            // recurses like bare `bash -c` (file-access deny enforcement).
+            let basename = program.rsplit(['/', '\\']).next().unwrap_or(program);
+            let lower = basename.to_ascii_lowercase();
+            let stem = lower
+                .strip_suffix(".exe")
+                .or_else(|| lower.strip_suffix(".cmd"))
+                .or_else(|| lower.strip_suffix(".bat"))
+                .unwrap_or(lower.as_str());
+            if !matches!(stem, "bash" | "sh" | "dash" | "zsh" | "ksh") {
                 return InlineShellScript::NotInline;
             }
             false

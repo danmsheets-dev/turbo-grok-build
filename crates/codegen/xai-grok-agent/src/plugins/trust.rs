@@ -167,9 +167,17 @@ impl TrustStore {
     /// is under the user's home directory.  Otherwise it requires explicit
     /// trust via `~/.grok/trusted-plugins`.
     pub fn is_config_path_auto_trusted(plugin_root: &Path) -> bool {
-        let Some(home) = dirs::home_dir() else {
+        // Prefer USERPROFILE/HOME so Windows tests and container profiles work;
+        // `dirs::home_dir` uses Known Folder APIs that ignore the environment.
+        // Canonicalize both sides so `\\?\` / case / junctions still match.
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::home_dir);
+        let Some(home) = home else {
             return false;
         };
+        let home = dunce::canonicalize(&home).unwrap_or(home);
         match dunce::canonicalize(plugin_root) {
             Ok(canonical) => canonical.starts_with(&home),
             Err(_) => false,

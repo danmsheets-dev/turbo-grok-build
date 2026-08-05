@@ -169,6 +169,18 @@ pub(crate) async fn run_shell_child(
 ) -> ChildRunOutput<ShellCompletionData> {
     let start = std::time::Instant::now();
     let mut completion_data = ShellCompletionData::from_context(&ctx);
+    // Defense in depth: `request.id` is joined into worktree paths,
+    // `subagents/<id>/meta.json`, and session dirs. The Task tool gates
+    // model `task_id`, but every join site must fail closed in case another
+    // constructor or peer path supplies a hostile id.
+    if !xai_tool_types::is_safe_task_id(&request.id) {
+        let msg = format!(
+            "subagent id `{}` is not a valid path segment (letters, digits, `-`, `_`, `.` only; \
+             no separators, drive prefixes, Windows device names, or trailing dot/space)",
+            request.id
+        );
+        return child_run_output(failure_result(&request, &msg), completion_data, None);
+    }
     if request.owner.is_workflow() && cancel_token.is_cancelled() {
         return child_run_output(
             cancelled_result(&request, "Subagent was cancelled"),
@@ -1391,29 +1403,36 @@ pub(crate) async fn run_shell_child(
         if let Some(mode) = definition.capability_mode {
             mode.filter_tool_config(&mut definition.tool_config);
         }
-        let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
-        let memory_dir = &resolved_mem.path;
-        let memory_md = memory_dir.join("MEMORY.md");
-        if memory_md.is_file()
-            && let Ok(content) = std::fs::read_to_string(&memory_md)
-        {
-            const MAX_LINES: usize = 200;
-            const MAX_BYTES: usize = 25 * 1024;
-            let truncated: String = content
-                .lines()
-                .take(MAX_LINES)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let truncated =
-                xai_grok_tools::util::truncate::truncate_str(&truncated, MAX_BYTES).to_string();
-            if !truncated.is_empty() {
-                let injection = format!(
-                    "\n\n<agent-memory>\nMemory directory: {}\n\n{truncated}\n</agent-memory>",
-                    memory_dir.display()
-                );
-                definition.prompt_body =
-                    Some(definition.prompt_body.unwrap_or_default() + injection.as_str());
+        if xai_tool_types::is_safe_agent_name(&agent_name_for_memory) {
+            let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
+            let memory_dir = &resolved_mem.path;
+            let memory_md = memory_dir.join("MEMORY.md");
+            if memory_md.is_file()
+                && let Ok(content) = std::fs::read_to_string(&memory_md)
+            {
+                const MAX_LINES: usize = 200;
+                const MAX_BYTES: usize = 25 * 1024;
+                let truncated: String = content
+                    .lines()
+                    .take(MAX_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let truncated =
+                    xai_grok_tools::util::truncate::truncate_str(&truncated, MAX_BYTES).to_string();
+                if !truncated.is_empty() {
+                    let injection = format!(
+                        "\n\n<agent-memory>\nMemory directory: {}\n\n{truncated}\n</agent-memory>",
+                        memory_dir.display()
+                    );
+                    definition.prompt_body =
+                        Some(definition.prompt_body.unwrap_or_default() + injection.as_str());
+                }
             }
+        } else {
+            tracing::warn!(
+                agent = %agent_name_for_memory,
+                "skipping agent memory: name is not a safe path segment"
+            );
         }
     }
     let is_plugin_agent = definition.plugin_name.is_some();
@@ -1662,14 +1681,18 @@ pub(crate) async fn run_shell_child(
         if verbatim_mirror_fork {
             None
         } else if let Some(scope) = agent_memory_scope {
-            ctx.memory_config.as_ref().map(|mc| {
-                let mut c = mc.clone();
-                let resolved = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
-                c.enabled = true;
-                c.root_dir_override = Some(resolved.path);
-                c.flat_memory_root = resolved.is_project_scoped;
-                c
-            })
+            if xai_tool_types::is_safe_agent_name(&agent_name_for_memory) {
+                ctx.memory_config.as_ref().map(|mc| {
+                    let mut c = mc.clone();
+                    let resolved = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
+                    c.enabled = true;
+                    c.root_dir_override = Some(resolved.path);
+                    c.flat_memory_root = resolved.is_project_scoped;
+                    c
+                })
+            } else {
+                ctx.memory_config.clone()
+            }
         } else {
             ctx.memory_config.clone()
         },

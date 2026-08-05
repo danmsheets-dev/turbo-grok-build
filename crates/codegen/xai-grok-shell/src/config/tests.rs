@@ -1132,6 +1132,45 @@ fn subagents_config_local_disabled_wins() {
         assert!(!sa.enabled, "local [subagents] enabled=false should win");
     });
 }
+/// RC15 regression: `[subagents.models]` alone must not force-disable spawn.
+///
+/// Nested tables make `config.get("subagents")` present. If `enabled` defaults
+/// to false on deserialize, `resolve_enabled` treats that as an intentional
+/// local disable and strips `spawn_subagent` while kill/get_output remain.
+#[test]
+fn subagents_models_only_section_keeps_enabled() {
+    without_grok_subagents(|| {
+        let config: toml::Value = toml::from_str(
+            r#"
+            [subagents.models]
+            oracle = "nvidia/nvidia/nemotron-3-ultra-550b-a55b"
+            "#,
+        )
+        .unwrap();
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert!(
+            sa.enabled,
+            "[subagents.models] alone must keep subagents enabled (got enabled=false)"
+        );
+        assert_eq!(
+            sa.models.get("oracle").map(String::as_str),
+            Some("nvidia/nvidia/nemotron-3-ultra-550b-a55b")
+        );
+    });
+}
+#[test]
+fn subagents_toggle_only_section_keeps_enabled() {
+    without_grok_subagents(|| {
+        let config: toml::Value =
+            toml::from_str("[subagents.toggle]\nplan = false\n").unwrap();
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert!(
+            sa.enabled,
+            "[subagents.toggle] alone must keep subagents enabled"
+        );
+        assert_eq!(sa.toggle.get("plan").copied(), Some(false));
+    });
+}
 #[test]
 fn subagents_config_env_var_disables_default() {
     with_grok_subagents(
@@ -1231,6 +1270,8 @@ fn subagents_config_effort_parsed() {
 #[test]
 fn subagents_config_models_without_enabled() {
     without_grok_subagents(|| {
+        // Nested `[subagents.models]` alone is a partial section — not an
+        // intentional disable. Product default is subagents ON.
         let config: toml::Value = toml::from_str(
                 r#"
                 [subagents.models]
@@ -1240,8 +1281,8 @@ fn subagents_config_models_without_enabled() {
             .unwrap();
         let sa = SubagentsConfig::resolve(false, &config);
         assert!(
-                !sa.enabled,
-                "explicit [subagents] section without enabled should be false"
+                sa.enabled,
+                "[subagents.models] without enabled= must keep default ON (RC15)"
             );
         assert_eq!(sa.models.len(), 1);
         assert_eq!(sa.models.get("explore").unwrap(), "grok-3-fast");

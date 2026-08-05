@@ -346,11 +346,13 @@ mod tests {
 
     // Canonical home: under-home auto-trust canonicalizes the candidate but not
     // `$HOME` (macOS `/var` -> `/private/var`). The guard restores `$HOME` on drop.
-    fn home_tempdir() -> (tempfile::TempDir, PathBuf, EnvVarGuard) {
+    fn home_tempdir() -> (tempfile::TempDir, PathBuf, EnvVarGuard, EnvVarGuard) {
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
-        let guard = EnvVarGuard::set("HOME", &home);
-        (tmp, home, guard)
+        // Windows Known Folder home ignores HOME alone; set USERPROFILE too.
+        let guard_home = EnvVarGuard::set("HOME", &home);
+        let guard_profile = EnvVarGuard::set("USERPROFILE", &home);
+        (tmp, home, guard_home, guard_profile)
     }
 
     fn write_plugin_json(dir: &Path, name: &str) {
@@ -404,7 +406,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_local_install_picks_up_new_agent() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let source = home.join(".claude").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
@@ -424,7 +426,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_skips_unchanged_source() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let source = home.join(".claude").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
@@ -447,7 +449,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_picks_up_content_preserving_rename() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let source = home.join(".claude").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
@@ -476,7 +478,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_promote_failure_rolls_back_to_prior_snapshot() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let source = home.join(".claude").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
@@ -503,7 +505,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_skips_untrusted_source_outside_home() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let outside = tempfile::tempdir().unwrap();
         let source = outside.path().join("untrusted-plugin");
         write_plugin_json(&source, "untrusted-plugin");
@@ -522,7 +524,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_trusted_source_outside_home() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let outside = tempfile::tempdir().unwrap();
         let source = outside.path().join("trusted-plugin");
         write_plugin_json(&source, "trusted-plugin");
@@ -543,7 +545,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_preserves_install_subdir_scope() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let workspace = home.join("workspace");
         write_plugin_json(&workspace.join("plugins/a"), "plugin-a");
         write_plugin_json(&workspace.join("plugins/b"), "plugin-b");
@@ -570,7 +572,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_does_not_follow_directory_symlinks() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         let secret = home.join("secret-dir");
         std::fs::create_dir_all(&secret).unwrap();
         std::fs::write(secret.join("secret.txt"), "leak").unwrap();
@@ -595,7 +597,7 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn refresh_keeps_stale_when_legacy_subdir_scope_lost() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let (_home_tmp, home, _home_guard, _profile_guard) = home_tempdir();
         // Legacy multi-package source: the real plugin is at plugins/foo;
         // other-dir is unrelated root-level content that root-scope discovery
         // would pick up.

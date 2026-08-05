@@ -192,6 +192,9 @@ fn run_web_dashboard(args: &DashboardArgs) -> Result<()> {
     config.open_browser = !args.no_open;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        // Match PE `/STACK` and session threads: 0.2.119 prompt-turn futures
+        // can exhaust the default 2 MiB worker stack on Windows.
+        .thread_stack_size(16 * 1024 * 1024)
         .enable_all()
         .build()?;
     run_and_shutdown(
@@ -1953,6 +1956,11 @@ fn main() {
     let workers = cli_worker_threads();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers.get())
+        // Shipped `turbo.exe` does not inherit `RUST_MIN_STACK` from
+        // `.cargo/config.toml`. Worker threads default to ~2 MiB; the 0.2.119
+        // turn/prompt future can overflow that on Windows. Match the PE main
+        // stack (`/STACK:16MiB`) and cargo test config.
+        .thread_stack_size(16 * 1024 * 1024)
         .enable_all()
         .build()
         .unwrap_or_else(|e| {
@@ -2200,6 +2208,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Tree(tree_args) => {
                 init_tracing_simple("cli");
                 return xai_grok_pager::tree_cmd::run(tree_args);
+            }
+            Command::Disk(disk_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::disk_cmd::run(disk_args);
             }
             Command::Update {
                 check,

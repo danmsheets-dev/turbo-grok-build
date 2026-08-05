@@ -108,6 +108,34 @@ impl TestEnvGuard {
         Self { key, prev }
     }
 }
+
+/// Isolate user home for tests. Sets both `HOME` and `USERPROFILE` because
+/// [`resolved_home_dir`] consults those env vars (Windows Known Folder APIs
+/// ignore env, so plain `dirs::home_dir()` cannot be isolated).
+#[cfg(test)]
+pub(crate) fn isolate_home_dir(home: &std::path::Path) -> (TestEnvGuard, TestEnvGuard) {
+    (
+        TestEnvGuard::set("HOME", home),
+        TestEnvGuard::set("USERPROFILE", home),
+    )
+}
+
+/// User home directory that **respects** `HOME` / `USERPROFILE` overrides.
+///
+/// `dirs::home_dir()` on Windows uses `SHGetKnownFolderPath` and ignores the
+/// environment, which makes tests and containerized profiles that set
+/// `USERPROFILE` invisible. Prefer env when set, then fall back to `dirs`.
+pub(crate) fn resolved_home_dir() -> Option<std::path::PathBuf> {
+    for key in ["USERPROFILE", "HOME"] {
+        if let Ok(val) = std::env::var(key) {
+            let path = std::path::PathBuf::from(val);
+            if !path.as_os_str().is_empty() {
+                return Some(path);
+            }
+        }
+    }
+    dirs::home_dir()
+}
 #[cfg(test)]
 impl Drop for TestEnvGuard {
     fn drop(&mut self) {

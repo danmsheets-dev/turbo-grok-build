@@ -23,6 +23,16 @@ pub enum RelPathError {
     NotUtf8(std::path::PathBuf),
 }
 
+/// Host-native absolute **or** portable rooted absolute (leading `/`).
+///
+/// On Windows, `Path::is_absolute()` requires a drive/UNC prefix, so POSIX
+/// absolute spellings from session JSON (`/home/user/project/src/main.rs`)
+/// would otherwise be accepted as relative. `has_root()` covers that form on
+/// every platform without rejecting relative `src\main.rs` / `.\foo`.
+pub fn path_looks_absolute(path: &Path) -> bool {
+    path.is_absolute() || path.has_root()
+}
+
 /// Convert a path to absolute given a root directory.
 ///
 /// For absolute paths, the `root` is ignored. For relative paths, joins with `root`.
@@ -315,9 +325,14 @@ pub struct RelPathBuf(camino::Utf8PathBuf);
 
 impl RelPathBuf {
     /// Create from a string or PathBuf. Errors if absolute or not UTF-8.
+    ///
+    /// Absolute includes host-native absolute paths **and** portable rooted
+    /// forms (`/home/...`) so session JSON written on Unix stays absolute when
+    /// loaded on Windows — `Path::is_absolute()` alone is false for leading
+    /// `/` under windows-msvc, which misclassified legacy abs paths as relative.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self, RelPathError> {
         let path = path.into();
-        if path.is_absolute() {
+        if path_looks_absolute(&path) {
             return Err(RelPathError::NotRelative {
                 input: path.display().to_string(),
             });

@@ -1154,11 +1154,11 @@ mod tests {
     fn decide_inputs_flags_home_key_unrecordable() {
         // Case-2 wiring: with cwd == $HOME (git-init'd so workspace_key discovers
         // it as the home git root), the gather flags key_recordable=false and
-        // decide() trusts it despite configs + interactive. $HOME is overridden so
-        // dirs::home_dir()/workspace_key see the tempdir as home.
+        // decide() trusts it despite configs + interactive. Isolate both HOME and
+        // USERPROFILE so Windows Known Folder home cannot shadow the tempdir.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("HOME", home.path());
+        let _home = crate::isolate_home_dir(home.path());
         git2::Repository::init(home.path()).unwrap();
 
         let home_key = crate::trust::workspace_key(home.path());

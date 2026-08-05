@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use super::DirectoryVisit;
+
 pub(super) fn open_directory_path(path: &Path) -> Option<File> {
     use std::os::windows::fs::OpenOptionsExt as _;
 
@@ -12,6 +14,81 @@ pub(super) fn open_directory_path(path: &Path) -> Option<File> {
         .read(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     options.open(path).ok()
+}
+
+/// Enumerate direct child names of `path` (non-recursive).
+///
+/// Skips `.` / `..`. Rejects reparse-point entries so scanners do not follow
+/// junctions/symlinks out of the approved root. Returns `false` if the
+/// directory cannot be fully read.
+pub(super) fn visit_directory_names(path: &Path, mut visit: impl FnMut(OsString)) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        // Prefer symlink_metadata so we never follow reparse points.
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() || entry_has_reparse_point(&meta) {
+            continue;
+        }
+        visit(name);
+    }
+    true
+}
+
+pub(super) fn visit_directory_names_bounded(
+    path: &Path,
+    max_entries: usize,
+    mut visit: impl FnMut(OsString),
+) -> DirectoryVisit {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return DirectoryVisit {
+            visited: 0,
+            complete: false,
+        };
+    };
+    let mut visited = 0;
+    let mut complete = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            complete = false;
+            break;
+        };
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            complete = false;
+            break;
+        };
+        if meta.file_type().is_symlink() || entry_has_reparse_point(&meta) {
+            continue;
+        }
+        // Match Unix semantics: if another entry exists past the cap, incomplete.
+        if visited == max_entries {
+            complete = false;
+            break;
+        }
+        visited += 1;
+        visit(name);
+    }
+    DirectoryVisit { visited, complete }
+}
+
+fn entry_has_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 pub(super) fn open_regular_path(path: &Path) -> Option<File> {

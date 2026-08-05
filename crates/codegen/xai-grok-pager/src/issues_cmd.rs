@@ -96,7 +96,13 @@ pub enum IssuesCommand {
         #[arg(long)]
         summary: String,
         /// error_class (e.g. feature_gap, land_conflict, tool_schema)
-        #[arg(long = "class", default_value = "unknown")]
+        ///
+        /// Aliases match the agent `developer_log` tool field `error_class`.
+        #[arg(
+            long = "class",
+            visible_alias = "error-class",
+            default_value = "unknown"
+        )]
         error_class: String,
         /// Severity override: p0,p1,p2,p3
         #[arg(long)]

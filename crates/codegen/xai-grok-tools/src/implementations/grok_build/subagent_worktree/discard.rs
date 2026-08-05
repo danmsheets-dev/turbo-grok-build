@@ -137,8 +137,14 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
             // half-deleted RUNNING tree (RC13 Wave A).
             let marker = wt.join(".grok-subagent-live");
             let _ = tokio::fs::remove_file(&marker).await;
-            match tokio::fs::remove_dir_all(wt).await {
-                Ok(()) => {
+            // Windows MAX_PATH: use long-path-aware removal (same as
+            // xai-fast-worktree). Plain remove_dir_all fails on deep
+            // `.godot/imported` / nested node_modules trees.
+            let wt_path = wt.clone();
+            match tokio::task::spawn_blocking(move || xai_grok_paths::remove_dir_all_long(&wt_path))
+                .await
+            {
+                Ok(Ok(())) => {
                     worktree_removed = true;
                     tracing::info!(
                         subagent_id = %work.subagent_id,
@@ -146,9 +152,15 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
                         "discard_subagent removed live worktree"
                     );
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Already gone — still terminal-clean meta below.
                     worktree_removed = true;
+                }
+                Ok(Err(e)) => {
+                    return Err(xai_tool_runtime::ToolError::custom(
+                        "worktree_remove_failed",
+                        format!("failed to remove live worktree {}: {e}", wt.display()),
+                    ));
                 }
                 Err(e) => {
                     return Err(xai_tool_runtime::ToolError::custom(

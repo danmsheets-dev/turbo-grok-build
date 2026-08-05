@@ -37,14 +37,20 @@ pub fn default_grok_home() -> PathBuf {
 }
 
 /// Per-user config directory: `$GROK_HOME` or `~/.grok`. Created if needed.
+///
+/// `$GROK_HOME` is read on **every** call so process-level overrides (tests,
+/// installers, multi-tenant wrappers) take effect without restart. Only the
+/// default `~/.grok` derivation is cached — freezing env at first call made
+/// later `GROK_HOME` isolation invisible and broke worktree DB path lookups.
 pub fn grok_home() -> PathBuf {
+    if let Ok(v) = std::env::var("GROK_HOME") {
+        let grok_home = PathBuf::from(v);
+        let _ = std::fs::create_dir_all(&grok_home);
+        return grok_home;
+    }
     GROK_HOME
         .get_or_init(|| {
-            let grok_home = if let Ok(v) = std::env::var("GROK_HOME") {
-                PathBuf::from(v)
-            } else {
-                default_grok_home()
-            };
+            let grok_home = default_grok_home();
             let _ = std::fs::create_dir_all(&grok_home);
             grok_home
         })

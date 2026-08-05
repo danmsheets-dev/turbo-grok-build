@@ -85,7 +85,13 @@ impl RepoDirChain {
 /// from `xai-grok-workspace`, which depends on THIS crate) to keep the dep edge
 /// one-way; backs the home-is-dotfiles guard in [`RepoDirChain::resolve`].
 fn is_home_dir(path: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
+    // Prefer USERPROFILE/HOME so tests and container overrides work; Windows
+    // `dirs::home_dir` uses Known Folder APIs that ignore the environment.
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir);
+    let Some(home) = home else {
         return false;
     };
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -191,7 +197,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
         git2::Repository::init(&home).unwrap();
+        // Windows `dirs::home_dir` ignores HOME; set USERPROFILE too so the
+        // home-exact guard sees the tempdir as home.
         let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _profile_guard = EnvVarGuard::set("USERPROFILE", &home);
         let sub = home.join("proj");
         std::fs::create_dir_all(&sub).unwrap();
 
@@ -207,6 +216,7 @@ mod tests {
         // normally (no over-trigger), so $HOME points at an unrelated dir here.
         let home = tempfile::tempdir().unwrap();
         let _home_guard = EnvVarGuard::set("HOME", home.path());
+        let _profile_guard = EnvVarGuard::set("USERPROFILE", home.path());
         let repo = tempfile::tempdir().unwrap();
         git2::Repository::init(repo.path()).unwrap();
         let sub = repo.path().join("pkg");

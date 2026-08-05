@@ -300,7 +300,9 @@ async fn read_agents_config_with_roots(
                 .to_string();
             Some(AgentConfigFile {
                 file_name,
-                file_path: candidate.path.display().to_string(),
+                // Normalize separators so discovery/JSON consumers can match
+                // paths portably (Windows `display()` uses `\`).
+                file_path: candidate.path.to_string_lossy().replace('\\', "/"),
                 content,
             })
         })

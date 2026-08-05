@@ -1812,9 +1812,21 @@ pub async fn stash_before_destructive_op(
         session_id,
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
     );
+    // Pin autocrlf off for the stash transaction so Git for Windows
+    // (default core.autocrlf=true) does not rewrite line endings on
+    // stash push/pop during rewind — that leaves dirty trees or
+    // corrupted bytes relative to the checkpoint.
     if let Err(e) = git_cli(
         git_root,
-        &["stash", "push", "--include-untracked", "-m", &message],
+        &[
+            "-c",
+            "core.autocrlf=false",
+            "stash",
+            "push",
+            "--include-untracked",
+            "-m",
+            &message,
+        ],
     )
     .await
     {
@@ -2167,7 +2179,18 @@ pub async fn soft_restore_git_state(
             };
         }
     };
-    if let Err(e) = git_cli(&git_root, &["reset", "--soft", &git_ref.head]).await {
+    if let Err(e) = git_cli(
+        &git_root,
+        &[
+            "-c",
+            "core.autocrlf=false",
+            "reset",
+            "--soft",
+            &git_ref.head,
+        ],
+    )
+    .await
+    {
         tracing::warn!(
             path = %git_root.display(),
             session_id,
@@ -2176,7 +2199,12 @@ pub async fn soft_restore_git_state(
             "soft_restore_git_state: reset --soft failed"
         );
         let stash_ref = match stash_ref {
-            Some(stash) => match git_cli(&git_root, &["stash", "pop"]).await {
+            Some(stash) => match git_cli(
+                &git_root,
+                &["-c", "core.autocrlf=false", "stash", "pop"],
+            )
+            .await
+            {
                 Ok(_) => None,
                 Err(pop_err) => {
                     tracing::warn!(
@@ -2199,7 +2227,12 @@ pub async fn soft_restore_git_state(
             stash_ref,
         };
     }
-    let index_reset = match git_cli(&git_root, &["reset", "--quiet", "--", "."]).await {
+    let index_reset = match git_cli(
+        &git_root,
+        &["-c", "core.autocrlf=false", "reset", "--quiet", "--", "."],
+    )
+    .await
+    {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(
@@ -2963,32 +2996,32 @@ mod tests {
     }
     #[test]
     fn test_effective_worktree_cwd_empty_offset() {
-        let result =
-            effective_worktree_cwd("/home/user/.grok/worktrees/repo/ab-123-a", Path::new(""));
-        assert_eq!(result, "/home/user/.grok/worktrees/repo/ab-123-a");
+        let root = "/home/user/.grok/worktrees/repo/ab-123-a";
+        let result = effective_worktree_cwd(root, Path::new(""));
+        // Compare as Path: production uses native separators (correct for OS cwd).
+        assert_eq!(Path::new(&result), Path::new(root));
     }
     #[test]
     fn test_effective_worktree_cwd_single_level_offset() {
-        let result =
-            effective_worktree_cwd("/home/user/.grok/worktrees/repo/ab-123-a", Path::new("src"));
-        assert_eq!(result, "/home/user/.grok/worktrees/repo/ab-123-a/src");
+        let root = "/home/user/.grok/worktrees/repo/ab-123-a";
+        let result = effective_worktree_cwd(root, Path::new("src"));
+        assert_eq!(Path::new(&result), Path::new(root).join("src"));
     }
     #[test]
     fn test_effective_worktree_cwd_nested_offset() {
-        let result = effective_worktree_cwd(
-            "/home/user/.grok/worktrees/repo/ab-123-b",
-            Path::new("packages/frontend/src"),
-        );
+        let root = "/home/user/.grok/worktrees/repo/ab-123-b";
+        let result = effective_worktree_cwd(root, Path::new("packages/frontend/src"));
         assert_eq!(
-            result,
-            "/home/user/.grok/worktrees/repo/ab-123-b/packages/frontend/src"
+            Path::new(&result),
+            Path::new(root).join("packages/frontend/src")
         );
     }
     #[test]
     fn test_effective_worktree_cwd_no_trailing_slash() {
         let root = "/worktree/path";
         let result = effective_worktree_cwd(root, Path::new(""));
-        assert!(!result.ends_with('/'));
+        // No trailing separator on either platform.
+        assert!(!result.ends_with('/') && !result.ends_with('\\'));
     }
     #[test]
     fn test_compute_subdir_offset_at_git_root() {
@@ -3054,7 +3087,10 @@ mod tests {
         let (offset, _git_root) = compute_subdir_offset(&sub.to_string_lossy());
         let worktree_root = "/home/user/.grok/worktrees/myrepo/ab-test-a";
         let effective = effective_worktree_cwd(worktree_root, &offset);
-        assert_eq!(effective, format!("{}/src/lib", worktree_root));
+        assert_eq!(
+            Path::new(&effective),
+            Path::new(worktree_root).join("src").join("lib")
+        );
     }
     #[test]
     fn test_find_git_root_from_repo_root() {
@@ -3758,6 +3794,13 @@ mod restore_code_tests {
         git_cli(dir, &["config", "commit.gpgsign", "false"])
             .await
             .unwrap();
+        // Git for Windows defaults core.autocrlf=true, which rewrites LF
+        // fixtures to CRLF across stash push/pop and breaks byte-exact
+        // restore assertions. Pin LF for deterministic restore tests.
+        git_cli(dir, &["config", "core.autocrlf", "false"])
+            .await
+            .unwrap();
+        git_cli(dir, &["config", "core.eol", "lf"]).await.unwrap();
         std::fs::write(dir.join("README.md"), "hello\n").unwrap();
         git_cli(dir, &["add", "."]).await.unwrap();
         git_cli(dir, &["commit", "-q", "-m", "init"]).await.unwrap();

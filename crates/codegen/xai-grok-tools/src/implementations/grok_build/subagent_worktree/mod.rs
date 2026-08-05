@@ -453,18 +453,46 @@ pub fn parse_name_status(stdout: &str) -> Vec<String> {
     files
 }
 
-/// Read a blob at `rev:path` from a git repo. Returns None if the path is
-/// missing at that revision (deleted / never existed).
-pub async fn git_show_blob(repo: &Path, rev: &str, path: &str) -> Option<String> {
+/// Read a blob at `rev:path` as raw bytes. Returns None if missing.
+///
+/// Binary-safe: land must not lossily decode images/wasm via UTF-8.
+pub async fn git_show_blob(repo: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
     let spec = format!("{rev}:{path}");
-    match git_capture(repo, &["show", &spec]).await {
-        Ok(s) => Some(s),
-        Err(_) => None,
+    git_capture_bytes(repo, &["show", &spec]).await.ok()
+}
+
+/// Like [`git_capture`] but returns raw stdout bytes (binary blobs).
+pub async fn git_capture_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git {} failed ({}): {}",
+            args.join(" "),
+            output.status,
+            stderr.trim()
+        ));
     }
+    Ok(output.stdout)
 }
 
 /// Write or delete a file under `root` relative to `rel`.
-pub async fn apply_file_content(root: &Path, rel: &str, content: Option<&str>) -> Result<(), String> {
+///
+/// Content is raw bytes so binary land is exact. Kit manifests still get
+/// text-side union merge when both sides are valid UTF-8 JSON.
+pub async fn apply_file_content(
+    root: &Path,
+    rel: &str,
+    content: Option<&[u8]>,
+) -> Result<(), String> {
     let dest = root.join(rel);
     match content {
         Some(data) => {
@@ -474,18 +502,23 @@ pub async fn apply_file_content(root: &Path, rel: &str, content: Option<&str>) -
                     .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
             // Semantic union-merge for kit manifests (densify parallel land).
-            let data = if is_manifest_json_path(rel) {
-                match tokio::fs::read_to_string(&dest).await {
-                    Ok(parent_text) => {
-                        match union_merge_manifest_json(&parent_text, data) {
-                            Some(merged) => merged,
-                            None => data.to_owned(),
+            let data: Vec<u8> = if is_manifest_json_path(rel) {
+                match (
+                    std::str::from_utf8(data).ok(),
+                    tokio::fs::read(&dest).await.ok().and_then(|b| {
+                        String::from_utf8(b).ok()
+                    }),
+                ) {
+                    (Some(child_text), Some(parent_text)) => {
+                        match union_merge_manifest_json(&parent_text, child_text) {
+                            Some(merged) => merged.into_bytes(),
+                            None => data.to_vec(),
                         }
                     }
-                    Err(_) => data.to_owned(),
+                    _ => data.to_vec(),
                 }
             } else {
-                data.to_owned()
+                data.to_vec()
             };
             tokio::fs::write(&dest, data)
                 .await

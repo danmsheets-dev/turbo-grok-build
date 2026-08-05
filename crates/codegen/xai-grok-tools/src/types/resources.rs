@@ -480,6 +480,95 @@ pub struct ConfineRoot(pub PathBuf);
 #[derive(Debug, Clone, Default)]
 pub struct AllowedWritePaths(pub Vec<String>);
 
+/// Error when a write target is outside spawn `allowed_paths`.
+#[derive(Debug, Clone)]
+pub struct AllowedPathsViolation {
+    pub path: String,
+    pub allowed: Vec<String>,
+}
+
+impl AllowedPathsViolation {
+    pub fn code(&self) -> &'static str {
+        "path_allowlist_violation"
+    }
+
+    pub fn message(&self) -> String {
+        format!(
+            "write refused: path `{}` is outside allowed_paths {:?}. \
+             Edit only under those prefixes, or re-spawn without allowed_paths.",
+            self.path, self.allowed
+        )
+    }
+
+    pub fn into_tool_error(self) -> xai_tool_runtime::ToolError {
+        xai_tool_runtime::ToolError::custom(self.code(), self.message())
+    }
+}
+
+/// Fail closed when `allowed` is non-empty and `resolved` is not under `cwd`
+/// relative to any allowlist prefix.
+///
+/// Empty / missing allowlist = unrestricted (Ok). Paths that cannot be made
+/// relative to `cwd` are refused when an allowlist is active.
+pub fn enforce_allowed_write_paths(
+    cwd: &std::path::Path,
+    resolved: &std::path::Path,
+    allowed: &[String],
+) -> Result<(), AllowedPathsViolation> {
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    let rel: PathBuf = match resolved.strip_prefix(cwd) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => {
+            // Try after canonicalize both sides (Windows case / long path).
+            let c_cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+            let c_res = dunce::canonicalize(resolved).unwrap_or_else(|_| resolved.to_path_buf());
+            match c_res.strip_prefix(&c_cwd) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => {
+                    return Err(AllowedPathsViolation {
+                        path: resolved.display().to_string(),
+                        allowed: allowed.to_vec(),
+                    });
+                }
+            }
+        }
+    };
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    // Exact path or directory prefix (same rules as land allowlist).
+    let allowed_ok = allowed.iter().any(|prefix| {
+        let p = prefix.trim_end_matches('/');
+        rel_str == p
+            || rel_str.starts_with(&(p.to_owned() + "/"))
+            || (prefix.ends_with('/') && rel_str.starts_with(prefix.as_str()))
+    });
+    if allowed_ok {
+        return Ok(());
+    }
+    Err(AllowedPathsViolation {
+        path: rel_str,
+        allowed: allowed.to_vec(),
+    })
+}
+
+/// Whether `path` is rooted for model-path rewriting.
+///
+/// On Windows, `Path::is_absolute()` is false for POSIX spellings like
+/// `/home/user/project` (no drive prefix). Models still emit those forms from
+/// remote/container sessions and conversation history; treat a leading
+/// [`std::path::Component::RootDir`] as rooted so display-cwd strip works
+/// cross-platform (same rule as permission `edit_target_protection`).
+fn path_is_rooted(path: &std::path::Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::RootDir)
+    )
+}
+
 /// Resolve a model-provided path, rewriting absolute paths from conversation
 /// history when [`DisplayCwd`] is set.
 ///
@@ -501,14 +590,18 @@ pub fn resolve_model_path(
     let expanded = shellexpand::tilde(input);
     let input_path = std::path::Path::new(expanded.as_ref());
     if let Some(display) = display_cwd
-        && input_path.is_absolute()
+        && path_is_rooted(input_path)
     {
         if let Ok(suffix) = input_path.strip_prefix(display) {
             return cwd.join(suffix);
         }
+        // Rooted but not under display_cwd: keep the model spelling as a path
+        // (POSIX absolute on Windows is still a distinct spelling for confine).
         return input_path.to_path_buf();
     }
-    if !input_path.is_absolute() && !expanded.is_empty() {
+    if !path_is_rooted(input_path) && !expanded.is_empty() {
+        // Model may omit the leading `/` while still intending a path under
+        // display_cwd / cwd (e.g. absolute-looking without root).
         let as_absolute = std::path::PathBuf::from(format!("/{}", expanded.as_ref()));
         let effective_base = display_cwd.unwrap_or(cwd);
         if as_absolute.starts_with(effective_base)

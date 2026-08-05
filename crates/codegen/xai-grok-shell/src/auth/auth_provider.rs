@@ -622,12 +622,16 @@ pub(crate) fn test_backdate_provider_mint(name: &str, age: std::time::Duration) 
 #[cfg(test)]
 pub(crate) fn test_counting_provider(name: &str, dir: &std::path::Path) -> AuthProviderRef {
     let counter = dir.join("count");
+    // Forward-slash the path: auth shell is Git Bash / sh, and `\` is an
+    // escape character there — Windows `display()` backslashes would break
+    // the append/count script.
+    let counter_unix = counter.display().to_string().replace('\\', "/");
     AuthProviderRef::new(
         name.to_owned(),
         AuthProviderConfig {
             command: format!(
                 "echo run >> {c}; printf 'tok-%s' \"$(wc -l < {c} | tr -d ' ')\"",
-                c = counter.display()
+                c = counter_unix
             ),
             args: None,
             token_ttl_secs: Some(3600),

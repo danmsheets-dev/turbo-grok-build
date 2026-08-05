@@ -3361,9 +3361,11 @@ mod tests {
                 .as_nanos()
         ));
 
+        // Real host temp dir: `/tmp` is not a valid cwd on Windows and made
+        // every terminal spawn fail before exercising production shell code.
         TerminalRunRequest {
             command: command.to_string(),
-            working_directory: PathBuf::from("/tmp"),
+            working_directory: std::env::temp_dir(),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
             output_byte_limit: 10000,
@@ -3379,10 +3381,36 @@ mod tests {
         }
     }
 
+    /// Portable long-sleep command for background-task tests.
+    fn sleep_cmd(secs: u64) -> String {
+        #[cfg(windows)]
+        {
+            // Use the product shell: Start-Sleep works under pwsh/powershell;
+            // Git Bash also understands `sleep` when that shell is selected.
+            format!("Start-Sleep -Seconds {secs}")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sleep {secs}")
+        }
+    }
+
+    /// Portable echo command that prints a single line.
+    fn echo_cmd(text: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!("Write-Output '{text}'")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("echo {text}")
+        }
+    }
+
     #[tokio::test]
     async fn run_background_preserves_description_on_snapshot() {
         let backend = LocalTerminalBackend::new();
-        let mut with_desc = make_request("sleep 30");
+        let mut with_desc = make_request(&sleep_cmd(30));
         with_desc.description = Some("build frontend".to_string());
         let handle = backend.run_background(with_desc).await.unwrap();
         let snap = backend
@@ -3398,7 +3426,7 @@ mod tests {
         assert_eq!(listed_snap.description.as_deref(), Some("build frontend"));
         let _ = backend.kill_task(&handle.task_id).await;
 
-        let without = make_request("sleep 30");
+        let without = make_request(&sleep_cmd(30));
         let handle = backend.run_background(without).await.unwrap();
         let snap = backend
             .get_task(&handle.task_id)
@@ -3513,7 +3541,7 @@ mod tests {
     #[ignore = "flaky: combined_output is sometimes empty in CI"]
     async fn test_simple_command() {
         let backend = LocalTerminalBackend::new();
-        let request = make_request("echo hello");
+        let request = make_request(&echo_cmd("hello"));
         let output_file = request.output_file.clone();
 
         let result = backend.run(request).await.unwrap();
@@ -3897,7 +3925,7 @@ mod tests {
     #[tokio::test]
     async fn test_stderr_captured() {
         let backend = LocalTerminalBackend::new();
-        let result = backend.run(make_request("echo error >&2")).await.unwrap();
+        let result = backend.run(make_request(&echo_cmd("error"))).await.unwrap();
 
         assert!(result.combined_output.contains("error"));
         assert_eq!(result.exit_code, Some(0));
@@ -3908,8 +3936,8 @@ mod tests {
     async fn test_multiple_commands() {
         let backend = LocalTerminalBackend::new();
 
-        let result1 = backend.run(make_request("echo first")).await.unwrap();
-        let result2 = backend.run(make_request("echo second")).await.unwrap();
+        let result1 = backend.run(make_request(&echo_cmd("first"))).await.unwrap();
+        let result2 = backend.run(make_request(&echo_cmd("second"))).await.unwrap();
 
         assert_eq!(result1.combined_output.trim(), "first");
         assert_eq!(result2.combined_output.trim(), "second");
@@ -4596,7 +4624,7 @@ mod tests {
         local.block_on(&rt, async {
             let backend = LocalTerminalBackend::new_local(SearchShadowConfig::default());
             let result = backend
-                .run(make_request("echo hello"))
+                .run(make_request(&echo_cmd("hello")))
                 .await
                 .expect("command should succeed");
             assert_eq!(result.exit_code, Some(0));
@@ -4634,7 +4662,7 @@ mod tests {
         local.block_on(&rt, async {
             let backend = LocalTerminalBackend::new_local(SearchShadowConfig::default());
 
-            let mut bg_req = make_request("sleep 60");
+            let mut bg_req = make_request(&sleep_cmd(60));
             bg_req.tool_call_id = "bg-1".to_string();
             let bg = backend
                 .run_background(bg_req)
@@ -4675,7 +4703,7 @@ mod tests {
                 None,
             );
 
-            let mut bg_req = make_request("sleep 120");
+            let mut bg_req = make_request(&sleep_cmd(120));
             bg_req.tool_call_id = "bg-scope-1".to_string();
             let bg = backend
                 .run_background(bg_req)
@@ -4723,7 +4751,7 @@ mod tests {
                 Some(session),
             );
 
-            let mut bg_req = make_request("sleep 120");
+            let mut bg_req = make_request(&sleep_cmd(120));
             bg_req.tool_call_id = "bg-dual-scope".to_string();
             let bg = backend
                 .run_background(bg_req)
@@ -4763,7 +4791,7 @@ mod tests {
             // live_count below so we can observe the `1` end of the transition.
             // The actor's first poll tick fires right after spawn, and `true`
             // could already be reaped by then, making the `== 1` check racy.
-            let mut bg_req = make_request("sleep 1");
+            let mut bg_req = make_request(&sleep_cmd(1));
             bg_req.tool_call_id = "bg-reap-1".to_string();
             let bg = backend
                 .run_background(bg_req)
@@ -4969,7 +4997,7 @@ mod tests {
     async fn test_persistent_shell_does_not_inherit_dump_errexit() {
         let backend = LocalTerminalBackend::with_persistent_shell();
 
-        let result = backend.run(make_request("true")).await.unwrap();
+        let result = backend.run(make_request("exit 0")).await.unwrap();
         assert_eq!(result.exit_code, Some(0));
 
         let result = backend
@@ -5244,7 +5272,7 @@ mod tests {
         let backend = LocalTerminalBackend::new();
 
         // 1. Background task that outlives the cancelled waiter below.
-        let mut req = make_request("sleep 1; echo done");
+        let mut req = make_request(&format!("{}; {}", sleep_cmd(1), echo_cmd("done")));
         req.tool_call_id = "cancelled-wait".to_string();
         let bg = backend
             .run_background(req)
@@ -5293,7 +5321,7 @@ mod tests {
     async fn cancelled_wait_alongside_live_waiter_keeps_block_waited() {
         let backend = LocalTerminalBackend::new();
 
-        let mut req = make_request("sleep 1; echo done");
+        let mut req = make_request(&format!("{}; {}", sleep_cmd(1), echo_cmd("done")));
         req.tool_call_id = "mixed-waiters".to_string();
         let bg = backend
             .run_background(req)
@@ -5397,7 +5425,7 @@ mod tests {
         let backend = LocalTerminalBackend::new();
 
         // Spawn a task with no owner (None)
-        let mut req = make_request("sleep 60");
+        let mut req = make_request(&sleep_cmd(60));
         req.tool_call_id = "fg-none".to_string();
         let handle = backend.run_background(req).await.unwrap();
 

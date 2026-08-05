@@ -198,7 +198,21 @@ fn redirect_stdio(log_path: &Path) -> io::Result<()> {
 /// pidfile itself is left on disk for diagnostics.
 #[derive(Debug)]
 pub struct PidFile {
+    /// Exclusive lock handle. On Unix this is the pidfile itself (content is
+    /// written through the same fd). On Windows this is a sibling
+    /// `<pidfile>.lock` so the advisory PID text remains readable under a
+    /// mandatory lock (Windows ERROR_LOCK_VIOLATION otherwise blocks
+    /// contenders from reading the predecessor PID for takeover).
     _file: File,
+}
+
+/// Path of the exclusive lock file associated with a pidfile on Windows.
+/// Sibling `*.lock` keeps advisory PID text readable under a mandatory lock.
+#[cfg(windows)]
+fn pidfile_lock_path(path: &Path) -> std::path::PathBuf {
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lock");
+    std::path::PathBuf::from(lock)
 }
 
 impl PidFile {
@@ -212,26 +226,92 @@ impl PidFile {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut file = daemon_file_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
 
-        match file.try_lock_exclusive() {
-            Ok(()) => {}
-            Err(e) if is_lock_contended(&e) => return Ok(None),
-            Err(e) => return Err(e),
+        #[cfg(windows)]
+        {
+            // Lock sibling so the advisory PID text file stays readable while
+            // the exclusive lock is held (mandatory Windows byte-range locks
+            // block all readers of the locked region — including takeover).
+            let lock_path = pidfile_lock_path(path);
+            let lock_file = daemon_file_options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)?;
+
+            match lock_file.try_lock_exclusive() {
+                Ok(()) => {}
+                Err(e) if is_lock_contended(&e) => return Ok(None),
+                Err(e) => return Err(e),
+            }
+
+            // Mixed-version safety: pre-sibling builds locked the pidfile
+            // itself. Probe that path without holding the lock so content
+            // remains readable for takeover diagnostics.
+            let mut content = daemon_file_options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?;
+            match content.try_lock_exclusive() {
+                Ok(()) => {
+                    // No legacy holder. Drop the content-file lock immediately
+                    // so other processes can still read the PID text.
+                    let _ = content.unlock();
+                }
+                Err(e) if is_lock_contended(&e) => {
+                    // Legacy (or other) exclusive holder on the pidfile path.
+                    let _ = lock_file.unlock();
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+
+            // Write may still fail if a legacy holder raced in after the probe
+            // or holds a share mode that blocks writers — treat lock errors as
+            // contention (do not surface as hard I/O failure for single-instance).
+            if let Err(e) = (|| -> io::Result<()> {
+                content.set_len(0)?;
+                content.write_all(process::id().to_string().as_bytes())?;
+                content.flush()?;
+                Ok(())
+            })() {
+                if is_lock_contended(&e) {
+                    let _ = lock_file.unlock();
+                    return Ok(None);
+                }
+                return Err(e);
+            }
+            // Drop `content` — only `lock_file` stays locked for the guard.
+
+            return Ok(Some(Self { _file: lock_file }));
         }
 
-        // PID contents are advisory diagnostics; the flock provides exclusion.
-        // `set_len(0)` clears any stale (possibly longer) value first.
-        file.set_len(0)?;
-        file.write_all(process::id().to_string().as_bytes())?;
-        file.flush()?;
+        #[cfg(not(windows))]
+        {
+            let mut file = daemon_file_options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?;
 
-        Ok(Some(Self { _file: file }))
+            match file.try_lock_exclusive() {
+                Ok(()) => {}
+                Err(e) if is_lock_contended(&e) => return Ok(None),
+                Err(e) => return Err(e),
+            }
+
+            // PID contents are advisory diagnostics; the flock provides exclusion.
+            // `set_len(0)` clears any stale (possibly longer) value first.
+            file.set_len(0)?;
+            file.write_all(process::id().to_string().as_bytes())?;
+            file.flush()?;
+
+            Ok(Some(Self { _file: file }))
+        }
     }
 
     /// Acquire the lock, taking over from a live predecessor workspace-server

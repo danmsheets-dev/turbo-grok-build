@@ -2047,7 +2047,10 @@ fn spawn_permission_manager_with_pin(
                         .map(|p| p.as_path());
                     let process_confine = xai_grok_tools::types::resources::process_confine_root()
                         .map(|p| p.as_path());
-                    if let Some(root) = process_confine.or(session_confine) {
+                    // Align with file tools: session isolation worktree root wins
+                    // when present (tighter than parent process confine). Process
+                    // root remains the outer jail when no session root is set.
+                    if let Some(root) = session_confine.or(process_confine) {
                         // Join relative shell operands against the real session
                         // cwd (worktree), not the permission actor's global cwd.
                         let join_cwd = path_context

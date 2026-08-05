@@ -458,10 +458,16 @@ fn is_static_path_operand(p: &str) -> bool {
 fn join_cwd(base: &Path, operand: &str) -> PathBuf {
     let p = Path::new(operand);
     if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        base.join(p)
+        return p.to_path_buf();
     }
+    // On Windows, `Path::join` treats a leading `/` as "rooted on the current
+    // drive" and rewrites `base.join("/abs/path")` into e.g. `H:/abs/path`.
+    // Models (and git's own `-C` on Unix) use POSIX absolute spellings; keep
+    // that form so ambient scans don't retarget onto the drive root.
+    if operand.starts_with('/') || operand.starts_with('\\') {
+        return PathBuf::from(operand);
+    }
+    base.join(p)
 }
 
 fn apply_literal_chdir(cwd: &Path, words: &[String]) -> Option<PathBuf> {

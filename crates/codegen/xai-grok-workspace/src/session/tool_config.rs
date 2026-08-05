@@ -313,8 +313,9 @@ pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// `<home>/sessions/<session_id>/`; left unset, `state_path` stays empty
 /// (legacy behavior).
 ///
-/// [`SessionContext::session_folder`] is `/tmp/sessions/<sanitized_id>/`
-/// (terminal logs and other tool artifacts — not the project `cwd`).
+/// [`SessionContext::session_folder`] is
+/// `<temp>/grok/sessions/<sanitized_id>/` (terminal logs and other tool
+/// artifacts — not the project `cwd`).
 ///
 /// Terminal backends are persistent-shell [`LocalTerminalBackend`]s, built
 /// once per session by [`build_terminal_backend`] and passed into every
@@ -382,9 +383,14 @@ impl WorkspaceSessionContextFactory {
         );
         dir.join("tool_state.json")
     }
-    /// `/tmp/sessions/<sanitized_id>/` for terminal logs and other tool artifacts.
+    /// `<temp>/grok/sessions/<sanitized_id>/` for terminal logs and other tool
+    /// artifacts. Uses the OS temp directory (not hardcoded `/tmp`) so Windows
+    /// does not write under drive-root `\tmp` (often blocked or non-user-owned).
+    ///
+    /// [`ensure_session_dir`] already appends `sessions/<id>` under `root`.
     fn resolve_session_folder(session_id: &str) -> PathBuf {
-        let (dir, created) = ensure_session_dir(std::path::Path::new("/tmp"), session_id);
+        let base = std::env::temp_dir().join("grok");
+        let (dir, created) = ensure_session_dir(&base, session_id);
         if let Err(e) = created {
             tracing::warn!(
                 session = %session_id,
@@ -1051,18 +1057,19 @@ mod tests {
     fn factory_session_folder_is_tmp_sessions_not_project_cwd() {
         let cwd = PathBuf::from("/workspace");
         let folder = WorkspaceSessionContextFactory::resolve_session_folder("sess-1");
-        let expected = PathBuf::from("/tmp/sessions/sess-1");
+        let sessions = std::env::temp_dir().join("grok").join("sessions");
+        let expected = sessions.join("sess-1");
         assert_eq!(folder, expected);
         assert!(folder.is_dir());
         assert!(!folder.starts_with(&cwd));
         assert_eq!(
             folder.join("terminal").join("call-42.log"),
-            PathBuf::from("/tmp/sessions/sess-1/terminal/call-42.log")
+            expected.join("terminal").join("call-42.log")
         );
     }
     #[test]
     fn factory_session_folder_sanitizes_and_isolates_ids() {
-        let sessions = PathBuf::from("/tmp/sessions");
+        let sessions = std::env::temp_dir().join("grok").join("sessions");
         let hostile = WorkspaceSessionContextFactory::resolve_session_folder("../../etc");
         assert!(hostile.starts_with(&sessions));
         assert_eq!(hostile.parent(), Some(sessions.as_path()));
@@ -1091,9 +1098,10 @@ mod tests {
         assert!(ok.is_ok());
         assert_eq!(under_home, home.path().join("sessions").join("shared-id"));
         assert!(under_home.is_dir());
-        let (under_tmp, ok) = ensure_session_dir(std::path::Path::new("/tmp"), "shared-id");
+        let tmp_base = std::env::temp_dir().join("grok");
+        let (under_tmp, ok) = ensure_session_dir(&tmp_base, "shared-id");
         assert!(ok.is_ok());
-        assert_eq!(under_tmp, PathBuf::from("/tmp/sessions/shared-id"));
+        assert_eq!(under_tmp, tmp_base.join("sessions").join("shared-id"));
         assert!(under_tmp.is_dir());
     }
     /// A hostile `session_id` (`../../etc`) is sanitized to a single safe

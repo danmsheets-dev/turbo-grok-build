@@ -162,7 +162,7 @@ pub(crate) async fn run_search_replace(
         .get::<xai_tool_runtime::BehaviorVersion>()
         .map(|v| v.0.clone());
     let tool_call_id = ctx.call_id.as_str().to_owned();
-    let (cwd, display_cwd, fs, notification_handle, hints_enabled, confine_root);
+    let (cwd, display_cwd, fs, notification_handle, hints_enabled, confine_root, allowed_paths);
     {
         let res = resources.lock().await;
         cwd = match cwd_override {
@@ -174,6 +174,9 @@ pub(crate) async fn run_search_replace(
         notification_handle = res.require::<NotificationHandle>()?.0.clone();
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
         confine_root = res.get::<ConfineRoot>().map(|c| c.0.clone());
+        allowed_paths = res
+            .get::<crate::types::resources::AllowedWritePaths>()
+            .map(|a| a.0.clone());
     }
     // RC13 Wave A: fail closed when session CWD / confine root is gone
     // (worktree tombstone) before any read/write.
@@ -189,6 +192,10 @@ pub(crate) async fn run_search_replace(
         }
         Err(_) => resolved,
     };
+    if let Some(ref prefixes) = allowed_paths {
+        crate::types::resources::enforce_allowed_write_paths(&cwd, &path, prefixes)
+            .map_err(|e| e.into_tool_error())?;
+    }
     if let Some(err) = validate_path_length(&input.file_path) {
         return Ok(err);
     }

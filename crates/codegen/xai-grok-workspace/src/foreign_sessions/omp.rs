@@ -719,6 +719,9 @@ mod tests {
         assert_eq!(xdg_sessions_root(None), None);
     }
 
+    // Production only consults XDG on Linux/macOS (`cfg!` gate in
+    // `sessions_root`). Keep those assertions platform-matched.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn sessions_root_prefers_xdg_data_home_when_omp_dir_exists() {
         let _lock = env_lock();
@@ -751,8 +754,11 @@ mod tests {
             crate::TestEnvGuard::set("PI_CONFIG_DIR", std::path::Path::new(".omp-test"));
 
         let root = sessions_root().expect("config fallback should resolve a root");
+        let expected_suffix = std::path::Path::new(".omp-test")
+            .join("agent")
+            .join("sessions");
         assert!(
-            root.ends_with(".omp-test/agent/sessions"),
+            root.ends_with(&expected_suffix),
             "config root should embed PI_CONFIG_DIR, got {root:?}"
         );
         assert!(
@@ -761,6 +767,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn sessions_root_embeds_profile_under_xdg_and_config_paths() {
         let _lock = env_lock();

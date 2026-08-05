@@ -860,34 +860,93 @@ impl AuthManager {
     /// Invariants:
     /// - **Disk write before any network I/O** (else a sibling process can
     ///   reuse the not-yet-rotated RT and the IdP returns `invalid_grant`).
-    /// - **Caller holds the `auth.json` file lock** (production callers:
-    ///   `refresh_chain` Success arm, `flow::run_auth_flow`).
+    /// - **Acquires the `auth.json` file lock** for the whole-map RMW. Callers
+    ///   that already hold the lock (refresh Success arm) must use
+    ///   [`Self::update_locked`] instead — nested exclusive flock deadlocks.
     ///
     /// Returns the input `GrokAuth` BEFORE enrichment lands; callers
     /// needing the post-enrichment view re-read `current()`.
     pub(crate) async fn update(self: &Arc<Self>, auth: GrokAuth) -> std::io::Result<GrokAuth> {
-        let update_started = std::time::Instant::now();
+        let Some(lock) = self.try_lock_auth_file_async(AUTH_LOCK_TIMEOUT).await else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "could not acquire auth.json lock for credential update",
+            ));
+        };
+        self.update_locked(auth, &lock).await
+    }
+
+    /// Like [`Self::update`], but the caller already holds `auth.json` flock.
+    /// Used by the refresh chain so we never re-enter the non-reentrant lock.
+    pub(crate) async fn update_locked(
+        self: &Arc<Self>,
+        auth: GrokAuth,
+        _lock: &AuthFileLock,
+    ) -> std::io::Result<GrokAuth> {
+        let result = self.persist_scope_rmw(&auth, "auth update").await?;
+        self.spawn_user_info_enrichment(auth.clone());
+        Ok(result)
+    }
+
+    /// Persist to disk and cache without spawning the background `/user` task
+    /// (already merged inline, or a stale fetch must not race a fresh write).
+    ///
+    /// Acquires the `auth.json` file lock for the whole-map RMW. Callers that
+    /// already hold the lock must use [`Self::save_without_enrichment_locked`].
+    pub(crate) async fn save_without_enrichment(
+        &self,
+        auth: GrokAuth,
+    ) -> std::io::Result<GrokAuth> {
+        let Some(_lock) = try_lock_auth_file_async(&self.path, AUTH_LOCK_TIMEOUT).await else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "could not acquire auth.json lock for credential save",
+            ));
+        };
+        self.persist_scope_rmw(&auth, "auth update (no enrichment)")
+            .await
+    }
+
+    /// Like [`Self::save_without_enrichment`] when the caller already holds flock.
+    #[allow(dead_code)] // available for refresh-style callers that already hold the lock
+    pub(crate) async fn save_without_enrichment_locked(
+        &self,
+        auth: GrokAuth,
+        _lock: &AuthFileLock,
+    ) -> std::io::Result<GrokAuth> {
+        self.persist_scope_rmw(&auth, "auth update (no enrichment)")
+            .await
+    }
+
+    /// Whole-map read-modify-write of this manager's scope into `auth.json`.
+    /// Caller must hold the file lock (or accept the race — only internal
+    /// after lock acquisition).
+    async fn persist_scope_rmw(
+        &self,
+        auth: &GrokAuth,
+        log_label: &str,
+    ) -> std::io::Result<GrokAuth> {
+        let started = std::time::Instant::now();
         let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
             Ok(map) => map,
             Err(e) => {
                 // Non-recoverable error (PermissionDenied, etc.) — keep conservative.
-                tracing::warn!(error = %e, "auth: read failed, updating in-memory only");
+                tracing::warn!(error = %e, "{log_label}: read failed, updating in-memory only");
                 xai_grok_telemetry::unified_log::warn(
                     "auth update skipped disk write (read failed)",
                     None,
-                    Some(serde_json::json!({ "error": e.to_string() })),
+                    Some(serde_json::json!({ "error": e.to_string(), "label": log_label })),
                 );
                 self.with_inner_write(|inner| *inner = Some(auth.clone()));
-                self.spawn_user_info_enrichment(auth.clone());
-                return Ok(auth);
+                return Ok(auth.clone());
             }
         };
         let mut map = map;
         // One entry per scope (personal and team share the scope key).
-        tracing::debug!(scope = %self.scope, "auth: storing token");
+        tracing::debug!(scope = %self.scope, "{log_label}: storing token");
         map.insert(self.scope.clone(), auth.clone());
         let write_result = write_auth_json(&self.path, &map);
-        let elapsed_ms = update_started.elapsed().as_millis() as u64;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => xai_grok_telemetry::unified_log::info(
                 "auth update disk written",
@@ -896,6 +955,7 @@ impl AuthManager {
                     "rt_prefix": auth.refresh_token.as_deref().map(token_suffix),
                     "key_prefix": token_suffix(&auth.key),
                     "elapsed_ms": elapsed_ms,
+                    "label": log_label,
                 })),
             ),
             Err(e) => xai_grok_telemetry::unified_log::error(
@@ -904,6 +964,7 @@ impl AuthManager {
                 Some(serde_json::json!({
                     "error": e.to_string(),
                     "elapsed_ms": elapsed_ms,
+                    "label": log_label,
                 })),
             ),
         }
@@ -913,66 +974,8 @@ impl AuthManager {
         // the stale/dead token in memory and the user is completely stuck.
         *self.permanent_failure.write() = None;
         self.with_inner_write(|inner| *inner = Some(auth.clone()));
-
-        // Fire-and-forget enrichment. Off the critical path -- a slow
-        // `/user` would otherwise widen the sibling-process
-        // `invalid_grant` race window.
-        self.spawn_user_info_enrichment(auth.clone());
-
         write_result?;
-        Ok(auth)
-    }
-
-    /// Persist to disk and cache without spawning the background `/user` task
-    /// (already merged inline, or a stale fetch must not race a fresh write).
-    pub(crate) async fn save_without_enrichment(
-        &self,
-        auth: GrokAuth,
-    ) -> std::io::Result<GrokAuth> {
-        let started = std::time::Instant::now();
-        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
-            Ok(map) => map,
-            Err(e) => {
-                // Non-recoverable error — keep conservative.
-                tracing::warn!(error = %e, "auth: read failed, updating in-memory only (no enrichment)");
-                xai_grok_telemetry::unified_log::warn(
-                    "auth update skipped disk write (read failed, no enrichment)",
-                    None,
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
-                self.with_inner_write(|inner| *inner = Some(auth.clone()));
-                return Ok(auth);
-            }
-        };
-        let mut map = map;
-        tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        map.insert(self.scope.clone(), auth.clone());
-        let write_result = write_auth_json(&self.path, &map);
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        match &write_result {
-            Ok(()) => xai_grok_telemetry::unified_log::info(
-                "auth update disk written (no enrichment)",
-                None,
-                Some(serde_json::json!({
-                    "rt_prefix": auth.refresh_token.as_deref().map(token_suffix),
-                    "key_prefix": token_suffix(&auth.key),
-                    "elapsed_ms": elapsed_ms,
-                })),
-            ),
-            Err(e) => xai_grok_telemetry::unified_log::error(
-                "auth update disk write failed (no enrichment)",
-                None,
-                Some(serde_json::json!({
-                    "error": e.to_string(),
-                    "elapsed_ms": elapsed_ms,
-                })),
-            ),
-        }
-        // Always update in-memory, even if disk write failed (see update()).
-        *self.permanent_failure.write() = None;
-        self.with_inner_write(|inner| *inner = Some(auth.clone()));
-        write_result?;
-        Ok(auth)
+        Ok(auth.clone())
     }
 
     /// Spawn the `/user` enrichment task; body in the `enrichment` submodule.
@@ -1911,7 +1914,7 @@ impl AuthManager {
     ) -> Result<GrokAuth, AuthError> {
         let pre_key_prefix = attempted_key.as_deref().map(token_suffix);
         match outcome {
-            RefreshOutcome::Success(new_auth) => match self.update(*new_auth).await {
+            RefreshOutcome::Success(new_auth) => match self.update_locked(*new_auth, _lock).await {
                 Ok(auth) => {
                     let new_prefix = token_suffix(&auth.key);
                     xai_grok_telemetry::unified_log::info(

@@ -14,7 +14,14 @@ use xai_tool_protocol::turn_hook::TurnHookOutcome;
 /// `GROK_WORKSPACE_TERMINATION_GRACE_MS`. 45s fits under the K8s grace period.
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 45_000;
 /// preStop-hook drain marker; override via `GROK_WORKSPACE_DRAINING_FILE`.
+/// Platform-specific defaults: Unix `/tmp/...`, Windows under system temp
+/// (resolved at runtime in [`draining_file_path`] when env unset).
+#[cfg(unix)]
 const DEFAULT_DRAINING_FILE: &str = "/tmp/workspace-server.draining";
+#[cfg(windows)]
+const DEFAULT_DRAINING_FILE: &str = "workspace-server.draining";
+#[cfg(not(any(unix, windows)))]
+const DEFAULT_DRAINING_FILE: &str = "workspace-server.draining";
 static DRAIN_STARTED_TOTAL: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
     register_int_counter_vec!(
         "grok_workspace_drain_started_total",
@@ -3976,7 +3983,17 @@ fn grace_budget_from_raw(raw: Option<String>) -> std::time::Duration {
 fn draining_file_path() -> std::path::PathBuf {
     std::env::var("GROK_WORKSPACE_DRAINING_FILE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_DRAINING_FILE))
+        .unwrap_or_else(|_| {
+            #[cfg(windows)]
+            {
+                // Prefer OS temp (not drive-root `\tmp` or a bare relative name).
+                std::env::temp_dir().join(DEFAULT_DRAINING_FILE)
+            }
+            #[cfg(not(windows))]
+            {
+                std::path::PathBuf::from(DEFAULT_DRAINING_FILE)
+            }
+        })
 }
 /// Atomically write `outstanding` (total durability work still pending: upload
 /// queue depth + in-flight artifact producers) to the drain marker (temp +

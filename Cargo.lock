@@ -17042,6 +17042,7 @@ dependencies = [
  "xai-grok-developer-log",
  "xai-grok-env",
  "xai-grok-extra-ca",
+ "xai-grok-paths",
  "xai-grok-sandbox",
  "xai-grok-test-support",
  "xai-grok-tools-api",

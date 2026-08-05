@@ -117,34 +117,75 @@ fn try_direnv_export(dir: &Path) -> Option<HashMap<String, String>> {
     }
 }
 
+/// Quote a host path for embedding in a double-quoted bash string.
+///
+/// On Windows, normalizes `\` → `/` so Git Bash / MSYS does not treat path
+/// separators as escape sequences (`\t`, `\U`, …). On Unix, backslashes are
+/// preserved as literal filename characters and escaped for bash safety.
+/// Also escapes `$`, `` ` ``, and `"`.
+fn bash_quote_path(path: &Path) -> String {
+    let mut out = String::with_capacity(path.as_os_str().len() + 8);
+    for ch in path.to_string_lossy().chars() {
+        match ch {
+            // Windows path separators only — never rewrite Unix `\` in names.
+            #[cfg(windows)]
+            '\\' => out.push('/'),
+            #[cfg(not(windows))]
+            '\\' => {
+                out.push('\\');
+                out.push('\\');
+            }
+            '"' | '$' | '`' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Load environment by running .envrc in a bash subshell.
 /// This is the fallback when direnv is not installed.
 fn load_envrc_via_bash(dir: &Path) -> Option<HashMap<String, String>> {
     let envrc_path = dir.join(".envrc");
+    let bash = xai_grok_config::shell::resolve_bash_executable().or_else(|| {
+        tracing::warn!(?envrc_path, "No bash executable found for .envrc fallback");
+        None
+    })?;
 
     // Build a script that:
-    // 1. Includes direnv stubs
-    // 2. Sources the .envrc
-    // 3. Outputs all env vars as KEY=VALUE pairs (null-separated for safety)
+    // 1. cd into the project
+    // 2. Prefer Windows-form $PWD on Git Bash (`pwd -W`) so PATH_add / $PWD
+    //    exports are usable by native Windows consumers (MSYS otherwise maps
+    //    TEMP dirs to `/tmp/...` and drive letters to `/c/...`).
+    // 3. Includes direnv stubs
+    // 4. Sources the .envrc
+    // 5. Outputs all env vars as KEY=VALUE pairs (null-separated for safety)
     let script = format!(
         r#"
 set -e
 cd "{dir}"
+# Git Bash: surface a Windows path for $PWD when available.
+if WIN_PWD=$(pwd -W 2>/dev/null); then
+  WIN_PWD=$(printf '%s' "$WIN_PWD" | tr '\\' '/')
+  export PWD="$WIN_PWD"
+fi
 {stubs}
 . "{envrc}"
 # Output all environment variables, null-separated
 env -0
 "#,
-        dir = dir.display(),
+        dir = bash_quote_path(dir),
         stubs = DIRENV_STUBS,
-        envrc = envrc_path.display(),
+        envrc = bash_quote_path(&envrc_path),
     );
 
     // Capture baseline environment (before running .envrc)
     let baseline: HashMap<String, String> = std::env::vars().collect();
 
-    // Run the script and capture output
-    let mut bash_cmd = Command::new("/bin/bash");
+    // Run the script and capture output (Git Bash on Windows; /bin/bash on Unix).
+    let mut bash_cmd = Command::new(&bash);
     bash_cmd
         .arg("-c")
         .arg(&script)
@@ -155,12 +196,18 @@ env -0
 
     let output = match output {
         Ok(o) if o.status.success() => o,
-        Ok(_) => {
-            tracing::warn!(?envrc_path, "Failed to execute .envrc via bash");
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            tracing::warn!(
+                ?envrc_path,
+                bash = %bash,
+                %stderr,
+                "Failed to execute .envrc via bash"
+            );
             return None;
         }
         Err(e) => {
-            tracing::warn!(?envrc_path, ?e, "Failed to run bash for .envrc");
+            tracing::warn!(?envrc_path, bash = %bash, ?e, "Failed to run bash for .envrc");
             return None;
         }
     };
@@ -229,12 +276,56 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Normalize path separators for host vs Git Bash / MSYS `$PWD` forms.
+    fn path_norm(s: &str) -> String {
+        s.replace('\\', "/").to_ascii_lowercase()
+    }
+
+    /// True when `got` contains `host_path` under Win32, MSYS, or TEMP→/tmp form.
+    fn path_contains_host(got: &str, host_path: &Path) -> bool {
+        let got_n = path_norm(got);
+        let host_n = path_norm(&host_path.to_string_lossy());
+        if got_n.contains(&host_n) {
+            return true;
+        }
+        // Git Bash often reports `C:\foo` as `/c/foo`.
+        let bytes = host_n.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            let drive = bytes[0] as char;
+            let rest = &host_n[2..];
+            let msys = format!("/{drive}{rest}");
+            if got_n.contains(&msys) {
+                return true;
+            }
+        }
+        // TEMP dirs are frequently mounted at `/tmp/<name>` under Git Bash.
+        if let Some(name) = host_path.file_name().and_then(|n| n.to_str()) {
+            let tmp_form = format!("/tmp/{}", path_norm(name));
+            if got_n.contains(&tmp_form) {
+                return true;
+            }
+        }
+        // Last resort: unique temp directory leaf must appear.
+        if let Some(name) = host_path.file_name().and_then(|n| n.to_str()) {
+            if got_n.contains(&path_norm(name)) {
+                return true;
+            }
+        }
+        false
+    }
+
     #[test]
     fn test_simple_export() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
 
-        let env = load_envrc(dir.path()).unwrap();
+        let Some(env) = load_envrc(dir.path()) else {
+            // Soft-fail when neither direnv nor bash is available (CI without Git).
+            if xai_grok_config::shell::resolve_bash_executable().is_none() {
+                return;
+            }
+            panic!("load_envrc returned None despite bash being available");
+        };
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
@@ -243,9 +334,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export MY_DIR=$PWD/subdir\n").unwrap();
 
-        let env = load_envrc(dir.path()).unwrap();
-        let expected = format!("{}/subdir", dir.path().display());
-        assert_eq!(env.get("MY_DIR"), Some(&expected));
+        let Some(env) = load_envrc(dir.path()) else {
+            if xai_grok_config::shell::resolve_bash_executable().is_none() {
+                return;
+            }
+            panic!("load_envrc returned None despite bash being available");
+        };
+        let my_dir = env.get("MY_DIR").expect("MY_DIR set by .envrc");
+        assert!(
+            path_contains_host(my_dir, dir.path()) && path_norm(my_dir).ends_with("/subdir"),
+            "MY_DIR={my_dir:?} should contain host path {host:?}/subdir",
+            host = dir.path()
+        );
     }
 
     #[test]
@@ -259,9 +359,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "PATH_add bin\n").unwrap();
 
-        let env = load_envrc(dir.path()).unwrap();
-        let path = env.get("PATH").unwrap();
-        assert!(path.contains(&format!("{}/bin", dir.path().display())));
+        let Some(env) = load_envrc(dir.path()) else {
+            if xai_grok_config::shell::resolve_bash_executable().is_none() {
+                return;
+            }
+            panic!("load_envrc returned None despite bash being available");
+        };
+        let path = env.get("PATH").expect("PATH set by PATH_add");
+        let bin = dir.path().join("bin");
+        assert!(
+            path_contains_host(path, &bin),
+            "PATH={path:?} should contain {bin:?}"
+        );
     }
 
     #[test]
@@ -279,7 +388,12 @@ fi
         )
         .unwrap();
 
-        let env = load_envrc(dir.path()).unwrap();
+        let Some(env) = load_envrc(dir.path()) else {
+            if xai_grok_config::shell::resolve_bash_executable().is_none() {
+                return;
+            }
+            panic!("load_envrc returned None despite bash being available");
+        };
         assert_eq!(env.get("EXISTS"), Some(&"yes".to_string()));
     }
 }

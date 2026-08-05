@@ -8,9 +8,11 @@
 //! Release archives ship more than the executable: the release workflow copies
 //! the whole `bundled/` tree (skills, agents, prompts) next to `turbo` /
 //! `turbo.exe`. The archive reader therefore accepts a `bundled/**` subtree at
-//! arbitrary depth and activates it at `<TURBO_HOME>/bundled` — staged into a
-//! sibling directory first, then swapped in with renames so a crash can never
-//! leave a half-written bundle live.
+//! arbitrary depth and activates it at `$GROK_HOME/bundled` (default
+//! `~/.grok/bundled`) — staged into a sibling directory first, then swapped in
+//! with renames so a crash can never leave a half-written bundle live. Binaries
+//! and update state stay under `TURBO_SHARE_DIR` / `~/.turbo`; only the bundle
+//! is shared with the agent/skill loaders that read `$GROK_HOME/bundled`.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -1247,7 +1249,7 @@ fn prepare_extract_destinations(
         .with_context(|| format!("creating extract stage {}", stage_root.display()))?;
     let binary_path = stage_root.join(binary_entry);
     // The bundle stage must already sit on the same filesystem as the final
-    // `<TURBO_HOME>/bundled` target so activation is a rename, not a copy — a
+    // `$GROK_HOME/bundled` target so activation is a rename, not a copy — a
     // copy would not be atomic and could be interrupted half-written.
     if path_exists_or_symlink(&bundle_stage) {
         bail!(

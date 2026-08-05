@@ -135,9 +135,21 @@ pub fn inject_card(index: &TreeIndex, config: &WorkspaceTreeConfig) -> String {
         }
     }
 
+    // Hot paths / smoke anchors (RC15+): help dogfood agents find handoff docs,
+    // VERSION, release-dist binary, and isolation worktree base without a full walk.
+    let hot = hot_path_lines(&index.root, &index.meta.canonical_root);
+    if !hot.is_empty() {
+        lines.push(String::new());
+        lines.push("Hot paths:".to_string());
+        lines.extend(hot);
+    }
+
     lines.push(String::new());
     lines.push("Tools: workspace_tree, resolve_path".to_string());
     lines.push("Tip: resolve_path before inventing folders.".to_string());
+    lines.push(format!(
+        "Worktrees: ~/.grok/worktrees/… · prune: turbo subagent prune · tree store: turbo tree prune"
+    ));
 
     let mut card = lines.join("\n");
     if card.len() > max_chars {
@@ -234,6 +246,68 @@ fn collapsed_notes(root: &TreeNode, limit: usize) -> Vec<String> {
         }
     }
     walk(root, &mut out, limit);
+    out
+}
+
+/// Smoke / dogfood anchors: handoff docs, VERSION, release-dist binary hint.
+fn hot_path_lines(root: &TreeNode, canonical_root: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut docs_smoke: Vec<String> = Vec::new();
+    let mut version: Option<String> = None;
+    let mut release_dist: Option<String> = None;
+
+    fn walk(
+        n: &TreeNode,
+        docs_smoke: &mut Vec<String>,
+        version: &mut Option<String>,
+        release_dist: &mut Option<String>,
+    ) {
+        let name_l = n.name.to_ascii_lowercase();
+        let rel_l = n.rel_path.replace('\\', "/").to_ascii_lowercase();
+        if n.kind == NodeKind::File {
+            if name_l == "version" && !n.rel_path.contains('/') && !n.rel_path.contains('\\') {
+                *version = Some(n.rel_path.clone());
+            }
+            if (name_l.contains("smoke") || name_l.contains("handoff") || name_l.contains("install"))
+                && (rel_l.starts_with("docs/") || rel_l.contains("/docs/"))
+                && (name_l.ends_with(".md") || name_l.ends_with(".txt"))
+            {
+                docs_smoke.push(n.rel_path.clone());
+            }
+            if rel_l.contains("target/release-dist/")
+                && (name_l == "turbo" || name_l == "turbo.exe" || name_l == "hyper" || name_l == "hyper.exe")
+            {
+                *release_dist = Some(n.rel_path.clone());
+            }
+        }
+        if let Some(children) = &n.children {
+            for c in children {
+                walk(c, docs_smoke, version, release_dist);
+            }
+        }
+    }
+    walk(root, &mut docs_smoke, &mut version, &mut release_dist);
+
+    docs_smoke.sort();
+    docs_smoke.dedup();
+    for p in docs_smoke.into_iter().take(8) {
+        out.push(format!("  docs: {p}"));
+    }
+    if let Some(v) = version {
+        out.push(format!("  VERSION: {v}"));
+    }
+    if let Some(b) = release_dist {
+        out.push(format!("  binary: {b} (path-qualified; prefer over PATH)"));
+    } else {
+        // Hint even when index collapsed target/ (common for large monorepos).
+        let hint = std::path::Path::new(canonical_root).join("target").join("release-dist");
+        if hint.is_dir() {
+            out.push(format!(
+                "  binary dir: {} (check turbo.exe / hyper.exe)",
+                hint.display()
+            ));
+        }
+    }
     out
 }
 

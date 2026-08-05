@@ -122,8 +122,9 @@ impl CompiledPolicy {
             let Some(InvocationWord::Literal(program)) = words.words.first() else {
                 continue;
             };
-            let program = shell_program_name(program);
-            let program_lower = program.to_ascii_lowercase();
+            // Strip path + Windows extensions so `cat.exe` / `Get-Content.EXE`
+            // hit the same reader/writer model as `cat` / `get-content`.
+            let program_lower = normalize_program_name(program);
             if matches!(program_lower.as_str(), "cd" | "pushd" | "popd") {
                 continue;
             }
@@ -1258,18 +1259,41 @@ impl ProtectedEditPermission {
     }
 }
 
+/// Whether `path` is rooted (absolute) for protection purposes.
+///
+/// On Windows, `Path::is_absolute()` is false for POSIX spellings like
+/// `/home/user/.ssh/id_rsa` (no drive prefix). Models and unit tests still
+/// emit those forms; treat a leading `RootDir` as rooted so sensitive-path
+/// checks work cross-platform.
+fn path_is_rooted_for_protection(path: &Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::RootDir)
+    )
+}
+
 /// Whether an already-resolved direct edit target needs confirmation, and why.
 ///
 /// The caller uses the edit tools' shared model-path resolver first. This helper
 /// preserves its uncollapsed components for physical symlink + `..` resolution,
 /// while checking a separate lexical normalization for traversal aliases.
 pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason> {
-    if !path.is_absolute() {
+    if !path_is_rooted_for_protection(path) {
         return Some(ProtectedEditReason::Sensitive);
     }
     let lexical = xai_grok_paths::normalize_lexically(path);
     if let Some(reason) = protected_edit_reason(&lexical) {
         return Some(reason);
+    }
+    // POSIX absolute spellings (`/etc/…`) are not real paths on Windows, so
+    // physical symlink resolution either fails or maps them into the current
+    // drive. Lexical checks above already covered the model-supplied spelling;
+    // only resolve physically when the host Path API considers it absolute.
+    if !path.is_absolute() {
+        return None;
     }
     let Some(resolved) = resolve_following_symlinks(path, 0) else {
         return Some(ProtectedEditReason::Sensitive);

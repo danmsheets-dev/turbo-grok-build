@@ -1076,7 +1076,9 @@ mod tests {
     #[tokio::test]
     async fn test_rewind_point_creation() {
         let tracker = FileStateTracker::new();
-        let cwd = AbsPathBuf::new(PathBuf::from("/test")).unwrap();
+        // Host-absolute cwd: AbsPathBuf rejects POSIX `/test` on Windows
+        // (Path::is_absolute requires a drive/UNC prefix).
+        let cwd = AbsPathBuf::new(std::env::temp_dir().join("file_state_rewind_cwd")).unwrap();
         let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
         let fs_wrapper = crate::file_system::AsyncFsWrapper::new(fs);
         let ctx = ToolContext::new_local_context(cwd.to_path_buf(), fs_wrapper, Arc::new(()));
@@ -1098,7 +1100,7 @@ mod tests {
     #[tokio::test]
     async fn test_truncate_from() {
         let tracker = FileStateTracker::new();
-        let cwd = AbsPathBuf::new(PathBuf::from("/test")).unwrap();
+        let cwd = AbsPathBuf::new(std::env::temp_dir().join("file_state_truncate_cwd")).unwrap();
         let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
         let fs_wrapper = crate::file_system::AsyncFsWrapper::new(fs);
         let ctx = ToolContext::new_local_context(cwd.to_path_buf(), fs_wrapper, Arc::new(()));

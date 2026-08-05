@@ -467,6 +467,7 @@ fn by_name_in_cwd_with_plugins_and_home(
     if let Some(registry) = plugins {
         // Check if name is qualified (plugin-name:agent-name)
         if let Some((plugin_name, agent_name)) = name.split_once(':')
+            && xai_tool_types::is_safe_agent_name(agent_name)
             && let Some(plugin) = registry.get(plugin_name)
             && plugin.enabled
         {
@@ -483,6 +484,10 @@ fn by_name_in_cwd_with_plugins_and_home(
 
         // Bare name lookup: only resolve if exactly one plugin has this agent.
         // Ambiguous matches (multiple plugins with same agent name) are rejected.
+        // Fail closed on path-unsafe names before any join.
+        if !xai_tool_types::is_safe_agent_name(name) {
+            return None;
+        }
         let mut matches: Vec<(&crate::plugins::registry::LoadedPlugin, std::path::PathBuf)> =
             Vec::new();
         for plugin in registry.enabled_plugins() {
@@ -582,6 +587,10 @@ fn load_project_definitions(
 /// First project agent named `name` along the cwd→git-root walk (the shared
 /// [`project_agent_dirs`] SSOT), highest-priority dir first.
 fn load_project_definition_by_name(name: &str, cwd: &Path) -> Option<AgentDefinition> {
+    // Model/CLI-supplied names become a single path segment under agents/.
+    if !xai_tool_types::is_safe_agent_name(name) {
+        return None;
+    }
     for agents_dir in project_agent_dirs(Some(cwd)).0 {
         let agent_file = agents_dir.join(format!("{name}.md"));
         if let Some(def) = load_definition_from_path(
@@ -602,6 +611,9 @@ fn load_definition_by_name(
     error_message: &str,
     scope_override: Option<AgentScope>,
 ) -> Option<AgentDefinition> {
+    if !xai_tool_types::is_safe_agent_name(name) {
+        return None;
+    }
     let agent_file = dir.join(format!("{}.md", name));
     load_definition_from_path(&agent_file, name, error_message, scope_override)
 }

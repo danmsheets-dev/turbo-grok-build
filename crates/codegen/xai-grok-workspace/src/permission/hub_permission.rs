@@ -251,18 +251,22 @@ pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessK
                 .get("file_path")
                 .or_else(|| args.get("path"))
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned();
-            Some(AccessKind::Edit(path))
+                .unwrap_or("unknown");
+            // Same sanitizer as native AccessKind::from / path tools so a
+            // deny on `**/.env` cannot be skipped with `" .env"` padding.
+            Some(AccessKind::Edit(
+                xai_grok_tools::types::resources::sanitize_model_path_arg(path).to_owned(),
+            ))
         }
         "write" | "write_file" => {
             let path = args
                 .get("file_path")
                 .or_else(|| args.get("path"))
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned();
-            Some(AccessKind::Edit(path))
+                .unwrap_or("unknown");
+            Some(AccessKind::Edit(
+                xai_grok_tools::types::resources::sanitize_model_path_arg(path).to_owned(),
+            ))
         }
         "apply_patch" => {
             let patch = args

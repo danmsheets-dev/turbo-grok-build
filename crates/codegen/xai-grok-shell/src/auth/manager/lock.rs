@@ -807,13 +807,16 @@ mod tests {
         let lock_path = path.with_file_name("auth.json.lock");
 
         let lock = try_lock_auth_file_nonblocking(&path).expect("uncontended non-blocking acquire");
+        // On Windows, exclusive LockFileEx blocks concurrent open/read of the
+        // locked range while the holder is live. Drop first, then inspect the
+        // bytes the holder wrote (production waiters re-open after unlock or
+        // read via share-mode; the write itself is what this test asserts).
+        drop(lock);
 
         let content = std::fs::read_to_string(&lock_path).unwrap();
         let (pid, _ts) =
             parse_holder_info(&content).expect("non-blocking acquire must write parseable info");
         assert_eq!(pid, std::process::id());
-
-        drop(lock);
     }
 
     #[test]
@@ -1185,14 +1188,15 @@ mod tests {
         let lock = try_lock_auth_file_async(&path, StdDuration::from_secs(1)).await;
         assert!(lock.is_some(), "should acquire lock");
 
-        // Verify lock file has holder info.
+        // Release first: Windows exclusive LockFileEx blocks concurrent
+        // open/read of the locked range while the holder is live.
+        drop(lock);
+
+        // Verify lock file still has holder info after release.
         let lock_path = path.with_file_name("auth.json.lock");
         let content = std::fs::read_to_string(&lock_path).unwrap();
         let (pid, _ts) = parse_holder_info(&content).unwrap();
         assert_eq!(pid, std::process::id());
-
-        // Release.
-        drop(lock);
 
         // Re-acquire should succeed.
         let lock2 = try_lock_auth_file_async(&path, StdDuration::from_secs(1)).await;

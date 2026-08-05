@@ -5552,13 +5552,15 @@ impl AppView {
             // Game Mode owns Slow-tick animation (Terra freeze fix). Redraw only
             // when sync/tick marks dirty — frozen idle rooms skip full office paint.
             if agent.game_mode.open {
-                let (sw, sh) = agent.last_terminal_size;
-                let stage_h = sh.saturating_sub(3).max(8);
-                needs_redraw |= crate::views::game_mode::sync_game_mode(
-                    agent,
-                    sw.max(20),
-                    stage_h,
-                );
+                // Prefer last painted scrollback size so tick tier matches paint
+                // (avoids Normal↔Compact thrash that snap-clears walks/handoffs).
+                let (sw, sh) = if let Some(stage) = agent.game_mode.last_stage {
+                    (stage.width.max(20), stage.height.max(8))
+                } else {
+                    let (tw, th) = agent.last_terminal_size;
+                    (tw.max(20), th.saturating_sub(3).max(8))
+                };
+                needs_redraw |= crate::views::game_mode::sync_game_mode(agent, sw, sh);
             }
             needs_redraw |= agent.scrollback.tick();
             needs_redraw |= agent.todo.list_state.tick();

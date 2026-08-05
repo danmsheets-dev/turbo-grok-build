@@ -145,6 +145,45 @@ fn find_git_bash() -> Option<String> {
     None
 }
 
+/// Resolve a bash executable suitable for POSIX scripts (`.envrc`, auth helpers).
+///
+/// - Unix: `/bin/bash`, then `/usr/bin/bash`, then `bash` on `PATH`.
+/// - Windows: Git Bash (never WSL `bash.exe` alone — path translation differs).
+pub fn resolve_bash_executable() -> Option<String> {
+    #[cfg(unix)]
+    {
+        for candidate in ["/bin/bash", "/usr/bin/bash"] {
+            if std::path::Path::new(candidate).exists() {
+                return Some(candidate.to_string());
+            }
+        }
+        // Fall back to PATH.
+        if let Ok(output) = {
+            let mut cmd = std::process::Command::new("which");
+            xai_tty_utils::detach_std_command(&mut cmd);
+            cmd.arg("bash").stdin(std::process::Stdio::null());
+            cmd.output()
+        } {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !path.is_empty() && std::path::Path::new(&path).exists() {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        find_git_bash()
+    }
+}
+
 #[cfg(not(unix))]
 impl WindowsShell {
     /// Short display name for user-facing contexts (e.g. "bash", "pwsh").
@@ -286,6 +325,136 @@ pub fn shell_command_argv(command: &str) -> ShellInvocation {
     invocation_for(detect_windows_shell(), command)
 }
 
+/// Detect the shell for **auth / identity** command strings (`auth_provider_command`,
+/// identity probes, external token refresh helpers).
+///
+/// This is intentionally **not** the terminal cascade. Terminal tools prefer
+/// PowerShell so MSBuild-style `/flag` args survive; auth scripts need:
+///
+/// 1. Reliable **exit-code propagation** (PowerShell `-Command` does not meet
+///    the providers' `exit 0 = success` contract).
+/// 2. Pre-0.2.119 POSIX semantics when Git Bash is installed (`$VAR`, pipes,
+///    `exit 3`).
+///
+/// Cascade (cached): `GROK_AUTH_SHELL` → `GROK_SHELL` (non-PowerShell only) →
+/// Git Bash if present → `cmd /C`. PowerShell is never auto-selected for auth
+/// because exit-code propagation is required for credential providers.
+///
+/// Prefer `GROK_AUTH_SHELL` when the terminal shell (`GROK_SHELL=pwsh`) must
+/// differ from the auth cascade.
+#[cfg(not(unix))]
+pub fn detect_windows_auth_shell() -> &'static WindowsShell {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<WindowsShell> = OnceLock::new();
+
+    CACHED.get_or_init(|| {
+        // Dedicated auth override — does not force PowerShell on auth when the
+        // user only wanted PowerShell for agent terminals.
+        if let Ok(val) = std::env::var("GROK_AUTH_SHELL") {
+            match val.trim().to_ascii_lowercase().as_str() {
+                "bash" | "gitbash" | "git-bash" => {
+                    if let Some(path) = find_git_bash() {
+                        tracing::info!(
+                            shell = path,
+                            "Windows auth shell (GROK_AUTH_SHELL override): Git Bash"
+                        );
+                        return WindowsShell::GitBash(path);
+                    }
+                    tracing::warn!(
+                        "GROK_AUTH_SHELL={val} but Git Bash not found; falling through"
+                    );
+                }
+                "cmd" | "cmd.exe" => {
+                    tracing::info!("Windows auth shell (GROK_AUTH_SHELL override): cmd.exe");
+                    return WindowsShell::Cmd;
+                }
+                "pwsh" | "powershell" => {
+                    tracing::warn!(
+                        "GROK_AUTH_SHELL={val}: PowerShell is not used for auth \
+                         (exit-code contract); falling through to bash/cmd"
+                    );
+                }
+                other => {
+                    tracing::warn!(
+                        "GROK_AUTH_SHELL={other} is not recognized \
+                         (expected bash|cmd); falling through"
+                    );
+                }
+            }
+        }
+
+        if let Ok(val) = std::env::var("GROK_SHELL") {
+            match val.trim().to_ascii_lowercase().as_str() {
+                // Terminal PowerShell preference must NOT hijack auth.
+                "pwsh" | "powershell" => {
+                    tracing::info!(
+                        "GROK_SHELL={val}: ignored for auth shell (use GROK_AUTH_SHELL=bash|cmd); \
+                         continuing auth cascade"
+                    );
+                }
+                "bash" | "gitbash" | "git-bash" => {
+                    if let Some(path) = find_git_bash() {
+                        tracing::info!(
+                            shell = path,
+                            "Windows auth shell (GROK_SHELL override): Git Bash"
+                        );
+                        return WindowsShell::GitBash(path);
+                    }
+                    tracing::warn!(
+                        "GROK_SHELL={val} but Git Bash not found; falling through to auth auto-detect"
+                    );
+                }
+                "cmd" | "cmd.exe" => {
+                    tracing::info!("Windows auth shell (GROK_SHELL override): cmd.exe");
+                    return WindowsShell::Cmd;
+                }
+                other => {
+                    tracing::warn!(
+                        "GROK_SHELL={other} is not recognized for auth \
+                         (expected bash|cmd; pwsh is terminal-only); falling through"
+                    );
+                }
+            }
+        }
+
+        // Prefer Git Bash for POSIX auth scripts when present (historical
+        // Windows behaviour before the 0.2.119 `cmd /C` hardcode).
+        if let Some(path) = find_git_bash() {
+            tracing::info!(shell = path, "Windows auth shell: Git Bash");
+            return WindowsShell::GitBash(path);
+        }
+
+        // cmd propagates native `.exe` / `.bat` exit codes; always available.
+        tracing::info!("Windows auth shell: cmd.exe");
+        WindowsShell::Cmd
+    })
+}
+
+/// Build `(program, args, env)` for an auth/identity command string.
+///
+/// See [`detect_windows_auth_shell`]. Use this for credential providers — not
+/// [`shell_command_argv`], which optimises for agent terminals.
+#[cfg(not(unix))]
+pub fn auth_shell_command_argv(command: &str) -> ShellInvocation {
+    invocation_for(detect_windows_auth_shell(), command)
+}
+
+/// Wrap a PowerShell command so the **process** exit code mirrors native
+/// tool failures (`$LASTEXITCODE`).
+///
+/// Bare `pwsh -Command "git …"` / `powershell.exe -Command "…"` returns 0 when
+/// a native `.exe` fails — PowerShell only sets `$LASTEXITCODE`. Agent tools
+/// and auth helpers treat process exit 0 as success, so failures were
+/// silently green. This matches the auth-shell rationale (exit-code contract).
+#[cfg(not(unix))]
+fn wrap_powershell_exit_propagation(command: &str) -> String {
+    // Script block: run user command, then exit with native code if set,
+    // else 1 when `$?` is false (cmdlet errors with no LASTEXITCODE).
+    format!(
+        "& {{ {command}; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; if (-not $?) {{ exit 1 }} }}"
+    )
+}
+
 /// Pure builder split out of `shell_command_argv` so tests can exercise every
 /// `WindowsShell` variant, not just the one installed on the test host.
 #[cfg(not(unix))]
@@ -320,7 +489,7 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                command.to_string(),
+                wrap_powershell_exit_propagation(command),
             ],
             env: utf8_env.to_vec(),
         },
@@ -330,7 +499,7 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                command.to_string(),
+                wrap_powershell_exit_propagation(command),
             ],
             env: utf8_env.to_vec(),
         },
@@ -678,5 +847,26 @@ mod tests {
             "{:?}",
             inv.env
         );
+    }
+
+    /// PowerShell wrappers must surface native `$LASTEXITCODE` (false-green fix).
+    #[cfg(not(unix))]
+    #[test]
+    fn invocation_for_powershell_wraps_lastexitcode() {
+        for shell in [WindowsShell::Pwsh, WindowsShell::PowerShell] {
+            let inv = invocation_for(&shell, "cmd /c exit 7");
+            let cmd = inv.args.last().expect("Command arg");
+            assert!(
+                cmd.contains("LASTEXITCODE"),
+                "expected LASTEXITCODE wrap for {shell:?}, got {cmd}"
+            );
+            assert!(
+                cmd.contains("cmd /c exit 7"),
+                "user command must remain in wrap for {shell:?}, got {cmd}"
+            );
+        }
+        // Cmd must not wrap (native exit already propagates).
+        let inv = invocation_for(&WindowsShell::Cmd, "exit /b 7");
+        assert_eq!(inv.args, vec!["/C".to_string(), "exit /b 7".to_string()]);
     }
 }

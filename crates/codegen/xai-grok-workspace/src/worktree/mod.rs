@@ -658,7 +658,10 @@ pub fn resolve_label_collision(base_dir: &Path, label: &str) -> String {
 fn grok_home() -> std::path::PathBuf {
     xai_fast_worktree::resolve_grok_home().unwrap_or_else(|_| {
         dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .unwrap_or_else(|| {
+                // Never use Unix `/tmp` on Windows (drive-root `\tmp`).
+                std::env::temp_dir()
+            })
             .join(".grok")
     })
 }
@@ -733,8 +736,16 @@ pub fn label_from_path(worktree_path: &str) -> String {
 /// queries. Returns `None` for non-worktree paths (without opening the DB) or
 /// when the DB is unavailable.
 fn worktree_record_for_cwd(cwd: &str) -> Option<(WorktreeDb, WorktreeRecord)> {
-    let worktrees_dir = grok_home().join("worktrees");
-    let mut path = Path::new(cwd);
+    // Canonicalize both sides so Windows case / `\\?\` / mixed separators do
+    // not make `starts_with` reject a registered worktree under GROK_HOME.
+    let worktrees_dir = {
+        let raw = grok_home().join("worktrees");
+        dunce::canonicalize(&raw).unwrap_or(raw)
+    };
+    let mut path = {
+        let raw = PathBuf::from(cwd);
+        dunce::canonicalize(&raw).unwrap_or(raw)
+    };
     if !path.starts_with(&worktrees_dir) {
         return None;
     }
@@ -751,7 +762,7 @@ fn worktree_record_for_cwd(cwd: &str) -> Option<(WorktreeDb, WorktreeRecord)> {
         if let Ok(Some(record)) = db.get(&path.to_string_lossy()) {
             return Some((db, record));
         }
-        path = path.parent()?;
+        path = path.parent()?.to_path_buf();
     }
     None
 }
@@ -2242,16 +2253,29 @@ async fn get_apply_context(worktree_path: &str) -> Result<ApplyContext> {
     .await?
 }
 
-async fn get_file_at_commit(worktree_path: &str, commit: &str, path: &str) -> Option<String> {
-    git_cli(
-        Path::new(worktree_path),
-        &["show", &format!("{}:{}", commit, path)],
-    )
-    .await
-    .ok()
+async fn get_file_at_commit_bytes(
+    worktree_path: &str,
+    commit: &str,
+    path: &str,
+) -> Option<Vec<u8>> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(worktree_path)
+        .args(["show", &format!("{commit}:{path}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let output = cmd.output().await.ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
-async fn apply_file_content(dest: &Path, content: Option<&String>) -> bool {
+fn bytes_for_conflict_display(data: Option<Vec<u8>>) -> Option<String> {
+    data.map(|v| match String::from_utf8(v) {
+        Ok(s) => s,
+        Err(e) => format!("<binary {} bytes>", e.as_bytes().len()),
+    })
+}
+
+async fn apply_file_content_bytes(dest: &Path, content: Option<&[u8]>) -> bool {
     match content {
         Some(data) => {
             if let Some(parent) = dest.parent() {
@@ -2268,7 +2292,9 @@ async fn apply_file_content(dest: &Path, content: Option<&String>) -> bool {
 
 pub async fn apply_worktree(req: &ApplyWorktreeRequest) -> Result<ApplyWorktreeResponse> {
     let worktree_path = &req.worktree_path;
-    let git_root = find_main_repo_root_from_path(Path::new(worktree_path))?;
+    // Prefer registered source_repo so standalone isolation trees don't
+    // treat themselves as the main repo (commondir().parent() == worktree).
+    let git_root = resolve_apply_parent_root(Path::new(worktree_path))?;
     let git_root_str = git_root.to_string_lossy().to_string();
     let ctx = get_apply_context(worktree_path).await?;
 
@@ -2279,48 +2305,86 @@ pub async fn apply_worktree(req: &ApplyWorktreeRequest) -> Result<ApplyWorktreeR
         });
     }
 
+    // Overwrite: apply each path as we go (destructive by design).
+    // Merge: plan first — never write parent files until the full set is
+    // conflict-free. Fail closed. Content is raw bytes so binary land is exact.
     let mut files = Vec::new();
     let mut conflicts = Vec::new();
+    let mut merge_plan: Vec<(GitFileChange, Option<Vec<u8>>)> = Vec::new();
 
     for file_change in ctx.changed_files {
         let worktree_file = Path::new(worktree_path).join(&file_change.path);
         let main_file = git_root.join(&file_change.path);
-        let theirs = tokio::fs::read_to_string(&worktree_file).await.ok();
+        let theirs = if worktree_file.is_file() {
+            tokio::fs::read(&worktree_file).await.ok()
+        } else {
+            None
+        };
 
         if req.mode == ApplyMode::Overwrite {
-            if apply_file_content(&main_file, theirs.as_ref()).await {
+            if apply_file_content_bytes(&main_file, theirs.as_deref()).await {
                 files.push(file_change);
             }
             continue;
         }
 
-        // Merge mode
-        let base = get_file_at_commit(worktree_path, &ctx.base_commit, &file_change.path).await;
-        let ours = tokio::fs::read_to_string(&main_file).await.ok();
+        // Merge mode — detect only (no writes yet)
+        let base =
+            get_file_at_commit_bytes(worktree_path, &ctx.base_commit, &file_change.path).await;
+        let ours = if main_file.is_file() {
+            tokio::fs::read(&main_file).await.ok()
+        } else {
+            None
+        };
 
         if base == ours {
-            if apply_file_content(&main_file, theirs.as_ref()).await {
-                files.push(file_change);
-            }
+            merge_plan.push((file_change, theirs));
         } else if base != theirs {
             conflicts.push(FileConflict {
                 path: file_change.path,
                 change_type: file_change.change_type,
-                base,
-                ours,
-                theirs,
+                base: bytes_for_conflict_display(base),
+                ours: bytes_for_conflict_display(ours),
+                theirs: bytes_for_conflict_display(theirs),
             });
+        }
+        // else: child matches base, parent diverged — skip (parent wins)
+    }
+
+    if req.mode != ApplyMode::Overwrite {
+        if !conflicts.is_empty() {
+            // Nothing applied — isolation preserved.
+            return Ok(ApplyWorktreeResponse::Conflicts {
+                files: vec![],
+                conflicts,
+            });
+        }
+        for (file_change, theirs) in merge_plan {
+            let main_file = git_root.join(&file_change.path);
+            if apply_file_content_bytes(&main_file, theirs.as_deref()).await {
+                files.push(file_change);
+            }
         }
     }
 
-    if conflicts.is_empty() {
-        Ok(ApplyWorktreeResponse::Success {
-            files,
-            git_root: git_root_str,
-        })
-    } else {
-        Ok(ApplyWorktreeResponse::Conflicts { files, conflicts })
+    Ok(ApplyWorktreeResponse::Success {
+        files,
+        git_root: git_root_str,
+    })
+}
+
+/// Parent git root for apply/land: registered `source_repo` when present,
+/// else [`find_main_repo_root_from_path`] (linked worktrees).
+fn resolve_apply_parent_root(worktree_path: &Path) -> Result<PathBuf> {
+    if let Ok(db) = xai_fast_worktree::WorktreeDb::open_default()
+        && let Ok(Some(record)) = db.get(&worktree_path.to_string_lossy())
+    {
+        let source = record.source_repo;
+        if source.as_path() != worktree_path && source.is_dir() {
+            return Ok(source);
+        }
     }
+    find_main_repo_root_from_path(worktree_path)
 }
 
 // ============================================================================

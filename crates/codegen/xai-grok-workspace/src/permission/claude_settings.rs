@@ -367,13 +367,12 @@ pub fn find_claude_settings_paths(cwd: &Path) -> Vec<PathBuf> {
 /// out of [`find_claude_settings_paths`] so [`claude_settings_paths_for_trust`]
 /// can load ONLY the user tier when a folder is untrusted.
 ///
-/// Use `dirs::home_dir()` to match the home-resolution strategy used by
-/// `claude_import.rs::scan_importable_settings` and `claude_import_state.rs`,
-/// so a path returned here reliably tests as global in the import scanner's
-/// `is_global` check.
+/// Resolve global `~/.claude` paths via [`crate::resolved_home_dir`] so
+/// `HOME`/`USERPROFILE` overrides work (Windows Known Folder APIs ignore env,
+/// and tests isolate home that way).
 fn global_claude_settings_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::resolved_home_dir() {
         let global = home.join(".claude");
         paths.push(global.join("settings.local.json"));
         paths.push(global.join("settings.json"));

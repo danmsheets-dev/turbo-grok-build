@@ -219,10 +219,22 @@ impl MemoryConfig {
 /// `.grok/config.toml`. Enabled by default; can be disabled via
 /// `GROK_SUBAGENTS=0` env var or `[subagents] enabled = false`
 /// in config.toml.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+///
+/// **RC15:** `enabled` must default to **true** on deserialize. A partial
+/// section like `[subagents.models]` alone used to leave `enabled = false`
+/// (bool `Default`) while still counting as a local section, so
+/// `resolve_enabled` treated it as an intentional disable and stripped
+/// `spawn_subagent` while kill/get_output remained — boot card still said
+/// Subagents: enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
+    ///
+    /// Defaults to **true**. Only explicit `[subagents] enabled = false`,
+    /// `GROK_SUBAGENTS=0`, or equivalent force-disables. Nested tables alone
+    /// (`[subagents.models]`, `[subagents.toggle]`, …) must not disable.
+    #[serde(default = "default_subagents_enabled")]
     pub enabled: bool,
     /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped ≥1 at resolve).
     #[serde(default)]
@@ -298,6 +310,27 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub personas: std::collections::HashMap<String, SubagentPersona>,
 }
+
+/// Serde / Default: subagents on unless explicitly disabled.
+fn default_subagents_enabled() -> bool {
+    true
+}
+
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_subagents_enabled(),
+            max_depth: None,
+            max_concurrent: None,
+            models: std::collections::HashMap::new(),
+            effort: std::collections::HashMap::new(),
+            toggle: std::collections::HashMap::new(),
+            roles: std::collections::HashMap::new(),
+            personas: std::collections::HashMap::new(),
+        }
+    }
+}
+
 use xai_grok_subagent_resolution::config::{SubagentPersona, SubagentRole};
 impl SubagentsConfig {
     fn discover_personas_in_dir(&mut self, dir: &std::path::Path) {

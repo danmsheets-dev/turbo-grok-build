@@ -52,34 +52,24 @@ pub(crate) fn git_bin() -> OsString {
 }
 
 /// Run a config-provided command string through the platform shell: `sh -c`
-/// on unix, `cmd /C` on Windows. The escape hatch shared by the auth
-/// providers and the identity command.
+/// on unix; on Windows the **auth** shell cascade (not the terminal cascade).
+/// The escape hatch shared by the auth providers and the identity command.
 ///
 /// Windows has no `sh` on `PATH` in a default install, so hardcoding it made
 /// every one of those call sites fail to spawn — and where Git Bash *is*
 /// installed, `sh` eats the backslashes in a native path such as
-/// `C:\corp\auth.exe`. `cmd /C` runs `.exe` / `.cmd` / `.bat` directly and
-/// propagates the child's exit code, which the auth providers' "exit 0 =
-/// success" contract depends on (PowerShell's `-Command` does not).
+/// `C:\corp\auth.exe`. Auth needs reliable exit-code propagation (the
+/// providers' "exit 0 = success" contract); PowerShell `-Command` does not
+/// meet that. The agent terminal cascade prefers pwsh for MSBuild `/flag`
+/// passthrough and is the **wrong** detector for credential scripts.
+///
+/// Windows auth cascade ([`xai_grok_config::shell::auth_shell_command_argv`]):
+/// `GROK_SHELL` override → Git Bash when present (pre-0.2.119 POSIX semantics)
+/// → `cmd /C` (exit codes + always available). Never auto-selects PowerShell.
 pub(crate) fn shell_c(script: &str) -> Command {
-    // Windows: route through the shared shell detector rather than hardcoding
-    // `cmd /C`. Before the 0.2.119 sync this helper was `sh -c` on EVERY
-    // platform, so a Windows user's `auth_provider_command` / identity command
-    // could rely on POSIX syntax (`$VAR`, `exit 3`, pipes, `>&2`) and it worked
-    // wherever Git Bash was on PATH. Upstream switched it to `cmd /C`, which
-    // silently changes what those configured commands mean — `$VAR` stops
-    // expanding and a non-zero `exit` is lost.
-    //
-    // `shell_command_argv` preserves that behaviour where it worked (Git Bash
-    // `-c`, plus the MSYS_NO_PATHCONV env it needs) while still fixing the case
-    // upstream cared about: a machine with no `sh` at all now falls back to
-    // pwsh/PowerShell/cmd instead of failing to spawn. Honours `GROK_SHELL`.
-    // This is the same helper local_terminal, streaming_local_terminal and the
-    // hooks runner already use, so shell semantics stay consistent across the
-    // product.
     #[cfg(windows)]
     {
-        let inv = xai_grok_config::shell::shell_command_argv(script);
+        let inv = xai_grok_config::shell::auth_shell_command_argv(script);
         let mut cmd = Command::new(&inv.program);
         cmd.args(&inv.args);
         for (key, value) in &inv.env {

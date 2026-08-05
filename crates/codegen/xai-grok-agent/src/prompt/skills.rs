@@ -333,11 +333,27 @@ async fn list_skills_with_options(
 }
 
 /// Expand a `~`-prefixed path string to an absolute `PathBuf`.
+///
+/// Accepts `~/…`, `~\…` (Windows), and bare `~`. Home is resolved from
+/// `USERPROFILE` then `HOME` then `dirs::home_dir` so Windows Known Folder
+/// and test overrides agree.
 fn expand_tilde(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    let home = || {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .or_else(|| dirs::home_dir().map(|p| p.into_os_string()))
+    };
+    if raw == "~"
+        && let Some(home) = home()
     {
-        return PathBuf::from(home).join(rest);
+        return PathBuf::from(home);
+    }
+    for prefix in ["~/", "~\\"] {
+        if let Some(rest) = raw.strip_prefix(prefix)
+            && let Some(home) = home()
+        {
+            return PathBuf::from(home).join(rest);
+        }
     }
     PathBuf::from(raw)
 }
@@ -955,9 +971,17 @@ mod tests {
         let paths = find_skill_paths(&grok_dir);
         assert_eq!(paths.len(), 2);
 
-        let path_strs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-        assert!(path_strs.iter().any(|p| p.contains("parent/SKILL.md")));
-        assert!(path_strs.iter().any(|p| p.contains("child/SKILL.md")));
+        // Path components, not string substrings (Windows uses `\`).
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with(std::path::Path::new("parent").join("SKILL.md")))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with(std::path::Path::new("child").join("SKILL.md")))
+        );
     }
 
     // ── extract_first_paragraph ──────────────────────────────────────
@@ -2166,7 +2190,9 @@ mod tests {
         // User skill appears before bundled (first-seen-wins ordering)
         let first_commit = raw.iter().find(|s| s.name == "commit").unwrap();
         assert!(
-            !first_commit.path.contains("/bundled/"),
+            !std::path::Path::new(&first_commit.path)
+                .components()
+                .any(|c| c.as_os_str() == "bundled"),
             "User skill should appear before bundled: {}",
             first_commit.path
         );
@@ -2182,7 +2208,9 @@ mod tests {
             commit_skills.len()
         );
         assert!(
-            !commit_skills[0].path.contains("/bundled/"),
+            !std::path::Path::new(&commit_skills[0].path)
+                .components()
+                .any(|c| c.as_os_str() == "bundled"),
             "User skill should win over bundled: {}",
             commit_skills[0].path
         );
@@ -2433,7 +2461,11 @@ mod tests {
         .await;
         let bundled: Vec<_> = skills
             .iter()
-            .filter(|s| s.path.contains("/bundled/"))
+            .filter(|s| {
+                std::path::Path::new(&s.path)
+                    .components()
+                    .any(|c| c.as_os_str() == "bundled")
+            })
             .collect();
         assert!(
             bundled.is_empty(),
@@ -2693,6 +2725,10 @@ mod tests {
             .find(|s| s.name == "zz-copyfix-japandi2")
             .unwrap();
         assert_eq!(rekeyed.display_name.as_deref(), Some("zz-copyfix-japandi"));
-        assert!(rekeyed.path.ends_with("zz-copyfix-japandi2/SKILL.md"));
+        assert!(
+            std::path::Path::new(&rekeyed.path).ends_with(
+                std::path::Path::new("zz-copyfix-japandi2").join("SKILL.md")
+            )
+        );
     }
 }

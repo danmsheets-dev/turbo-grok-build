@@ -147,6 +147,10 @@ pub fn fr_set_configured_dir(path: &Path) -> Result<PathBuf, FrStoreError> {
     );
     let tmp = cfg_path.with_extension("toml.tmp");
     fs::write(&tmp, body)?;
+    // Windows cannot rename over an existing file — remove dest first.
+    if cfg_path.exists() {
+        let _ = fs::remove_file(&cfg_path);
+    }
     fs::rename(&tmp, &cfg_path)?;
     fr_set_root_override(Some(target.clone()));
     Ok(target)
@@ -527,6 +531,9 @@ impl FeatureRequestStore {
         let tmp = path.with_extension("json.tmp");
         let pretty = serde_json::to_string_pretty(index)?;
         fs::write(&tmp, pretty)?;
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
         fs::rename(&tmp, &path)?;
         Ok(())
     }
@@ -569,6 +576,9 @@ impl FeatureRequestStore {
         let tmp = path.with_extension("json.tmp");
         let pretty = serde_json::to_string_pretty(fr)?;
         fs::write(&tmp, pretty)?;
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
         fs::rename(&tmp, path)?;
         Ok(())
     }

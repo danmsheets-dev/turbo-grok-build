@@ -39,7 +39,7 @@ When they want multi-source research with verification and citations (or name `d
 
 When they name any other registered workflow (boot-card catalog or `/workflow <name>`), launch that exact `name`. Prefer a registered workflow over inventing a multi-subagent pipeline.
 
-Do **not** reimplement deep-audit or deep-research by spawning two or more explore/review subagents. Use `${{ tools.by_kind.task }}` / subagents for targeted implement, review, or explore work — not full audit recipes. The `workflow` call returns immediately; progress is in `/workflows` and completion is reported — do not poll or sleep-wait.
+Do **not** reimplement deep-audit or deep-research by spawning two or more explore/review subagents. Use ${%- if tools.by_kind.task %}`${{ tools.by_kind.task }}` / ${%- endif %}subagents for targeted implement, review, or explore work — not full audit recipes. The `workflow` call returns immediately; progress is in `/workflows` and completion is reported — do not poll or sleep-wait.
 </workflows>
 ${%- endif %}
 

@@ -290,14 +290,18 @@ impl WorktreeDb {
 
     /// Look up by ID, label, or path.
     ///
-    /// If `id_or_path` contains `/`, it's treated as a path (canonicalized
-    /// before lookup). Otherwise it's looked up first as a DB ID, then as a
+    /// If `id_or_path` looks like a filesystem path it is canonicalized and
+    /// looked up by path; otherwise it is looked up first as a DB ID, then as a
     /// worktree label (stored in `metadata.label`).
+    ///
+    /// Path detection must recognize **Windows** separators: treating only `/`
+    /// as a path marker made every `H:\…\worktrees\…` lookup fall through to
+    /// ID/label and miss the registered worktree (trust collapse, label
+    /// lookup, and `touch` all broke on Windows).
     pub fn get(&self, id_or_path: &str) -> Result<Option<WorktreeRecord>> {
-        if id_or_path.contains('/') {
-            let canon = PathBuf::from(id_or_path);
-            let canon = dunce::canonicalize(&canon).unwrap_or(canon);
-            queries::get_by_path(&self.conn, &canon)
+        if looks_like_fs_path(id_or_path) {
+            let path = normalize_path_for_db(Path::new(id_or_path));
+            queries::get_by_path(&self.conn, &path)
         } else {
             let by_id = queries::get_by_id(&self.conn, id_or_path)?;
             if by_id.is_some() {
@@ -383,6 +387,88 @@ pub fn now_epoch_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// Whether `s` should be treated as a filesystem path (not a bare DB id/label).
+///
+/// Worktree IDs and labels are single path segments (`[A-Za-z0-9_-.]` style).
+/// Anything with a separator, drive prefix, or UNC lead-in is a path — including
+/// Windows `\` which the previous `/`-only check missed.
+pub(crate) fn looks_like_fs_path(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if s.contains('/') || s.contains('\\') {
+        return true;
+    }
+    // `C:foo` / `C:` drive forms without further separators.
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return true;
+    }
+    Path::new(s).is_absolute()
+}
+
+/// Canonical form used for DB path columns and lookups.
+pub(crate) fn normalize_path_for_db(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod path_identity_tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_fs_path_accepts_unix_and_windows_paths() {
+        assert!(looks_like_fs_path("/home/user/.grok/worktrees/repo/wt"));
+        assert!(looks_like_fs_path(r"H:\Users\me\.grok\worktrees\repo\wt"));
+        assert!(looks_like_fs_path(r"C:\work\wt"));
+        assert!(looks_like_fs_path(r"\\?\C:\work\wt"));
+        assert!(looks_like_fs_path("C:"));
+        assert!(!looks_like_fs_path("wt"));
+        assert!(!looks_like_fs_path("subagent-019e5f2c"));
+        assert!(!looks_like_fs_path("my-label"));
+        assert!(!looks_like_fs_path(""));
+    }
+
+    #[test]
+    fn get_finds_windows_style_registered_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().join("grok-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let wt = home.join("worktrees").join("repo").join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let source = home.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+
+        let db = WorktreeDb::open(&home).unwrap();
+        let record = WorktreeRecord {
+            id: "wt".into(),
+            path: wt.clone(),
+            source_repo: source,
+            repo_name: "repo".into(),
+            kind: WorktreeKind::Session,
+            creation_mode: "standalone".into(),
+            git_ref: None,
+            head_commit: None,
+            session_id: None,
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: None,
+            status: WorktreeStatus::Alive,
+            metadata: None,
+        };
+        db.register(&record).unwrap();
+
+        // Windows display form uses backslashes — must not be treated as an id.
+        let key = wt.to_string_lossy().into_owned();
+        assert!(
+            looks_like_fs_path(&key),
+            "registered path must classify as fs path: {key}"
+        );
+        let found = db.get(&key).unwrap().expect("lookup by Windows path");
+        assert_eq!(found.id, "wt");
+    }
 }
 
 pub fn resolve_grok_home() -> Result<PathBuf> {

@@ -713,11 +713,36 @@ pub(crate) async fn spawn_session_actor(
                     as std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend>
             }
             TerminalBackendKind::LocalPersistent => {
-                std::sync::Arc::new(LocalTerminalBackend::new_local_with_persistent_shell(
-                    resolve_search_shadows(),
-                    resolve_policy(),
-                    tool_context.process_scope.clone(),
-                ))
+                // Persistent shell state (cwd/env/functions across tool calls)
+                // is Unix-only (fd dump scripts). On Windows the flag would
+                // silently no-op and mislead the agent — use the non-persistent
+                // backend and keep login-env capture off unless configured.
+                #[cfg(unix)]
+                {
+                    std::sync::Arc::new(LocalTerminalBackend::new_local_with_persistent_shell(
+                        resolve_search_shadows(),
+                        resolve_policy(),
+                        tool_context.process_scope.clone(),
+                    ))
+                        as std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend>
+                }
+                #[cfg(not(unix))]
+                {
+                    tracing::info!(
+                        "Windows: LocalPersistent requested but shell state is Unix-only; \
+                         using non-persistent terminal (cwd/env do not carry across commands)"
+                    );
+                    let login_shell_capture = crate::util::config::resolve_login_shell_capture(
+                        remote_settings.as_ref().and_then(|r| r.login_shell_capture),
+                    );
+                    std::sync::Arc::new(LocalTerminalBackend::new_local_with_login_shell_capture(
+                        resolve_search_shadows(),
+                        login_shell_capture,
+                        resolve_policy(),
+                        tool_context.process_scope.clone(),
+                    ))
+                        as std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend>
+                }
             }
             TerminalBackendKind::LocalNonPersistent => {
                 let login_shell_capture = crate::util::config::resolve_login_shell_capture(

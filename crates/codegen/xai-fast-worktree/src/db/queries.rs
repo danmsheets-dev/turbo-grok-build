@@ -30,9 +30,20 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     })
 }
 
+/// Canonicalize paths stored in the DB so lookup and register use one form.
+///
+/// On Windows, `display()` of a non-canonical path can differ from
+/// `dunce::canonicalize` (drive case, `\\?\` strip). Register and get must
+/// share this helper or trust/label collapse miss the row.
+fn path_for_db(path: &Path) -> std::path::PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 pub fn register(conn: &Connection, record: &WorktreeRecord) -> Result<()> {
-    let path_str = record.path.to_string_lossy();
-    let source_str = record.source_repo.to_string_lossy();
+    let path_str = path_for_db(&record.path).to_string_lossy().into_owned();
+    let source_str = path_for_db(&record.source_repo)
+        .to_string_lossy()
+        .into_owned();
     let metadata_str = record
         .metadata
         .as_ref()
@@ -46,8 +57,8 @@ pub fn register(conn: &Connection, record: &WorktreeRecord) -> Result<()> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             record.id,
-            path_str.as_ref(),
-            source_str.as_ref(),
+            path_str,
+            source_str,
             record.repo_name,
             record.kind.as_str(),
             record.creation_mode,
@@ -73,11 +84,11 @@ pub fn unregister(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 pub fn unregister_by_path(conn: &Connection, path: &Path) -> Result<bool> {
-    let path_str = path.to_string_lossy();
+    let path_str = path_for_db(path).to_string_lossy().into_owned();
     let affected = conn
         .execute(
             "DELETE FROM worktrees WHERE path = ?1",
-            params![path_str.as_ref()],
+            params![path_str],
         )
         .context("failed to unregister worktree by path")?;
     Ok(affected > 0)
@@ -127,10 +138,11 @@ pub fn get_by_label(conn: &Connection, label: &str) -> Result<Option<WorktreeRec
 }
 
 pub fn get_by_path(conn: &Connection, path: &Path) -> Result<Option<WorktreeRecord>> {
+    let path_str = path_for_db(path).to_string_lossy().into_owned();
     get_one(
         conn,
         "SELECT * FROM worktrees WHERE path = ?1",
-        &path.to_string_lossy(),
+        &path_str,
     )
 }
 
@@ -140,10 +152,12 @@ pub fn list(conn: &Connection, filter: &ListFilter) -> Result<Vec<WorktreeRecord
 
     let status_str = filter.status.map(|s| s.as_str());
     let kind_str = filter.kind.map(|k| k.as_str());
+    // Normalize with the same path identity as register/get so Windows
+    // callers with mixed case / `\` / `\\?\` still match stored rows.
     let source_repo_str = filter
         .source_repo
         .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+        .map(|p| path_for_db(p).to_string_lossy().into_owned());
 
     if !filter.include_dead {
         sql.push_str(" AND status = 'alive'");

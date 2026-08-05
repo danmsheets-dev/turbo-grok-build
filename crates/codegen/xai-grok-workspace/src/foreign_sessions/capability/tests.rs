@@ -213,11 +213,29 @@ fn windows_open_verifies_stable_file_identity() {
 
 #[cfg(windows)]
 #[test]
-fn windows_directory_scans_fail_closed() {
+fn windows_directory_scans_enumerate_children() {
     let root = tempfile::tempdir().unwrap();
     let child = root.path().join("child");
     std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("note.txt"), "hi").unwrap();
     let approved = ApprovedRoot::new(root.path()).unwrap();
-    assert!(approved.subroot(&child).is_none());
-    assert!(!approved.for_each_entry(|_| panic!("enumerated on Windows")));
+
+    let sub = approved
+        .subroot(&child)
+        .expect("Windows subroot should open a contained directory");
+    assert!(sub.path().ends_with("child"));
+
+    let mut names = Vec::new();
+    assert!(
+        approved.for_each_entry(|name| names.push(name)),
+        "Windows directory visit should complete"
+    );
+    assert!(
+        names.iter().any(|n| n == "child"),
+        "expected child entry, got {names:?}"
+    );
+
+    let outcome = sub.for_each_entry_bounded(8, |name| names.push(name));
+    assert!(outcome.complete);
+    assert_eq!(outcome.visited, 1);
 }

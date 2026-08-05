@@ -5,6 +5,12 @@
 use super::test_counting_provider as counting_provider;
 use super::*;
 
+/// Embed a filesystem path in a POSIX shell snippet. Windows `display()` uses
+/// `\`, which is an escape in bash; convert to `/` so Git Bash / sh scripts work.
+fn sh_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 #[tokio::test]
 async fn provider_token_is_cached_while_fresh() {
     let dir = tempfile::tempdir().unwrap();
@@ -349,7 +355,7 @@ async fn provider_concurrent_mints_single_flight() {
         AuthProviderConfig {
             command: format!(
                 "sleep 0.3; echo run >> {c}; printf 'tok-%s' \"$(wc -l < {c} | tr -d ' ')\"",
-                c = counter.display()
+                c = sh_path(&counter)
             ),
             args: None,
             token_ttl_secs: Some(3600),
@@ -421,7 +427,7 @@ async fn provider_expiry_source_precedence() {
     let c1 = dir.path().join("c1");
     let cmd1 = format!(
         "echo run >> {}; printf '{{\"access_token\":\"t1\",\"expires_in\":10}}'",
-        c1.display()
+        sh_path(&c1)
     );
     assert_eq!(
         mints_after_first("test-exp-expires-in", cmd1, Some(3600), &c1).await,
@@ -431,7 +437,7 @@ async fn provider_expiry_source_precedence() {
 
     // token_ttl_secs=1 (stale) wins over a 2h JWT exp (fresh): re-mints.
     let c2 = dir.path().join("c2");
-    let cmd2 = format!("echo run >> {}; printf '{}'", c2.display(), long_jwt());
+    let cmd2 = format!("echo run >> {}; printf '{}'", sh_path(&c2), long_jwt());
     assert_eq!(
         mints_after_first("test-exp-ttl", cmd2, Some(1), &c2).await,
         2,
@@ -441,7 +447,7 @@ async fn provider_expiry_source_precedence() {
     // JWT exp alone: a near-expiry claim (inside the skew) re-mints,
     // proving the claim is consumed when nothing else is configured.
     let c3 = dir.path().join("c3");
-    let cmd3 = format!("echo run >> {}; printf '{}'", c3.display(), short_jwt());
+    let cmd3 = format!("echo run >> {}; printf '{}'", sh_path(&c3), short_jwt());
     assert_eq!(
         mints_after_first("test-exp-jwt", cmd3, None, &c3).await,
         2,
@@ -478,19 +484,34 @@ async fn provider_unusable_expiry_still_mints() {
 
 #[tokio::test]
 async fn provider_args_run_without_a_shell() {
+    // Direct-exec mode: no shell. Use a program that exists on every platform
+    // (`cmd /C echo` on Windows, `printf` on Unix) and keep metacharacters
+    // literal so we prove args are not re-parsed by a shell.
+    #[cfg(windows)]
+    let (command, args) = (
+        "cmd".to_owned(),
+        vec![
+            "/C".to_owned(),
+            "echo".to_owned(),
+            "tok-$HOME;42".to_owned(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (command, args) = ("printf".to_owned(), vec!["tok-$HOME;42".to_owned()]);
     let provider = AuthProviderRef::new(
         "test-args".to_owned(),
         AuthProviderConfig {
-            command: "printf".to_owned(),
-            // Shell metacharacters stay literal under direct exec.
-            args: Some(vec!["tok-$HOME;42".to_owned()]),
+            command,
+            args: Some(args),
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
         },
     );
+    let tok = provider.ensure_fresh_token(None).await.rotated();
+    // `cmd /C echo` may append CRLF; trim for comparison.
     assert_eq!(
-        provider.ensure_fresh_token(None).await.rotated().as_deref(),
+        tok.as_deref().map(str::trim),
         Some("tok-$HOME;42"),
     );
 }
@@ -655,7 +676,7 @@ async fn failed_401_remint_invalidates_the_cached_token() {
             command: format!(
                 "echo run >> {c}; n=$(wc -l < {c} | tr -d ' '); \
                  [ \"$n\" = 1 ] && printf 'tok-1' || exit 1",
-                c = counter.display()
+                c = sh_path(&counter)
             ),
             args: None,
             token_ttl_secs: Some(3600),
@@ -694,7 +715,7 @@ async fn failed_pre_turn_mint_does_not_serve_the_stale_token() {
             command: format!(
                 "echo run >> {c}; n=$(wc -l < {c} | tr -d ' '); \
                  [ \"$n\" = 1 ] && printf 'tok-1' || exit 1",
-                c = counter.display()
+                c = sh_path(&counter)
             ),
             args: None,
             token_ttl_secs: Some(3600),
@@ -790,8 +811,28 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
         .map(|v| format!("${{{v}-}}"))
         .collect::<Vec<_>>()
         .join("");
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.args(["-c", &format!("printf 'tok[%s]' \"{echo}\"")]);
+    // Prefer the auth shell cascade (Git Bash when present) so `printf` works
+    // on Windows; fall back to an absolute Git Bash path if `sh` is not on PATH.
+    let mut cmd = {
+        #[cfg(windows)]
+        {
+            let inv = xai_grok_config::shell::auth_shell_command_argv(&format!(
+                "printf 'tok[%s]' \"{echo}\""
+            ));
+            let mut c = tokio::process::Command::new(&inv.program);
+            c.args(&inv.args);
+            for (k, v) in &inv.env {
+                c.env(k, v);
+            }
+            c
+        }
+        #[cfg(not(windows))]
+        {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", &format!("printf 'tok[%s]' \"{echo}\"")]);
+            c
+        }
+    };
     for var in EXPECTED {
         cmd.env(var, "first-party-leak");
     }

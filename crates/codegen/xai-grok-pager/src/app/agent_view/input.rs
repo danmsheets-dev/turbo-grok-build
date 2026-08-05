@@ -474,6 +474,26 @@ impl AgentView {
                 self.clear_stuck_scrollback_drag();
             }
         }
+        // Game Mode is a parent-level overlay: handle Ctrl+G before routing
+        // into a fullscreen subagent child (child has its own empty game_mode).
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && registry.matches_id(ActionId::ToggleGameMode, key)
+            && self.active_modal.is_none()
+            && self.extensions_modal.is_none()
+            && self.block_viewer.is_none()
+            && self.line_viewer.is_none()
+        {
+            // Close fullscreen child first so the parent office is visible.
+            if self.active_subagent.is_some() {
+                self.active_subagent = None;
+            }
+            self.game_mode.toggle();
+            if !self.game_mode.open {
+                self.game_mode.clear_hover();
+            }
+            return InputOutcome::Changed;
+        }
         if let Some(ref child_sid) = self.active_subagent.clone() {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
@@ -1787,7 +1807,8 @@ mod background_and_tasks_shortcut_tests {
         assert!(child.hit_bg_button.rect.is_none());
     }
     #[test]
-    fn ctrl_g_toggles_tasks_and_never_demotes() {
+    fn ctrl_g_toggles_game_mode() {
+        // RC11+: Ctrl+G is Game Mode (Tasks moved to Ctrl+Shift+G).
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.prompt.set_text("draft");
@@ -1795,20 +1816,15 @@ mod background_and_tasks_shortcut_tests {
         agent.prompt.set_cursor(draft_len);
         agent.set_active_pane(AgentPane::Prompt, true);
         add_running_execute(&mut agent);
+        assert!(!agent.game_mode.open);
         let first = agent.handle_input(&ctrl('g'), &registry);
         assert!(matches!(first, InputOutcome::Changed));
-        assert_eq!(agent.active_pane, AgentPane::Tasks);
-        assert!(agent.tasks.overlay.visible);
-        assert!(agent.tasks.overlay.focused);
+        assert!(agent.game_mode.open, "Ctrl+G must open Game Mode");
         assert_eq!(agent.prompt.text(), "draft");
         assert_eq!(agent.prompt.cursor(), draft_len);
         let second = agent.handle_input(&ctrl('g'), &registry);
-        assert!(matches!(
-            second,
-            InputOutcome::Action(Action::FocusScrollback)
-        ));
-        assert!(!agent.tasks.overlay.visible);
-        assert!(!agent.tasks.overlay.focused);
+        assert!(matches!(second, InputOutcome::Changed));
+        assert!(!agent.game_mode.open, "second Ctrl+G must close Game Mode");
     }
 }
 #[cfg(test)]

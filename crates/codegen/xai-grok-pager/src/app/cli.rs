@@ -144,6 +144,8 @@ pub enum Command {
     Features(crate::features_cmd::FeaturesArgs),
     /// Workspace directory atlas: status, doctor, inject-preview, build, resolve
     Tree(crate::tree_cmd::TreeArgs),
+    /// Disk report and safe clean (target/debug, old worktrees, tree store)
+    Disk(crate::disk_cmd::DiskArgs),
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;

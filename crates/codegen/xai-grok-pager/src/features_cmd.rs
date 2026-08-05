@@ -90,7 +90,13 @@ pub enum FeaturesCommand {
         #[arg(long)]
         summary: String,
         /// request_class (e.g. tool_surface, scheduler, subagent)
-        #[arg(long = "class", default_value = "other")]
+        ///
+        /// Aliases match the agent `feature_request_log` tool field `request_class`.
+        #[arg(
+            long = "class",
+            visible_alias = "request-class",
+            default_value = "other"
+        )]
         request_class: String,
         /// Priority: must_have, should_have, nice_to_have, exploratory
         #[arg(long)]
