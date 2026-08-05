@@ -261,6 +261,20 @@ fn filled_body(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, fill: [u8; 4
     }
 }
 
+/// Screen-light bleed onto the monitor bezel, per active frame (RC16 §4 #4).
+///
+/// Indexed by `frame % 4` — the period [`sprite_square_monitor`] already
+/// animates — so the glow is *baked into frames the sprite cache already
+/// stores*: no new cache keys, no new fingerprint inputs. Frame 3 is the
+/// "compile flash" (one bright beat per cycle), which is why the ramp is not
+/// monotonic.
+const MONITOR_GLOW: [[u8; 3]; 4] = [
+    [8, 26, 18],
+    [14, 44, 30],
+    [10, 32, 22],
+    [56, 120, 96],
+];
+
 /// Square monitor bezel. `active` scrolls code when true.
 pub fn sprite_square_monitor(active: bool, frame: u8) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(12, 12, Rgba(CLEAR));
@@ -295,6 +309,61 @@ pub fn sprite_square_monitor(active: bool, frame: u8) -> RgbaImage {
     }
     if frame % 2 == 0 {
         px(&mut img, 9, 8, [220, 255, 220, 255]);
+    }
+    // Glow rim: the screen's light spilling onto the bezel, brightening and
+    // dimming across the four frames the caller already animates. The bezel is
+    // 2px thick on every side (screen is 8×7 inside a 12×11 body), which is the
+    // minimum that survives the Nearest downsample to terminal cells.
+    let g = MONITOR_GLOW[(frame % 4) as usize];
+    for y in 0..11i32 {
+        for x in 0..12i32 {
+            if (2..10).contains(&x) && (2..9).contains(&y) {
+                continue; // screen interior — this is a rim, not a wash
+            }
+            let p = img.get_pixel(x as u32, y as u32).0;
+            px(
+                &mut img,
+                x,
+                y,
+                [
+                    p[0].saturating_add(g[0]),
+                    p[1].saturating_add(g[1]),
+                    p[2].saturating_add(g[2]),
+                    255,
+                ],
+            );
+        }
+    }
+    img
+}
+
+/// Office door prop — `open` swings the leaf back and shows the dark opening.
+///
+/// Two states, no frame counter: `open` *is* the canonical cache key, so unlike
+/// the animated character sprites this one declares no `*_frame_key` fn. Placed
+/// by [`super::compose`] at the entry/exit point SpawnWalk and ExitDoor use.
+pub fn sprite_door(open: bool) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(12, 16, Rgba(CLEAR));
+    let jamb = [96, 64, 40, 255];
+    let wood = [150, 100, 58, 255];
+    let wood_h = [178, 126, 76, 255];
+    let dark = [16, 14, 22, 255];
+    let brass = [255, 208, 72, 255];
+
+    filled_body(&mut img, 0, 0, 12, 16, jamb);
+    if open {
+        // Doorway seen through: dark opening with the leaf swung to the jamb.
+        fill_rect(&mut img, 2, 2, 8, 12, dark);
+        fill_rect(&mut img, 2, 2, 3, 12, wood);
+        fill_rect(&mut img, 2, 2, 3, 1, wood_h);
+        px(&mut img, 4, 8, brass);
+    } else {
+        fill_rect(&mut img, 2, 2, 8, 12, wood);
+        fill_rect(&mut img, 2, 2, 8, 1, wood_h);
+        // Panel seams — 2px tall so the downsample cannot swallow them.
+        fill_rect(&mut img, 3, 5, 6, 2, jamb);
+        fill_rect(&mut img, 3, 10, 6, 2, jamb);
+        fill_rect(&mut img, 8, 7, 2, 2, brass);
     }
     img
 }
@@ -980,6 +1049,80 @@ mod tests {
                 "supervisor phase {phase} must have {period} distinct frames"
             );
         }
+    }
+
+    /// RC16 §4 #4: the monitor glow must live *inside* the four frames the
+    /// sprite already animates (so it costs no cache keys), must actually vary
+    /// across them, must peak on the compile-flash frame, and must leave an
+    /// inactive monitor — i.e. the empty desk — completely alone.
+    #[test]
+    fn monitor_glow_rides_the_existing_typing_frames() {
+        // A bezel pixel that is neither screen interior nor a corner.
+        let bezel_lum = |img: &RgbaImage| -> u32 {
+            let p = img.get_pixel(6, 0).0;
+            u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])
+        };
+        let lums: Vec<u32> = (0..4u8)
+            .map(|f| bezel_lum(&sprite_square_monitor(true, f)))
+            .collect();
+        assert!(
+            lums.iter().collect::<std::collections::HashSet<_>>().len() == 4,
+            "glow must differ on all four frames, got {lums:?}"
+        );
+        assert_eq!(
+            lums.iter().copied().max(),
+            Some(lums[3]),
+            "frame 3 is the compile flash and must be the brightest: {lums:?}"
+        );
+
+        // Inactive monitors keep the flat bezel (empty desk art is unchanged).
+        let off = sprite_square_monitor(false, 0);
+        assert_eq!(bezel_lum(&off), bezel_lum(&sprite_square_monitor(false, 3)));
+
+        // The rim must not bleed into the screen interior: (2,2) is inside the
+        // screen and left of the scrolling code, so it stays the base color.
+        for f in 0..4u8 {
+            assert_eq!(
+                sprite_square_monitor(true, f).get_pixel(2, 2).0,
+                [12, 20, 28, 255],
+                "frame {f}: glow washed the screen instead of rimming it"
+            );
+        }
+
+        // ...and the glow must survive the trip into the seated developer.
+        let pal = DevPalette::by_index(0);
+        let dev: Vec<u32> = (0..4u8)
+            .map(|f| {
+                let img = sprite_developer_at_desk(pal, true, f);
+                let p = img.get_pixel(25, 1).0; // monitor blitted at (19, 1)
+                u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])
+            })
+            .collect();
+        assert_eq!(dev, lums, "typing dev must show the same bezel glow ramp");
+    }
+
+    /// RC16 §4 #6: two distinct door states, both within the composable size
+    /// budget the other ambient props use.
+    #[test]
+    fn door_has_two_distinct_states() {
+        let closed = sprite_door(false);
+        let open = sprite_door(true);
+        assert_eq!(closed.dimensions(), (12, 16));
+        assert_eq!(open.dimensions(), closed.dimensions());
+        assert_ne!(
+            closed.as_raw(),
+            open.as_raw(),
+            "the swing must actually change pixels"
+        );
+        // The opening must be visibly darker than the closed leaf.
+        let lum = |img: &RgbaImage, x: u32, y: u32| {
+            let p = img.get_pixel(x, y).0;
+            u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])
+        };
+        assert!(
+            lum(&open, 8, 8) < lum(&closed, 6, 3),
+            "an open door must show a dark opening"
+        );
     }
 
     #[test]

@@ -468,9 +468,9 @@ impl GameModeState {
     ///    text behind the Supervisor card may force a recompose.
     /// 3. Wall title, overflow, labels, tokens, elapsed, activity are **excluded**
     ///    (status strip / hover popup only).
-    /// 4. `anim_t` is hashed only for phases whose composited position actually
-    ///    moves with it ([`phase_anim_t_is_visible`]) — not for seated desk blink
-    ///    or the pinned Handoff pose (both use the tick frame bucket).
+    /// 4. `anim_t` is hashed only for phases whose composited output actually
+    ///    moves with it ([`phase_anim_t_is_visible`]) — not for the seated desk
+    ///    blink, which uses the tick frame bucket.
     /// 5. Scaled BG cache is independent — see [`Self::ensure_pixel_frame`].
     fn visual_fingerprint(&self, cell_w: u16, cell_h: u16) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -1207,14 +1207,27 @@ fn resample_nearest_into(dst: &mut RgbaImage, src: &RgbaImage) {
 ///
 /// Single source of truth for two gates that must not drift apart:
 /// [`GameModeState::visual_fingerprint`] (what forces a recompose) and
-/// [`GameModeState::tick_anim`] (what forces a repaint). Handoff is excluded on
-/// purpose — [`super::compose::walk_position`] pins it on the rug, so hashing its
-/// `anim_t` meant 500 ms of full recomposes of pixel-identical frames (RC16
-/// BUG-3 bonus). Celebrate/FailBeat FX sample the frame bucket, not `anim_t`.
+/// [`GameModeState::tick_anim`] (what forces a repaint). Celebrate/FailBeat FX
+/// sample the frame bucket, not `anim_t`, so they stay out.
+///
+/// Handoff was excluded by RC16 BUG-3-bonus because
+/// [`super::compose::walk_position`] pins the walker on the rug, making those
+/// 500 ms of recomposes pixel-identical — pure waste. It is back in because
+/// [`super::compose::paint_fx_handoff_papers`] now draws a burst of paper quads
+/// whose arc *is* `anim_t`: the frames differ again, so the recomposes buy
+/// something. The cost is bounded and rare — ~6 extra recomposes (one per Slow
+/// tick of the 500 ms Handoff) per subagent completion, inside a
+/// Celebrate→WalkToBoss→Handoff→ExitDoor sequence whose other 2 s already
+/// recompose every tick. Driving the papers off the `tick/4` bucket instead
+/// would have been free but would only have sampled ~2 arc positions in 500 ms,
+/// i.e. a flicker rather than a throw.
 fn phase_anim_t_is_visible(phase: ActorPhase) -> bool {
     matches!(
         phase,
-        ActorPhase::SpawnWalk | ActorPhase::WalkToBoss | ActorPhase::ExitDoor
+        ActorPhase::SpawnWalk
+            | ActorPhase::WalkToBoss
+            | ActorPhase::ExitDoor
+            | ActorPhase::Handoff
     )
 }
 
@@ -1691,26 +1704,30 @@ mod tests {
         assert_ne!(s.visual_fingerprint(80, 24), fp0);
     }
 
-    /// BUG-3 bonus: Handoff pins the walker on the rug, so its `anim_t` churn
-    /// must not force a recompose — the phases that really move still must.
+    /// Only phases whose composited output moves with `anim_t` may hash it.
+    /// Seated desks animate off the `tick/4` bucket instead, so their `anim_t`
+    /// (which `tick_anim` spins every tick) must never force a recompose.
+    /// Handoff is in the moving set again: the walker is still pinned on the
+    /// rug, but the papers FX arcs off `anim_t` (see `phase_anim_t_is_visible`).
     #[test]
     fn only_moving_walk_phases_hash_anim_t() {
         let mut s = GameModeState::new();
         s.desks[0].child_session_id = Some("h".into());
-        s.desks[0].phase = ActorPhase::Handoff;
+        s.desks[0].phase = ActorPhase::AtDeskWorking;
         s.desks[0].anim_t = 0.0;
         let fp0 = s.visual_fingerprint(80, 24);
         s.desks[0].anim_t = 1.0;
         assert_eq!(
             s.visual_fingerprint(80, 24),
             fp0,
-            "pinned handoff pose must not dirty the pixel fingerprint"
+            "a seated desk's anim_t must not dirty the pixel fingerprint"
         );
 
         for phase in [
             ActorPhase::SpawnWalk,
             ActorPhase::WalkToBoss,
             ActorPhase::ExitDoor,
+            ActorPhase::Handoff,
         ] {
             s.desks[0].phase = phase;
             s.desks[0].anim_t = 0.0;

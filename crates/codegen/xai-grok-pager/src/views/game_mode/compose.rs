@@ -9,7 +9,7 @@ use image::RgbaImage;
 
 use super::sprites_pixel::{
     DevPalette, blit, dev_at_desk_frame_key, scale_nn, sprite_coffee, sprite_developer_at_desk,
-    sprite_developer_walk, sprite_empty_desk, sprite_plant, sprite_supervisor,
+    sprite_developer_walk, sprite_door, sprite_empty_desk, sprite_plant, sprite_supervisor,
     stamp_floor_patch_sampled, supervisor_frame_key, walk_frame_key,
 };
 use super::state::{ActorPhase, GameModeState, SupervisorPhase};
@@ -37,6 +37,23 @@ const SUPERVISOR_COVER_H_FRAC: f32 = 0.14;
 /// Door position as a fraction of frame width — actors enter (SpawnWalk) and
 /// leave (ExitDoor) through it.
 const DOOR_X_FRAC: f32 = 0.06;
+
+/// Top of the door prop, as a fraction of frame height.
+///
+/// The mockup has no door, so the prop is placed on open carpet: the lowest
+/// non-carpet pixel of the baked bookshelf in the [`DOOR_X_FRAC`] column is at
+/// 0.4401h (measured off `office_bg.png`) and the ambient plant starts at
+/// 0.62h, which leaves this band clear. Nothing has to be erased first — the
+/// compose pass resets the whole canvas from the background every frame, so a
+/// floor stamp here would only replace clean carpet with a slightly different
+/// carpet and leave a visible patch.
+const DOOR_Y_FRAC: f32 = 0.46;
+
+/// `anim_t` window at each end of the walk during which the door stands open.
+///
+/// Bucket-aligned on purpose — see [`door_is_open`].
+const DOOR_OPEN_ENTER_T: f32 = 0.25;
+const DOOR_OPEN_EXIT_T: f32 = 0.75;
 
 /// Cell rect covering the composed supervisor — the pixel office's hover hit box.
 ///
@@ -124,14 +141,14 @@ use std::sync::Arc;
 
 /// Cache cap, in entries.
 ///
-/// Measured worst case per scale-set after RC16 P8 frame quantization is **72**
-/// live keys: 36 seated devs (6 skins × (4 typing frames + 2 idle poses)),
-/// 24 walkers (6 skins × 2 packet × 2 frames), 9 supervisors (2 idle + 4 working
-/// + 3 reviewing reachable from the `(tick/4)%4` frame counter) and 3 statics
-/// (empty desk, plant, coffee). Before quantization the same set needed 111,
-/// which is why a 128-entry cap thrashed.
+/// Measured worst case per scale-set is **74** live keys: 36 seated devs
+/// (6 skins × (4 typing frames + 2 idle poses)), 24 walkers (6 skins × 2 packet
+/// × 2 frames), 9 supervisors (2 idle + 4 working + 3 reviewing reachable from
+/// the `(tick/4)%4` frame counter), 2 doors (open / closed) and 3 statics
+/// (empty desk, plant, coffee). Before RC16 P8 frame quantization the character
+/// set alone needed 111, which is why a 128-entry cap thrashed.
 ///
-/// 256 leaves room for two full scale-sets (144, i.e. mid-resize) plus ~80 keys
+/// 256 leaves room for two full scale-sets (148, i.e. mid-resize) plus ~76 keys
 /// of headroom for upcoming animation sprites. It is a backstop only:
 /// [`sprite_cache_begin_pass`] drops stale scales eagerly, so the map normally
 /// sits at one scale-set.
@@ -301,6 +318,14 @@ fn cached_coffee(sc: u32) -> Arc<RgbaImage> {
     })
 }
 
+/// +2 keys per scale-set (open / closed) — the door has no frame counter, so
+/// `open` is already its canonical key and it needs no `*_frame_key` fn.
+fn cached_door(open: bool, sc: u32) -> Arc<RgbaImage> {
+    let sc = sc.max(1);
+    let key = (0xDDu64 << 56) | ((open as u64) << 32) | sc as u64;
+    cache_get_or_insert(key, sc, || scale_nn(&sprite_door(open), sc))
+}
+
 /// Clear baked mockup character + furniture in a desk region with SNES floor.
 fn clear_desk_area(canvas: &mut RgbaImage, bg: &RgbaImage, cx: i32, cy: i32, w: u32, h: u32) {
     let cover_w = (w as f32 * 0.15) as i32;
@@ -401,9 +426,83 @@ fn paint_fx_fail(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
     }
 }
 
+/// Papers changing hands during [`ActorPhase::Handoff`].
+///
+/// Procedural like [`paint_fx_celebrate`] — no sprite, so zero cache keys. `t`
+/// is the desk's `anim_t`; each sheet lags the one before it so the burst reads
+/// as a small stack crossing to the supervisor's desk instead of one blob.
+///
+/// The arc is deliberately shallow and biased *down* from `cy`: the walker and
+/// the supervisor share one anchor, which sits mid-torso, so a tall arc throws
+/// the sheets across the boss's face instead of over his desk. Quads are >= 3px
+/// because the composed frame is Nearest-downsampled by `effective_pixel_scale`
+/// (2 or 3), and a 2px feature can fall between samples at scale 3.
+fn paint_fx_handoff_papers(canvas: &mut RgbaImage, cx: i32, cy: i32, t: f32, w: u32) {
+    const SHEETS: usize = 4;
+    const LAG: f32 = 0.15;
+    let paper: [u8; 4] = [248, 248, 240, 255];
+    let ink: [u8; 4] = [96, 128, 200, 255];
+    let span = (w as f32 * 0.05).max(6.0);
+    let quad = ((w as f32 * 0.012) as i32).clamp(3, 5);
+    let (cw, ch) = canvas.dimensions();
+    for i in 0..SHEETS {
+        // Stretch the flight so the last (most lagged) sheet still lands by t=1.
+        let p = (t * (1.0 + LAG * (SHEETS - 1) as f32) - LAG * i as f32).clamp(0.0, 1.0);
+        if p <= 0.0 || p >= 1.0 {
+            continue;
+        }
+        let x = cx as f32 - span * 0.5 + span * p;
+        let y = cy as f32 + span * 0.15 - span * 0.45 * (std::f32::consts::PI * p).sin();
+        for dy in 0..quad {
+            for dx in 0..quad {
+                let sx = x as i32 + dx;
+                let sy = y as i32 + dy;
+                if sx < 0 || sy < 0 || sx as u32 >= cw || sy as u32 >= ch {
+                    continue;
+                }
+                // One ink line per sheet so it reads as paper, not a white blob.
+                let c = if dy == quad / 2 && dx > 0 { ink } else { paper };
+                canvas.put_pixel(sx as u32, sy as u32, image::Rgba(c));
+            }
+        }
+    }
+}
+
 /// Door x in canvas pixels.
 fn door_x(w: u32) -> f32 {
     w as f32 * DOOR_X_FRAC
+}
+
+/// Sprite frame for desk `i`, rotated off the global `(tick/4)%4` bucket.
+///
+/// All six desks used to sample the one global bucket, so the whole room typed
+/// on the same keystroke and celebrated on the same sparkle — which reads as a
+/// looping GIF rather than a room. The offset is a pure function of the desk
+/// index, so it adds **no** fingerprint input (the global bucket is already
+/// hashed) and **no** cache keys (the frame domain is still 0..4).
+fn desk_frame(frame: u8, desk: usize) -> u8 {
+    (frame.wrapping_add(desk as u8)) % 4
+}
+
+/// Whether the office door stands open this frame.
+///
+/// FINGERPRINT NOTE: a pure function of inputs
+/// [`GameModeState::visual_fingerprint`] already hashes — every desk's
+/// occupancy and phase, plus, for SpawnWalk/ExitDoor, its `anim_t` quantized to
+/// `(anim_t * 20.0) as u8`. Both thresholds are bucket-aligned (`< 0.25` is
+/// bucket `< 5`, `>= 0.75` is bucket `>= 15`), so two `anim_t` values that
+/// share a hash bucket can never disagree about the door. That is what makes
+/// the door free: no new fingerprint input, and both phases already recompose
+/// every tick.
+fn door_is_open(state: &GameModeState) -> bool {
+    state.desks.iter().any(|d| {
+        d.is_occupied()
+            && match d.phase {
+                ActorPhase::SpawnWalk => d.anim_t < DOOR_OPEN_ENTER_T,
+                ActorPhase::ExitDoor => d.anim_t >= DOOR_OPEN_EXIT_T,
+                _ => false,
+            }
+    })
 }
 
 /// Walking-actor centre (canvas pixels) for `phase` at `anim_t`.
@@ -411,8 +510,8 @@ fn door_x(w: u32) -> f32 {
 /// `cx`/`cy` are the actor's own desk anchor:
 /// - `SpawnWalk` slides in from the door at desk height,
 /// - `WalkToBoss` crosses desk → supervisor,
-/// - `Handoff` stands on the rug (position does not depend on `anim_t` — see
-///   [`GameModeState::visual_fingerprint`], which no longer hashes it),
+/// - `Handoff` stands on the rug (the *walker* does not move with `anim_t`; the
+///   papers FX blitted over it does — see [`paint_fx_handoff_papers`]),
 /// - `ExitDoor` mirrors the entry back out: rug → door (RC16 BUG-3; it used to
 ///   restart 45% back along the desk line and walk *into* the supervisor again).
 fn walk_position(phase: ActorPhase, anim_t: f32, cx: i32, cy: i32, w: u32, h: u32) -> (f32, f32) {
@@ -479,8 +578,17 @@ pub fn compose_cell_frame_into(
     // pass touches the cache, so a resize cannot push the live set over the cap.
     sprite_cache_begin_pass([sc, walk_sc, prop_sc, sup_sc]);
 
-    // Ambient props (plants / coffee) near room edges — cached static sprites.
+    // Ambient props (door / plants / coffee) near room edges — cached sprites.
+    // The door goes down first so the plant that shares its column overlaps it
+    // at large prop scales instead of being erased by it.
     {
+        let door = cached_door(door_is_open(state), prop_sc);
+        blit(
+            canvas,
+            door.as_ref(),
+            door_x(w) as i32 - door.width() as i32 / 2,
+            (h as f32 * DOOR_Y_FRAC) as i32,
+        );
         let plant = cached_plant(prop_sc);
         let coffee = cached_coffee(prop_sc);
         blit(
@@ -545,6 +653,8 @@ pub fn compose_cell_frame_into(
         let cx = (ax * w as f32) as i32;
         let cy = (ay * h as f32) as i32;
         let desk = &state.desks[i];
+        // Break the six-desk lockstep (see `desk_frame`).
+        let frame = desk_frame(frame, i);
 
         if desk.is_empty() {
             clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
@@ -581,6 +691,9 @@ pub fn compose_cell_frame_into(
                     x as i32 - walker.width() as i32 / 2,
                     y as i32 - walker.height() as i32 / 2,
                 );
+                if matches!(desk.phase, ActorPhase::Handoff) {
+                    paint_fx_handoff_papers(canvas, x as i32, y as i32, desk.anim_t, w);
+                }
             }
             ActorPhase::Celebrate => {
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
@@ -890,15 +1003,105 @@ mod tests {
                 cached_supervisor(phase, frame, 1);
             }
         }
+        for open in [true, false] {
+            cached_door(open, 1);
+        }
         cached_empty_desk(1);
         cached_plant(1);
         cached_coffee(1);
-        // 36 seated devs + 24 walkers + 9 supervisors + 3 statics.
-        assert_eq!(sprite_cache_len(), 72);
+        // 36 seated devs + 24 walkers + 9 supervisors + 2 doors + 3 statics.
+        assert_eq!(sprite_cache_len(), 74);
         assert!(
             sprite_cache_len() * 2 <= SPRITE_CACHE_CAP,
             "cap must hold two scale-sets across a resize"
         );
+    }
+
+    /// The free win: six desks must not sample the same sprite frame. The
+    /// offset stays inside the 0..4 domain the cache keys are budgeted for, and
+    /// is a pure rotation of the global bucket (so the already-hashed bucket
+    /// still determines every desk's frame).
+    #[test]
+    fn desk_frames_are_offset_not_lockstep() {
+        for bucket in 0..4u8 {
+            let frames: Vec<u8> = (0..6).map(|i| desk_frame(bucket, i)).collect();
+            assert!(frames.iter().all(|f| *f < 4), "{frames:?} left the domain");
+            assert_eq!(
+                frames.iter().collect::<std::collections::HashSet<_>>().len(),
+                4,
+                "bucket {bucket}: six desks must cover all four frames, got {frames:?}"
+            );
+            assert_ne!(frames[0], frames[1], "adjacent desks must differ");
+        }
+        // Pure rotation: advancing the global bucket advances every desk.
+        for i in 0..6 {
+            assert_eq!(desk_frame(1, i), desk_frame(0, i + 1));
+        }
+    }
+
+    /// RC16 §4 #6: the door state must be a pure function of what
+    /// `visual_fingerprint` already hashes, i.e. two `anim_t` values sharing the
+    /// `(anim_t * 20.0) as u8` bucket must never disagree about the door. If
+    /// they could, the office would show a door state the fingerprint cannot
+    /// distinguish and the swing would stick.
+    #[test]
+    fn door_state_never_splits_an_anim_t_hash_bucket() {
+        let mut s = GameModeState::new();
+        assert!(!door_is_open(&s), "an empty room keeps the door shut");
+
+        for phase in [ActorPhase::SpawnWalk, ActorPhase::ExitDoor] {
+            s.desks[0].child_session_id = Some("d".into());
+            s.desks[0].phase = phase;
+            let mut per_bucket: std::collections::HashMap<u8, bool> =
+                std::collections::HashMap::new();
+            for step in 0..=1000u32 {
+                let t = step as f32 / 1000.0;
+                s.desks[0].anim_t = t;
+                let bucket = (t * 20.0) as u8;
+                let open = door_is_open(&s);
+                if let Some(prev) = per_bucket.insert(bucket, open) {
+                    assert_eq!(
+                        prev, open,
+                        "{phase:?}: bucket {bucket} disagrees about the door at t={t}"
+                    );
+                }
+            }
+            // ...and it must actually swing at the right end of the walk.
+            s.desks[0].anim_t = 0.0;
+            assert_eq!(door_is_open(&s), phase == ActorPhase::SpawnWalk);
+            s.desks[0].anim_t = 1.0;
+            assert_eq!(door_is_open(&s), phase == ActorPhase::ExitDoor);
+        }
+
+        // A cleared seat cannot hold the door open.
+        s.desks[0].child_session_id = None;
+        s.desks[0].phase = ActorPhase::SpawnWalk;
+        s.desks[0].anim_t = 0.0;
+        assert!(!door_is_open(&s));
+    }
+
+    /// The papers FX is procedural: it must stay inside the canvas whatever the
+    /// walker anchor is, and must move as `anim_t` advances (which is why
+    /// Handoff hashes `anim_t` again — see `state::phase_anim_t_is_visible`).
+    #[test]
+    fn handoff_papers_move_and_stay_in_bounds() {
+        let mut canvas = RgbaImage::new(64, 48);
+        // Off-canvas anchors must not panic or write out of bounds.
+        for (cx, cy) in [(-40, -40), (200, 200), (0, 0)] {
+            paint_fx_handoff_papers(&mut canvas, cx, cy, 0.5, 64);
+        }
+
+        let render = |t: f32| {
+            let mut c = RgbaImage::new(64, 48);
+            paint_fx_handoff_papers(&mut c, 32, 32, t, 64);
+            c.into_raw()
+        };
+        let mid = render(0.45);
+        assert!(mid.iter().any(|b| *b != 0), "mid-flight must draw sheets");
+        assert_ne!(mid, render(0.75), "the arc must advance with anim_t");
+        // Endpoints are empty: the sheets are in flight, never parked.
+        assert!(render(0.0).iter().all(|b| *b == 0));
+        assert!(render(1.0).iter().all(|b| *b == 0));
     }
 
     #[test]
@@ -910,3 +1113,4 @@ mod tests {
         assert_eq!(frame.dimensions(), bg.dimensions());
     }
 }
+
