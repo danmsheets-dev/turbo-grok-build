@@ -10,6 +10,14 @@ use super::wall::WallMode;
 
 pub const DESK_COUNT: usize = 6;
 
+/// Ticks between forced HUD repaints in tiers that paint per-desk monitor text.
+///
+/// ~1 s at the ~12 Hz Slow tick — the same divisor `render::format_clock` uses.
+/// The HUD shows whole-second data (`mm:ss`, tokens, tool calls), and the sync
+/// signature buckets `elapsed` to whole seconds too (RC16 PERF-2), so a finer
+/// cadence would repaint identical text.
+const HUD_REFRESH_TICKS: u64 = 12;
+
 /// Snapshot of one subagent for the room (decoupled from pager types).
 #[derive(Debug, Clone)]
 pub struct DeskAgentSnapshot {
@@ -384,8 +392,9 @@ impl GameModeState {
     ///    painted as buffer overlays after halfblock paint.
     /// 3. Wall title, overflow, labels, tokens, elapsed, activity are **excluded**
     ///    (status strip / hover popup only).
-    /// 4. `anim_t` is hashed only for walk path positions (handoff/exit), not for
-    ///    seated desk blink (which uses the tick frame bucket).
+    /// 4. `anim_t` is hashed only for phases whose composited position actually
+    ///    moves with it ([`phase_anim_t_is_visible`]) — not for seated desk blink
+    ///    or the pinned Handoff pose (both use the tick frame bucket).
     /// 5. Scaled BG cache is independent — see [`Self::ensure_pixel_frame`].
     fn visual_fingerprint(&self, cell_w: u16, cell_h: u16) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -404,14 +413,8 @@ impl GameModeState {
             d.child_session_id.hash(&mut h);
             (d.phase as u8).hash(&mut h);
             d.skin.hash(&mut h);
-            // Walk path smoothness — include SpawnWalk slide.
-            if matches!(
-                d.phase,
-                ActorPhase::WalkToBoss
-                    | ActorPhase::Handoff
-                    | ActorPhase::ExitDoor
-                    | ActorPhase::SpawnWalk
-            ) {
+            // Walk path smoothness — SpawnWalk / WalkToBoss / ExitDoor slides.
+            if phase_anim_t_is_visible(d.phase) {
                 ((d.anim_t * 20.0) as u8).hash(&mut h);
             }
         }
@@ -894,7 +897,8 @@ impl GameModeState {
     /// while a frozen room is parked (RC16 PERF-1).
     ///
     /// Marks redraw dirty when visual output may change (working desks, walks,
-    /// focus pulse edge).
+    /// focus pulse edge, per-desk HUD text) — see the dirty gate below for the
+    /// per-path cadences.
     pub fn tick_anim(&mut self, tier: GameTier) {
         // Structural changes below (phase transitions, desk clears, handoff
         // promotion) are inputs to `sync_from_snapshots`: they free seats, drain
@@ -913,10 +917,37 @@ impl GameModeState {
         self.tick = self.tick.wrapping_add(1);
         self.last_tick = Instant::now();
         // Focus ring pulse flips every 4 ticks.
-        if had_focus && (tick_before / 4) != (self.tick / 4) {
+        let bucket_edge = (tick_before / 4) != (self.tick / 4);
+        if had_focus && bucket_edge {
             self.mark_redraw_dirty();
         }
+        // Which office the paint path will draw (`render::render_game_mode`):
+        // the pixel stage needs ≥40×8 cells, which every office tier already
+        // guarantees (`layout::MIN_STAGE_W/H` are 72×18).
+        let pixel_office = self.pixel_mode && tier.uses_office_art();
         if needs_frames {
+            // PERF (RC16 PERF-6): the pixel office samples only the `tick / 4`
+            // sprite bucket, so a room of seated desks composes a pixel-identical
+            // frame on 3 of every 4 ticks. Mark those on the bucket edge only.
+            // Walks still mark every tick (their `anim_t` is fingerprint-visible),
+            // and the Unicode office must keep per-tick marks — it animates at
+            // `tick%2` / `tick%4` / `tick%6` with a `tick/2` activity marquee.
+            let moves_between_buckets = self
+                .desks
+                .iter()
+                .any(|d| d.is_occupied() && phase_anim_t_is_visible(d.phase));
+            if !pixel_office || moves_between_buckets || bucket_edge {
+                self.mark_redraw_dirty();
+            }
+        } else if !pixel_office
+            && (self.tick / HUD_REFRESH_TICKS) != (tick_before / HUD_REFRESH_TICKS)
+            && self.desks.iter().any(|d| d.is_occupied())
+        {
+            // RC16 BUG-4: the pixel idle-freeze is right for a static sprite, but
+            // Compact / Unicode paint per-desk monitor HUDs (elapsed timer, token
+            // counts, scrolled activity) whose data the sync refreshes every
+            // second. Nothing else marks those dirty, so an on-screen `01:23`
+            // could sit frozen for minutes. Refresh at [`HUD_REFRESH_TICKS`].
             self.mark_redraw_dirty();
         }
 
@@ -1068,6 +1099,22 @@ fn resample_nearest_into(dst: &mut RgbaImage, src: &RgbaImage) {
             dst.put_pixel(x, y, p);
         }
     }
+}
+
+/// Whether `phase` renders at a position driven by `anim_t`, i.e. whether the
+/// composited office can change **between** `tick / 4` sprite bucket edges.
+///
+/// Single source of truth for two gates that must not drift apart:
+/// [`GameModeState::visual_fingerprint`] (what forces a recompose) and
+/// [`GameModeState::tick_anim`] (what forces a repaint). Handoff is excluded on
+/// purpose — [`super::compose::walk_position`] pins it on the rug, so hashing its
+/// `anim_t` meant 500 ms of full recomposes of pixel-identical frames (RC16
+/// BUG-3 bonus). Celebrate/FailBeat FX sample the frame bucket, not `anim_t`.
+fn phase_anim_t_is_visible(phase: ActorPhase) -> bool {
+    matches!(
+        phase,
+        ActorPhase::SpawnWalk | ActorPhase::WalkToBoss | ActorPhase::ExitDoor
+    )
 }
 
 /// Case-insensitive `contains("think")` over the live activity label.
@@ -1330,6 +1377,127 @@ mod tests {
         assert_eq!(s.visual_fingerprint(80, 24), fp0);
         s.tick = 4; // next bucket
         assert_ne!(s.visual_fingerprint(80, 24), fp0);
+    }
+
+    /// BUG-3 bonus: Handoff pins the walker on the rug, so its `anim_t` churn
+    /// must not force a recompose — the phases that really move still must.
+    #[test]
+    fn only_moving_walk_phases_hash_anim_t() {
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("h".into());
+        s.desks[0].phase = ActorPhase::Handoff;
+        s.desks[0].anim_t = 0.0;
+        let fp0 = s.visual_fingerprint(80, 24);
+        s.desks[0].anim_t = 1.0;
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            fp0,
+            "pinned handoff pose must not dirty the pixel fingerprint"
+        );
+
+        for phase in [
+            ActorPhase::SpawnWalk,
+            ActorPhase::WalkToBoss,
+            ActorPhase::ExitDoor,
+        ] {
+            s.desks[0].phase = phase;
+            s.desks[0].anim_t = 0.0;
+            let fp = s.visual_fingerprint(80, 24);
+            s.desks[0].anim_t = 0.5;
+            assert_ne!(
+                s.visual_fingerprint(80, 24),
+                fp,
+                "{phase:?} moves with anim_t and must recompose"
+            );
+        }
+    }
+
+    /// Count redraw marks over `ticks` animation steps.
+    fn dirty_marks_over(s: &mut GameModeState, tier: GameTier, ticks: u64) -> u64 {
+        s.take_redraw_dirty();
+        let mut n = 0;
+        for _ in 0..ticks {
+            s.tick_anim(tier);
+            if s.take_redraw_dirty() {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// BUG-4: a thinking-only room freezes the pixel office on purpose, but the
+    /// Compact / Unicode tiers paint a live per-desk HUD (elapsed, tokens,
+    /// marquee) that must still be refreshed — ~1 Hz, not never.
+    #[test]
+    fn non_pixel_tier_refreshes_hud_for_thinking_desks() {
+        let mut s = GameModeState::new();
+        s.desks[0].child_session_id = Some("t".into());
+        s.desks[0].phase = ActorPhase::AtDeskThinking;
+
+        assert_eq!(
+            dirty_marks_over(&mut s, GameTier::Compact, HUD_REFRESH_TICKS * 2),
+            2,
+            "compact HUD must refresh once per HUD_REFRESH_TICKS, no faster"
+        );
+
+        // Unicode office (pixel path off) paints the same HUD.
+        let mut u = GameModeState::new();
+        u.pixel_mode = false;
+        u.desks[0].child_session_id = Some("t".into());
+        u.desks[0].phase = ActorPhase::AtDeskThinking;
+        assert_eq!(
+            dirty_marks_over(&mut u, GameTier::Normal, HUD_REFRESH_TICKS),
+            1,
+            "unicode fallback HUD must refresh too"
+        );
+
+        // ...and the pixel office keeps its idle freeze (RC13 invariant).
+        let mut p = GameModeState::new();
+        p.desks[0].child_session_id = Some("t".into());
+        p.desks[0].phase = ActorPhase::AtDeskThinking;
+        assert_eq!(
+            dirty_marks_over(&mut p, GameTier::Normal, HUD_REFRESH_TICKS * 2),
+            0,
+            "thinking-only pixel office must not repaint at all"
+        );
+    }
+
+    /// PERF-6: seated pixel desks only change on the `tick / 4` sprite bucket, so
+    /// 3 of every 4 repaints re-blit an identical office. Walks and every
+    /// Unicode-drawn office keep their per-tick cadence.
+    #[test]
+    fn pixel_steady_typing_marks_dirty_on_bucket_edges_only() {
+        let seated = |pixel_mode: bool| {
+            let mut s = GameModeState::new();
+            s.pixel_mode = pixel_mode;
+            s.desks[0].child_session_id = Some("w".into());
+            s.desks[0].phase = ActorPhase::AtDeskWorking;
+            s
+        };
+
+        assert_eq!(
+            dirty_marks_over(&mut seated(true), GameTier::Normal, 8),
+            2,
+            "pixel office typing must repaint on tick/4 edges only"
+        );
+        assert_eq!(
+            dirty_marks_over(&mut seated(false), GameTier::Normal, 8),
+            8,
+            "unicode office animates at tick%2/%4/%6 — must stay per-tick"
+        );
+        assert_eq!(
+            dirty_marks_over(&mut seated(true), GameTier::Compact, 8),
+            8,
+            "compact cards animate + scroll the marquee — must stay per-tick"
+        );
+
+        let mut walking = seated(true);
+        walking.desks[0].phase = ActorPhase::WalkToBoss;
+        assert_eq!(
+            dirty_marks_over(&mut walking, GameTier::Normal, 8),
+            8,
+            "a walk moves every tick and must repaint every tick"
+        );
     }
 
     /// PERF-7: a hidden office holds no image memory; reopening rebuilds it.

@@ -27,6 +27,10 @@ const DESK_ANCHORS: [(f32, f32); 6] = [
 
 const SUPERVISOR_ANCHOR: (f32, f32) = (0.50, 0.28);
 
+/// Door position as a fraction of frame width — actors enter (SpawnWalk) and
+/// leave (ExitDoor) through it.
+const DOOR_X_FRAC: f32 = 0.06;
+
 pub fn load_office_background() -> Result<RgbaImage, String> {
     image::load_from_memory(OFFICE_BG_PNG)
         .map(|i| i.to_rgba8())
@@ -250,6 +254,42 @@ fn paint_fx_fail(canvas: &mut RgbaImage, cx: i32, cy: i32, frame: u8) {
     }
 }
 
+/// Door x in canvas pixels.
+fn door_x(w: u32) -> f32 {
+    w as f32 * DOOR_X_FRAC
+}
+
+/// Walking-actor centre (canvas pixels) for `phase` at `anim_t`.
+///
+/// `cx`/`cy` are the actor's own desk anchor:
+/// - `SpawnWalk` slides in from the door at desk height,
+/// - `WalkToBoss` crosses desk → supervisor,
+/// - `Handoff` stands on the rug (position does not depend on `anim_t` — see
+///   [`GameModeState::visual_fingerprint`], which no longer hashes it),
+/// - `ExitDoor` mirrors the entry back out: rug → door (RC16 BUG-3; it used to
+///   restart 45% back along the desk line and walk *into* the supervisor again).
+fn walk_position(phase: ActorPhase, anim_t: f32, cx: i32, cy: i32, w: u32, h: u32) -> (f32, f32) {
+    let t = anim_t.clamp(0.0, 1.0);
+    let (sx, sy) = SUPERVISOR_ANCHOR;
+    let sup_x = sx * w as f32;
+    let sup_y = sy * h as f32;
+    match phase {
+        ActorPhase::SpawnWalk => {
+            let dx = door_x(w);
+            (dx + (cx as f32 - dx) * t, cy as f32)
+        }
+        ActorPhase::Handoff => (sup_x, sup_y),
+        ActorPhase::ExitDoor => (
+            sup_x + (door_x(w) - sup_x) * t,
+            sup_y + (cy as f32 - sup_y) * t,
+        ),
+        _ => (
+            cx as f32 + (sup_x - cx as f32) * t,
+            cy as f32 + (sup_y - cy as f32) * t,
+        ),
+    }
+}
+
 /// Composite sprites onto a clone of the scaled office background.
 ///
 /// Prefer [`compose_cell_frame_into`] with a reused canvas to avoid allocating
@@ -384,14 +424,7 @@ pub fn compose_cell_frame_into(
                     ActorPhase::WalkToBoss | ActorPhase::Handoff
                 );
                 let walker = cached_walk(desk.skin, frame, with_packet, walk_sc.max(1));
-                let (tx, ty) = SUPERVISOR_ANCHOR;
-                let t = match desk.phase {
-                    ActorPhase::Handoff => 1.0,
-                    ActorPhase::ExitDoor => 0.55 + desk.anim_t * 0.45,
-                    _ => desk.anim_t.clamp(0.0, 1.0),
-                };
-                let x = cx as f32 + (tx * w as f32 - cx as f32) * t;
-                let y = cy as f32 + (ty * h as f32 - cy as f32) * t;
+                let (x, y) = walk_position(desk.phase, desk.anim_t, cx, cy, w, h);
                 blit(
             canvas,
             walker.as_ref(),
@@ -432,14 +465,12 @@ pub fn compose_cell_frame_into(
                     cy - empty.height() as i32 / 2,
                 );
                 let walker = cached_walk(desk.skin, frame, false, walk_sc.max(1));
-                let t = desk.anim_t.clamp(0.0, 1.0);
-                let door_x = (w as f32 * 0.06) as i32;
-                let x = door_x as f32 + (cx as f32 - door_x as f32) * t;
+                let (x, y) = walk_position(desk.phase, desk.anim_t, cx, cy, w, h);
                 blit(
                     canvas,
                     walker.as_ref(),
                     x as i32 - walker.width() as i32 / 2,
-                    cy - walker.height() as i32 / 2,
+                    y as i32 - walker.height() as i32 / 2,
                 );
             }
             ActorPhase::AtDeskWorking => {
@@ -478,6 +509,75 @@ mod tests {
         let s = crate::views::game_mode::sprites_pixel::effective_pixel_scale(80, 24).max(1);
         assert_eq!(scaled.width(), 80 * s);
         assert_eq!(scaled.height(), 48 * s);
+    }
+
+    /// BUG-3: the exit walk used to reuse the desk→supervisor line, so its first
+    /// frame teleported 45% backwards and the actor then walked back into the
+    /// supervisor. It must leave the rug and reach the door instead.
+    #[test]
+    fn exit_door_walks_from_supervisor_to_the_door() {
+        let (w, h) = (400u32, 200u32);
+        let (cx, cy) = (300i32, 150i32); // bottom-right desk anchor
+        let (sup_x, sup_y) = (
+            SUPERVISOR_ANCHOR.0 * w as f32,
+            SUPERVISOR_ANCHOR.1 * h as f32,
+        );
+
+        let start = walk_position(ActorPhase::ExitDoor, 0.0, cx, cy, w, h);
+        assert!(
+            (start.0 - sup_x).abs() < 1.0 && (start.1 - sup_y).abs() < 1.0,
+            "exit must start where the handoff left the actor, got {start:?}"
+        );
+
+        let mut prev = start.0;
+        for step in 1..=10 {
+            let t = step as f32 / 10.0;
+            let (x, _) = walk_position(ActorPhase::ExitDoor, t, cx, cy, w, h);
+            assert!(x < prev, "exit walk must keep moving left (t={t}, x={x})");
+            prev = x;
+        }
+
+        let end = walk_position(ActorPhase::ExitDoor, 1.0, cx, cy, w, h);
+        assert!(
+            (end.0 - door_x(w)).abs() < 1.0,
+            "exit must finish at the door, got {end:?}"
+        );
+        assert!(
+            (end.0 - sup_x).abs() > (w as f32 * 0.3),
+            "exit must not vanish on the supervisor"
+        );
+        assert!(
+            (end.1 - cy as f32).abs() < 1.0,
+            "exit must drop back to the desk row it entered on, got {end:?}"
+        );
+    }
+
+    /// The other walk phases keep their RC13 geometry.
+    #[test]
+    fn spawn_and_boss_walks_keep_their_endpoints() {
+        let (w, h) = (400u32, 200u32);
+        let (cx, cy) = (300i32, 150i32);
+        let (sup_x, sup_y) = (
+            SUPERVISOR_ANCHOR.0 * w as f32,
+            SUPERVISOR_ANCHOR.1 * h as f32,
+        );
+
+        let spawn0 = walk_position(ActorPhase::SpawnWalk, 0.0, cx, cy, w, h);
+        assert!(
+            (spawn0.0 - door_x(w)).abs() < 1.0,
+            "spawn enters at the door"
+        );
+        let spawn1 = walk_position(ActorPhase::SpawnWalk, 1.0, cx, cy, w, h);
+        assert_eq!((spawn1.0 as i32, spawn1.1 as i32), (cx, cy));
+
+        let boss1 = walk_position(ActorPhase::WalkToBoss, 1.0, cx, cy, w, h);
+        assert!((boss1.0 - sup_x).abs() < 1.0 && (boss1.1 - sup_y).abs() < 1.0);
+
+        // Handoff is pinned on the rug for its whole duration.
+        for t in [0.0, 0.5, 1.0] {
+            let p = walk_position(ActorPhase::Handoff, t, cx, cy, w, h);
+            assert_eq!((p.0 as i32, p.1 as i32), (sup_x as i32, sup_y as i32));
+        }
     }
 
     #[test]
