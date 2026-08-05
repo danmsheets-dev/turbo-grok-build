@@ -402,6 +402,12 @@ fn phase_signature(state: &GameModeState) -> u64 {
         d.child_session_id.hash(&mut h);
         (d.phase as u8).hash(&mut h);
         d.failed.hash(&mut h);
+        // Typing cadence (RC16 §4 #9). A level change alters the composed
+        // keyboard on the *next* frame bucket, so the office would repaint
+        // within ~4 ticks anyway — including it here just makes the new cadence
+        // start on the sync that derived it. Bounded by the sample period and
+        // the hysteresis, so it cannot become a per-sync dirty source.
+        (d.busy as u8).hash(&mut h);
     }
     (state.supervisor as u8).hash(&mut h);
     state.overflow_count.hash(&mut h);

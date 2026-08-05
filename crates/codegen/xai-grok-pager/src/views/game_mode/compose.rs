@@ -14,7 +14,7 @@ use super::sprites_pixel::{
     sprite_empty_desk, sprite_mcp_server, sprite_plant, sprite_supervisor,
     stamp_floor_patch_sampled, supervisor_frame_key, walk_frame_key,
 };
-use super::state::{ActorPhase, GameModeState, SupervisorPhase};
+use super::state::{ActorPhase, BusyLevel, GameModeState, SupervisorPhase};
 
 /// Embedded mockup.
 pub const OFFICE_BG_PNG: &[u8] = include_bytes!("../../../assets/game_mode/office_bg.png");
@@ -623,6 +623,63 @@ fn paint_fx_handoff_papers(canvas: &mut RgbaImage, cx: i32, cy: i32, t: f32, w: 
     }
 }
 
+/// Office-wide golden light sweeping left→right on WORK FINISHED (RC16 §4 #8).
+///
+/// Procedural like [`paint_fx_confetti`] — **zero cache keys** — and a *blend*
+/// like [`paint_boss_rug`] rather than a fill, so it lifts the room's own art
+/// (and the sprites already blitted over it) instead of covering them.
+///
+/// `t` is [`super::state::GameModeState::success_wave_t`], which is derived from
+/// the fingerprint's own 150 ms bucket and nothing finer — so, exactly as for
+/// [`paint_wall_clock`]'s hands, a crest position the fingerprint cannot
+/// distinguish cannot exist.
+///
+/// The crest starts *on* the left edge — half the band already lit, so the
+/// success reads on the very first composed frame — and ends a full half-width
+/// past the right one, which makes the last frame byte-identical to the un-waved
+/// room. That is what lets the office re-freeze on exactly the frame it had
+/// before the success instead of on a slightly gold one.
+///
+/// COST: one pass over the band's columns per composed frame — a fraction of
+/// the full-canvas [`apply_hour_tint`] pass — ten times per success event and
+/// never otherwise.
+fn paint_fx_success_wave(canvas: &mut RgbaImage, t: f32, w: u32) {
+    const GOLD: [i32; 3] = [255, 216, 128];
+    /// Blend percent at the crest, falling to 0 at the band's edges.
+    const PEAK_PCT: i32 = 34;
+    let (cw, ch) = canvas.dimensions();
+    if cw == 0 || ch == 0 {
+        return;
+    }
+    // Wide band: the composed frame is Nearest-downsampled to cell resolution,
+    // so a narrow sweep would flicker across a couple of cells instead of
+    // reading as light moving through the room.
+    let half = (w as f32 * 0.16).max(6.0);
+    let crest = t.clamp(0.0, 1.0) * (w as f32 + half);
+    let x0 = (crest - half).max(0.0) as u32;
+    let x1 = ((crest + half).max(0.0) as u32 + 1).min(cw);
+    for x in x0..x1 {
+        let d = ((x as f32 + 0.5) - crest).abs() / half;
+        if d >= 1.0 {
+            continue;
+        }
+        // Squared falloff: a linear ramp reads as a hard-edged bar once the
+        // frame is downsampled.
+        let k = (1.0 - d) * (1.0 - d);
+        let pct = (PEAK_PCT as f32 * k) as i32;
+        if pct <= 0 {
+            continue;
+        }
+        for y in 0..ch {
+            let p = canvas.get_pixel_mut(x, y);
+            for i in 0..3 {
+                let c = i32::from(p.0[i]);
+                p.0[i] = (c + (GOLD[i] - c) * pct / 100) as u8;
+            }
+        }
+    }
+}
+
 /// Day/night tints, indexed by [`hour_tint_band`]: `(rgb, blend percent)`.
 ///
 /// Deliberately weak. The office art is already low-contrast at terminal
@@ -773,6 +830,24 @@ fn door_x(w: u32) -> f32 {
 /// hashed) and **no** cache keys (the frame domain is still 0..4).
 fn desk_frame(frame: u8, desk: usize) -> u8 {
     (frame.wrapping_add(desk as u8)) % 4
+}
+
+/// Typing frame for desk `i`, at a cadence set by its token throughput (§4 #9).
+///
+/// The only difference from [`desk_frame`] is the divisor: a Hot desk reads
+/// `tick / 2` and hammers the keyboard twice as fast as the room's global
+/// `tick / 4` bucket, a Calm one reads `tick / 8` and taps. The frame domain is
+/// still `0..4`, which is exactly what
+/// [`super::sprites_pixel::dev_at_desk_frame_key`] declares for a typing
+/// developer — so a hot room adds **zero** cache keys, only more transitions
+/// between keys the cache already holds.
+///
+/// FINGERPRINT: `visual_fingerprint` hashes `tick / d` for the finest divisor
+/// any desk is using, plus each typing desk's level; see
+/// [`super::state::GameModeState::frame_bucket_divisor`] for why the divisors
+/// have to be powers of two.
+fn desk_typing_frame(tick: u64, desk: usize, busy: BusyLevel) -> u8 {
+    desk_frame(((tick / busy.frame_divisor()) % 4) as u8, desk)
 }
 
 /// Whether the office door stands open this frame.
@@ -1113,7 +1188,15 @@ pub fn compose_cell_frame_into(
             }
             ActorPhase::AtDeskWorking => {
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
-                let spr = cached_dev_at_desk(desk.skin, true, frame, sc.max(1));
+                // Typing cadence rides the desk's own throughput bucket, not the
+                // room's global one (RC16 §4 #9) — same 0..4 frame domain, so no
+                // new cache keys.
+                let spr = cached_dev_at_desk(
+                    desk.skin,
+                    true,
+                    desk_typing_frame(tick, i, desk.busy),
+                    sc.max(1),
+                );
                 blit(
                     canvas,
                     spr.as_ref(),
@@ -1138,6 +1221,12 @@ pub fn compose_cell_frame_into(
                 );
             }
         }
+    }
+
+    // Last, over everything: the one-shot success sweep is *lighting*, so it
+    // has to lift the desks and the boss as well as the room (RC16 §4 #8).
+    if let Some(t) = state.success_wave_t() {
+        paint_fx_success_wave(canvas, t, w);
     }
 }
 
@@ -1931,6 +2020,135 @@ mod tests {
             base,
             "every clock face must be procedural"
         );
+    }
+
+    /// RC16 §4 #8: the crest must actually cross the room left→right, must
+    /// *lighten* what it touches rather than paint over it, and must leave the
+    /// room byte-identical at the end of its sweep — that last part is what lets
+    /// the office re-freeze on the frame it had before the success.
+    #[test]
+    fn success_wave_sweeps_left_to_right_and_leaves_the_room_as_it_found_it() {
+        let base = image::Rgba([40u8, 60, 70, 255]);
+        let render = |t: f32| {
+            let mut c = RgbaImage::from_pixel(96, 32, base);
+            paint_fx_success_wave(&mut c, t, 96);
+            c
+        };
+
+        // Brightest column, as a proxy for the crest.
+        let crest_x = |img: &RgbaImage| -> Option<u32> {
+            (0..img.width())
+                .filter(|x| img.get_pixel(*x, 0).0 != base.0)
+                .max_by_key(|x| u32::from(img.get_pixel(*x, 0).0[0]))
+        };
+
+        let mut last = None;
+        for step in 0..=8u32 {
+            let t = step as f32 / 9.0;
+            let img = render(t);
+            let x = crest_x(&img).unwrap_or_else(|| panic!("t={t}: nothing lit"));
+            if let Some(prev) = last {
+                assert!(x > prev, "t={t}: crest went backwards ({prev} → {x})");
+            }
+            last = Some(x);
+            // Lighting, not painting: every touched pixel moves toward gold and
+            // never away from the room's own colour.
+            for p in img.pixels() {
+                assert!(p.0[0] >= base.0[0] && p.0[1] >= base.0[1], "{:?}", p.0);
+                assert_eq!(p.0[3], 255, "alpha must survive");
+            }
+        }
+
+        assert_eq!(
+            render(1.0).into_raw(),
+            RgbaImage::from_pixel(96, 32, base).into_raw(),
+            "the last bucket must leave the room untouched"
+        );
+
+        // Degenerate inputs must not panic or write out of bounds.
+        let mut tiny = RgbaImage::new(1, 1);
+        for t in [-1.0f32, 0.0, 0.5, 2.0] {
+            paint_fx_success_wave(&mut tiny, t, 1);
+            paint_fx_success_wave(&mut RgbaImage::new(0, 0), t, 0);
+        }
+    }
+
+    /// The wave is a per-pixel blend, like the boss rug and the hour tint — no
+    /// sprite, so a success event must not touch the sprite cache at all.
+    #[test]
+    fn success_wave_costs_no_cache_keys() {
+        let full = load_office_background().expect("bg");
+        let bg = scale_bg_to_cells(&full, 80, 24);
+        sprite_cache_reset();
+        let mut s = GameModeState::new();
+        s.clock_hm = (10, 3);
+        let dark = compose_cell_frame(&bg, &s, 0);
+        let base = sprite_cache_len();
+
+        let mut lit = None;
+        for step in 0..10u64 {
+            // Walk the armed deadline backwards through every reachable bucket.
+            s.success_fx_until = Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(1500 - step * 150),
+            );
+            let f = compose_cell_frame(&bg, &s, 0);
+            if step == 3 {
+                lit = Some(f);
+            }
+        }
+        assert_eq!(
+            sprite_cache_len(),
+            base,
+            "the success wave must be entirely procedural"
+        );
+        assert_ne!(
+            lit.expect("mid-sweep frame").as_raw(),
+            dark.as_raw(),
+            "…and must actually change the composed office"
+        );
+
+        s.success_fx_until = None;
+        assert_eq!(
+            compose_cell_frame(&bg, &s, 0).as_raw(),
+            dark.as_raw(),
+            "an expired wave must compose the pre-success frame exactly"
+        );
+    }
+
+    /// RC16 §4 #9: a hot desk must type visibly faster than a calm one, and the
+    /// whole spread must stay inside the `0..4` frame domain the cache keys are
+    /// budgeted for — the cadence is free precisely because it adds no keys.
+    #[test]
+    fn typing_cadence_scales_with_the_busy_level() {
+        let steps = |busy: BusyLevel| -> usize {
+            let frames: Vec<u8> = (0..32u64).map(|t| desk_typing_frame(t, 0, busy)).collect();
+            assert!(frames.iter().all(|f| *f < 4), "{busy:?}: {frames:?}");
+            frames.windows(2).filter(|w| w[0] != w[1]).count()
+        };
+        let (calm, normal, hot) = (
+            steps(BusyLevel::Calm),
+            steps(BusyLevel::Normal),
+            steps(BusyLevel::Hot),
+        );
+        assert_eq!((calm, normal, hot), (3, 7, 15), "one keystroke per divisor");
+        assert!(hot > normal && normal > calm, "{calm}/{normal}/{hot}");
+
+        // The per-desk offset survives the divisor, so six hot desks still do
+        // not type in lockstep.
+        for busy in [BusyLevel::Calm, BusyLevel::Normal, BusyLevel::Hot] {
+            let row: std::collections::HashSet<u8> =
+                (0..6).map(|i| desk_typing_frame(0, i, busy)).collect();
+            assert_eq!(row.len(), 4, "{busy:?}: desks must cover all four frames");
+        }
+
+        // Normal is exactly the pre-RC16-§4-#9 cadence: the global bucket.
+        for tick in 0..32u64 {
+            assert_eq!(
+                desk_typing_frame(tick, 2, BusyLevel::Normal),
+                desk_frame(((tick / 4) % 4) as u8, 2),
+                "tick {tick}"
+            );
+        }
     }
 
     /// RC16 §4 #12: the tint bands must cover the whole day, the working day

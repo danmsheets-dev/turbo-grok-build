@@ -41,6 +41,47 @@ const RACK_BURST: Duration = Duration::from_millis(1200);
 /// gate vs 83 ms tick failure RC16 BUG-2 documented.
 const AMBIENT_PERIOD: Duration = Duration::from_millis(2500);
 
+/// Quantization of the success wave's sweep position (RC16 §4 #8).
+///
+/// The composed crest is derived from this bucket and nothing finer (see
+/// [`GameModeState::success_wave_t`]), so the whole one-shot costs exactly
+/// [`SUCCESS_WAVE_BUCKETS`] recomposes — a wave position the fingerprint cannot
+/// distinguish cannot exist.
+const SUCCESS_WAVE_BUCKET_MS: u64 = 150;
+
+/// Number of [`SUCCESS_WAVE_BUCKET_MS`] steps the crest takes to cross the room.
+const SUCCESS_WAVE_BUCKETS: u64 = 10;
+
+/// How long one office-wide success wave runs after WORK FINISHED (RC16 §4 #8).
+///
+/// ~1.5 s: long enough to read as a sweep at the ~12 Hz Slow tick, short enough
+/// that the wakeup tail it holds on a room that is otherwise parking stays
+/// inside ~18 Slow ticks, once per success event (see
+/// [`GameModeState::success_wave_t`]).
+const SUCCESS_WAVE: Duration =
+    Duration::from_millis(SUCCESS_WAVE_BUCKET_MS * SUCCESS_WAVE_BUCKETS);
+
+/// Minimum wall time between two token-throughput samples on one desk (§4 #9).
+///
+/// Wall time, **not** sync count: [`super::sync_game_mode`] is throttled
+/// (RC16 PERF-3) and skips entirely for unchanged subagent maps (PERF-2), so a
+/// delta measured "per sync" would read a different rate depending on how busy
+/// the rest of the app was. A running desk re-signs at least once a second
+/// (`display_elapsed().as_secs()` is in `subagent_signature`), so a desk that
+/// stops streaming still gets sampled and still decays back to Calm.
+const BUSY_SAMPLE_PERIOD: Duration = Duration::from_millis(750);
+
+/// Tokens/sec bucket boundaries for [`BusyLevel`] (RC16 §4 #9).
+///
+/// Two-sided on purpose — the enter thresholds sit well above the exit ones, so
+/// a stream hovering at a boundary cannot flip a desk's typing cadence on every
+/// sample. Without that, a desk at ~45 tok/s would visibly stutter between two
+/// animation rates, which reads as a bug rather than as throughput.
+const BUSY_HOT_ENTER: f32 = 45.0;
+const BUSY_HOT_EXIT: f32 = 28.0;
+const BUSY_NORMAL_ENTER: f32 = 12.0;
+const BUSY_NORMAL_EXIT: f32 = 5.0;
+
 /// Snapshot of one subagent for the room (decoupled from pager types).
 #[derive(Debug, Clone)]
 pub struct DeskAgentSnapshot {
@@ -76,6 +117,64 @@ pub enum ActorPhase {
     FailBeat,
 }
 
+/// How hard a seated desk is streaming, from its token throughput (RC16 §4 #9).
+///
+/// Drives the desk's typing cadence in
+/// [`super::compose::desk_typing_frame`] and nothing else — a desk that is not
+/// [`ActorPhase::AtDeskWorking`] composes no keyboard, which is why
+/// [`GameModeState::visual_fingerprint`] hashes the level only for that phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyLevel {
+    /// Barely streaming — long thinking pauses, waiting on a tool.
+    Calm,
+    /// Ordinary streaming; the cadence every desk had before RC16 §4 #9.
+    Normal,
+    /// Flat out.
+    Hot,
+}
+
+impl BusyLevel {
+    /// Tick divisor for this desk's typing frame.
+    ///
+    /// FINGERPRINT INVARIANT: the divisors are **powers of two**, and
+    /// [`GameModeState::frame_bucket_divisor`] hashes `tick / d` for the finest
+    /// one any desk is using. With 2/4/8 every coarser bucket's edges are a
+    /// strict subset of the finer one's, so the single hashed value determines
+    /// every desk's frame. A divisor like 6 would put a frame change at tick 6,
+    /// where `tick / 4` does not move, and the fingerprint would miss it.
+    pub(crate) fn frame_divisor(self) -> u64 {
+        match self {
+            Self::Calm => 8,
+            Self::Normal => 4,
+            Self::Hot => 2,
+        }
+    }
+}
+
+/// Next [`BusyLevel`] for a desk currently at `cur` measuring `rate` tokens/sec.
+///
+/// Hysteresis: entering a level needs a clearly higher rate than staying in it
+/// (see the `BUSY_*` constants), so a noisy delta cannot oscillate the cadence.
+fn next_busy_level(cur: BusyLevel, rate: f32) -> BusyLevel {
+    let hot_gate = if matches!(cur, BusyLevel::Hot) {
+        BUSY_HOT_EXIT
+    } else {
+        BUSY_HOT_ENTER
+    };
+    let normal_gate = if matches!(cur, BusyLevel::Calm) {
+        BUSY_NORMAL_ENTER
+    } else {
+        BUSY_NORMAL_EXIT
+    };
+    if rate >= hot_gate {
+        BusyLevel::Hot
+    } else if rate >= normal_gate {
+        BusyLevel::Normal
+    } else {
+        BusyLevel::Calm
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DeskSlot {
     pub child_session_id: Option<String>,
@@ -87,6 +186,12 @@ pub struct DeskSlot {
     pub tool_calls: u32,
     pub activity: String,
     pub failed: bool,
+    /// Typing cadence bucket, re-derived from token throughput at sync time.
+    pub(crate) busy: BusyLevel,
+    /// `tokens` as of the last throughput sample (**not** the last sync).
+    pub(crate) prev_tokens: u64,
+    /// When [`Self::prev_tokens`] was taken — the denominator of the rate.
+    pub(crate) tokens_at: Instant,
     /// Palette index 0..5 for sprite color.
     pub skin: u8,
     /// Animation progress 0.0..1.0 for current phase.
@@ -110,6 +215,9 @@ impl Default for DeskSlot {
             tool_calls: 0,
             activity: String::new(),
             failed: false,
+            busy: BusyLevel::Normal,
+            prev_tokens: 0,
+            tokens_at: Instant::now(),
             skin: 0,
             anim_t: 0.0,
             phase_started: Instant::now(),
@@ -125,6 +233,23 @@ impl DeskSlot {
 
     pub fn is_occupied(&self) -> bool {
         self.child_session_id.is_some()
+    }
+
+    /// Fold this sync's token count into the desk's throughput bucket (§4 #9).
+    ///
+    /// A no-op until [`BUSY_SAMPLE_PERIOD`] of **wall time** has passed since
+    /// the last sample, so the measured rate is independent of how often the
+    /// sync actually ran. Called before `tokens` is overwritten, but it reads
+    /// [`Self::prev_tokens`], not `tokens` — the window spans several syncs.
+    fn sample_throughput(&mut self, tokens: u64) {
+        let dt = self.tokens_at.elapsed();
+        if dt < BUSY_SAMPLE_PERIOD {
+            return;
+        }
+        let rate = tokens.saturating_sub(self.prev_tokens) as f32 / dt.as_secs_f32();
+        self.busy = next_busy_level(self.busy, rate);
+        self.prev_tokens = tokens;
+        self.tokens_at = Instant::now();
     }
 }
 
@@ -237,6 +362,14 @@ pub struct GameModeState {
     /// expiry edge in [`Self::tick_anim`]. See [`Self::rack_burst_active`] for
     /// the fingerprint and wakeup contract.
     pub(crate) rack_active_until: Option<Instant>,
+    /// Office-wide success wave armed until this instant (RC16 §4 #8).
+    ///
+    /// Armed by [`Self::sync_from_snapshots`] on the *edge* into
+    /// [`WallMode::WorkFinished`] — never on the level, because `had_success`
+    /// is sticky and the wall then sits on WorkFinished for the rest of the
+    /// session. Consumed on the expiry edge in [`Self::tick_anim`]. See
+    /// [`Self::success_wave_t`] for the fingerprint and wakeup contract.
+    pub(crate) success_fx_until: Option<Instant>,
     /// Slow ambient animation step (RC16 §4 #7).
     ///
     /// Wall-clock driven, **not** derived from `tick`: an office the event loop
@@ -370,6 +503,7 @@ impl GameModeState {
             overflow_count: 0,
             attention_until: None,
             rack_active_until: None,
+            success_fx_until: None,
             ambient_step: 0,
             ambient_at: Instant::now(),
             clock_hm: local_clock_bucket(),
@@ -570,6 +704,27 @@ impl GameModeState {
         })
     }
 
+    /// Finest `tick` divisor any composed sprite is reading this frame (§4 #9).
+    ///
+    /// 4 is the floor: the walkers, the fail beat, the supervisor and the MCP
+    /// rack all ride the global `(tick / 4) % 4` bucket, so the room can never
+    /// hash anything coarser. A typing desk may ask for a *finer* one
+    /// ([`BusyLevel::frame_divisor`]) — that, and only that, is what makes a hot
+    /// desk type faster.
+    ///
+    /// COST: a room with any Hot desk moves its fingerprint (and its repaints)
+    /// at `tick / 2` instead of `tick / 4` — roughly double the recompose rate,
+    /// ~6 Hz instead of ~3 Hz, and only while a desk is genuinely streaming at
+    /// [`BUSY_HOT_ENTER`] tokens/sec or better. Calm desks are *cheaper* than
+    /// the old fixed cadence but cannot lower the floor.
+    pub(crate) fn frame_bucket_divisor(&self) -> u64 {
+        self.desks
+            .iter()
+            .filter(|d| d.is_occupied() && matches!(d.phase, ActorPhase::AtDeskWorking))
+            .map(|d| d.busy.frame_divisor())
+            .fold(4, u64::min)
+    }
+
     /// Fingerprint for pixel recompose — **only** inputs that change
     /// [`super::compose::compose_cell_frame`] output.
     ///
@@ -594,6 +749,15 @@ impl GameModeState {
     /// 6. `mcp_info` is excluded for the same reason as `supervisor_info` — the
     ///    rack *card* is an overlay. Only the derived
     ///    [`Self::rack_burst_active`] bool, which the composed LEDs read, is in.
+    /// 7. The success wave (RC16 §4 #8) is hashed **only while it runs**: its
+    ///    bucket is `None` from the instant it expires, so the room's
+    ///    fingerprint returns to exactly the value it had before the wave and
+    ///    re-freezes. A wave that kept hashing after expiry would recompose the
+    ///    room forever — the trap, since it fires as the room goes idle.
+    /// 8. Each typing desk's [`BusyLevel`] is hashed for the one phase that
+    ///    composes it, together with the finest tick bucket in use
+    ///    ([`Self::frame_bucket_divisor`]) — hashing the level without the
+    ///    finer bucket would freeze a hot desk's extra frames.
     fn visual_fingerprint(&self, cell_w: u16, cell_h: u16) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -605,6 +769,9 @@ impl GameModeState {
         // construction — a deadline compared against `now` can only ever be
         // on or off, so this cannot force a recompose per tick.
         self.rack_burst_active().hash(&mut h);
+        // One-shot golden sweep: `None` once it expires, so the fingerprint
+        // returns to its pre-wave value and the room parks (see invariant 7).
+        self.success_wave_bucket_at(Instant::now()).hash(&mut h);
         // Wall clock hands + the day/night tint band both derive from this pair
         // and nothing finer, so the clock costs at most 6 recomposes/hour.
         self.clock_hm.hash(&mut h);
@@ -615,9 +782,10 @@ impl GameModeState {
         } else {
             0u64.hash(&mut h);
         }
-        // Coarse sprite frame bucket (~ tick÷4) only when compose samples it.
+        // Sprite frame bucket (~ tick÷4, finer while a desk is Hot) only when
+        // compose samples it.
         if self.pixel_needs_tick_frame() {
-            (self.tick / 4).hash(&mut h);
+            (self.tick / self.frame_bucket_divisor()).hash(&mut h);
         } else {
             0u64.hash(&mut h);
         }
@@ -625,6 +793,12 @@ impl GameModeState {
             d.child_session_id.hash(&mut h);
             (d.phase as u8).hash(&mut h);
             d.skin.hash(&mut h);
+            // Typing cadence — only the phase that actually composes a keyboard
+            // reads it, so a thinking desk's throughput cannot dirty an idle
+            // room (the RC13 freeze, invariant 1).
+            if matches!(d.phase, ActorPhase::AtDeskWorking) {
+                (d.busy as u8).hash(&mut h);
+            }
             // Walk path smoothness — SpawnWalk / WalkToBoss / ExitDoor slides.
             if phase_anim_t_is_visible(d.phase) {
                 ((d.anim_t * 20.0) as u8).hash(&mut h);
@@ -812,9 +986,51 @@ impl GameModeState {
         if self.rack_active_until.is_some() {
             return true;
         }
+        // ...and for the success wave, which is armed *precisely* as the room
+        // goes idle: without this the loop would park on the same tick the wave
+        // was armed on and the sweep would never take a step.
+        if self.success_fx_until.is_some() {
+            return true;
+        }
         // Seated desks animate (typing, walks, celebrate/fail beats) and own the
         // hover/focus ring — an empty room has neither.
         self.desks.iter().any(|d| d.is_occupied())
+    }
+
+    /// Fingerprint bucket of the success wave as observed at `at` (RC16 §4 #8).
+    ///
+    /// `None` when no wave is armed **or** the armed one has already elapsed —
+    /// which is what makes the wave provably one-shot: the hashed value returns
+    /// to `None` at expiry whether or not [`Self::tick_anim`] has consumed the
+    /// deadline yet, so the recomposed frame is byte-identical to the pre-wave
+    /// one and the room re-freezes.
+    fn success_wave_bucket_at(&self, at: Instant) -> Option<u8> {
+        let until = self.success_fx_until?;
+        let remaining = until.saturating_duration_since(at);
+        if remaining.is_zero() {
+            return None;
+        }
+        let elapsed_ms = SUCCESS_WAVE.saturating_sub(remaining).as_millis() as u64;
+        Some((elapsed_ms / SUCCESS_WAVE_BUCKET_MS).min(SUCCESS_WAVE_BUCKETS - 1) as u8)
+    }
+
+    /// Sweep position `0.0..=1.0` of the live success wave, or `None` (§4 #8).
+    ///
+    /// Derived from [`Self::success_wave_bucket_at`], i.e. from exactly the
+    /// value [`Self::visual_fingerprint`] hashes and nothing finer — the same
+    /// contract the wall clock's hands are drawn under. Read by
+    /// [`super::compose::paint_fx_success_wave`].
+    ///
+    /// WAKEUP BUDGET: **~18 Slow ticks, once per success event, and nothing
+    /// standing.** The wave is armed on the edge into
+    /// [`WallMode::WorkFinished`], which is by definition the moment the room
+    /// stops animating for its own reasons, so its whole 1.5 s is a tail the
+    /// office would otherwise have spent parked. It buys 10 recomposes (one per
+    /// [`SUCCESS_WAVE_BUCKET_MS`]) and then the room parks — pinned by
+    /// `expired_success_wave_is_consumed_and_lets_the_room_park`.
+    pub(crate) fn success_wave_t(&self) -> Option<f32> {
+        let bucket = self.success_wave_bucket_at(Instant::now())?;
+        Some(f32::from(bucket) / (SUCCESS_WAVE_BUCKETS - 1) as f32)
     }
 
     /// Whether the MCP rack's LEDs are lit this frame (RC16 §4 #5).
@@ -1032,6 +1248,10 @@ impl GameModeState {
                     self.desks[i].activity.clone_from(&snap.activity);
                 }
                 self.desks[i].elapsed = snap.elapsed;
+                // Typing cadence from real throughput (RC16 §4 #9). Measured
+                // against wall time inside the desk, so a throttled or skipped
+                // sync cannot change the rate it reads.
+                self.desks[i].sample_throughput(snap.tokens);
                 self.desks[i].tokens = snap.tokens;
                 // Real work lights the MCP rack (RC16 §4 #5). The desk's own
                 // `tool_calls` *is* the previous sync's value until the line
@@ -1141,6 +1361,7 @@ impl GameModeState {
         let attention_active = self
             .attention_until
             .is_some_and(|t| t > Instant::now());
+        let wall_before = self.wall;
         self.wall = super::wall::compute_wall_mode(
             agents,
             supervisor_working,
@@ -1157,6 +1378,18 @@ impl GameModeState {
             attention_active,
             waiting_on_user,
         );
+
+        // Office-wide success wave (RC16 §4 #8), armed on the **edge** into
+        // WorkFinished. A level test (`self.wall == WorkFinished`) would re-arm
+        // it on every sync for the rest of the session: `had_success` is sticky,
+        // so once the last subagent lands the wall never leaves WorkFinished
+        // until new work starts — and a permanently re-armed wave is a room that
+        // can never park. `finish_started` is the same one-shot discipline one
+        // level down, per desk.
+        if self.wall == WallMode::WorkFinished && wall_before != WallMode::WorkFinished {
+            self.success_fx_until = Some(Instant::now() + SUCCESS_WAVE);
+            self.mark_redraw_dirty();
+        }
     }
 
     /// Drop **every** image buffer Game Mode owns, including the decoded
@@ -1220,6 +1453,13 @@ impl GameModeState {
             tool_calls: snap.tool_calls,
             activity: snap.activity.clone(),
             failed: snap.failed,
+            // A fresh seat starts at the cadence every desk used before RC16
+            // §4 #9 and measures its first rate one BUSY_SAMPLE_PERIOD later —
+            // seeding `prev_tokens` from the snapshot means an agent that was
+            // already streaming before it got a desk does not read as a burst.
+            busy: BusyLevel::Normal,
+            prev_tokens: snap.tokens,
+            tokens_at: Instant::now(),
             skin,
             anim_t: 0.0,
             phase_started: Instant::now(),
@@ -1294,6 +1534,23 @@ impl GameModeState {
             self.rack_active_until = None;
             self.mark_redraw_dirty();
         }
+        // Same edge-consuming shape for the success wave (RC16 §4 #8), and for
+        // a sharper reason: it is armed exactly as the room goes idle, so
+        // nothing else is left to repaint the sweep or to notice it ending.
+        // `self.last_tick` is still the *previous* tick here (it is refreshed
+        // below), so the bucket compare marks dirty once per composed step —
+        // ~10 repaints across the wave rather than one per Slow tick.
+        if let Some(until) = self.success_fx_until {
+            let now = Instant::now();
+            if until <= now {
+                self.success_fx_until = None;
+                self.mark_redraw_dirty();
+            } else if self.success_wave_bucket_at(now)
+                != self.success_wave_bucket_at(self.last_tick)
+            {
+                self.mark_redraw_dirty();
+            }
+        }
         // Slow ambient step (RC16 §4 #7 / #12). Wall-clock gated, so it runs at
         // the same rate whether the room is awake at ~12 Hz for its own reasons
         // or parked on the ambient wake — and it re-reads the clock at the only
@@ -1317,8 +1574,14 @@ impl GameModeState {
         let had_focus = self.focus_desk().is_some();
         self.tick = self.tick.wrapping_add(1);
         self.last_tick = Instant::now();
-        // Focus ring pulse flips every 4 ticks.
+        // Focus ring pulse flips every 4 ticks (a ratatui overlay, so it keeps
+        // the fixed cadence whatever the desks are doing).
         let bucket_edge = (tick_before / 4) != (self.tick / 4);
+        // Sprite frame edge — finer than the focus pulse while a desk is Hot
+        // (RC16 §4 #9). Must be the same divisor `visual_fingerprint` hashes,
+        // or a hot desk's extra frames would be composed and never painted.
+        let frame_div = self.frame_bucket_divisor();
+        let frame_edge = (tick_before / frame_div) != (self.tick / frame_div);
         if had_focus && bucket_edge {
             self.mark_redraw_dirty();
         }
@@ -1327,9 +1590,10 @@ impl GameModeState {
         // guarantees (`layout::MIN_STAGE_W/H` are 72×18).
         let pixel_office = self.pixel_mode && tier.uses_office_art();
         if needs_frames {
-            // PERF (RC16 PERF-6): the pixel office samples only the `tick / 4`
-            // sprite bucket, so a room of seated desks composes a pixel-identical
-            // frame on 3 of every 4 ticks. Mark those on the bucket edge only.
+            // PERF (RC16 PERF-6): the pixel office samples only the sprite
+            // frame bucket (`tick / 4`, or `tick / 2` while a desk is Hot), so
+            // a room of seated desks composes a pixel-identical frame on 3 of
+            // every 4 ticks. Mark those on the bucket edge only.
             // Walks still mark every tick (their `anim_t` is fingerprint-visible),
             // and the Unicode office must keep per-tick marks — it animates at
             // `tick%2` / `tick%4` / `tick%6` with a `tick/2` activity marquee.
@@ -1337,7 +1601,7 @@ impl GameModeState {
                 .desks
                 .iter()
                 .any(|d| d.is_occupied() && phase_anim_t_is_visible(d.phase));
-            if !pixel_office || moves_between_buckets || bucket_edge {
+            if !pixel_office || moves_between_buckets || frame_edge {
                 self.mark_redraw_dirty();
             }
         } else if !pixel_office
@@ -2330,6 +2594,282 @@ mod tests {
         assert!(
             !s.rack_burst_active(),
             "an unchanged tool count must not re-arm the burst"
+        );
+    }
+
+    /// RC16 §4 #8: the wave is armed on the **edge** into WorkFinished and
+    /// exactly once per success event. `had_success` is sticky, so a level test
+    /// would re-arm it on every sync until the session ends — a room that can
+    /// never park, which is the failure this whole animation has to avoid.
+    #[test]
+    fn success_wave_is_armed_once_per_work_finished() {
+        let mut s = GameModeState::new();
+        s.sync_from_snapshots(&[snap("a", true)], false, GameTier::Compact, false);
+        assert_eq!(s.wall, WallMode::Working);
+        assert!(
+            s.success_fx_until.is_none(),
+            "a running room must not sweep"
+        );
+
+        // The desk finishes and the compact tier retires the celebrate on the
+        // next sync, so the wall lands on WorkFinished.
+        s.sync_from_snapshots(&[snap("a", false)], false, GameTier::Compact, false);
+        s.sync_from_snapshots(&[], false, GameTier::Compact, false);
+        assert_eq!(s.wall, WallMode::WorkFinished);
+        let armed = s.success_fx_until.expect("WORK FINISHED must sweep");
+        assert!(s.success_wave_t().is_some(), "and it must be live");
+
+        // The wall stays on WorkFinished for the rest of the session: further
+        // syncs must not push the deadline out.
+        for _ in 0..4 {
+            s.sync_from_snapshots(&[], false, GameTier::Compact, false);
+        }
+        assert_eq!(
+            s.success_fx_until,
+            Some(armed),
+            "a sync on a wall that never left WorkFinished must not re-arm"
+        );
+
+        // A *new* success is a new event, and does get its own wave.
+        s.success_fx_until = None;
+        s.sync_from_snapshots(&[snap("b", true)], false, GameTier::Compact, false);
+        assert_eq!(s.wall, WallMode::Working);
+        s.sync_from_snapshots(&[snap("b", false)], false, GameTier::Compact, false);
+        s.sync_from_snapshots(&[], false, GameTier::Compact, false);
+        assert!(
+            s.success_fx_until.is_some(),
+            "the next WORK FINISHED must sweep again"
+        );
+    }
+
+    /// THE TRAP (RC16 §4 #8): the wave fires exactly as the room goes idle, so
+    /// if its bucket kept reaching the fingerprint after expiry the office would
+    /// recompose forever and the loop would never park. This pins all three
+    /// halves: the sweep moves the fingerprint while it runs, the fingerprint
+    /// returns to its **pre-wave value** at expiry, and `tick_anim` consumes the
+    /// deadline on the edge so `needs_animation_tick` goes false.
+    #[test]
+    fn expired_success_wave_is_consumed_and_lets_the_room_park() {
+        let mut s = GameModeState::new();
+        s.last_sync_at = Some(Instant::now());
+        s.clock_hm = (10, 3);
+        s.take_redraw_dirty();
+        let quiet = s.visual_fingerprint(80, 24);
+        assert!(!s.needs_animation_tick(), "control: an empty room parks");
+
+        s.success_fx_until = Some(Instant::now() + SUCCESS_WAVE);
+        assert!(s.needs_animation_tick(), "an armed wave holds the loop");
+        let early = s.visual_fingerprint(80, 24);
+        assert_ne!(early, quiet, "the sweep must recompose");
+        // Half-way through: a different bucket, so a different frame.
+        s.success_fx_until = Some(Instant::now() + SUCCESS_WAVE / 2);
+        assert_ne!(
+            s.visual_fingerprint(80, 24),
+            early,
+            "the crest must move with the bucket"
+        );
+
+        // Deadline passed, nothing has consumed it yet.
+        s.success_fx_until = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(
+            s.visual_fingerprint(80, 24),
+            quiet,
+            "an elapsed wave must fingerprint exactly like the pre-wave room"
+        );
+        assert!(
+            s.needs_animation_tick(),
+            "…but the room still owes it one repaint"
+        );
+
+        s.take_redraw_dirty();
+        s.tick_anim(GameTier::Normal);
+        assert!(
+            s.success_fx_until.is_none(),
+            "tick_anim must consume the expiry"
+        );
+        assert!(s.take_redraw_dirty(), "the un-lit room must be repainted once");
+        assert!(
+            !s.needs_animation_tick(),
+            "and then the room must park again (PERF-1)"
+        );
+        assert_eq!(s.visual_fingerprint(80, 24), quiet);
+    }
+
+    /// The recompose budget, stated as a test: one full sweep costs
+    /// [`SUCCESS_WAVE_BUCKETS`] repaints and no more, however many Slow ticks
+    /// happen to land inside its window.
+    #[test]
+    fn success_wave_repaint_budget_is_one_per_bucket() {
+        let mut s = GameModeState::new();
+        s.clock_hm = (10, 3);
+        s.success_fx_until = Some(Instant::now() + SUCCESS_WAVE);
+        s.take_redraw_dirty();
+
+        // Replay the whole window at the ~12 Hz Slow cadence without sleeping:
+        // `tick_anim` marks dirty exactly when the bucket at *this* tick differs
+        // from the bucket at the previous one, so stepping an `Instant` forward
+        // one interval at a time counts the repaints it would have made.
+        let start = Instant::now();
+        let at = |step: u64| start + Duration::from_millis(step * 83);
+        let mut marks = 0;
+        let mut buckets = std::collections::HashSet::new();
+        for step in 0..=SUCCESS_WAVE.as_millis() as u64 / 83 {
+            buckets.insert(s.success_wave_bucket_at(at(step)));
+            if s.success_wave_bucket_at(at(step)) != s.success_wave_bucket_at(at(step + 1)) {
+                marks += 1;
+            }
+        }
+        assert!(
+            marks <= SUCCESS_WAVE_BUCKETS,
+            "{marks} repaints for {SUCCESS_WAVE_BUCKETS} composable frames"
+        );
+        assert_eq!(
+            buckets.len() as u64,
+            SUCCESS_WAVE_BUCKETS,
+            "every bucket must be reachable at the Slow cadence, got {buckets:?}"
+        );
+    }
+
+    /// RC16 §4 #9: the typing cadence follows real token throughput, measured
+    /// against **wall time** (the sync is throttled and can skip, so a per-sync
+    /// delta would read a different rate depending on how busy the app was).
+    #[test]
+    fn token_throughput_buckets_the_typing_cadence() {
+        // One sample of `tokens` gained over `secs` seconds, from level `cur`.
+        let sample = |cur: BusyLevel, gained: u64, secs: f32| {
+            let mut d = DeskSlot {
+                busy: cur,
+                prev_tokens: 1000,
+                tokens_at: Instant::now() - Duration::from_secs_f32(secs),
+                ..DeskSlot::default()
+            };
+            d.sample_throughput(1000 + gained);
+            d.busy
+        };
+
+        assert_eq!(sample(BusyLevel::Normal, 200, 2.0), BusyLevel::Hot);
+        assert_eq!(sample(BusyLevel::Normal, 40, 2.0), BusyLevel::Normal);
+        assert_eq!(sample(BusyLevel::Normal, 0, 2.0), BusyLevel::Calm);
+        assert_eq!(sample(BusyLevel::Hot, 0, 2.0), BusyLevel::Calm);
+        assert_eq!(sample(BusyLevel::Calm, 200, 2.0), BusyLevel::Hot);
+
+        // Hysteresis: a rate sitting between the enter and exit gates must hold
+        // whatever level the desk is already in, or the cadence flickers.
+        let mid = ((BUSY_HOT_ENTER + BUSY_HOT_EXIT) / 2.0 * 2.0) as u64;
+        assert_eq!(sample(BusyLevel::Hot, mid, 2.0), BusyLevel::Hot);
+        assert_eq!(sample(BusyLevel::Normal, mid, 2.0), BusyLevel::Normal);
+        let low = ((BUSY_NORMAL_ENTER + BUSY_NORMAL_EXIT) / 2.0 * 2.0) as u64;
+        assert_eq!(sample(BusyLevel::Normal, low, 2.0), BusyLevel::Normal);
+        assert_eq!(sample(BusyLevel::Calm, low, 2.0), BusyLevel::Calm);
+
+        // Below the sample period nothing is measured at all — the window has
+        // to be long enough for the rate to mean something.
+        let mut fresh = DeskSlot {
+            busy: BusyLevel::Calm,
+            prev_tokens: 0,
+            tokens_at: Instant::now(),
+            ..DeskSlot::default()
+        };
+        fresh.sample_throughput(100_000);
+        assert_eq!(fresh.busy, BusyLevel::Calm, "one tick is not a rate");
+        assert_eq!(fresh.prev_tokens, 0, "…and the window must not restart");
+    }
+
+    /// End to end through the sync path: a streaming desk goes Hot and a silent
+    /// one decays back, whatever cadence the syncs themselves arrive at.
+    #[test]
+    fn sync_tracks_throughput_across_a_throttled_sync_rate() {
+        let mut s = GameModeState::new();
+        let mut a = snap("a", true);
+        a.tokens = 0;
+        s.sync_from_snapshots(&[a.clone()], false, GameTier::Comfort, false);
+        assert_eq!(s.desks[0].busy, BusyLevel::Normal, "a new seat starts flat");
+
+        // Several syncs inside one sample window change nothing...
+        a.tokens = 400;
+        for _ in 0..5 {
+            s.sync_from_snapshots(&[a.clone()], false, GameTier::Comfort, false);
+        }
+        assert_eq!(s.desks[0].busy, BusyLevel::Normal, "the window is still open");
+
+        // ...then one sync after the window elapses reads the whole delta.
+        s.desks[0].tokens_at = Instant::now() - Duration::from_secs(2);
+        a.tokens = 800;
+        s.sync_from_snapshots(&[a.clone()], false, GameTier::Comfort, false);
+        assert_eq!(s.desks[0].busy, BusyLevel::Hot, "800 tokens in 2 s is hot");
+
+        // A desk that stops streaming decays, even though its token count is
+        // now identical on every sync.
+        s.desks[0].tokens_at = Instant::now() - Duration::from_secs(2);
+        s.sync_from_snapshots(&[a], false, GameTier::Comfort, false);
+        assert_eq!(s.desks[0].busy, BusyLevel::Calm, "silence must cool down");
+    }
+
+    /// The cost of §4 #9, pinned: a Hot desk moves the fingerprint (and the
+    /// repaints) at `tick / 2` instead of `tick / 4`, a Calm one at `tick / 8`,
+    /// and neither can lower the floor below the global bucket the walkers, the
+    /// fail beat and the rack all ride.
+    #[test]
+    fn busy_level_sets_the_frame_bucket_and_the_repaint_rate() {
+        let seated = |busy: BusyLevel| {
+            let mut s = GameModeState::new();
+            s.desks[0].child_session_id = Some("w".into());
+            s.desks[0].phase = ActorPhase::AtDeskWorking;
+            s.desks[0].busy = busy;
+            s.clock_hm = (10, 3);
+            s
+        };
+
+        assert_eq!(seated(BusyLevel::Hot).frame_bucket_divisor(), 2);
+        assert_eq!(seated(BusyLevel::Normal).frame_bucket_divisor(), 4);
+        assert_eq!(seated(BusyLevel::Calm).frame_bucket_divisor(), 4, "floor");
+        assert_eq!(
+            GameModeState::new().frame_bucket_divisor(),
+            4,
+            "an empty room keeps the global bucket"
+        );
+
+        // A hot desk recomposes twice as often; a normal one is unchanged.
+        let mut hot = seated(BusyLevel::Hot);
+        let fp0 = hot.visual_fingerprint(80, 24);
+        hot.tick = 2;
+        assert_ne!(hot.visual_fingerprint(80, 24), fp0, "hot moves at tick/2");
+        let mut normal = seated(BusyLevel::Normal);
+        let fp1 = normal.visual_fingerprint(80, 24);
+        normal.tick = 2;
+        assert_eq!(normal.visual_fingerprint(80, 24), fp1, "normal at tick/4");
+
+        // The level itself is an input: same tick, different cadence bucket.
+        assert_ne!(
+            seated(BusyLevel::Hot).visual_fingerprint(80, 24),
+            seated(BusyLevel::Normal).visual_fingerprint(80, 24),
+            "the composed keyboard differs, so the level must be hashed"
+        );
+
+        // ...but only for the phase that composes a keyboard: a thinking desk's
+        // throughput must never dirty a frozen room (RC13 idle freeze).
+        let mut think = seated(BusyLevel::Normal);
+        think.desks[0].phase = ActorPhase::AtDeskThinking;
+        let idle = think.visual_fingerprint(80, 24);
+        think.desks[0].busy = BusyLevel::Hot;
+        assert_eq!(
+            think.visual_fingerprint(80, 24),
+            idle,
+            "a thinking desk composes no keyboard"
+        );
+        assert_eq!(think.frame_bucket_divisor(), 4);
+
+        // Repaint rate follows the same divisor, or composed frames never reach
+        // the screen.
+        assert_eq!(
+            dirty_marks_over(&mut seated(BusyLevel::Hot), GameTier::Normal, 8),
+            4,
+            "a hot desk repaints on tick/2 edges"
+        );
+        assert_eq!(
+            dirty_marks_over(&mut seated(BusyLevel::Normal), GameTier::Normal, 8),
+            2,
+            "…and a normal one is exactly as cheap as before RC16 §4 #9"
         );
     }
 
