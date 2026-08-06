@@ -83,7 +83,14 @@ impl CollectedDiagnostics {
             return;
         }
 
-        let display_path = uri.strip_prefix("file://").unwrap_or(uri); // Unix-only
+        // The reader of this summary gets a path they can open. A `file:` URI
+        // is percent-encoded and, on Windows, carries a leading slash before
+        // the drive, so chopping the scheme off showed `/H:/grok%20build/x.rs`.
+        let display_path = Url::parse(uri)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| uri.to_string());
         self.lines.push(format!("{display_path}:"));
         self.file_count += 1;
         self.shown += showing.len();

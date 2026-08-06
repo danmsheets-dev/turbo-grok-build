@@ -3407,6 +3407,115 @@ mod tests {
         }
     }
 
+    /// Portable "print the shell's current directory, and nothing else".
+    ///
+    /// `Get-Location` on its own renders a formatted table
+    /// (`Path\n----\nC:\…`), which is not a path; `$PWD.Path` is.
+    fn pwd_cmd() -> String {
+        #[cfg(windows)]
+        {
+            "Write-Output $PWD.Path".to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            "pwd".to_string()
+        }
+    }
+
+    /// Portable "change the shell's current directory".
+    fn cd_cmd(dir: &std::path::Path) -> String {
+        #[cfg(windows)]
+        {
+            format!("Set-Location -LiteralPath '{}'", dir.display())
+        }
+        #[cfg(not(windows))]
+        {
+            format!("cd '{}'", dir.display())
+        }
+    }
+
+    /// Two paths name the same directory. Windows is case-insensitive and can
+    /// hand back a different-but-equivalent spelling (8.3 vs long, drive case),
+    /// and macOS resolves `/tmp` to `/private/tmp`, so compare resolved forms
+    /// and fall back to the literal text when a path cannot be canonicalized.
+    fn same_dir(a: &str, b: &std::path::Path) -> bool {
+        let a = std::path::Path::new(a.trim());
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => a == b,
+        }
+    }
+
+    /// Portable "start a child that outlives this shell and keeps the
+    /// inherited stdout pipe open for `secs`".
+    ///
+    /// This is what forces the drain timeout: the shell exits, but the pipe
+    /// does not reach EOF until the orphan does. `Start-Process -NoNewWindow`
+    /// is the Windows equivalent of a POSIX `&` here — verified to hold the
+    /// pipe for the child's whole lifetime.
+    fn orphan_holding_pipe_cmd(secs: u64) -> String {
+        #[cfg(windows)]
+        {
+            format!(
+                "Start-Process -NoNewWindow powershell \
+                 -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds {secs}'"
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sleep {secs} &")
+        }
+    }
+
+    /// Portable "set an environment variable in this shell".
+    fn set_env_cmd(name: &str, value: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!("$env:{name} = '{value}'")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("export {name}={value}")
+        }
+    }
+
+    /// Portable "print `$name`, or the word `empty` when it is unset".
+    fn echo_env_or_empty_cmd(name: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!(
+                "if ($env:{name}) {{ Write-Output $env:{name} }} \
+                 else {{ Write-Output 'empty' }}"
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            format!("echo ${{{name}:-empty}}")
+        }
+    }
+
+    /// Portable "print `count` lines, one every `gap_ms` milliseconds".
+    ///
+    /// Each line is `{prefix}{i}` with `i` zero-padded to three digits, so the
+    /// per-line byte count is fixed and a byte-limit assertion is stable.
+    fn drip_cmd(prefix: &str, count: u32, gap_ms: u32) -> String {
+        #[cfg(windows)]
+        {
+            format!(
+                "foreach ($i in 1..{count}) {{ Write-Output ('{prefix}{{0:d3}}' -f $i); \
+                 Start-Sleep -Milliseconds {gap_ms} }}"
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let secs = format!("{}.{:03}", gap_ms / 1000, gap_ms % 1000);
+            format!(
+                "i=1; while [ $i -le {count} ]; do printf '{prefix}%03d\\n' \"$i\"; \
+                 sleep {secs}; i=$((i+1)); done"
+            )
+        }
+    }
+
     #[tokio::test]
     async fn run_background_preserves_description_on_snapshot() {
         let backend = LocalTerminalBackend::new();
@@ -3989,8 +4098,11 @@ mod tests {
             std::env::temp_dir().join(format!("terminal-test-bg-{}.out", std::process::id()));
 
         let request = TerminalRunRequest {
-            command: "echo background_test && sleep 0.1".to_string(),
-            working_directory: PathBuf::from("/tmp"),
+            // Two statements on separate lines rather than `&&`: PowerShell 5.1
+            // has no pipeline-chain operators, and `/tmp` is not a directory on
+            // Windows so it could never be a spawn cwd.
+            command: format!("{}\n{}", echo_cmd("background_test"), sleep_cmd(1)),
+            working_directory: std::env::temp_dir(),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
             output_byte_limit: 10000,
@@ -4071,7 +4183,7 @@ mod tests {
 
         let request = TerminalRunRequest {
             // Command that produces output over time (not all at once)
-            command: "for i in 1 2 3; do echo chunk_$i; sleep 0.15; done".to_string(),
+            command: drip_cmd("chunk_", 3, 150),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
             timeout: Duration::from_secs(5),
@@ -4128,8 +4240,8 @@ mod tests {
         );
 
         // The final output should contain all chunks
-        assert!(result.combined_output.contains("chunk_1"));
-        assert!(result.combined_output.contains("chunk_3"));
+        assert!(result.combined_output.contains("chunk_001"));
+        assert!(result.combined_output.contains("chunk_003"));
     }
 
     #[tokio::test]
@@ -4147,7 +4259,7 @@ mod tests {
         let request = TerminalRunRequest {
             // ~1.8 KB of ASCII over ~1.8s; far exceeds the 200-char limit so
             // truncation fires early and keeps firing on the shrinking tail.
-            command: "for i in $(seq 1 60); do printf 'LINE%03d-XXXXXXXXXXXXXXXXXXXX\\n' \"$i\"; sleep 0.03; done".to_string(),
+            command: drip_cmd("XXXXXXXXXXXXXXXXXXXX-LINE", 60, 30),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
             timeout: Duration::from_secs(10),
@@ -4511,11 +4623,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_background_child_with_inherited_pipe_does_not_block() {
-        // `sleep 300 &` inherits the pipe — without drain timeout this blocks forever.
+        // The orphan inherits the pipe — without drain timeout the read of the
+        // shell's stdout blocks until the orphan exits, not until the shell does.
         let backend = LocalTerminalBackend::new();
         let request = TerminalRunRequest {
-            command: "sleep 300 &\nsleep 1\necho done".to_string(),
-            working_directory: PathBuf::from("/tmp"),
+            command: format!(
+                "{}\n{}\n{}",
+                orphan_holding_pipe_cmd(60),
+                sleep_cmd(1),
+                echo_cmd("done")
+            ),
+            working_directory: std::env::temp_dir(),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
             output_byte_limit: 10000,
@@ -4772,6 +4890,13 @@ mod tests {
     /// in `self.processes` for `COMPLETED_TASK_TTL`; if the actor kept the `Arc`
     /// that long, a `kill_all()` on exit could `killpg` a pid the OS recycled.
     /// Asserts the injected scope's live-group count goes 1 -> 0 across the reap.
+    ///
+    /// Mirrors the product guard: the early drop is `#[cfg(unix)]` (see the
+    /// reap sweep at terminal.rs:1469 and its comment) because only `killpg`
+    /// can hit a recycled pid. On Windows the group is a JobObject HANDLE and
+    /// the `Arc` is deliberately held until the `ProcessState` is removed, so
+    /// `live_count() == 0` at reap is not the Windows contract.
+    #[cfg(unix)]
     #[test]
     fn reaped_background_child_leaves_scope_empty() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -4826,7 +4951,18 @@ mod tests {
     // ================================================================
     // Persistent shell tests
     // ================================================================
+    //
+    // The persistent shell is a unix-only product feature: `spawn_command`
+    // routes to it under `#[cfg(unix)]` (terminal.rs:623) and
+    // `spawn_persistent_command` itself is `#[cfg(unix)]` (terminal.rs:780).
+    // On Windows `with_persistent_shell()` builds a backend that never takes
+    // that path, so the tests below — which assert state carried between
+    // commands — are gated to match the guard rather than asserting a
+    // behaviour the product does not ship. Tests in this section that exercise
+    // something cross-platform (the GPG_TTY scrub, the pre-spawn cwd check)
+    // are deliberately left ungated.
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_cd_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -4845,6 +4981,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_env_var_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -4886,6 +5023,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_function_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -4905,6 +5043,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_variable_capture() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -4926,6 +5065,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_deleted_cwd_falls_back_to_request_cwd() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -4993,6 +5133,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_does_not_inherit_dump_errexit() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5023,17 +5164,19 @@ mod tests {
 
         let scratch = tempfile::TempDir::new().unwrap();
         let result = backend
-            .run(make_request(&format!("cd {}", scratch.path().display())))
+            .run(make_request(&cd_cmd(scratch.path())))
             .await
             .unwrap();
         assert_eq!(result.exit_code, Some(0));
         drop(scratch);
 
-        let result = backend.run(make_request("pwd")).await.unwrap();
+        let result = backend.run(make_request(&pwd_cmd())).await.unwrap();
         assert_eq!(result.exit_code, Some(0));
         let pwd = result.combined_output.trim();
+        // The request cwd is `make_request`'s — the host temp dir, which is
+        // neither `/tmp` on macOS nor a POSIX path at all on Windows.
         assert!(
-            pwd == "/tmp" || pwd == "/private/tmp",
+            same_dir(pwd, &std::env::temp_dir()),
             "spawns must use the request cwd, got: {pwd:?}"
         );
     }
@@ -5085,13 +5228,13 @@ mod tests {
         let backend = LocalTerminalBackend::new();
 
         let result = backend
-            .run(make_request("export SHOULD_NOT_PERSIST=yes"))
+            .run(make_request(&set_env_cmd("SHOULD_NOT_PERSIST", "yes")))
             .await
             .unwrap();
         assert_eq!(result.exit_code, Some(0));
 
         let result = backend
-            .run(make_request("echo ${SHOULD_NOT_PERSIST:-empty}"))
+            .run(make_request(&echo_env_or_empty_cmd("SHOULD_NOT_PERSIST")))
             .await
             .unwrap();
         assert_eq!(result.exit_code, Some(0));

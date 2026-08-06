@@ -43,9 +43,15 @@ pub(super) fn replay_tracked_documents(
     tracked_docs
         .iter()
         .filter_map(|(uri_str, lang_id)| {
-            let path = uri_str
-                .strip_prefix("file://")
-                .map(PathBuf::from)
+            // A `file:` URI is not the path with a prefix chopped off: it is
+            // percent-encoded (`grok%20build`), and on Windows it carries a
+            // leading slash before the drive (`file:///H:/x` -> `H:\x`).
+            // Chopping produced `/H:/x` and an unreadable path, so every
+            // tracked document was silently dropped and a restarted server was
+            // told about no files at all.
+            let path = Url::parse(uri_str)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
                 .unwrap_or_else(|| PathBuf::from(uri_str));
             let content = std::fs::read_to_string(&path).ok()?;
             let uri = file_uri(&path).ok()?;

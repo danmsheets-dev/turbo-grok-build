@@ -11,29 +11,31 @@ use std::path::PathBuf;
 const MOCK_LSP_SERVER: &str = r#"
 import json, sys
 
+# LSP framing is a byte protocol: the header terminators are literal CRLFs and
+# Content-Length counts bytes. Python's text-mode stdio would translate those
+# newlines on Windows (writing \r\r\n and reading \r\n as \n), so every mock
+# here speaks through the raw binary buffers, exactly as a real server does.
 def read_message():
     headers = {}
     while True:
-        line = sys.stdin.readline()
+        line = sys.stdin.buffer.readline()
         if not line:
             return None
-        if line.strip() == '':
+        if line.strip() == b'':
             break
-        if ':' in line:
-            key, value = line.split(':', 1)
-            headers[key.strip()] = value.strip()
+        if b':' in line:
+            key, value = line.split(b':', 1)
+            headers[key.strip().decode()] = value.strip().decode()
     length = int(headers.get('Content-Length', 0))
     if length == 0:
         return None
-    body = sys.stdin.read(length)
-    return json.loads(body)
+    return json.loads(sys.stdin.buffer.read(length))
 
 def send_message(msg):
-    body = json.dumps(msg)
-    header = f"Content-Length: {len(body)}\r\n\r\n"
-    sys.stdout.write(header)
-    sys.stdout.write(body)
-    sys.stdout.flush()
+    body = json.dumps(msg).encode('utf-8')
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
 
 def send_diagnostics(uri):
     send_message({
@@ -151,26 +153,28 @@ pub(super) fn write_delayed_diagnostics_server() -> (tempfile::TempDir, PathBuf)
     const DELAYED_SERVER: &str = r#"
 import json, sys, time
 
+# Binary stdio: see the note on MOCK_LSP_SERVER.
 def read_message():
     headers = {}
     while True:
-        line = sys.stdin.readline()
+        line = sys.stdin.buffer.readline()
         if not line:
             return None
-        if line.strip() == '':
+        if line.strip() == b'':
             break
-        if ':' in line:
-            key, value = line.split(':', 1)
-            headers[key.strip()] = value.strip()
+        if b':' in line:
+            key, value = line.split(b':', 1)
+            headers[key.strip().decode()] = value.strip().decode()
     length = int(headers.get('Content-Length', 0))
     if length == 0:
         return None
-    return json.loads(sys.stdin.read(length))
+    return json.loads(sys.stdin.buffer.read(length))
 
 def send_message(msg):
-    body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {len(body)}\r\n\r\n{body}")
-    sys.stdout.flush()
+    body = json.dumps(msg).encode('utf-8')
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
 
 while True:
     msg = read_message()
@@ -223,26 +227,28 @@ pub(super) fn write_slow_init_server(delay_ms: u64) -> (tempfile::TempDir, PathB
     let script = format!(
         r#"import json, sys, time
 
+# Binary stdio: see the note on MOCK_LSP_SERVER.
 def read_message():
     headers = {{}}
     while True:
-        line = sys.stdin.readline()
+        line = sys.stdin.buffer.readline()
         if not line:
             return None
-        if line.strip() == '':
+        if line.strip() == b'':
             break
-        if ':' in line:
-            key, value = line.split(':', 1)
-            headers[key.strip()] = value.strip()
+        if b':' in line:
+            key, value = line.split(b':', 1)
+            headers[key.strip().decode()] = value.strip().decode()
     length = int(headers.get('Content-Length', 0))
     if length == 0:
         return None
-    return json.loads(sys.stdin.read(length))
+    return json.loads(sys.stdin.buffer.read(length))
 
 def send_message(msg):
-    body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {{len(body)}}\r\n\r\n{{body}}")
-    sys.stdout.flush()
+    body = json.dumps(msg).encode('utf-8')
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
 
 while True:
     msg = read_message()
@@ -299,26 +305,28 @@ FAILURES_BEFORE_SUCCESS = {failures_before_success}
 COUNTER_FILE = os.environ["INIT_FAILURE_COUNTER_FILE"]
 INIT_ERROR = json.loads("{init_error_payload}")
 
+# Binary stdio: see the note on MOCK_LSP_SERVER.
 def read_message():
     headers = {{}}
     while True:
-        line = sys.stdin.readline()
+        line = sys.stdin.buffer.readline()
         if not line:
             return None
-        if line.strip() == '':
+        if line.strip() == b'':
             break
-        if ':' in line:
-            key, value = line.split(':', 1)
-            headers[key.strip()] = value.strip()
+        if b':' in line:
+            key, value = line.split(b':', 1)
+            headers[key.strip().decode()] = value.strip().decode()
     length = int(headers.get('Content-Length', 0))
     if length == 0:
         return None
-    return json.loads(sys.stdin.read(length))
+    return json.loads(sys.stdin.buffer.read(length))
 
 def send_message(msg):
-    body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {{len(body)}}\r\n\r\n{{body}}")
-    sys.stdout.flush()
+    body = json.dumps(msg).encode('utf-8')
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
 
 def increment_attempts():
     attempts = 0
@@ -371,30 +379,39 @@ while True:
 /// `read_message` / `send_message` / `publish` — the same for every mock.
 const MOCK_PREAMBLE: &str = r#"
 import json, sys
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 state = {"saves": 0, "pulls": 0}
 
+# A `file:` URI is not a path with a fixed-length prefix to chop off: on
+# Windows `file:///H:/x/y.ts` has to become `H:\x\y.ts`, not `/H:/x/y.ts`.
+# `url2pathname` is the platform-correct conversion (and un-percent-encodes).
+def uri_to_path(uri):
+    return url2pathname(urlparse(uri).path)
+
+# Binary stdio: see the note on MOCK_LSP_SERVER.
 def read_message():
     headers = {}
     while True:
-        line = sys.stdin.readline()
+        line = sys.stdin.buffer.readline()
         if not line:
             return None
-        if line.strip() == '':
+        if line.strip() == b'':
             break
-        if ':' in line:
-            key, value = line.split(':', 1)
-            headers[key.strip()] = value.strip()
+        if b':' in line:
+            key, value = line.split(b':', 1)
+            headers[key.strip().decode()] = value.strip().decode()
     length = int(headers.get('Content-Length', 0))
     if length == 0:
         return None
-    return json.loads(sys.stdin.read(length))
+    return json.loads(sys.stdin.buffer.read(length))
 
 def send_message(msg):
-    body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {len(body)}\r\n\r\n")
-    sys.stdout.write(body)
-    sys.stdout.flush()
+    body = json.dumps(msg).encode('utf-8')
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
 
 def one_diagnostic(message):
     return [{
@@ -577,7 +594,7 @@ def handle(msg, method):
         state["pulls"] += 1
         asked_about = state["revisions"]
         if state["pulls"] == 1:
-            path = msg["params"]["textDocument"]["uri"][len("file://"):]
+            path = uri_to_path(msg["params"]["textDocument"]["uri"])
             open(os.path.join(os.path.dirname(path), "first-pull-started"), "w").close()
         time.sleep(0.3)
         reply(msg, {
@@ -624,7 +641,7 @@ def handle(msg, method):
             reply(msg, {"kind": "full", "resultId": "r1",
                         "items": one_diagnostic("the problem")})
         elif state["pulls"] == 2:
-            path = msg["params"]["textDocument"]["uri"][len("file://"):]
+            path = uri_to_path(msg["params"]["textDocument"]["uri"])
             open(os.path.join(os.path.dirname(path), "second-pull-started"), "w").close()
             time.sleep(0.3)
             reply(msg, {"kind": "full", "resultId": "clean", "items": []})
