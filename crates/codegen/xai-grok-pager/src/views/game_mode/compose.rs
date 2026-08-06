@@ -64,7 +64,7 @@ const DOOR_OPEN_EXIT_T: f32 = 0.75;
 /// placement test can assert the rack clears them instead of re-typing literals.
 const PLANT_L_ANCHOR: (f32, f32) = (0.06, 0.62);
 const PLANT_R_ANCHOR: (f32, f32) = (0.90, 0.58);
-/// Moved down from 0.40h in RC16 §3 step 2: at 0.40h the mug floated on the wall
+/// Moved down from 0.40h in RC2 §3 step 2: at 0.40h the mug floated on the wall
 /// *inside* the rack footprint below. 0.48h stands it on the carpet in front of
 /// the rack, clear of both the rack (ends 0.46h) and the right plant (0.58h).
 const COFFEE_ANCHOR: (f32, f32) = (0.88, 0.48);
@@ -88,7 +88,7 @@ const RACK_ANCHOR: (f32, f32) = (0.947, 0.318);
 
 /// Footprint of the baked rack, as fractions of the canvas.
 ///
-/// Also the rack's hover hit box for RC16 §3 step 3 — same contract as
+/// Also the rack's hover hit box for RC2 §3 step 3 — same contract as
 /// [`SUPERVISOR_COVER_W_FRAC`], and the reason [`rack_scale`] never lets the
 /// sprite grow past it.
 const RACK_COVER_W_FRAC: f32 = 0.087;
@@ -98,7 +98,7 @@ const RACK_COVER_H_FRAC: f32 = 0.283;
 ///
 /// Like [`RACK_ANCHOR`], this is the mockup's own prop: `office_bg.png` bakes a
 /// round wall clock — permanently reading 4 o'clock — above the boss's rug, its
-/// white face spanning x 684..738, y 135..183 of 1448×1086. RC16 §4 #12 makes it
+/// white face spanning x 684..738, y 135..183 of 1448×1086. RC2 §4 #12 makes it
 /// tell the time by wiping that face and drawing the hands from the local clock
 /// ([`super::state::GameModeState::clock_hm`]), so the room keeps exactly one
 /// clock and needs no new geometry.
@@ -114,7 +114,7 @@ const CLOCK_ANCHOR: (f32, f32) = (0.491, 0.146);
 const CLOCK_FACE_W_FRAC: f32 = 0.038;
 const CLOCK_FACE_H_FRAC: f32 = 0.045;
 
-/// Ends of the floor robot's patrol, as fractions of canvas width (RC16 §4 #11).
+/// Ends of the floor robot's patrol, as fractions of canvas width (RC2 §4 #11).
 ///
 /// The path is the strip of carpet *nearest the viewer*, which is why it may run
 /// the full width of the room instead of hiding in the margin bands the plants
@@ -137,7 +137,7 @@ const ROOMBA_FLOOR_GAP_FRAC: f32 = 0.02;
 /// room tall.
 const ROOMBA_MAX_H_FRAC: f32 = 0.10;
 
-/// Steps in one end-to-end sweep of the patrol (RC16 §4 #11).
+/// Steps in one end-to-end sweep of the patrol (RC2 §4 #11).
 ///
 /// The robot advances one step per `tick / 4` bucket — the bucket the office
 /// already samples and already hashes — so 48 steps is ~16 s per crossing at the
@@ -265,7 +265,7 @@ fn rack_scale(w: u32, h: u32) -> u32 {
     fit.floor().clamp(1.0, 5.0) as u32
 }
 
-/// Scale for the 14×8 [`sprite_roomba`] on a `w`×`h` canvas (RC16 §4 #11).
+/// Scale for the 14×8 [`sprite_roomba`] on a `w`×`h` canvas (RC2 §4 #11).
 ///
 /// [`prop_scale`] with a height fit floored on top, for the same reason
 /// [`rack_scale`] floors: the robot's whole claim is that its patrol strip sits
@@ -315,7 +315,7 @@ fn roomba_moves_right(step: u64) -> bool {
 // Keys are stable per (kind, skin, canonical frame, scale); plant/coffee are
 // static. The frame in a key is always the sprite's *canonical* frame (see
 // `sprites_pixel::{dev_at_desk_frame_key, walk_frame_key, supervisor_frame_key}`)
-// so frames that render identical art share one entry (RC16 P8).
+// so frames that render identical art share one entry (RC2 P8).
 use std::sync::Arc;
 
 /// Cache cap, in entries.
@@ -327,7 +327,7 @@ use std::sync::Arc;
 /// the `(tick/4)%4` frame counter), 2 doors (open / closed), 5 MCP racks (idle
 /// plus the 4 active frames the same counter reaches), 2 floor robots (the two
 /// [`roomba_frame_key`] frames) and 3 statics (empty desk, plant, coffee).
-/// Before RC16 P8 frame quantization the character set alone needed 111, which
+/// Before RC2 P8 frame quantization the character set alone needed 111, which
 /// is why a 128-entry cap thrashed.
 ///
 /// 256 leaves room for two full scale-sets (210, i.e. mid-resize) plus ~46 keys
@@ -386,7 +386,7 @@ thread_local! {
 }
 
 /// Declare the scales this compose pass will draw at and drop everything built
-/// at any other scale (RC16 P8).
+/// at any other scale (RC2 P8).
 ///
 /// A resize changes every derived scale at once, so the previous stage's entries
 /// become garbage in a single step. Dropping them here keeps the map at ~one
@@ -598,7 +598,7 @@ fn paint_boss_rug(canvas: &mut RgbaImage, cx: i32, cy: i32, cover_w: i32, cover_
 
 /// Pose frame for [`sprite_developer_celebrate`], driven by the desk's `anim_t`.
 ///
-/// TIMING NOTE (RC16 §4 #2): Celebrate lasts 400 ms — about 5 Slow ticks — but
+/// TIMING NOTE (RC2 §4 #2): Celebrate lasts 400 ms — about 5 Slow ticks — but
 /// the `tick / 4` sprite bucket every other pose rides advances only every
 /// ~330 ms, so a bucket-driven celebrate pose showed **one** frame for the whole
 /// celebration. `anim_t` is per-desk and advances every tick, and
@@ -616,7 +616,7 @@ fn celebrate_pose_frame(anim_t: f32) -> u8 {
     ((anim_t.clamp(0.0, 1.0) * 4.0) as u8) % 2
 }
 
-/// Falling multi-colour confetti over a celebrating desk (RC16 §4 #2).
+/// Falling multi-colour confetti over a celebrating desk (RC2 §4 #2).
 ///
 /// Procedural like [`paint_fx_handoff_papers`] — no sprite, so zero cache keys.
 /// `t` is the desk's `anim_t`; each piece is released a little later than the
@@ -708,7 +708,7 @@ fn paint_fx_handoff_papers(canvas: &mut RgbaImage, cx: i32, cy: i32, t: f32, w: 
     }
 }
 
-/// Dust the floor robot kicks up behind itself (RC16 §4 #11).
+/// Dust the floor robot kicks up behind itself (RC2 §4 #11).
 ///
 /// Procedural like [`paint_fx_confetti`] — no sprite, so **zero cache keys**.
 /// The puffs trail the direction of travel and fade with distance, which is what
@@ -752,7 +752,7 @@ fn paint_fx_roomba_dust(canvas: &mut RgbaImage, cx: i32, cy: i32, step: u64, sc:
     }
 }
 
-/// Office-wide golden light sweeping left→right on WORK FINISHED (RC16 §4 #8).
+/// Office-wide golden light sweeping left→right on WORK FINISHED (RC2 §4 #8).
 ///
 /// Procedural like [`paint_fx_confetti`] — **zero cache keys** — and a *blend*
 /// like [`paint_boss_rug`] rather than a fill, so it lifts the room's own art
@@ -821,7 +821,7 @@ const HOUR_TINTS: [([u8; 3], i32); 4] = [
     ([80, 112, 190], 20),    // 20–04 night: cool moonlight
 ];
 
-/// Which [`HOUR_TINTS`] band a local hour falls in (RC16 §4 #12).
+/// Which [`HOUR_TINTS`] band a local hour falls in (RC2 §4 #12).
 ///
 /// A pure function of the hour, which
 /// [`super::state::GameModeState::visual_fingerprint`] already hashes as part of
@@ -842,7 +842,7 @@ pub(super) fn hour_tint_band(hour: u8) -> u8 {
 /// rebuild** path only — i.e. on a resize or an hour-band change, a handful of
 /// times a day — never per compose. A full-canvas blend on every fingerprint
 /// miss would have added an O(canvas) pass to every walk frame, which is exactly
-/// the cost RC16 PERF-4 already complains about.
+/// the cost RC2 PERF-4 already complains about.
 pub(super) fn apply_hour_tint(img: &mut RgbaImage, band: u8) {
     let (tint, pct) = HOUR_TINTS[usize::from(band).min(HOUR_TINTS.len() - 1)];
     if pct == 0 {
@@ -856,7 +856,7 @@ pub(super) fn apply_hour_tint(img: &mut RgbaImage, band: u8) {
     }
 }
 
-/// Hands on the mockup's baked wall clock, from the local time (RC16 §4 #12).
+/// Hands on the mockup's baked wall clock, from the local time (RC2 §4 #12).
 ///
 /// Procedural like [`paint_fx_confetti`] — **zero cache keys**. Caching a sprite
 /// per minute would have meant 288 entries (24 h × 6 ten-minute steps × idle/lit
@@ -979,11 +979,11 @@ fn desk_typing_frame(tick: u64, desk: usize, busy: BusyLevel) -> u8 {
     desk_frame(((tick / busy.frame_divisor()) % 4) as u8, desk)
 }
 
-/// Whether the MCP rack's LEDs chase this frame (RC16 §4 #5).
+/// Whether the MCP rack's LEDs chase this frame (RC2 §4 #5).
 ///
 /// The signal is **real tool-call traffic**: a seated desk's `tool_calls`
 /// counter going up arms [`GameModeState::rack_active_until`] for
-/// `RACK_BURST`, and the rack is lit for exactly that window. RC16 §3 step 2
+/// `RACK_BURST`, and the rack is lit for exactly that window. RC2 §3 step 2
 /// shipped a placeholder here — "any desk typing" — which lit the rack for the
 /// whole life of every subagent whether or not a single tool was ever called.
 ///
@@ -1058,7 +1058,7 @@ fn door_is_open(state: &GameModeState) -> bool {
 /// - `WalkToBoss` crosses desk → supervisor,
 /// - `Handoff` stands on the rug (the *walker* does not move with `anim_t`; the
 ///   papers FX blitted over it does — see [`paint_fx_handoff_papers`]),
-/// - `ExitDoor` mirrors the entry back out: rug → door (RC16 BUG-3; it used to
+/// - `ExitDoor` mirrors the entry back out: rug → door (RC2 BUG-3; it used to
 ///   restart 45% back along the desk line and walk *into* the supervisor again).
 fn walk_position(phase: ActorPhase, anim_t: f32, cx: i32, cy: i32, w: u32, h: u32) -> (f32, f32) {
     let t = anim_t.clamp(0.0, 1.0);
@@ -1094,7 +1094,7 @@ fn walk_position(phase: ActorPhase, anim_t: f32, cx: i32, cy: i32, w: u32, h: u3
 /// - Ambient plant/coffee and character sprites come from the scaled cache.
 /// - Idle/Waiting supervisor and thinking desks stay off the `tick / 4` bucket
 ///   so pure-idle ticks still freeze; they read the much slower
-///   `GameModeState::ambient_frame` instead (RC16 §4 #7).
+///   `GameModeState::ambient_frame` instead (RC2 §4 #7).
 pub fn compose_cell_frame(bg_scaled: &RgbaImage, state: &GameModeState, tick: u64) -> RgbaImage {
     let mut canvas = RgbaImage::new(bg_scaled.width(), bg_scaled.height());
     compose_cell_frame_into(&mut canvas, bg_scaled, state, tick);
@@ -1144,7 +1144,7 @@ pub fn compose_cell_frame_into_at(
     let sup_sc = (((w as f32 * 0.072) / 26.0).max(1.0).round().min(5.0) as u32).max(1);
     let rack_sc = rack_scale(w, h);
     let roomba_sc = roomba_scale(w, h);
-    // RC16 P8: retire sprites rasterised for a previous stage size before this
+    // RC2 P8: retire sprites rasterised for a previous stage size before this
     // pass touches the cache, so a resize cannot push the live set over the cap.
     // The robot derives its own scale from the canvas height, so — exactly like
     // the rack — that scale has to be declared live or a resize could strand it.
@@ -1224,7 +1224,7 @@ pub fn compose_cell_frame_into_at(
         // The idle/waiting pose stays off the ~12 Hz `tick / 4` bucket — that is
         // still the RC13 freeze — but it now rides the slow ambient step, so the
         // coffee steam that has been in this sprite since RC13 and never once
-        // moved finally alternates (RC16 §4 #7). `supervisor_frame_key` reads
+        // moved finally alternates (RC2 §4 #7). `supervisor_frame_key` reads
         // `frame % 2` for phase 0, which is exactly the ambient frame's domain,
         // so this adds no cache key.
         let sup_frame = if matches!(
@@ -1345,7 +1345,7 @@ pub fn compose_cell_frame_into_at(
             ActorPhase::AtDeskWorking => {
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 // Typing cadence rides the desk's own throughput bucket, not the
-                // room's global one (RC16 §4 #9) — same 0..4 frame domain, so no
+                // room's global one (RC2 §4 #9) — same 0..4 frame domain, so no
                 // new cache keys.
                 let spr = cached_dev_at_desk(
                     desk.skin,
@@ -1362,7 +1362,7 @@ pub fn compose_cell_frame_into_at(
             }
             ActorPhase::AtDeskThinking => {
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
-                // Slow ambient frame, not the `tick / 4` bucket (RC16 §4 #7):
+                // Slow ambient frame, not the `tick / 4` bucket (RC2 §4 #7):
                 // doubling it lands on 0 / 2, the two canonical keys
                 // `dev_at_desk_frame_key` already collapses idle frames onto —
                 // mug-on-desk + thinking bubble, and mug-at-the-face sip. Zero
@@ -1379,7 +1379,7 @@ pub fn compose_cell_frame_into_at(
         }
     }
 
-    // The floor robot, after the desks (RC16 §4 #11).
+    // The floor robot, after the desks (RC2 §4 #11).
     //
     // This is not a break in the props→supervisor→desks order, it is the y-sort:
     // the patrol strip is the carpet nearest the viewer (see
@@ -1403,7 +1403,7 @@ pub fn compose_cell_frame_into_at(
     }
 
     // Last, over everything: the one-shot success sweep is *lighting*, so it
-    // has to lift the desks and the boss as well as the room (RC16 §4 #8).
+    // has to lift the desks and the boss as well as the room (RC2 §4 #8).
     if let Some(t) = state.success_wave_t(now) {
         paint_fx_success_wave(canvas, t, w);
     }
@@ -1532,7 +1532,7 @@ mod tests {
         );
     }
 
-    /// Same contract for the rack box (RC16 §3 step 3): it must cover the baked
+    /// Same contract for the rack box (RC2 §3 step 3): it must cover the baked
     /// chassis the sprite is fitted into, stay inside the stage at every office
     /// geometry, and collapse to nothing on a degenerate stage — a zero-size
     /// `Rect` is how `render_game_mode` says "no rack painted here".
@@ -1786,7 +1786,7 @@ mod tests {
         }
     }
 
-    /// RC16 §4 #6: the door state must be a pure function of what
+    /// RC2 §4 #6: the door state must be a pure function of what
     /// `visual_fingerprint` already hashes, i.e. two `anim_t` values sharing the
     /// `(anim_t * 20.0) as u8` bucket must never disagree about the door. If
     /// they could, the office would show a door state the fingerprint cannot
@@ -1851,7 +1851,7 @@ mod tests {
         assert!(render(1.0).iter().all(|b| *b == 0));
     }
 
-    /// RC16 §4 #2: the celebrate pose is driven by `anim_t`, so it is bound by
+    /// RC2 §4 #2: the celebrate pose is driven by `anim_t`, so it is bound by
     /// the same rule the door is — two `anim_t` values that share the
     /// fingerprint's `(anim_t * 20.0) as u8` bucket must never render different
     /// poses, or the office shows a frame the fingerprint cannot distinguish.
@@ -1936,7 +1936,7 @@ mod tests {
         a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
     }
 
-    /// RC16 §3 step 2: the rack lands on the mockup's own "MCP SERVER" rack and
+    /// RC2 §3 step 2: the rack lands on the mockup's own "MCP SERVER" rack and
     /// must touch nothing else — not a desk (whose clear-stamp would erase it),
     /// not the supervisor rug, not the door column, not a plant or the mug.
     /// Checked against the *cover* footprint, which is both what [`rack_scale`]
@@ -2105,7 +2105,7 @@ mod tests {
             let mut busy = GameModeState::new();
             busy.desks[0].child_session_id = Some("a".into());
             busy.desks[0].phase = ActorPhase::AtDeskWorking;
-            // RC16 §4 #5: the rack answers to real tool calls, not to a desk
+            // RC2 §4 #5: the rack answers to real tool calls, not to a desk
             // merely existing — arm the burst the way a sync would.
             busy.rack_active_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
@@ -2142,7 +2142,7 @@ mod tests {
         assert_eq!(sprite_cache_len(), 4, "the chase must not collapse");
     }
 
-    /// RC16 §4 #12: the hands must land on the mockup's own baked clock face —
+    /// RC2 §4 #12: the hands must land on the mockup's own baked clock face —
     /// the whole design is "make the existing prop tell the time", so a drifted
     /// anchor would paint a second clock on bare wall. Checked as: the composed
     /// frame differs from the background inside the face, the hands move with
@@ -2243,7 +2243,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #8: the crest must actually cross the room left→right, must
+    /// RC2 §4 #8: the crest must actually cross the room left→right, must
     /// *lighten* what it touches rather than paint over it, and must leave the
     /// room byte-identical at the end of its sweep — that last part is what lets
     /// the office re-freeze on the frame it had before the success.
@@ -2336,7 +2336,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #9: a hot desk must type visibly faster than a calm one, and the
+    /// RC2 §4 #9: a hot desk must type visibly faster than a calm one, and the
     /// whole spread must stay inside the `0..4` frame domain the cache keys are
     /// budgeted for — the cadence is free precisely because it adds no keys.
     #[test]
@@ -2362,7 +2362,7 @@ mod tests {
             assert_eq!(row.len(), 4, "{busy:?}: desks must cover all four frames");
         }
 
-        // Normal is exactly the pre-RC16-§4-#9 cadence: the global bucket.
+        // Normal is exactly the pre-RC2-§4-#9 cadence: the global bucket.
         for tick in 0..32u64 {
             assert_eq!(
                 desk_typing_frame(tick, 2, BusyLevel::Normal),
@@ -2372,7 +2372,7 @@ mod tests {
         }
     }
 
-    /// RC16 §4 #12: the tint bands must cover the whole day, the working day
+    /// RC2 §4 #12: the tint bands must cover the whole day, the working day
     /// must stay untinted (zero cost, and the office is read at its own colours
     /// when people are actually looking at it), and the blend must stay in gamut.
     #[test]
@@ -2416,7 +2416,7 @@ mod tests {
         }
     }
 
-    /// RC16 §4 #7: the two ambient sprites must actually change between ambient
+    /// RC2 §4 #7: the two ambient sprites must actually change between ambient
     /// steps — and must do so **without** the `tick / 4` bucket moving, which is
     /// the whole point (the idle office stays frozen at ~12 Hz and animates at
     /// ~0.4 Hz instead).
@@ -2475,7 +2475,7 @@ mod tests {
         assert_eq!(all_frames, 4, "2 idle dev poses + 2 idle supervisor poses");
     }
 
-    /// RC16 §4 #11: the robot is blitted *after* the desks, which is only the
+    /// RC2 §4 #11: the robot is blitted *after* the desks, which is only the
     /// right y-sort if its patrol really is the strip of carpet nearest the
     /// viewer. So at every stage shape and every step of the cycle the sprite
     /// must stay on the canvas and stay below every desk's clear area — the band

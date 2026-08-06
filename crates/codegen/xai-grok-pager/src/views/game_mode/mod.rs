@@ -47,14 +47,14 @@ const ANIM_TICK_JITTER: Duration = Duration::from_millis(8);
 ///
 /// Must stay `<= SLOW_TICK_INTERVAL` (pinned by `anim_gate_fires_every_slow_tick`):
 /// a hardcoded 90 ms gate sat *above* the 83 ms interval and halved the effective
-/// animation rate to ~6 Hz (RC16 BUG-2).
+/// animation rate to ~6 Hz (RC2 BUG-2).
 fn anim_tick_gate() -> Duration {
     SLOW_TICK_INTERVAL.saturating_sub(ANIM_TICK_JITTER)
 }
 
 /// Minimum wall time between full snapshot rebuilds.
 ///
-/// PERF (RC16 PERF-3): the tick path had no throttle at all, so a pending
+/// PERF (RC2 PERF-3): the tick path had no throttle at all, so a pending
 /// permission — which pushes `tick_demand` to Fast (~30 Hz) and is *exactly*
 /// the state the wall advertises as "WAITING ON YOU" — tripled the rebuild
 /// rate while nothing changed. Gate on the Slow cadence instead, independent
@@ -72,7 +72,7 @@ pub fn snapshots_from_subagents(
 
 /// [`snapshots_from_subagents`] restricted to the entries the room can act on.
 ///
-/// PERF (RC16 PERF-2): `subagent_sessions` is insert-only — it grows for the
+/// PERF (RC2 PERF-2): `subagent_sessions` is insert-only — it grows for the
 /// whole session — and every rebuild allocated ~4 Strings per entry plus a
 /// sort. Completed subagents that no longer hold a desk cannot change anything
 /// downstream ([`crate::views::game_mode::wall::compute_wall_mode`] only reads
@@ -98,7 +98,7 @@ fn snapshots_filtered(
             // finished the authoritative final count wins. Mirrors the Tasks
             // pane (`views::tasks_pane::format_subagent_metrics`); Game Mode
             // had the precedence inverted and left a stale live count on the
-            // desk HUD of a finished agent (RC16 B10).
+            // desk HUD of a finished agent (RC2 B10).
             let tool_calls = if info.finished {
                 info.tool_calls.or(info.tool_call_count)
             } else {
@@ -133,7 +133,7 @@ fn snapshots_filtered(
 /// Delegates to the dashboard's classifier so the two vocabularies cannot drift
 /// apart: the inline `"failed" | "cancelled"` match here already missed
 /// `"error"`, which would have celebrated a failed subagent and walked it to
-/// the supervisor for a handoff (RC16 B9).
+/// the supervisor for a handoff (RC2 B9).
 fn info_failed(info: &SubagentInfo) -> bool {
     matches!(
         crate::views::dashboard::classify_subagent(info),
@@ -144,7 +144,7 @@ fn info_failed(info: &SubagentInfo) -> bool {
 /// Order-independent signature of everything a sync reads out of the subagent
 /// map, plus the per-call sync inputs.
 ///
-/// PERF (RC16 PERF-2): hashing the map in place is allocation-free, so an
+/// PERF (RC2 PERF-2): hashing the map in place is allocation-free, so an
 /// unchanged map costs one O(entries) pass instead of a full snapshot rebuild
 /// (~4 Strings per entry) plus a sort and O(desks x entries) scans.
 ///
@@ -197,7 +197,7 @@ pub fn supervisor_is_working(agent: &AgentView) -> bool {
 /// **Single-owner:** prefer calling from [`crate::app::app_view::AppView::tick`].
 /// Paint path should call only when [`GameModeState::needs_paint_sync`].
 ///
-/// PERF: the snapshot rebuild is gated twice (RC16 PERF-2/PERF-3): at most once
+/// PERF: the snapshot rebuild is gated twice (RC2 PERF-2/PERF-3): at most once
 /// per [`sync_gate`] regardless of the caller's cadence, and then only when
 /// [`subagent_signature`] or the room's in-flight state actually changed.
 /// `tick_anim` keeps its own [`anim_tick_gate`] and still runs on every call.
@@ -206,15 +206,15 @@ pub fn supervisor_is_working(agent: &AgentView) -> bool {
 /// (~12 Hz) **only while the room can animate** ([`GameModeState::needs_animation_tick`]).
 /// A frozen office drops to [`crate::app::app_view::TickDemand::Ambient`]
 /// (~0.33 Hz) for the coffee sip / steam / wall clock
-/// ([`GameModeState::needs_ambient_tick`], RC16 §4 #7), and to `None` outright
-/// once the pixel office is not on screen (RC16 PERF-1). Pixel recompose is
+/// ([`GameModeState::needs_ambient_tick`], RC2 §4 #7), and to `None` outright
+/// once the pixel office is not on screen (RC2 PERF-1). Pixel recompose is
 /// fingerprint-gated; redraw is dirty-gated so frozen idle rooms do not force a
 /// full office paint every Slow tick.
 ///
 /// `stage_width`/`stage_height` are the **stage** dims — the paint area with the
 /// status strip already peeled ([`stage_rect`]) — so the tier here equals the
 /// painted tier by construction. Do not pass a raw paint area: `compute_layout`
-/// would peel a second time and drop the tick tier a row (RC16 BUG-1).
+/// would peel a second time and drop the tick tier a row (RC2 BUG-1).
 pub fn sync_game_mode(agent: &mut AgentView, stage_width: u16, stage_height: u16) -> bool {
     if !agent.game_mode.open {
         return false;
@@ -236,7 +236,7 @@ pub fn sync_game_mode(agent: &mut AgentView, stage_width: u16, stage_height: u16
         refresh_mcp_snapshot(agent);
         let sig = subagent_signature(&agent.subagent_sessions, working, waiting_on_user, tier);
         // Identical inputs + a room with nothing in flight ⇒ the sync is a
-        // provable no-op; skip the rebuild entirely (RC16 PERF-2).
+        // provable no-op; skip the rebuild entirely (RC2 PERF-2).
         let skippable =
             agent.game_mode.last_sync_sig == Some(sig) && agent.game_mode.room_is_settled();
         if !skippable {
@@ -258,7 +258,7 @@ pub fn sync_game_mode(agent: &mut AgentView, stage_width: u16, stage_height: u16
 /// Refresh the Supervisor hover card's data from the live agent.
 ///
 /// Overlay-only by construction: nothing here marks redraw dirty (that would
-/// un-park a frozen room — RC16 PERF-1) and nothing here reaches
+/// un-park a frozen room — RC2 PERF-1) and nothing here reaches
 /// [`GameModeState::visual_fingerprint`]. The card is repainted by whatever
 /// already repaints the office, which is guaranteed while any of this can move:
 /// a running turn puts the Supervisor in `Working`, and that both animates the
@@ -371,7 +371,7 @@ fn rebuild_from_subagents(
     let seats_before = agent.game_mode.active_desk_count();
     // Hashed once per sync instead of twice: the post-sync value is cached and
     // reused as the "before" of the next sync. `tick_anim` drops the cache
-    // whenever it may have moved a phase, so it is never stale (RC16 PERF-2).
+    // whenever it may have moved a phase, so it is never stale (RC2 PERF-2).
     let phase_sig_before = agent
         .game_mode
         .last_phase_sig
@@ -411,7 +411,7 @@ fn rebuild_from_subagents(
 /// `overflow_count` is included because the +N door badge and the status strip
 /// render it while the seats, phases and wall all stay put: a 7th subagent
 /// arriving at a full room changed nothing else, so the badge went stale
-/// (RC16 B11).
+/// (RC2 B11).
 fn phase_signature(state: &GameModeState) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -419,7 +419,7 @@ fn phase_signature(state: &GameModeState) -> u64 {
         d.child_session_id.hash(&mut h);
         (d.phase as u8).hash(&mut h);
         d.failed.hash(&mut h);
-        // Typing cadence (RC16 §4 #9). A level change alters the composed
+        // Typing cadence (RC2 §4 #9). A level change alters the composed
         // keyboard on the *next* frame bucket, so the office would repaint
         // within ~4 ticks anyway — including it here just makes the new cadence
         // start on the sync that derived it. Bounded by the sample period and
@@ -544,12 +544,12 @@ mod tests {
         let mut agent =
             crate::app::agent_view::test_agent_view(None, std::path::PathBuf::from("."));
         agent.game_mode.open = true;
-        agent.current_branch = Some("rc16-game-mode".to_string());
+        agent.current_branch = Some("rc2-game-mode".to_string());
         sync_game_mode(&mut agent, 100, 20);
         assert_eq!(agent.game_mode.sync_rebuilds, 1, "first sync rebuilds");
         assert_eq!(
             agent.game_mode.supervisor_info.branch.as_deref(),
-            Some("rc16-game-mode")
+            Some("rc2-game-mode")
         );
         assert_eq!(
             agent.game_mode.supervisor_info.turn_elapsed, None,

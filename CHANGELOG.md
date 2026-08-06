@@ -26,25 +26,73 @@ accelerated at r6; product rebrand to **Turbo** at r10.
 | r12 | `0.2.114-r12` | Isolation FS jail, densify, MCP harden |
 | r13 | `0.2.114-r13` | Workspace Tree inject, Game Mode perf |
 | r14 | `0.2.114-r14` | **web_fetch**, **workflow routing**, English-only |
-| **r15** | **`0.2.119-r1`** | **Upstream 0.2.119 sync**, security + Windows correctness |
+| r15 | `0.2.119-r1` | Upstream 0.2.119 sync, security + Windows correctness |
+| **r2** | **`0.2.119-r2`** | **Game Mode overhaul**, disk gates, tools list |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
 
 ---
 
-## [Unreleased] - RC16 disk gates + tools list
+## [0.2.119-r2] - 2026-08-05
+
+**Turbo Grok Build RC2.** Second RC on the `0.2.119` wire line. Headline is a
+full Game Mode overhaul — every confirmed bug and performance finding from the
+[RC2 Game Mode audit](./docs/RC2_GAME_MODE_AUDIT.md) fixed, two new hover
+tooltips, and eleven new sprite animations. Game Mode test coverage went 25 →
+132.
 
 ### Added
+- **Game Mode — Supervisor hover tooltip:** model, phase, turn elapsed, context
+  window used/total, seat + overflow counts, wall state, git branch.
+- **Game Mode — MCP server rack:** the rack sprite is now composed into the
+  office, with a hover tooltip listing each server's status, tool count and
+  failure detail. Backed by a new per-agent MCP status cache so status is live
+  outside the `/mcps` modal (pushes were previously dropped when it closed).
+- **Game Mode — eleven sprite animations:** debug-rage fail pose with a red
+  error monitor, arms-up celebrate with confetti, papers flying during handoff,
+  monitor glow + compile flash, swinging door on spawn/exit, MCP rack LED bursts
+  keyed to real tool calls, coffee-sip idle (which revives the previously dead
+  idle steam and thinking-bubble blink), real day/night wall clock with hour
+  tint, office-wide success wave on WORK FINISHED, typing cadence driven by
+  token throughput, and a floor robot that patrols only while the office is busy.
 - `turbo tools list [--json] [--require NAME]` — headless schema assert for registered model-facing tools (respects `GROK_SUBAGENTS` / `[subagents] enabled`).
 - `turbo disk check [--min-free-gb N]` — fail closed under free-space gate (default `GROK_MIN_FREE_GB=40`).
 - `turbo disk clean --safe --if-low-space` — reclaim only when under the free-space gate.
 - Disk report surfaces **min free** threshold status and **keep-N** vs live `subagent-*` count.
 
+### Fixed
+- **Game Mode tier off-by-one:** the tick path re-peeled the status strip, so at
+  a 19-row paint area every tick snap-cleared walks, celebrates and handoffs
+  while the office still painted them — those animations were impossible at that
+  terminal height. Tick and paint tiers now match by construction.
+- **Game Mode animation cadence:** the 90 ms animation gate sat above the 83 ms
+  Slow tick interval and dropped every other tick, so the office ran at ~6 Hz
+  and the wall clock at half real time. The gate is now derived from
+  `SLOW_TICK_INTERVAL` so the two cannot drift apart.
+- **Exit walk:** after a handoff the developer teleported backward and walked
+  into the supervisor again instead of leaving. It now exits through the door.
+- Nine further Game Mode correctness bugs: hover popup clipping, failure-status
+  vocabulary drift against the dashboard classifier, stale tool-call counts on
+  finished agents, stale overflow badge, Unicode art alignment, token unit
+  rounding at boundaries, and a dead supervisor-phase write.
+
 ### Changed
+- **Game Mode idle cost:** an open office no longer pins the event loop at
+  ~12 Hz. A frozen room parks (Compact/Unicode at zero wakeups; the pixel office
+  falls through to a budgeted ~0.33 Hz ambient tick that drives the idle
+  animations). Per-tick snapshot rebuilds over the insert-only subagent map are
+  change-gated, image caches are released when the view closes (~8-10 MB that
+  previously leaked for the process lifetime), and paint buffers are reused
+  in place instead of reallocated per animation step.
 - Soft-preserve keep-N default **3** (`GROK_SUBAGENT_KEEP_N`; alias `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N`). **`0` = age-only** prune (`GROK_SUBAGENT_KEEP_MAX_AGE_SECS`, default 24h).
 - Pre-spawn free-space default **40 GiB** (`GROK_MIN_FREE_GB`; alias `GROK_SUBAGENT_MIN_FREE_BYTES`). Set `0` to disable.
 - Safe clean skips live-marked worktrees (`.grok-subagent-live`).
+
+### Known gaps
+- Supervisor pacing (audit animation #10) is deferred: the supervisor sprite
+  bakes his desk into the same image as the figure, so it needs an asset split
+  rather than a code change. Reasoning is recorded in the audit doc.
 
 ---
 
@@ -180,7 +228,7 @@ turn-state / remote-compaction work.
 
 ## [Unreleased]
 
-### Planned (RC16 candidates — feature request log)
+### Planned (RC2 candidates — feature request log)
 Rust `target/` disk hygiene product surface (Windows monorepo often 100–300 GB):
 - `turbo disk report` / `turbo disk clean --safe`
 - Doctor free-space probe + agent preflight before heavy cargo / release-dist

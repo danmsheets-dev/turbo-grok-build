@@ -86,7 +86,7 @@ pub fn game_tier(stage: Rect) -> GameTier {
 /// Single source of truth for the peel. The paint path ([`compute`]) and every
 /// non-paint consumer (the `AppView::tick` sync path) must derive the tier from
 /// the same stage — peeling twice put the tick tier one row below the painted
-/// one and snap-cleared walks at the `MIN_STAGE_H` boundary (RC16 BUG-1).
+/// one and snap-cleared walks at the `MIN_STAGE_H` boundary (RC2 BUG-1).
 pub fn stage_rect(area: Rect) -> Rect {
     let strip_h = STATUS_STRIP_H.min(area.height);
     Rect {

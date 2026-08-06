@@ -776,7 +776,7 @@
         );
     }
 
-    /// RC16 §3 step 3: a live `server_status` push must reach the
+    /// RC2 §3 step 3: a live `server_status` push must reach the
     /// modal-independent status cache *before* the modal-closed cheap path
     /// drops it — that drop is why Game Mode's rack could only ever show
     /// startup counts. The cheap path itself is unchanged: still no redraw,

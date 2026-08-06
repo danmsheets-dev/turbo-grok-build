@@ -52,7 +52,7 @@ impl HalfblockCellCache {
 
     /// Re-sample `img` into this cache in place, reusing the packed allocation.
     ///
-    /// PERF (RC16 PERF-5): Game Mode rebuilds the cache on every visual
+    /// PERF (RC2 PERF-5): Game Mode rebuilds the cache on every visual
     /// fingerprint miss — a fresh `Vec` per miss was ~100 KB of short-lived
     /// allocation per animation step. The packed buffer keeps its capacity
     /// across calls at a stable terminal size and only reallocates when the

@@ -154,7 +154,7 @@ Guidelines:
 - Config/auth/sessions: **`~/.grok`** (shared with official `grok` if installed)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md) · current RC line: see `VERSION`
 - Hyper compare remote: **`community`** → `DaviRain-Su/hyper-grok-build` (fetch-only)
-- Last sync: **RC15 / `0.2.119-r1`** — xAI upstream `e5478eff1` merged in full;
+- Last sync: **RC15 / `0.2.119-r1`** (current release: RC2 / `0.2.119-r2`) — xAI upstream `e5478eff1` merged in full;
   Turbo/Hyper fork point `c260695cc`. Some Hyper fixes live only inside its merge
   commits, so survey with `git show --cc`, not `git log --no-merges`.
 - Toolchain is pinned to **Rust 1.93.0**; `RUST_MIN_STACK` is set in

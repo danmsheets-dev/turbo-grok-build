@@ -174,7 +174,7 @@ pub(crate) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> 
 /// Before any of that it patches the matched **root** agent's
 /// modal-independent [`crate::app::agent_view::AgentView::mcp_status_cache`],
 /// which is the only per-server MCP status Game Mode's rack tooltip can
-/// read (RC16 §3 step 3). That write is silent: it never schedules an
+/// read (RC2 §3 step 3). That write is silent: it never schedules an
 /// effect and never requests a redraw, so every no-op below still
 /// behaves exactly as it did.
 ///

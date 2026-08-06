@@ -120,7 +120,7 @@ impl DevPalette {
 
 const CLEAR: [u8; 4] = [0, 0, 0, 0];
 const OUTLINE: [u8; 4] = [24, 28, 36, 255];
-/// Ceramic + brew of the desk mug (RC16 §4 #7). Shared by both idle poses of
+/// Ceramic + brew of the desk mug (RC2 §4 #7). Shared by both idle poses of
 /// [`sprite_developer_at_desk`] so the mug does not change colour when it moves
 /// from the desktop to the developer's face.
 const MUG: [u8; 4] = [232, 236, 244, 255];
@@ -272,7 +272,7 @@ fn filled_body(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, fill: [u8; 4
     }
 }
 
-/// Screen-light bleed onto the monitor bezel, per active frame (RC16 §4 #4).
+/// Screen-light bleed onto the monitor bezel, per active frame (RC2 §4 #4).
 ///
 /// Indexed by `frame % 4` — the period [`sprite_square_monitor`] already
 /// animates — so the glow is *baked into frames the sprite cache already
@@ -286,7 +286,7 @@ const MONITOR_GLOW: [[u8; 3]; 4] = [
     [56, 120, 96],
 ];
 
-/// Error-mode counterpart of [`MONITOR_GLOW`] (RC16 §4 #1).
+/// Error-mode counterpart of [`MONITOR_GLOW`] (RC2 §4 #1).
 ///
 /// Indexed by `frame % 2` — the period the error screen blinks at — so the red
 /// spill costs no cache keys either. Deliberately red-dominant: the fail beat
@@ -296,7 +296,7 @@ const MONITOR_ERROR_GLOW: [[u8; 3]; 2] = [[40, 8, 12], [96, 14, 20]];
 /// What a monitor screen is showing.
 ///
 /// `Off` is the dark empty-desk screen, `Active` scrolls code, and `Error`
-/// (RC16 §4 #1) stacks red error bars for [`sprite_developer_fail`].
+/// (RC2 §4 #1) stacks red error bars for [`sprite_developer_fail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitorMode {
     Off,
@@ -477,7 +477,7 @@ pub fn sprite_empty_desk() -> RgbaImage {
     img
 }
 
-/// Canonical `frame` for [`sprite_developer_at_desk`] (RC16 P8).
+/// Canonical `frame` for [`sprite_developer_at_desk`] (RC2 P8).
 ///
 /// Two frames with the same key render byte-identical images, so the compose
 /// sprite cache keys on this instead of the raw frame and stores no duplicates.
@@ -487,7 +487,7 @@ pub fn sprite_empty_desk() -> RgbaImage {
 /// - idle pins the monitor to frame 0 and only reads `frame % 4 < 2` — **2**
 ///   distinct poses, so odd frames collapse onto their even neighbour.
 ///
-/// RC16 §4 #7 gave the two idle poses their content (mug on the desk + thinking
+/// RC2 §4 #7 gave the two idle poses their content (mug on the desk + thinking
 /// bubble, versus mug raised to the face for a sip) **without** widening the
 /// period: the sip reads the same `frame % 4 < 2` discriminator the bubble
 /// always did, so the coffee cycle costs zero additional cache keys.
@@ -601,19 +601,19 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
         let y = 16 + (frame % 2) as i32;
         // No outline at this thickness: `outline_rect` paints the top *and*
         // bottom row, which on a 2px-tall rect is every pixel — the arm came
-        // out as a solid black bar with no skin left (RC16 B6). The idle arm
+        // out as a solid black bar with no skin left (RC2 B6). The idle arm
         // below is likewise outline-free.
         fill_rect(&mut img, 11, y, 6, 2, pal.skin);
         // sleeve
         fill_rect(&mut img, 10, y, 2, 2, pal.shirt);
     } else if sipping {
-        // Coffee sip (RC16 §4 #7): the forearm folds up and the mug that sits on
+        // Coffee sip (RC2 §4 #7): the forearm folds up and the mug that sits on
         // the desk in the other idle pose is at the face instead. Drawn after
         // the head so it reads as being in front of it.
         //
         // `fill_rect`, not `filled_body`: a 1px outline around a 4px sprite is
         // seven eighths of the sprite, and the mug came out as a dark smudge
-        // that read like a beard — the same trap as the typing arm (RC16 B6) and
+        // that read like a beard — the same trap as the typing arm (RC2 B6) and
         // the fail pose's palms.
         fill_rect(&mut img, 10, 15, 2, 3, pal.shirt); // sleeve
         fill_rect(&mut img, 10, 12, 2, 3, pal.skin); // forearm
@@ -649,7 +649,7 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
     img
 }
 
-/// Canonical `frame` for [`sprite_developer_fail`] (RC16 §4 #1) — the shudder
+/// Canonical `frame` for [`sprite_developer_fail`] (RC2 §4 #1) — the shudder
 /// and the error monitor's blink both read `frame % 2`, so the period is **2**.
 pub fn fail_frame_key(frame: u8) -> u8 {
     frame % 2
@@ -730,7 +730,7 @@ pub fn sprite_developer_fail(pal: DevPalette, frame: u8) -> RgbaImage {
     img
 }
 
-/// Canonical `frame` for [`sprite_developer_celebrate`] (RC16 §4 #2) — the hop
+/// Canonical `frame` for [`sprite_developer_celebrate`] (RC2 §4 #2) — the hop
 /// and the arm raise both read `frame % 2`, so the period is **2**.
 pub fn celebrate_frame_key(frame: u8) -> u8 {
     frame % 2
@@ -820,7 +820,7 @@ pub fn sprite_developer_celebrate(pal: DevPalette, frame: u8) -> RgbaImage {
     img
 }
 
-/// Canonical `frame` for [`sprite_developer_walk`] (RC16 P8) — the limb swap is
+/// Canonical `frame` for [`sprite_developer_walk`] (RC2 P8) — the limb swap is
 /// the only frame-dependent art, so the period is **2**.
 pub fn walk_frame_key(frame: u8) -> u8 {
     frame % 2
@@ -861,7 +861,7 @@ pub fn sprite_developer_walk(pal: DevPalette, frame: u8, with_packet: bool) -> R
     img
 }
 
-/// Canonical `frame` for [`sprite_supervisor`] (RC16 P8), per phase:
+/// Canonical `frame` for [`sprite_supervisor`] (RC2 P8), per phase:
 /// - **1** (working) scrolls code at `% 3` and bobs the hands at `% 2` — period 6;
 /// - **2** (reviewing) only scrolls code — period 3;
 /// - anything else (idle/waiting) only alternates the coffee steam — period 2.
@@ -971,7 +971,7 @@ pub fn sprite_supervisor(phase: u8, frame: u8) -> RgbaImage {
             fill_rect(&mut img, 21, 14, 2, 2, skin);
             // Steam. Two pixels wide, not one: this animation has been in the
             // sprite since RC13 and nobody ever saw it, first because compose
-            // pinned the idle frame to 0 (RC16 §4 #7 un-pins it) and second
+            // pinned the idle frame to 0 (RC2 §4 #7 un-pins it) and second
             // because a 1px wisp cannot survive the Nearest downsample.
             if frame % 2 == 0 {
                 fill_rect(&mut img, 25, 11, 2, 1, [230, 230, 240, 220]);
@@ -988,7 +988,7 @@ pub fn sprite_supervisor(phase: u8, frame: u8) -> RgbaImage {
     img
 }
 
-/// Canonical `frame` for [`sprite_mcp_server`] (RC16 §3 step 2).
+/// Canonical `frame` for [`sprite_mcp_server`] (RC2 §3 step 2).
 ///
 /// Idle art reads no frame at all, so every idle frame collapses onto one key.
 /// The active art reads `frame % 2` (badge, LED brightness, link LED),
@@ -1002,7 +1002,7 @@ pub fn mcp_rack_frame_key(active: bool, frame: u8) -> u8 {
 /// MCP server rack. When `active`, LEDs chase and the status bar pulses.
 ///
 /// Composed by [`super::compose`] onto the "MCP SERVER" rack the mockup bakes
-/// into the right wall (RC16 §3 step 2). Until then this was `#[cfg(test)]`
+/// into the right wall (RC2 §3 step 2). Until then this was `#[cfg(test)]`
 /// scaffolding with no call site.
 ///
 /// FEATURE SIZE: every animated element is >= 2×2 sprite pixels. The composed
@@ -1125,7 +1125,7 @@ pub fn sprite_coffee() -> RgbaImage {
     img
 }
 
-/// Canonical `frame` for [`sprite_roomba`] (RC16 §4 #11).
+/// Canonical `frame` for [`sprite_roomba`] (RC2 §4 #11).
 ///
 /// The sprite reads `frame % 2` and nothing else — the status lamp blinks and
 /// the side brush swaps corners on the same discriminator — so the whole period
@@ -1137,7 +1137,7 @@ pub fn roomba_frame_key(frame: u8) -> u8 {
 /// Office floor-cleaning robot: a squat disc with a status lamp and a side brush.
 ///
 /// Composed by [`super::compose`] on the strip of carpet nearest the viewer, and
-/// blitted *after* the desks because that strip is in front of them (RC16 §4 #11).
+/// blitted *after* the desks because that strip is in front of them (RC2 §4 #11).
 ///
 /// FEATURE SIZE: both animated elements are 2×2 sprite pixels. The robot draws at
 /// scale 1 on ordinary terminals and the composed frame is then Nearest-
@@ -1263,7 +1263,7 @@ mod tests {
         assert!(!sprite_supervisor(1, 2).as_raw().is_empty());
     }
 
-    /// RC16 §3 step 2: the rack's cache key must be the sprite's real period —
+    /// RC2 §3 step 2: the rack's cache key must be the sprite's real period —
     /// no wider (duplicate entries for identical art) and no narrower (two
     /// different pictures sharing one entry, i.e. a frozen animation).
     #[test]
@@ -1374,7 +1374,7 @@ mod tests {
         }
     }
 
-    /// RC16 P8: the compose sprite cache keys on the declared canonical frame,
+    /// RC2 P8: the compose sprite cache keys on the declared canonical frame,
     /// so a key collision MUST mean pixel-identical art. Pin every declared
     /// period against the real sprite bodies so they cannot drift apart.
     #[test]
@@ -1426,7 +1426,7 @@ mod tests {
         }
     }
 
-    /// RC16 §4 #11: the floor robot is ~5×3 pixels once the office is
+    /// RC2 §4 #11: the floor robot is ~5×3 pixels once the office is
     /// downsampled, so its lamp is the whole animation. Nearest picks one source
     /// row (and column) in every `effective_pixel_scale`, which is 3 on ordinary
     /// terminals — so the lamp must span 3px on **both** axes or a stage whose
@@ -1531,7 +1531,7 @@ mod tests {
         }
     }
 
-    /// RC16 §4 #4: the monitor glow must live *inside* the four frames the
+    /// RC2 §4 #4: the monitor glow must live *inside* the four frames the
     /// sprite already animates (so it costs no cache keys), must actually vary
     /// across them, must peak on the compile-flash frame, and must leave an
     /// inactive monitor — i.e. the empty desk — completely alone.
@@ -1584,7 +1584,7 @@ mod tests {
         assert_eq!(dev, lums, "typing dev must show the same bezel glow ramp");
     }
 
-    /// RC16 §4 #1: the fail beat must be its own pose — the face buried in both
+    /// RC2 §4 #1: the fail beat must be its own pose — the face buried in both
     /// palms (so no eye highlight survives) over a red error monitor — not the
     /// ordinary seated developer with a flash painted over him.
     #[test]
@@ -1644,7 +1644,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #2: the celebrate pose must raise both arms clear of the
+    /// RC2 §4 #2: the celebrate pose must raise both arms clear of the
     /// shoulders and throw them higher on the second frame — two frames that
     /// differ only by a hop would read as a twitch, not a cheer.
     #[test]
@@ -1689,7 +1689,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #6: two distinct door states, both within the composable size
+    /// RC2 §4 #6: two distinct door states, both within the composable size
     /// budget the other ambient props use.
     #[test]
     fn door_has_two_distinct_states() {

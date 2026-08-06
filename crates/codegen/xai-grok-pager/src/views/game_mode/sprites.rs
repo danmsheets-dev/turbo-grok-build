@@ -94,7 +94,7 @@ pub fn supervisor_lines(phase: SupervisorPhase, tick: u64, set: SpriteSet) -> Ve
         // Every row is exactly `SUPER_W` display columns: `hands` is 3-4 cols
         // wide depending on phase, so the desk front used to fall 2-3 columns
         // short of the `╔═SUPER═╗` header and the right wall stepped inwards
-        // (RC16 B8). Head and face are centred over the same box.
+        // (RC2 B8). Head and face are centred over the same box.
         SpriteSet::Medium => vec![
             Line::from(vec![Span::styled(pad_center("∩   ∩", SUPER_W), gold)]),
             Line::from(vec![Span::styled(pad_center(face, SUPER_W), body)]),
@@ -184,7 +184,7 @@ pub fn empty_desk_lines(set: SpriteSet) -> Vec<Line<'static>> {
     match set {
         // 8 columns wide: the box is sized to its `IDLE` label, which is 4
         // columns and used to overhang a 3-column box by one, pushing the
-        // right wall out of line with the rows above and below (RC16 B7).
+        // right wall out of line with the rows above and below (RC2 B7).
         SpriteSet::Small => vec![
             Line::from(vec![Span::styled("  ░░░░  ", dim)]),
             Line::from(vec![Span::styled(" ┌────┐ ", wood)]),

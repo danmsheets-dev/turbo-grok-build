@@ -1,6 +1,6 @@
-# RC16 Game Mode Audit — Bugs, Performance, Hover Info & Sprite Animations
+# RC2 Game Mode Audit — Bugs, Performance, Hover Info & Sprite Animations
 
-> **STATUS: IMPLEMENTED** on `rc16-game-mode` (18 commits). Every bug and perf finding below is fixed; both hover
+> **STATUS: IMPLEMENTED** on `rc2-game-mode` (18 commits). Every bug and perf finding below is fixed; both hover
 > tooltips and 11 of the 12 animation proposals shipped. Animation #10 (supervisor pacing) was **skipped** — see
 > "Deferred" at the bottom. Game Mode tests went 25 → 132. Do not read this document as a list of open issues;
 > it is the design record for work that has landed. Shipped behavior is summarized in `KNOWN_ISSUES.md`.

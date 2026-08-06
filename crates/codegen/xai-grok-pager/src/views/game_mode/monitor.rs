@@ -13,7 +13,7 @@ fn trunc(s: &str, max: usize) -> String {
 /// Truncate to `max` display columns (ellipsis if it did not fit) and pad the
 /// remainder with spaces, so every monitor row is exactly `max` wide.
 ///
-/// PERF (RC16 P12): takes an iterator so the marquee can be rotated straight
+/// PERF (RC2 P12): takes an iterator so the marquee can be rotated straight
 /// into the output instead of collecting an intermediate `String`; measures
 /// with `UnicodeWidthChar` instead of allocating a `String` per character; and
 /// tracks the running width instead of re-measuring the whole output on every
@@ -62,7 +62,7 @@ fn fmt_duration(d: std::time::Duration) -> String {
 /// Smallest count that renders as `1.0M` / `1.0B`.
 ///
 /// `{:.1}` rounds to nearest, so promoting on the raw unit boundary printed
-/// `1000.0k` for everything from 999_950 up (RC16 B13). Promote on the
+/// `1000.0k` for everything from 999_950 up (RC2 B13). Promote on the
 /// *rounded* boundary instead so the digits always match the suffix. The `k`
 /// tier needs no such constant — below 1000 the count prints in full.
 const TOK_M_MIN: u64 = 999_950;
@@ -134,7 +134,7 @@ pub fn monitor_lines(desk: &DeskSlot, width: u16, tick: u64) -> Vec<Line<'static
         ]));
     }
     if inner >= 6 {
-        // The marquee rotates straight into the truncated row (RC16 P12): the
+        // The marquee rotates straight into the truncated row (RC2 P12): the
         // rotated copy used to be collected into a `String` that `trunc` then
         // immediately threw away, every paint, for every occupied desk.
         let act = if desk.activity.is_empty() {

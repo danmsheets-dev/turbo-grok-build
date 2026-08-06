@@ -2976,7 +2976,7 @@ fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
     );
 }
 
-/// RC16 §3 step 3: the `mcp/list` response must always refresh the
+/// RC2 §3 step 3: the `mcp/list` response must always refresh the
 /// modal-independent status cache, not only when the extensions modal happens
 /// to be open. Game Mode's rack tooltip is the other consumer, and the fetch it
 /// triggers from `AppView::tick` never opens a modal at all.

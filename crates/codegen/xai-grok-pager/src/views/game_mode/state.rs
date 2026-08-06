@@ -14,10 +14,10 @@ pub const DESK_COUNT: usize = 6;
 ///
 /// ~1 s at the ~12 Hz Slow tick. The HUD shows whole-second data (`mm:ss`,
 /// tokens, tool calls), and the sync signature buckets `elapsed` to whole
-/// seconds too (RC16 PERF-2), so a finer cadence would repaint identical text.
+/// seconds too (RC2 PERF-2), so a finer cadence would repaint identical text.
 const HUD_REFRESH_TICKS: u64 = 12;
 
-/// How long one MCP rack LED burst stays lit after a tool call (RC16 §4 #5).
+/// How long one MCP rack LED burst stays lit after a tool call (RC2 §4 #5).
 ///
 /// Long enough for the chase to read as motion — the LEDs step on the
 /// `(tick / 4)` bucket, ~333 ms at the Slow cadence, so 1.2 s is ~4 steps — and
@@ -26,7 +26,7 @@ const HUD_REFRESH_TICKS: u64 = 12;
 /// [`GameModeState::rack_burst_active`]).
 const RACK_BURST: Duration = Duration::from_millis(1200);
 
-/// Minimum wall-clock gap between ambient animation steps (RC16 §4 #7 / #12).
+/// Minimum wall-clock gap between ambient animation steps (RC2 §4 #7 / #12).
 ///
 /// The ambient step is what drives the two animations that only exist in a room
 /// nothing else is animating: the thinking developer's coffee sip (with the
@@ -37,10 +37,10 @@ const RACK_BURST: Duration = Duration::from_millis(1200);
 /// the cadence the event loop wakes a parked office at. If the two were equal,
 /// scheduler jitter would leave `elapsed` a hair under the gate on most wakes
 /// and the animation would run at half the intended rate — exactly the 90 ms
-/// gate vs 83 ms tick failure RC16 BUG-2 documented.
+/// gate vs 83 ms tick failure RC2 BUG-2 documented.
 const AMBIENT_PERIOD: Duration = Duration::from_millis(2500);
 
-/// Quantization of the success wave's sweep position (RC16 §4 #8).
+/// Quantization of the success wave's sweep position (RC2 §4 #8).
 ///
 /// The composed crest is derived from this bucket and nothing finer (see
 /// [`GameModeState::success_wave_t`]), so the whole one-shot costs exactly
@@ -51,7 +51,7 @@ const SUCCESS_WAVE_BUCKET_MS: u64 = 150;
 /// Number of [`SUCCESS_WAVE_BUCKET_MS`] steps the crest takes to cross the room.
 const SUCCESS_WAVE_BUCKETS: u64 = 10;
 
-/// How long one office-wide success wave runs after WORK FINISHED (RC16 §4 #8).
+/// How long one office-wide success wave runs after WORK FINISHED (RC2 §4 #8).
 ///
 /// ~1.5 s: long enough to read as a sweep at the ~12 Hz Slow tick, short enough
 /// that the wakeup tail it holds on a room that is otherwise parking stays
@@ -63,14 +63,14 @@ const SUCCESS_WAVE: Duration =
 /// Minimum wall time between two token-throughput samples on one desk (§4 #9).
 ///
 /// Wall time, **not** sync count: [`super::sync_game_mode`] is throttled
-/// (RC16 PERF-3) and skips entirely for unchanged subagent maps (PERF-2), so a
+/// (RC2 PERF-3) and skips entirely for unchanged subagent maps (PERF-2), so a
 /// delta measured "per sync" would read a different rate depending on how busy
 /// the rest of the app was. A running desk re-signs at least once a second
 /// (`display_elapsed().as_secs()` is in `subagent_signature`), so a desk that
 /// stops streaming still gets sampled and still decays back to Calm.
 const BUSY_SAMPLE_PERIOD: Duration = Duration::from_millis(750);
 
-/// Tokens/sec bucket boundaries for [`BusyLevel`] (RC16 §4 #9).
+/// Tokens/sec bucket boundaries for [`BusyLevel`] (RC2 §4 #9).
 ///
 /// Two-sided on purpose — the enter thresholds sit well above the exit ones, so
 /// a stream hovering at a boundary cannot flip a desk's typing cadence on every
@@ -116,7 +116,7 @@ pub enum ActorPhase {
     FailBeat,
 }
 
-/// How hard a seated desk is streaming, from its token throughput (RC16 §4 #9).
+/// How hard a seated desk is streaming, from its token throughput (RC2 §4 #9).
 ///
 /// Drives the desk's typing cadence in
 /// [`super::compose::desk_typing_frame`] and nothing else — a desk that is not
@@ -126,7 +126,7 @@ pub enum ActorPhase {
 pub enum BusyLevel {
     /// Barely streaming — long thinking pauses, waiting on a tool.
     Calm,
-    /// Ordinary streaming; the cadence every desk had before RC16 §4 #9.
+    /// Ordinary streaming; the cadence every desk had before RC2 §4 #9.
     Normal,
     /// Flat out.
     Hot,
@@ -284,7 +284,7 @@ pub enum HoverTarget {
 /// holding `&mut AgentView`. Never hashed into
 /// [`GameModeState::visual_fingerprint`] and never marks redraw dirty: the card
 /// is a ratatui overlay painted after the blit, and dirtying on a ticking timer
-/// would un-park the event loop that RC16 PERF-1 exists to park.
+/// would un-park the event loop that RC2 PERF-1 exists to park.
 ///
 /// **Bounded staleness.** The sync is throttled (`sync_gate`, ~75 ms) and can
 /// skip its *snapshot rebuild* entirely — the refresh here deliberately sits
@@ -354,14 +354,14 @@ pub struct GameModeState {
     pub overflow_count: usize,
     /// Sticky NEEDS ATTENTION until this instant (spec: brief, not forever).
     pub attention_until: Option<Instant>,
-    /// MCP rack LED burst armed until this instant (RC16 §4 #5).
+    /// MCP rack LED burst armed until this instant (RC2 §4 #5).
     ///
     /// Armed by [`Self::sync_from_snapshots`] whenever a seated desk's
     /// `tool_calls` counter *increases*, i.e. by real work, and consumed on the
     /// expiry edge in [`Self::tick_anim`]. See [`Self::rack_burst_active`] for
     /// the fingerprint and wakeup contract.
     pub(crate) rack_active_until: Option<Instant>,
-    /// Office-wide success wave armed until this instant (RC16 §4 #8).
+    /// Office-wide success wave armed until this instant (RC2 §4 #8).
     ///
     /// Armed by [`Self::sync_from_snapshots`] on the *edge* into
     /// [`WallMode::WorkFinished`] — never on the level, because `had_success`
@@ -369,7 +369,7 @@ pub struct GameModeState {
     /// session. Consumed on the expiry edge in [`Self::tick_anim`]. See
     /// [`Self::success_wave_t`] for the fingerprint and wakeup contract.
     pub(crate) success_fx_until: Option<Instant>,
-    /// Slow ambient animation step (RC16 §4 #7).
+    /// Slow ambient animation step (RC2 §4 #7).
     ///
     /// Wall-clock driven, **not** derived from `tick`: an office the event loop
     /// has parked only wakes at [`crate::app::app_view::AMBIENT_TICK_INTERVAL`],
@@ -380,7 +380,7 @@ pub struct GameModeState {
     pub(crate) ambient_step: u64,
     /// When [`Self::ambient_step`] last advanced.
     pub(crate) ambient_at: Instant,
-    /// Patrol step of the floor robot (RC16 §4 #11).
+    /// Patrol step of the floor robot (RC2 §4 #11).
     ///
     /// ZERO-COST CONTRACT — the whole point of this animation, do not relax it:
     /// advanced by [`Self::tick_anim`] **only on a `tick / 4` bucket edge and
@@ -399,11 +399,11 @@ pub struct GameModeState {
     ///    exist.
     ///
     /// Making it wander while the room is idle would trip both the RC13
-    /// idle-freeze (Rule 2) and the RC16 PERF-1 parking (Rule 3) at once.
+    /// idle-freeze (Rule 2) and the RC2 PERF-1 parking (Rule 3) at once.
     pub(crate) roomba_step: u64,
     /// Local wall clock, quantized to `(hour 0..24, ten-minute 0..6)`.
     ///
-    /// The quantization *is* the fingerprint contract (RC16 §4 #12): the composed
+    /// The quantization *is* the fingerprint contract (RC2 §4 #12): the composed
     /// hands are derived from this pair and nothing finer, so at most 6 clock
     /// recomposes per hour are possible. Re-read on the ambient step, so it is at
     /// most [`AMBIENT_PERIOD`] stale.
@@ -421,7 +421,7 @@ pub struct GameModeState {
     pub(crate) pixel_cell_h: u16,
     /// `pixel_scale()` captured when `pixel_bg_scaled` was last built.
     pub(crate) pixel_bg_scale: u32,
-    /// Hour tint band baked into `pixel_bg_scaled` (RC16 §4 #12).
+    /// Hour tint band baked into `pixel_bg_scaled` (RC2 §4 #12).
     ///
     /// PERF: the day/night tint is applied **once, to the cached background**,
     /// not per compose — a full-canvas blend on every fingerprint miss would
@@ -490,14 +490,14 @@ pub struct GameModeState {
     pub(crate) last_sync_at: Option<Instant>,
     /// Signature of the subagent map + sync inputs behind the last rebuild.
     ///
-    /// PERF (RC16 PERF-2): `None` forces the next sync to rebuild (open/toggle).
+    /// PERF (RC2 PERF-2): `None` forces the next sync to rebuild (open/toggle).
     pub(crate) last_sync_sig: Option<u64>,
     /// Desk phase signature as of the end of the last sync — reused as the
     /// "before" value next sync so it is hashed once per sync, not twice.
     pub(crate) last_phase_sig: Option<u64>,
     /// Snapshot rebuilds actually performed (skips do not count).
     ///
-    /// Observability for the RC16 PERF-2/PERF-3 gates; asserted by tests.
+    /// Observability for the RC2 PERF-2/PERF-3 gates; asserted by tests.
     pub(crate) sync_rebuilds: u64,
 }
 
@@ -752,7 +752,7 @@ impl GameModeState {
     /// PERF INVARIANTS (RC13):
     /// 1. Pure `tick_anim` while all desks are empty/thinking and the supervisor
     ///    is Idle/Waiting must keep `pixel_frame_fp` stable (no recompose)
-    ///    **within one [`AMBIENT_PERIOD`]**. RC16 §4 #7 relaxes the RC13
+    ///    **within one [`AMBIENT_PERIOD`]**. RC2 §4 #7 relaxes the RC13
     ///    invariant by exactly that much and no more: an idle room recomposes on
     ///    the slow ambient step edge (~0.4 Hz), never on the ~12 Hz tick, and the
     ///    `tick / 4` sprite bucket stays frozen — the ambient art rides
@@ -770,7 +770,7 @@ impl GameModeState {
     /// 6. `mcp_info` is excluded for the same reason as `supervisor_info` — the
     ///    rack *card* is an overlay. Only the derived
     ///    [`Self::rack_burst_active`] bool, which the composed LEDs read, is in.
-    /// 7. The success wave (RC16 §4 #8) is hashed **only while it runs**: its
+    /// 7. The success wave (RC2 §4 #8) is hashed **only while it runs**: its
     ///    bucket is `None` from the instant it expires, so the room's
     ///    fingerprint returns to exactly the value it had before the wave and
     ///    re-freezes. A wave that kept hashing after expiry would recompose the
@@ -779,7 +779,7 @@ impl GameModeState {
     ///    composes it, together with the finest tick bucket in use
     ///    ([`Self::frame_bucket_divisor`]) — hashing the level without the
     ///    finer bucket would freeze a hot desk's extra frames.
-    /// 9. The floor robot's [`Self::roomba_step`] (RC16 §4 #11) is hashed
+    /// 9. The floor robot's [`Self::roomba_step`] (RC2 §4 #11) is hashed
     ///    unconditionally and still costs nothing: it can only advance on a
     ///    `tick / 4` edge in a room that is already animating, i.e. on ticks the
     ///    bucket in invariant 8 already moved the fingerprint on. In a frozen
@@ -890,7 +890,7 @@ impl GameModeState {
         }
 
         // Rescale BG only when terminal cell size, pixel_scale asset factor, or
-        // the day/night tint band changes (RC16 §4 #12 — the tint is baked into
+        // the day/night tint band changes (RC2 §4 #12 — the tint is baked into
         // the cached BG, see `pixel_bg_tint`).
         let scale = super::sprites_pixel::effective_pixel_scale(cell_w, cell_h).max(1);
         let tint = super::compose::hour_tint_band(self.clock_hm.0);
@@ -935,7 +935,7 @@ impl GameModeState {
         super::compose::compose_cell_frame_into_at(&mut scratch, &bg, self, tick, now);
         // Terminal-res paint buffer for halfblock (use_direct — no per-paint resize).
         //
-        // PERF (RC16 PERF-5): both the paint buffer and the cell cache are
+        // PERF (RC2 PERF-5): both the paint buffer and the cell cache are
         // retained and overwritten in place. At a stable terminal size a
         // fingerprint miss now allocates nothing; only a size change reallocates.
         let paint_w = u32::from(cell_w).max(1);
@@ -966,7 +966,7 @@ impl GameModeState {
             // Nothing was synced while hidden: force a full rebuild on reopen.
             self.last_sync_sig = None;
             self.last_phase_sig = None;
-            // Re-arm the one-shot `mcp/list` request (RC16 §3 step 3): reopening
+            // Re-arm the one-shot `mcp/list` request (RC2 §3 step 3): reopening
             // is the user asking to look at the room again, and the cheapest
             // retry for a fetch that previously failed.
             self.mcp_fetch_dispatched = false;
@@ -977,7 +977,7 @@ impl GameModeState {
             self.ambient_at = Instant::now();
             self.mark_redraw_dirty();
         } else {
-            // PERF (RC16 PERF-7): a hidden office must impose no standing cost,
+            // PERF (RC2 PERF-7): a hidden office must impose no standing cost,
             // and a hidden office is not painting the pixel art the ambient wake
             // exists for (see [`Self::needs_ambient_tick`]).
             self.last_pixel_painted = false;
@@ -988,7 +988,7 @@ impl GameModeState {
     /// Whether a paint-side sync should run (tick already synced recently).
     ///
     /// A lower bound only: the rebuild itself is additionally gated by
-    /// `sync_gate` (RC16 PERF-3), so an early paint-side call may find nothing
+    /// `sync_gate` (RC2 PERF-3), so an early paint-side call may find nothing
     /// to do and return without touching the room.
     pub fn needs_paint_sync(&self) -> bool {
         match self.last_sync_at {
@@ -999,14 +999,14 @@ impl GameModeState {
 
     /// Whether the room still has something to animate or reconcile.
     ///
-    /// PERF INVARIANT (RC16 PERF-1): an open Game Mode used to hold the event
+    /// PERF INVARIANT (RC2 PERF-1): an open Game Mode used to hold the event
     /// loop at [`crate::app::app_view::TickDemand::Slow`] (~12 Hz) forever. A
     /// frozen room — no seated desks, Idle/Waiting supervisor, empty queues, no
     /// armed attention window, nothing dirty — produces zero visual change per
     /// Slow tick, so it must contribute **no** `Slow` demand.
     ///
     /// What the app parks at then depends on the tier, because the ambient
-    /// batch (RC16 §4 #7 / #12) gave the pixel office animations that exist
+    /// batch (RC2 §4 #7 / #12) gave the pixel office animations that exist
     /// *only* in a room nothing else is animating:
     /// - **Pixel office on screen:** [`Self::needs_ambient_tick`] takes over and
     ///   the app settles at [`crate::app::app_view::TickDemand::Ambient`]
@@ -1056,7 +1056,7 @@ impl GameModeState {
         self.desks.iter().any(|d| d.is_occupied())
     }
 
-    /// Fingerprint bucket of the success wave as observed at `at` (RC16 §4 #8).
+    /// Fingerprint bucket of the success wave as observed at `at` (RC2 §4 #8).
     ///
     /// `None` when no wave is armed **or** the armed one has already elapsed —
     /// which is what makes the wave provably one-shot: the hashed value returns
@@ -1097,7 +1097,7 @@ impl GameModeState {
         Some(f32::from(bucket) / (SUCCESS_WAVE_BUCKETS - 1) as f32)
     }
 
-    /// Whether the MCP rack's LEDs are lit this frame (RC16 §4 #5).
+    /// Whether the MCP rack's LEDs are lit this frame (RC2 §4 #5).
     ///
     /// FINGERPRINT: this bool **is** hashed by [`Self::visual_fingerprint`] —
     /// unlike the phase-derived predicate it replaced, `rack_active_until` is
@@ -1155,7 +1155,7 @@ impl GameModeState {
         (self.roomba_step % 2) as u8
     }
 
-    /// Whether the floor robot is travelling rather than parked (RC16 §4 #11).
+    /// Whether the floor robot is travelling rather than parked (RC2 §4 #11).
     ///
     /// Exactly [`Self::pixel_needs_tick_frame`] — the predicate that gates the
     /// step counter — exposed to `compose` so the dust trail is painted only
@@ -1188,7 +1188,7 @@ impl GameModeState {
 
     /// Whether a room that has nothing else to animate still needs slow ticks.
     ///
-    /// RULE 3 (RC16 §4 #7 / #12): [`Self::needs_animation_tick`] parks the event
+    /// RULE 3 (RC2 §4 #7 / #12): [`Self::needs_animation_tick`] parks the event
     /// loop, so an ambient animation that only satisfied the fingerprint would
     /// still freeze — the ticks that advance it would never happen. This is the
     /// wake path, and `AppView::tick_demand` maps it to
@@ -1198,10 +1198,10 @@ impl GameModeState {
     /// [`crate::app::app_view::AMBIENT_TICK_INTERVAL`] = 3 s) for as long as the
     /// pixel office is on screen. That is the whole standing cost of relaxing the
     /// RC13 idle-freeze: 36× cheaper than the ~12/sec an open office cost before
-    /// RC16 PERF-1, and it buys three animations that were shipped-but-dead (the
+    /// RC2 PERF-1, and it buys three animations that were shipped-but-dead (the
     /// Supervisor's idle coffee steam, the thinking bubble blink) or impossible
     /// (a real wall clock). Each wake costs one `AppView::tick` body, whose
-    /// Game Mode sync is itself skip-gated (RC16 PERF-2/3), plus one recompose
+    /// Game Mode sync is itself skip-gated (RC2 PERF-2/3), plus one recompose
     /// when the ambient step is visible.
     ///
     /// Gated on the last paint really having drawn the pixel office: Compact is a
@@ -1222,7 +1222,7 @@ impl GameModeState {
 
     /// Whether the room can be left alone when the subagent data is unchanged.
     ///
-    /// PERF (RC16 PERF-2): [`Self::sync_from_snapshots`] is a no-op for
+    /// PERF (RC2 PERF-2): [`Self::sync_from_snapshots`] is a no-op for
     /// byte-identical snapshots *only* while nothing in the room moves on its
     /// own. In-flight sequences do move: `tick_anim` promotes walks and clears
     /// desks between syncs, which frees seats for the door queue, retires the
@@ -1258,7 +1258,7 @@ impl GameModeState {
     ) {
         // Consume an expired attention window on the *edge*, not by level test.
         //
-        // RC16: `room_is_settled` and `needs_animation_tick` both key off
+        // RC2: `room_is_settled` and `needs_animation_tick` both key off
         // `attention_until`. If both merely tested `> now` they would flip in the
         // same instant: this sync would be skipped as settled (leaving `wall` on
         // its last `NeedsAttention` value, since the wall is only re-derived at
@@ -1275,7 +1275,7 @@ impl GameModeState {
         // No supervisor phase is set here: [`Self::update_supervisor`] runs
         // unconditionally at the end of this sync and derives it from the
         // (now cleared) desks + handoff queue, so an assignment in this loop
-        // was dead by construction (RC16 B12).
+        // was dead by construction (RC2 B12).
         if !tier.uses_office_art() {
             for i in 0..DESK_COUNT {
                 if matches!(
@@ -1304,7 +1304,7 @@ impl GameModeState {
 
         // Arm brief attention only on **new** failed child IDs (not every sync).
         //
-        // PERF (RC16 P11): probe the armed set by `&str` and only allocate the
+        // PERF (RC2 P11): probe the armed set by `&str` and only allocate the
         // owned id on the arming transition. A failed child stays in the map
         // until the turn ends, so the old `insert(id.to_string())` allocated a
         // String per failed child on *every* sync just to throw it away.
@@ -1333,7 +1333,7 @@ impl GameModeState {
                 continue;
             };
             if let Some(snap) = agents.iter().find(|a| a.child_session_id == sid) {
-                // PERF (RC16 PERF-2): compare before assigning — these three are
+                // PERF (RC2 PERF-2): compare before assigning — these three are
                 // byte-identical on almost every sync, and `clone_from` on a
                 // mismatch reuses the existing buffer instead of allocating.
                 if self.desks[i].label != snap.label {
@@ -1346,12 +1346,12 @@ impl GameModeState {
                     self.desks[i].activity.clone_from(&snap.activity);
                 }
                 self.desks[i].elapsed = snap.elapsed;
-                // Typing cadence from real throughput (RC16 §4 #9). Measured
+                // Typing cadence from real throughput (RC2 §4 #9). Measured
                 // against wall time inside the desk, so a throttled or skipped
                 // sync cannot change the rate it reads.
                 self.desks[i].sample_throughput(snap.tokens);
                 self.desks[i].tokens = snap.tokens;
-                // Real work lights the MCP rack (RC16 §4 #5). The desk's own
+                // Real work lights the MCP rack (RC2 §4 #5). The desk's own
                 // `tool_calls` *is* the previous sync's value until the line
                 // below overwrites it, so the increment edge needs no extra
                 // field — and it is an edge, not a level, so a desk parked at
@@ -1477,7 +1477,7 @@ impl GameModeState {
             waiting_on_user,
         );
 
-        // Office-wide success wave (RC16 §4 #8), armed on the **edge** into
+        // Office-wide success wave (RC2 §4 #8), armed on the **edge** into
         // WorkFinished. A level test (`self.wall == WorkFinished`) would re-arm
         // it on every sync for the rest of the session: `had_success` is sticky,
         // so once the last subagent lands the wall never leaves WorkFinished
@@ -1493,7 +1493,7 @@ impl GameModeState {
     /// Drop **every** image buffer Game Mode owns, including the decoded
     /// full-res office background.
     ///
-    /// PERF (RC16 PERF-7): called when Game Mode is toggled closed. Hidden, the
+    /// PERF (RC2 PERF-7): called when Game Mode is toggled closed. Hidden, the
     /// office used to keep ~8-10 MB resident for the rest of the process
     /// (`pixel_bg_full` alone is 1448×1086 RGBA ≈ 6.3 MB). `pixel_bg_full` is
     /// dropped too: reopening re-decodes the embedded PNG, which is expected to
@@ -1551,7 +1551,7 @@ impl GameModeState {
             tool_calls: snap.tool_calls,
             activity: snap.activity.clone(),
             failed: snap.failed,
-            // A fresh seat starts at the cadence every desk used before RC16
+            // A fresh seat starts at the cadence every desk used before RC2
             // §4 #9 and measures its first rate one BUSY_SAMPLE_PERIOD later —
             // seeding `prev_tokens` from the snapshot means an agent that was
             // already streaming before it got a desk does not read as a burst.
@@ -1607,7 +1607,7 @@ impl GameModeState {
     /// ambient steps ([`Self::needs_ambient_tick`]).
     ///
     /// Nothing user-visible may depend on this being called at all: a frozen
-    /// Compact/Unicode room gets neither cadence (RC16 PERF-1). That is why the
+    /// Compact/Unicode room gets neither cadence (RC2 PERF-1). That is why the
     /// wall-strip clock samples [`local_clock_bucket`] at paint time rather
     /// than reading the [`Self::clock_hm`] this refreshes — `clock_hm` exists
     /// for the *pixel* office, whose composed hands need a fingerprint input.
@@ -1619,7 +1619,7 @@ impl GameModeState {
         // Structural changes below (phase transitions, desk clears, handoff
         // promotion) are inputs to `sync_from_snapshots`: they free seats, drain
         // the handoff queue and re-derive the supervisor + wall. Invalidate the
-        // cached sync signatures so the next sync cannot be skipped (RC16
+        // cached sync signatures so the next sync cannot be skipped (RC2
         // PERF-2). A settled room only advances `anim_t`, which no sync input
         // reads — and every structural branch here needs a phase or a queue
         // entry that [`Self::room_is_settled`] already rejects.
@@ -1633,12 +1633,12 @@ impl GameModeState {
         // straight off `rack_burst_active` at compose time. `tick_anim` runs on
         // every Slow tick the room is awake for, and `needs_animation_tick`
         // tests `is_some()`, so exactly one tick observes the expiry, repaints
-        // the darkened rack, and only then lets the room park (RC16 PERF-1).
+        // the darkened rack, and only then lets the room park (RC2 PERF-1).
         if self.rack_active_until.is_some_and(|t| t <= Instant::now()) {
             self.rack_active_until = None;
             self.mark_redraw_dirty();
         }
-        // Same edge-consuming shape for the success wave (RC16 §4 #8), and for
+        // Same edge-consuming shape for the success wave (RC2 §4 #8), and for
         // a sharper reason: it is armed exactly as the room goes idle, so
         // nothing else is left to repaint the sweep or to notice it ending.
         // `self.last_tick` is still the *previous* tick here (it is refreshed
@@ -1655,7 +1655,7 @@ impl GameModeState {
                 self.mark_redraw_dirty();
             }
         }
-        // Slow ambient step (RC16 §4 #7 / #12). Wall-clock gated, so it runs at
+        // Slow ambient step (RC2 §4 #7 / #12). Wall-clock gated, so it runs at
         // the same rate whether the room is awake at ~12 Hz for its own reasons
         // or parked on the ambient wake — and it re-reads the clock at the only
         // cadence [`Self::clock_hm`]'s quantization can distinguish anyway.
@@ -1682,18 +1682,18 @@ impl GameModeState {
         // the fixed cadence whatever the desks are doing).
         let bucket_edge = (tick_before / 4) != (self.tick / 4);
         // Sprite frame edge — finer than the focus pulse while a desk is Hot
-        // (RC16 §4 #9). Must be the same divisor `visual_fingerprint` hashes,
+        // (RC2 §4 #9). Must be the same divisor `visual_fingerprint` hashes,
         // or a hot desk's extra frames would be composed and never painted.
         let frame_div = self.frame_bucket_divisor();
         let frame_edge = (tick_before / frame_div) != (self.tick / frame_div);
         if had_focus && bucket_edge {
             self.mark_redraw_dirty();
         }
-        // Floor robot (RC16 §4 #11): one patrol step per `tick / 4` bucket, and
+        // Floor robot (RC2 §4 #11): one patrol step per `tick / 4` bucket, and
         // **only** while the room already samples that bucket. Deliberately no
         // `mark_redraw_dirty` of its own — `frame_div` is 4 or finer, so every
         // edge this fires on is already a `frame_edge` below, and marking here
-        // would double-count on the very path RC16 PERF-6 exists to thin out.
+        // would double-count on the very path RC2 PERF-6 exists to thin out.
         // When the room freezes the robot simply stops where it is; sending it
         // home would mean animating a parked office.
         if needs_frames && bucket_edge {
@@ -1704,7 +1704,7 @@ impl GameModeState {
         // guarantees (`layout::MIN_STAGE_W/H` are 72×18).
         let pixel_office = self.pixel_mode && tier.uses_office_art();
         if needs_frames {
-            // PERF (RC16 PERF-6): the pixel office samples only the sprite
+            // PERF (RC2 PERF-6): the pixel office samples only the sprite
             // frame bucket (`tick / 4`, or `tick / 2` while a desk is Hot), so
             // a room of seated desks composes a pixel-identical frame on 3 of
             // every 4 ticks. Mark those on the bucket edge only.
@@ -1722,7 +1722,7 @@ impl GameModeState {
             && (self.tick / HUD_REFRESH_TICKS) != (tick_before / HUD_REFRESH_TICKS)
             && self.desks.iter().any(|d| d.is_occupied())
         {
-            // RC16 BUG-4: the pixel idle-freeze is right for a static sprite, but
+            // RC2 BUG-4: the pixel idle-freeze is right for a static sprite, but
             // Compact / Unicode paint per-desk monitor HUDs (elapsed timer, token
             // counts, scrolled activity) whose data the sync refreshes every
             // second. Nothing else marks those dirty, so an on-screen `01:23`
@@ -1856,7 +1856,7 @@ impl GameModeState {
 
 /// Nearest-neighbour resample of `src` into the already-allocated `dst`.
 ///
-/// PERF (RC16 PERF-5): replaces `image::imageops::resize(.., Nearest)` on the
+/// PERF (RC2 PERF-5): replaces `image::imageops::resize(.., Nearest)` on the
 /// compose path so the terminal-res paint buffer is written in place instead of
 /// reallocated on every fingerprint miss. Picks the same source pixel
 /// `imageops` would — `floor((out + 0.5) * src/dst)` per axis — so the painted
@@ -1891,7 +1891,7 @@ fn resample_nearest_into(dst: &mut RgbaImage, src: &RgbaImage) {
 ///
 /// Celebrate is in because 400 ms is **not** enough — it covers barely one
 /// bucket edge, so both its pose and its confetti would have shown a single
-/// frame (RC16 §4 #2). Both now read `anim_t`
+/// frame (RC2 §4 #2). Both now read `anim_t`
 /// ([`super::compose::celebrate_pose_frame`],
 /// [`super::compose::paint_fx_confetti`]), which costs ~5 recomposes per
 /// subagent success — one per Slow tick of the phase — inside a
@@ -1899,7 +1899,7 @@ fn resample_nearest_into(dst: &mut RgbaImage, src: &RgbaImage) {
 /// recompose every tick. Lengthening Celebrate to ~1 s so the bucket could
 /// drive it was the alternative; it would have delayed every handoff by 600 ms.
 ///
-/// Handoff was excluded by RC16 BUG-3-bonus because
+/// Handoff was excluded by RC2 BUG-3-bonus because
 /// [`super::compose::walk_position`] pins the walker on the rug, making those
 /// 500 ms of recomposes pixel-identical — pure waste. It is back in because
 /// [`super::compose::paint_fx_handoff_papers`] now draws a burst of paper quads
@@ -1921,7 +1921,7 @@ fn phase_anim_t_is_visible(phase: ActorPhase) -> bool {
     )
 }
 
-/// Local wall clock as `(hour 0..24, ten-minute 0..6)` (RC16 §4 #12).
+/// Local wall clock as `(hour 0..24, ten-minute 0..6)` (RC2 §4 #12).
 ///
 /// `chrono` is already a dependency of this crate (`acp::tracker` reads
 /// `Local::now()`), so the real local time costs no new dependency — and `std`
@@ -1949,7 +1949,7 @@ pub(super) fn local_clock_bucket() -> (u8, u8) {
 
 /// Case-insensitive `contains("think")` over the live activity label.
 ///
-/// PERF (RC16 PERF-2): runs once per running desk per sync — the previous
+/// PERF (RC2 PERF-2): runs once per running desk per sync — the previous
 /// `to_ascii_lowercase().contains(..)` allocated a String each time.
 fn activity_is_thinking(activity: &str) -> bool {
     activity
@@ -2057,7 +2057,7 @@ mod tests {
         assert_eq!(s.attention_until, Some(until), "re-sync must not re-arm");
     }
 
-    /// RC16 regression: the attention expiry must be consumed by exactly one
+    /// RC2 regression: the attention expiry must be consumed by exactly one
     /// sync, which re-derives the wall, *before* the room is allowed to park.
     ///
     /// The original PERF-1 + PERF-2 pairing level-tested `attention_until > now`
@@ -2189,7 +2189,7 @@ mod tests {
         assert_eq!(s.hover_screen, None);
     }
 
-    /// Seats win over the boss wherever the rects overlap, so the pre-RC16
+    /// Seats win over the boss wherever the rects overlap, so the pre-RC2
     /// desk-only behaviour is preserved exactly.
     #[test]
     fn overlapping_desk_wins_over_supervisor() {
@@ -2324,7 +2324,7 @@ mod tests {
             context_total: 256_000,
             context_pct: 16,
             waiting_on_user: true,
-            branch: Some("rc16-game-mode".to_string()),
+            branch: Some("rc2-game-mode".to_string()),
         };
         assert_eq!(
             s.visual_fingerprint(80, 24, Instant::now()),
@@ -2332,7 +2332,7 @@ mod tests {
             "supervisor hover + tooltip snapshot must not dirty pixel fingerprint"
         );
 
-        // RC16 §4 #7 relaxes this by exactly one input and no more: the slow
+        // RC2 §4 #7 relaxes this by exactly one input and no more: the slow
         // ambient step. The ~12 Hz tick bucket above is still frozen — 40 ticks
         // changed nothing — and only the ambient step moves the frame.
         s.ambient_step = s.ambient_step.wrapping_add(1);
@@ -2387,7 +2387,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #7 / #12: the ambient step is wall-clock gated, **not** derived
+    /// RC2 §4 #7 / #12: the ambient step is wall-clock gated, **not** derived
     /// from `tick`. A parked office only wakes every `AMBIENT_TICK_INTERVAL`, so
     /// a `tick / N` bucket would run at whatever rate the room happened to be
     /// ticking at. This pins both halves: ticks alone never advance it, and one
@@ -2422,7 +2422,7 @@ mod tests {
         );
 
         // The gate must be shorter than the loop cadence that wakes a parked
-        // office, or jitter drops every other step (the RC16 BUG-2 shape).
+        // office, or jitter drops every other step (the RC2 BUG-2 shape).
         assert!(
             AMBIENT_PERIOD < crate::app::app_view::AMBIENT_TICK_INTERVAL,
             "ambient gate must not be able to miss its own wake"
@@ -2435,11 +2435,11 @@ mod tests {
         );
     }
 
-    /// RC16 PERF-1: a synced, frozen room must not ask for **Slow** ticks — that
+    /// RC2 PERF-1: a synced, frozen room must not ask for **Slow** ticks — that
     /// is what keeps `AppView::tick_demand` off the ~12 Hz loop while the office
     /// is open. A fresh (never-synced) room always does.
     ///
-    /// RC16 §4 #7 adds the second half of the contract: such a room is no longer
+    /// RC2 §4 #7 adds the second half of the contract: such a room is no longer
     /// entirely still (coffee sip, steam, wall clock), so it asks for the much
     /// slower `TickDemand::Ambient` instead — and only once the pixel office has
     /// actually painted, since none of that art exists anywhere else.
@@ -2603,7 +2603,7 @@ mod tests {
         assert!(s.room_is_settled(), "a consumed window settles the room");
     }
 
-    /// RC16 §4 #5: the MCP rack's LEDs answer to **real tool calls**, and only
+    /// RC2 §4 #5: the MCP rack's LEDs answer to **real tool calls**, and only
     /// to those. A busy room with no tool traffic leaves the rack dark (that is
     /// the whole difference from the §3 step 2 placeholder), the armed burst is
     /// hashed so its edges recompose, and an idle tick inside the burst must
@@ -2796,7 +2796,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #8: the wave is armed on the **edge** into WorkFinished and
+    /// RC2 §4 #8: the wave is armed on the **edge** into WorkFinished and
     /// exactly once per success event. `had_success` is sticky, so a level test
     /// would re-arm it on every sync until the session ends — a room that can
     /// never park, which is the failure this whole animation has to avoid.
@@ -2841,7 +2841,7 @@ mod tests {
         );
     }
 
-    /// THE TRAP (RC16 §4 #8): the wave fires exactly as the room goes idle, so
+    /// THE TRAP (RC2 §4 #8): the wave fires exactly as the room goes idle, so
     /// if its bucket kept reaching the fingerprint after expiry the office would
     /// recompose forever and the loop would never park. This pins all three
     /// halves: the sweep moves the fingerprint while it runs, the fingerprint
@@ -2933,7 +2933,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #9: the typing cadence follows real token throughput, measured
+    /// RC2 §4 #9: the typing cadence follows real token throughput, measured
     /// against **wall time** (the sync is throttled and can skip, so a per-sync
     /// delta would read a different rate depending on how busy the app was).
     #[test]
@@ -3072,7 +3072,7 @@ mod tests {
         assert_eq!(
             dirty_marks_over(&mut seated(BusyLevel::Normal), GameTier::Normal, 8),
             2,
-            "…and a normal one is exactly as cheap as before RC16 §4 #9"
+            "…and a normal one is exactly as cheap as before RC2 §4 #9"
         );
     }
 
@@ -3095,7 +3095,7 @@ mod tests {
     /// Handoff is in the moving set again: the walker is still pinned on the
     /// rug, but the papers FX arcs off `anim_t` (see `phase_anim_t_is_visible`).
     /// Celebrate joined it for the same reason — its pose and confetti are both
-    /// too fast for the `tick / 4` bucket (RC16 §4 #2).
+    /// too fast for the `tick / 4` bucket (RC2 §4 #2).
     #[test]
     fn only_moving_walk_phases_hash_anim_t() {
         let mut s = GameModeState::new();
@@ -3202,10 +3202,10 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #7 wakeup budget, stated as a test: an idle pixel office spends
+    /// RC2 §4 #7 wakeup budget, stated as a test: an idle pixel office spends
     /// one repaint per [`AMBIENT_PERIOD`] and nothing else. At the
     /// `AMBIENT_TICK_INTERVAL` the loop actually wakes it at, that is ~0.33
-    /// repaints/sec — versus the ~12/sec an open office cost before RC16 PERF-1.
+    /// repaints/sec — versus the ~12/sec an open office cost before RC2 PERF-1.
     #[test]
     fn idle_office_repaint_budget_is_one_per_ambient_period() {
         let mut s = GameModeState::new();
@@ -3271,7 +3271,7 @@ mod tests {
         );
     }
 
-    /// RC16 §4 #11's entire claim, in one test: the floor robot advances **only**
+    /// RC2 §4 #11's entire claim, in one test: the floor robot advances **only**
     /// on a `tick / 4` bucket edge in a room that is already animating. That is
     /// what makes it free — no `needs_animation_tick` change (so no wakeups), and
     /// no dirty mark of its own (the bucket edge it rides already marked one).

@@ -257,10 +257,10 @@ pub enum TickDemand {
     /// multi-second cadence in a view that is otherwise frozen. Ticks at
     /// [`AMBIENT_TICK_INTERVAL`], ~36× cheaper than [`Slow`](Self::Slow).
     ///
-    /// Introduced for Game Mode's idle office (RC16 §4 #7 / #12): the coffee
+    /// Introduced for Game Mode's idle office (RC2 §4 #7 / #12): the coffee
     /// sip, the Supervisor's steam and the wall clock have to advance in a room
     /// [`TickDemand::None`] would park, but waking such a room 12×/second to
-    /// move a mug would undo RC16 PERF-1 outright.
+    /// move a mug would undo RC2 PERF-1 outright.
     Ambient,
     /// Only low-frequency work is pending (welcome logo shimmer at ~12fps,
     /// Game Mode office animations while the agent is otherwise idle, and the
@@ -278,7 +278,7 @@ pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
 /// The wakeup budget for every animation that must run in an otherwise-parked
 /// view. Chosen against Game Mode's idle office: a coffee sip or a minute hand
 /// reads fine at a ~3 s beat, and 0.33 wakeups/sec is a rounding error next to
-/// the ~12/sec an open office cost before RC16 PERF-1. Must stay **longer** than
+/// the ~12/sec an open office cost before RC2 PERF-1. Must stay **longer** than
 /// `game_mode::state`'s own `AMBIENT_PERIOD` gate, or jitter halves the rate.
 pub const AMBIENT_TICK_INTERVAL: Duration = Duration::from_millis(3000);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
@@ -6019,7 +6019,7 @@ impl AppView {
                 // Pixel recompose is fingerprint-gated inside game_mode::state so
                 // pure tick + hover do not rebuild the scaled BG every frame.
                 //
-                // PERF (RC16 PERF-1): a **frozen** room adds no demand at all —
+                // PERF (RC2 PERF-1): a **frozen** room adds no demand at all —
                 // an office with no seated desks, an Idle/Waiting supervisor and
                 // nothing dirty parks the loop instead of waking it ~12×/sec for
                 // as long as the view stays open. The two live checks are the
@@ -6040,7 +6040,7 @@ impl AppView {
                     }
                     // ...and a room with *only* ambient art left to move (the
                     // coffee sip, the Supervisor's steam, the wall clock) wakes
-                    // at its own ~3 s cadence instead of parking (RC16 §4 #7 /
+                    // at its own ~3 s cadence instead of parking (RC2 §4 #7 /
                     // #12). Deliberately below `Slow`: this must never be the
                     // reason the office animates at 12 Hz.
                     if agent.game_mode.needs_ambient_tick() {
@@ -7028,7 +7028,7 @@ pub(crate) mod tests {
             "settled picker must not keep demanding ticks"
         );
     }
-    /// RC16 PERF-1: an open Game Mode must not pin the event loop. A frozen
+    /// RC2 PERF-1: an open Game Mode must not pin the event loop. A frozen
     /// room — no seated desks, Idle supervisor, nothing dirty — adds no demand
     /// at all; a freshly toggled room (never synced) and a room with a working
     /// desk both stay on Slow.
@@ -7061,7 +7061,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// RC16 §3 step 3: opening Game Mode must fetch the MCP server list once —
+    /// RC2 §3 step 3: opening Game Mode must fetch the MCP server list once —
     /// Ctrl+G dispatches no Effect, so without this the rack tooltip would be
     /// stuck on startup counts for the whole session. "Once" is the load-bearing
     /// half: the tick path runs ~12×/second.
@@ -7126,7 +7126,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// RC16 §4 #7 / #12: a frozen office that has actually painted the pixel
+    /// RC2 §4 #7 / #12: a frozen office that has actually painted the pixel
     /// room still has ambient art to move (coffee sip, Supervisor steam, wall
     /// clock hands), so it must wake — at [`AMBIENT_TICK_INTERVAL`], never at
     /// the ~12 Hz Slow cadence PERF-1 exists to avoid.

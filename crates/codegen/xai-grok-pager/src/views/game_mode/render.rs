@@ -428,7 +428,7 @@ fn paint_popup(buf: &mut Buffer, area: Rect, anchor: PopupAnchor, lines: &[(Stri
     // footprint to keep inside `area` is one row and one column larger than the
     // card itself. Clamping the card alone parked it flush against the right /
     // bottom edge and the shadow then bled into the neighbouring UI rows
-    // (RC16 B5).
+    // (RC2 B5).
     let right = area.x.saturating_add(area.width);
     let bottom = area.y.saturating_add(area.height);
     let max_x = right.saturating_sub(width.saturating_add(1)).max(area.x);
@@ -680,10 +680,10 @@ fn paint_wall_display(
     }
 }
 
-/// Wall-strip clock for the Unicode office — real local time (RC16 §4 #12).
+/// Wall-strip clock for the Unicode office — real local time (RC2 §4 #12).
 ///
-/// It used to be a decorative `tick / 12` session timer, which RC16 BUG-2 ran at
-/// half speed and RC16 PERF-1 then froze outright whenever the room parked. Now
+/// It used to be a decorative `tick / 12` session timer, which RC2 BUG-2 ran at
+/// half speed and RC2 PERF-1 then froze outright whenever the room parked. Now
 /// it formats the same `(hour, ten-minute)` bucket the pixel office draws hands
 /// from, so the two offices agree and neither depends on the tick rate. Its
 /// caller ([`paint_wall_display`]) samples that bucket live at paint time, so
@@ -933,9 +933,9 @@ fn paint_status_strip(buf: &mut Buffer, area: Rect, state: &GameModeState, tier:
 // ── buffer helpers ──────────────────────────────────────────────
 
 /// Cells consumed by one painted char — never zero, so a combining mark still
-/// advances (matches the pre-RC16 behaviour of `width(ch.to_string()).max(1)`).
+/// advances (matches the pre-RC2 behaviour of `width(ch.to_string()).max(1)`).
 ///
-/// PERF (RC16 P9): the old form heap-allocated a `String` just to measure, and
+/// PERF (RC2 P9): the old form heap-allocated a `String` just to measure, and
 /// `set_symbol(&ch.to_string())` allocated a second one to paint. A full stage
 /// is thousands of characters per frame; `UnicodeWidthChar` + `set_char` are
 /// the pattern used by the rest of this pager's buffer painters.
@@ -1125,7 +1125,7 @@ mod tests {
             context_total: 256_000,
             context_pct: 16,
             waiting_on_user: true,
-            branch: Some("rc16-game-mode".to_string()),
+            branch: Some("rc2-game-mode".to_string()),
         };
         state.hover = Some(HoverTarget::Supervisor);
         state.hover_screen = Some((game.x + 20, game.y + 18));
@@ -1139,7 +1139,7 @@ mod tests {
                 " turn  1m33s  (working)",
                 " ctx   42.0k/256.0k  16%",
                 " desks 1/6 +2  WORKING",
-                " branch rc16-game-mode",
+                " branch rc2-game-mode",
                 " ▲ waiting on you",
             ]
         );
@@ -1406,7 +1406,7 @@ mod tests {
         assert_eq!(symbol_at(&buf, 3, 0), "b");
     }
 
-    /// RC16 §4 #12: the Unicode office's wall clock now shows the same real
+    /// RC2 §4 #12: the Unicode office's wall clock now shows the same real
     /// local time bucket the pixel office draws hands from. It used to be a
     /// `tick / 12` session timer, which BUG-2 ran at half speed and PERF-1 then
     /// froze outright — so it must no longer depend on `tick` at all.
@@ -1440,7 +1440,7 @@ mod tests {
         panic!("no wall clock painted");
     }
 
-    /// RC16 §4 #12 regression: the wall clock must be sampled **at paint time**,
+    /// RC2 §4 #12 regression: the wall clock must be sampled **at paint time**,
     /// not read from the tick-refreshed `clock_hm`.
     ///
     /// `clock_hm` is only refreshed by `tick_anim`'s ambient step, and the

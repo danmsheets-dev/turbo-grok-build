@@ -92,10 +92,10 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Folder worktrees** | Subagents default to isolated git worktrees under `~/.grok/worktrees/…` | RC7 (harden RC6–RC12) |
 | **Land / diff / discard** | Promote or drop child work via tools + `turbo subagent …` | RC8–RC9 |
 | **Agent-only baselines** | Diff/land = `baseline..snapshot`, not dirty parent vs HEAD | RC9 |
-| **Soft-preserve + keep-N** | Live worktrees kept for review; `GROK_SUBAGENT_KEEP_N` (default 3; `0` = age-only) | RC9 / RC12 / RC16 |
-| **Free-space gate** | Pre-spawn + `turbo disk check` (`GROK_MIN_FREE_GB`, default 40) | RC12 / RC16 |
-| **`turbo tools list`** | Headless schema assert (`--require spawn_subagent`) without a model turn | RC16 |
-| **`turbo disk`** | Report / check / safe clean (`target/debug`, old worktrees, tree store) | RC15 / RC16 |
+| **Soft-preserve + keep-N** | Live worktrees kept for review; `GROK_SUBAGENT_KEEP_N` (default 3; `0` = age-only) | RC9 / RC12 / RC2 |
+| **Free-space gate** | Pre-spawn + `turbo disk check` (`GROK_MIN_FREE_GB`, default 40) | RC12 / RC2 |
+| **`turbo tools list`** | Headless schema assert (`--require spawn_subagent`) without a model turn | RC2 |
+| **`turbo disk`** | Report / check / safe clean (`target/debug`, old worktrees, tree store) | RC15 / RC2 |
 | **FS confine (worktree)** | Write path + shell operand jail fail closed | RC12 |
 | **`/deepaudit`** | Parallel investigate → independent verify → verified report | RC8 |
 | **`/deep-research`** | Bounded research with claim cross-check | earlier + RC14 routing |
@@ -148,7 +148,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **RC15** · `0.2.119-r1` (+ RC16 disk/tools closeout on `dev`) |
+| Release line | upstream cadence | **RC15** · `0.2.119-r1` (+ RC2 disk/tools closeout on `dev`) |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -278,7 +278,7 @@ turbo disk report           # shows keep-N + min-free threshold status
 ```
 
 Details: [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md),
-[`CHANGELOG.md`](./CHANGELOG.md) (RC7–RC16), user-guide `16-subagents.md`.
+[`CHANGELOG.md`](./CHANGELOG.md) (RC7–RC2), user-guide `16-subagents.md`.
 
 ---
 
