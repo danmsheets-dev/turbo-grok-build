@@ -185,7 +185,7 @@ mod shell_suggestion_key_tests {
     /// Whole-line history item (insert_text doubles as the span replacement).
     ///
     /// Only the POSIX-gated bash Tab tests build these.
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     fn history_item(line: &str, range: std::ops::Range<usize>) -> CompletionItemParsed {
         CompletionItemParsed {
             display: line.to_owned(),
@@ -322,7 +322,7 @@ mod shell_suggestion_key_tests {
     // `cfg!(not(windows))` in `agent_view/prompt.rs`, so on Windows the
     // keystroke falls through to legacy focus cycling instead of completing.
     // Every test below carrying this attribute mirrors that product guard.
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     #[test]
     fn tab_opens_dropdown_without_ghost() {
         let mut agent = bash_agent("ls | gr");
@@ -345,8 +345,8 @@ mod shell_suggestion_key_tests {
 
     /// Tab in bash mode with no fetched candidates fires a deterministic
     /// fetch — no env flag, no AI, dropdown-scale limit.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_without_items_fires_deterministic_fetch() {
         let mut agent = bash_agent_always_on("cat no");
@@ -375,8 +375,8 @@ mod shell_suggestion_key_tests {
 
     /// Repeat Tab while the armed fetch is still in flight is a no-op: one
     /// RPC, one landing that runs the Tab semantics once.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn repeat_tab_fires_single_fetch_while_pending() {
         let mut agent = bash_agent_always_on("cat no");
@@ -397,8 +397,8 @@ mod shell_suggestion_key_tests {
 
     /// Items outdated by an edit (stale generation) refetch instead of
     /// completing over the old candidate set.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_with_stale_items_refetches() {
         let mut agent = bash_agent_always_on("cat no");
@@ -450,8 +450,8 @@ mod shell_suggestion_key_tests {
 
     /// Exactly one token candidate: Tab accepts it immediately — no
     /// dropdown flash — and the accept re-fetch keeps the pipeline alive.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_single_token_candidate_accepts_without_dropdown_flash() {
         let mut agent = bash_agent("cat no");
@@ -466,8 +466,8 @@ mod shell_suggestion_key_tests {
 
     /// The same insta-accept with the pipeline OFF: the refetch kick is a
     /// direct deterministic fetch instead of a debounce.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_single_candidate_accepts_and_kicks_fetch_always_on() {
         let mut agent = bash_agent_always_on("cat no");
@@ -490,8 +490,8 @@ mod shell_suggestion_key_tests {
 
     /// A single HISTORY item keeps the plain dropdown-open behavior:
     /// terminal Tab semantics apply to token completions only.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_single_history_item_opens_dropdown() {
         let mut agent = bash_agent("git st");
@@ -508,8 +508,8 @@ mod shell_suggestion_key_tests {
     /// shells send `insertText: "grep"`, no range) must never insta-accept
     /// — its whole-line fallback would replace `ls | gr` with `grep`. Tab
     /// plain-opens instead, sole match or not.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_sole_rangeless_path_row_opens_dropdown_never_accepts() {
         let mut agent = bash_agent("ls | gr");
@@ -523,8 +523,8 @@ mod shell_suggestion_key_tests {
 
     /// Any rangeless row in a MIXED set (legacy PATH row next to a ranged
     /// file row) forces plain-open too — no insta-accept, no fill.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_mixed_rangeless_and_ranged_rows_open_dropdown() {
         let mut agent = bash_agent("ls | gr");
@@ -542,8 +542,8 @@ mod shell_suggestion_key_tests {
     /// A MIXED set (any non-token item alongside file/path rows) disables
     /// terminal-Tab semantics wholesale: no insta-accept, no fill — Tab
     /// plain-opens so the user sees every candidate, history included.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_mixed_file_and_history_items_opens_dropdown() {
         let mut agent = bash_agent("cat no");
@@ -560,8 +560,8 @@ mod shell_suggestion_key_tests {
 
     /// Whole-line history sets never prefix-fill (half a history line is
     /// not a command) — Tab plain-opens.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_whole_line_history_items_open_dropdown_not_fill() {
         let mut agent = bash_agent("git st");
@@ -580,8 +580,8 @@ mod shell_suggestion_key_tests {
     /// the first Tab fills the common prefix in place (no dropdown) and
     /// re-fetches; when the refreshed items land, the second Tab opens the
     /// dropdown.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_fills_common_prefix_then_opens_dropdown_on_refresh() {
         let mut agent = bash_agent("cat al");
@@ -630,8 +630,8 @@ mod shell_suggestion_key_tests {
 
     /// The fill's refetch with the pipeline OFF is a direct deterministic
     /// fetch (no debounce to ride on).
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_fill_kicks_deterministic_fetch_always_on() {
         let mut agent = bash_agent_always_on("cat al");
@@ -689,8 +689,8 @@ mod shell_suggestion_key_tests {
     /// draft change. The declined fill now degrades to opening the
     /// dropdown: candidates visible, nothing fetched, chip intact, and the
     /// second Tab rides the normal open-dropdown handling.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_fill_clipping_paste_chip_opens_dropdown_without_refetch() {
         // Two candidates whose shared range (chip bytes 0..2, "li") fills
@@ -722,8 +722,8 @@ mod shell_suggestion_key_tests {
     /// Same hole on the insta-accept arm: committing would consume the
     /// sole candidate and THEN decline the splice, leaving every Tab to
     /// refetch the same set. The probe degrades to showing the candidate.
-    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    // POSIX-only: bash Tab is `cfg!(not(windows))`-gated (agent_view/prompt.rs:341).
+    #[cfg(not(windows))]
     #[test]
     fn tab_insta_accept_clipping_paste_chip_opens_dropdown_without_refetch() {
         let (mut agent, text) = chip_agent(vec![file_item("lima_one.txt", "lima_one.txt", 0..2)]);
@@ -868,7 +868,7 @@ mod shell_suggestion_key_tests {
     /// dismissal path), and the draft survives.
     // POSIX-only: the dropdown under test is opened by bash Tab, which is
     // `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     #[test]
     fn esc_closes_tab_fetched_dropdown() {
         let mut agent = bash_agent_always_on("git st");
@@ -926,7 +926,7 @@ mod shell_suggestion_key_tests {
     /// the clicked cursor instead of completing the old one.
     // POSIX-only: the invalidation is observed through a bash Tab, which is
     // `cfg!(not(windows))`-gated (agent_view/prompt.rs).
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     #[test]
     fn prompt_click_invalidates_cached_items_before_tab() {
         use crate::app::agent_view::AgentPane;
