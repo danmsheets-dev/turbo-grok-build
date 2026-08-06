@@ -8152,8 +8152,12 @@ pub(crate) mod tests {
             InputOutcome::Action(Action::QuitForUpdate)
         ));
     }
+    /// Minimal mode is the one screen mode where Ctrl+G owns
+    /// `EditPromptExternal` (`crate::actions::defaults::mode_ctrl_g_action`);
+    /// on the other modes Ctrl+G is Game Mode. Either way the tasks overlay —
+    /// which moved to Ctrl+Shift+G in RC11 — must stay shut.
     #[test]
-    fn minimal_ctrl_g_edits_prompt_while_full_tui_keeps_tasks() {
+    fn minimal_ctrl_g_edits_prompt_externally() {
         let event = key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
         let mut minimal = test_app_with_agent();
         minimal.screen_mode = ScreenMode::Minimal;
@@ -8207,6 +8211,18 @@ pub(crate) mod tests {
         assert!(owned.pending_editor.is_none());
         assert!(!owned.agents[&id].tasks.overlay.visible);
         assert!(!owned.agents[&id].tasks.overlay.focused);
+    }
+    /// RC11 moved the tasks pane off Ctrl+G (Game Mode took that chord) onto
+    /// Ctrl+Shift+G — see the `ToggleTasks` `ActionDef` in
+    /// `crate::actions::defaults`. The full-TUI tasks-overlay contract lives
+    /// on the real key.
+    #[test]
+    fn full_tui_ctrl_shift_g_opens_tasks_overlay() {
+        let event = key_event(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        let id = super::super::agent::AgentId(0);
         let mut full = test_app_with_agent();
         full.screen_mode = ScreenMode::Fullscreen;
         let out = full.handle_input(&event);
@@ -12505,11 +12521,31 @@ pub(crate) mod tests {
             "ExitSession intercept must NOT remove the agent (it only closes the popup)",
         );
     }
+    /// A cwd the workspace classifier always rejects as a project root.
+    ///
+    /// `xai_file_utils::workspace_classifier::is_platform_system_dir` keys its
+    /// Windows branch off `%TEMP%`/`%TMP%` (in that order) and its POSIX
+    /// branch off `/tmp`, so mirror that lookup rather than hardcoding a POSIX
+    /// literal — no real Windows cwd is spelled `/tmp`, and teaching the
+    /// Windows classifier that spelling would add a false-positive path to a
+    /// real classifier.
+    fn non_project_cwd() -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            std::env::var_os("TEMP")
+                .or_else(|| std::env::var_os("TMP"))
+                .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
+        }
+        #[cfg(not(windows))]
+        {
+            std::path::PathBuf::from("/tmp")
+        }
+    }
     #[test]
     fn needs_project_picker_false_when_disabled() {
         let mut app = test_app();
         app.project_picker_shown = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
+        app.cwd = non_project_cwd();
         app.project_picker_disabled = true;
         assert!(!app.needs_project_picker());
     }
@@ -12517,7 +12553,7 @@ pub(crate) mod tests {
     fn needs_project_picker_false_when_already_shown() {
         let mut app = test_app();
         app.project_picker_shown = true;
-        app.cwd = std::path::PathBuf::from("/tmp");
+        app.cwd = non_project_cwd();
         app.project_picker_disabled = false;
         assert!(!app.needs_project_picker());
     }
@@ -12526,7 +12562,7 @@ pub(crate) mod tests {
         let mut app = test_app();
         app.project_picker_shown = false;
         app.project_picker_disabled = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
+        app.cwd = non_project_cwd();
         assert!(app.needs_project_picker());
     }
     /// Chat mode hides the welcome picker's source filter, so `f` must not

@@ -1480,6 +1480,15 @@ mod tests {
         use crate::scrollback::types::{DisplayMode, derive_selection_text};
         use ratatui::buffer::Buffer;
 
+        // The Read header is relativized against the child cwd by
+        // `render::tool_paths`, which rebuilds the path from `Components` and
+        // therefore spells it with the *platform* separator: `src/lib.rs` on
+        // unix, `src\lib.rs` on Windows. Derive the expectation the same way
+        // so it stays exact on both instead of pinning one spelling.
+        let expected_rel = std::path::Path::new("src")
+            .join("lib.rs")
+            .to_string_lossy()
+            .into_owned();
         let parent_cwd = std::path::PathBuf::from("/parent/worktree");
         let child_cwd = std::path::PathBuf::from("/child/worktree");
         let mut child = make_agent();
@@ -1511,7 +1520,7 @@ mod tests {
             .ranges
             .iter()
             .flat_map(|range| &range.lines)
-            .find(|line| line.text == "src/lib.rs")
+            .find(|line| line.text == expected_rel)
             .expect("child-relative Read header")
             .clone();
         let content_width = rendered
@@ -1540,14 +1549,14 @@ mod tests {
                 |source| source(line.block_line_idx),
             )
             .flatten();
-        assert_eq!(source_text.as_deref(), Some("src/lib.rs"));
+        assert_eq!(source_text.as_deref(), Some(expected_rel.as_str()));
         {
             let child = parent.subagent_views.get(&child_id).expect("active child");
             let entry = child.scrollback.get(0).expect("child Read entry");
             let cached = entry.cached_output_ref();
             assert_eq!(
                 derive_selection_text(&cached.lines[line.block_line_idx]),
-                "src/lib.rs",
+                expected_rel,
                 "copy helper must not rebuild the child cache against parent cwd"
             );
         }
@@ -1574,7 +1583,7 @@ mod tests {
         };
         assert_eq!(
             parent.reconstruct_drag_copy(&drag),
-            Some(("src/lib.rs".to_string(), SelectionKind::Linear))
+            Some((expected_rel, SelectionKind::Linear))
         );
     }
 
