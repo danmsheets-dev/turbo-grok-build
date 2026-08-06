@@ -2227,9 +2227,11 @@ mod tests {
         assert!(!args.no_alt_screen);
     }
     #[test]
-    fn cli_command_name_is_grok() {
+    fn cli_command_name_is_turbo() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "grok");
+        // Matches the `Usage: turbo ...` line pinned by
+        // `cli_help_output_header` — both spell the shipped binary name.
+        assert_eq!(PagerArgs::command().get_name(), "turbo");
     }
     #[test]
     fn cli_help_output_header() {

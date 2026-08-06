@@ -1289,7 +1289,16 @@ pub(super) fn default_actions(
             !matches!(
                 def.context,
                 When::ScrollbackFocused | When::DashboardFocused | When::DashboardOverlay
-            ) && !matches!(def.id, ActionId::OpenDashboard | ActionId::FocusScrollback)
+            ) && !matches!(
+                def.id,
+                // `ToggleTasks` used to be the non-minimal half of
+                // `mode_ctrl_g_action`, so minimal never saw it. RC11 moved
+                // it out to its own Ctrl+Shift+G definition and it started
+                // leaking in — but the tasks pane is a side pane minimal
+                // cannot render, which is why minimal's SendToBackground
+                // help points at `/tasks` instead.
+                ActionId::OpenDashboard | ActionId::FocusScrollback | ActionId::ToggleTasks
+            )
         });
     }
 

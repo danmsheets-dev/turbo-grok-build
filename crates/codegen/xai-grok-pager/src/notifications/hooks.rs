@@ -113,7 +113,26 @@ pub fn run_hook(hook: &NotificationHook, event: &NotificationEvent) {
 mod tests {
     use super::*;
     use crate::notifications::config::NotificationEventKind;
+    use std::path::Path;
     use std::time::Instant;
+
+    /// Render `path` as a single argument for the POSIX `sh -c` line that
+    /// [`execute_hook`] runs.
+    ///
+    /// Windows paths arrive with `\` separators, and `sh` reads those as
+    /// escapes: `H:\dev-cache\tmp\.tmpAB\env.txt` collapses to
+    /// `H:dev-cachetmp.tmpABenv.txt`, so the hook wrote a junk file into the
+    /// crate directory instead of the temp dir and the assertion below then
+    /// failed on a file that was never created. `sh` (Git Bash / MSYS)
+    /// accepts the drive-letter form spelled with forward slashes. Quoting
+    /// covers the spaces that a real `%TEMP%` (`C:\Users\First Last\...`)
+    /// usually carries; on unix the rendering is `display()` verbatim.
+    fn sh_arg(path: &Path) -> String {
+        let rendered = path.display().to_string();
+        #[cfg(windows)]
+        let rendered = rendered.replace('\\', "/");
+        format!("'{rendered}'")
+    }
 
     fn test_event() -> NotificationEvent {
         NotificationEvent {
@@ -131,7 +150,7 @@ mod tests {
         let command = format!(
             "printf 'GROK_EVENT=%s\\nGROK_MESSAGE=%s\\nGROK_SESSION_ID=%s\\n' \
              \"$GROK_EVENT\" \"$GROK_MESSAGE\" \"$GROK_SESSION_ID\" > {}",
-            out.display()
+            sh_arg(&out)
         );
 
         execute_hook(
@@ -161,7 +180,7 @@ mod tests {
     fn omits_session_id_when_none() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
-        let command = format!("env > {}", out.display());
+        let command = format!("env > {}", sh_arg(&out));
 
         execute_hook(
             &command,
@@ -221,7 +240,7 @@ mod tests {
     fn successful_command_completes_without_error() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
-        let command = format!("touch {}", marker.display());
+        let command = format!("touch {}", sh_arg(&marker));
 
         execute_hook(
             &command,
@@ -251,7 +270,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
         let hook = NotificationHook {
-            command: format!("sleep 100; touch {}", marker.display()),
+            command: format!("sleep 100; touch {}", sh_arg(&marker)),
             events: vec![],
             only_unfocused: false,
             timeout_secs: 0, // exercises the .max(1) clamp inside run_hook
@@ -283,7 +302,7 @@ mod tests {
             command: format!(
                 "printf 'GROK_EVENT=%s\\nGROK_MESSAGE=%s\\nGROK_SESSION_ID=%s\\n' \
                  \"$GROK_EVENT\" \"$GROK_MESSAGE\" \"$GROK_SESSION_ID\" > {}",
-                out.display()
+                sh_arg(&out)
             ),
             events: vec![],
             only_unfocused: false,

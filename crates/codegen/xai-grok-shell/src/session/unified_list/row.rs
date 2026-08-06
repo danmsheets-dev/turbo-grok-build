@@ -216,11 +216,18 @@ mod tests {
 
     #[test]
     fn acp_conversion_preserves_the_row() {
+        // `SessionInfo::try_from` requires an absolute cwd, and a rooted but
+        // prefixless `/Users/...` is not absolute on Windows.
+        let cwd = if cfg!(windows) {
+            r"C:\Users\me\xai"
+        } else {
+            "/Users/me/xai"
+        };
         let merged = MergedSession {
             session_id: "sess_abc123".into(),
             summary: "Implement session list API".into(),
             updated_at: "2026-10-29T14:22:15Z".into(),
-            cwd: "/Users/me/xai".into(),
+            cwd: cwd.into(),
             ..MergedSession::default()
         };
         let info = merged_session_to_row(merged, facet_registry()).into_session_info();

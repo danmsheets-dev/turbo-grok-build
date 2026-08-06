@@ -786,6 +786,22 @@ fn remote_vscode_and_unsupported_shell_are_refused() {
     ));
 }
 
+/// `plan_ssh_wrap` is split around its `cfg!(windows)` gate so
+/// `test_fix_plan` can build a plan on every platform. Pin both halves:
+/// the production entry point still refuses on Windows, and the ungated
+/// planner still produces the ssh-wrap plan everywhere.
+#[test]
+fn platform_gate_stays_on_plan_fix_and_off_test_fix_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let production = plan_fix(request(temp.path(), "/bin/bash"), &report(), &terminal());
+    if cfg!(windows) {
+        assert!(matches!(production, Err(FixError::PlatformUnsupported)));
+    } else {
+        assert_eq!(production.expect("posix plan").id(), SSH_WRAP_ID);
+    }
+    assert_eq!(test_fix_plan(temp.path()).id(), SSH_WRAP_ID);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_is_manual_only_before_shell_selection() {

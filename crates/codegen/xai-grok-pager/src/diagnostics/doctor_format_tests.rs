@@ -14,6 +14,7 @@ use crate::host::HostOs;
 use crate::terminal::{
     ByobuBackend, ModifierDelivery, ModifierFate, MultiplexerKind, TerminalContext, TerminalName,
 };
+use crate::theme::ThemeKind;
 use crate::theme::color_support::ColorLevel;
 
 static LOCAL_ROUTE: ClipboardRoute = ClipboardRoute {
@@ -98,6 +99,25 @@ fn ghostty(is_ssh: bool) -> TerminalContext {
 
 fn build_doctor(snapshot: DoctorProbeSnapshot<'_>) -> String {
     let report = view(DiagnosticSnapshot::from(snapshot));
+    format_doctor(&report)
+}
+
+/// Hermetic theme catalog for the `themes n/N` golden below: two available
+/// out of five. The live catalog grew 5 -> 19 and moved that golden, which
+/// tests the *formatter* and never touches `ThemeKind::ALL`. That
+/// `total_themes` really is the whole live catalog, and that truecolor is
+/// the only filter narrowing the list, is covered structurally by
+/// `view_tests::color_facts_track_the_live_theme_catalog`.
+const FIXTURE_AVAILABLE_THEMES: &[ThemeKind] = &[ThemeKind::GrokNight, ThemeKind::GrokDay];
+const FIXTURE_TOTAL_THEMES: usize = 5;
+
+/// [`build_doctor`] with the theme catalog pinned to the fixture above.
+/// Only meaningful for goldens that render `n/N`; a truecolor snapshot
+/// renders `themes all` and is catalog-independent.
+fn build_doctor_with_fixture_themes(snapshot: DoctorProbeSnapshot<'_>) -> String {
+    let mut report = view(DiagnosticSnapshot::from(snapshot));
+    report.facts.color.available_themes = FIXTURE_AVAILABLE_THEMES.to_vec();
+    report.facts.color.total_themes = FIXTURE_TOTAL_THEMES;
     format_doctor(&report)
 }
 
@@ -222,7 +242,7 @@ fn tmux_config_and_reload_notes_output_is_stable() {
 #[test]
 fn limited_color_output_is_stable() {
     let terminal = ghostty(false);
-    let output = build_doctor(snapshot(
+    let output = build_doctor_with_fixture_themes(snapshot(
         &terminal,
         unavailable_tmux(),
         &LOCAL_ROUTE,

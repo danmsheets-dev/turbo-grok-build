@@ -620,13 +620,28 @@ mod tests {
 
     #[tokio::test]
     async fn async_gate_supports_bundled_and_user_skill_locations() {
+        // `skill_paths` assembles these with `Path::join`, so the probed
+        // paths carry the native separator. Spell the needles the same way
+        // rather than hard-coding `/`, which never matches on Windows.
+        let needle = |segments: &[&str]| {
+            segments
+                .iter()
+                .copied()
+                .collect::<std::path::PathBuf>()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let claude = needle(&["bundled", "skills", "resume-claude"]);
+        let codex = needle(&["skills", "resume-codex"]);
+        let cursor = needle(&["bundled", "skills", "resume-cursor"]);
+        let omp = needle(&["skills", "resume-omp"]);
         let enabled = gated_sources_async_with(compat_all(), Path::new("/grok"), |path| {
             let path = path.to_string_lossy();
             std::future::ready(
-                path.contains("bundled/skills/resume-claude")
-                    || path.contains("skills/resume-codex")
-                    || path.contains("bundled/skills/resume-cursor")
-                    || path.contains("skills/resume-omp"),
+                path.contains(&claude)
+                    || path.contains(&codex)
+                    || path.contains(&cursor)
+                    || path.contains(&omp),
             )
         })
         .await;

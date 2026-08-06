@@ -2698,6 +2698,10 @@ mod tests {
             [
                 NOTIFICATION_PROTOCOL_FALLBACK_ID,
                 FOCUS_TRACKING_UNAVAILABLE_ID,
+                // `collect_tui_runtime_findings` always appends the
+                // web_fetch status recommendation last; only its message
+                // varies with the environment, never its presence or id.
+                model::WEB_FETCH_STATUS_ID,
             ]
         );
         assert!(

@@ -2,7 +2,7 @@
 //! permission handle, goal-loop gate, and configured tool-overrides cutoff so policy,
 //! run-state, and a backtest bound can't be bypassed by delegating to a subagent.
 
-use super::{build_minimal_agent_for_tests, make_test_handle};
+use super::{build_minimal_agent_for_tests, make_test_handle, test_cwd};
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
@@ -21,8 +21,7 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
             let sid = acp::SessionId::new("parent-permission");
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             let gateway = GatewaySender::new(tx);
-            let cwd = xai_grok_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp"))
-                .expect("absolute cwd");
+            let cwd = xai_grok_paths::AbsPathBuf::new(test_cwd()).expect("absolute cwd");
             let (permission_handle, _events_rx) =
                 xai_grok_workspace::permission::spawn_permission_manager(
                     sid.clone(),

@@ -1,5 +1,20 @@
 #![allow(dead_code)]
 use super::*;
+/// Throwaway absolute cwd for actor fixtures.
+///
+/// `/tmp` has a root but no prefix on Windows, so `Path::is_absolute` is
+/// false there and `AbsPathBuf::new` rejects it with `NotAbsolute` — which
+/// panicked every fixture in this file before the actor was even built.
+/// Nothing touches the filesystem through it (the actor runs on `MockFs`),
+/// so the directory need not exist; it only has to be spelled the way the
+/// platform spells an absolute path.
+pub(crate) fn test_cwd() -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::PathBuf::from(r"C:\tmp")
+    } else {
+        std::path::PathBuf::from("/tmp")
+    }
+}
 /// Wrap `id` in a shared auth-method handle for `SessionActor` test literals
 /// (the field is now a shared live handle, not an owned id).
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {
@@ -180,7 +195,7 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    let cwd = xai_grok_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = xai_grok_paths::AbsPathBuf::new(test_cwd()).unwrap();
     let fs = Arc::new(xai_grok_workspace::file_system::MockFs::new(
         cwd.to_path_buf(),
     ));

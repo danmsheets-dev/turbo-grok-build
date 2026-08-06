@@ -701,6 +701,24 @@ fn plan_ssh_wrap(
     if cfg!(windows) {
         return Err(FixError::PlatformUnsupported);
     }
+    plan_ssh_wrap_after_platform_gate(request, report, terminal)
+}
+
+/// The planner proper. Split from [`plan_ssh_wrap`] purely so the
+/// `#[cfg(test)]` [`test_fix_plan`] below can hand callers a real `FixPlan`
+/// on Windows too — the doctor-fix *modal and dispatch* plumbing those
+/// callers cover is not platform-conditional, and gating them would delete
+/// live Windows coverage of platform-neutral code.
+///
+/// Production reaches this only through [`plan_ssh_wrap`], so the
+/// `cfg!(windows)` behavior is unchanged;
+/// `fix_tests::platform_gate_stays_on_plan_fix_and_off_test_fix_plan` pins
+/// both halves of that split.
+fn plan_ssh_wrap_after_platform_gate(
+    request: FixRequest,
+    report: &DiagnosticReport,
+    terminal: &TerminalContext,
+) -> Result<FixPlan, FixError> {
     if terminal.is_official_vscode_remote {
         return Err(FixError::NotApplicable);
     }
@@ -1592,9 +1610,17 @@ pub fn configured_report(mut report: DiagnosticReport, configured: bool) -> Diag
     report
 }
 
+/// A real `FixPlan` for tests that need one but are not about ssh-wrap:
+/// the app-level doctor-fix modal and dispatch tests, which exercise
+/// plumbing that behaves identically on every platform.
+///
+/// Deliberately bypasses [`plan_ssh_wrap`]'s `cfg!(windows)` gate rather
+/// than `plan_fix`, so those tests keep running on Windows instead of being
+/// `#[cfg(unix)]`-gated for a reason that has nothing to do with what they
+/// assert. Nothing else may use the ungated entry point.
 #[cfg(test)]
 pub(crate) fn test_fix_plan(home: &Path) -> FixPlan {
-    plan_fix(
+    plan_ssh_wrap_after_platform_gate(
         tests::request(home, "/bin/bash"),
         &tests::report(),
         &TerminalContext::default(),

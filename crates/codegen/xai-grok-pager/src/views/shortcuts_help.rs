@@ -1943,21 +1943,28 @@ mod tests {
                 assert!(row(ActionId::FocusScrollback).is_some());
             }
 
+            // The Ctrl+G pair is `mode_ctrl_g_action`: minimal keeps the
+            // external editor, everything else gets Game Mode (RC11 took
+            // Ctrl+G from the tasks pane, which moved to Ctrl+Shift+G).
+            // Exactly one of the pair is registered per mode.
             let expected = if mode.is_minimal() {
                 ActionId::EditPromptExternal
             } else {
-                ActionId::ToggleTasks
+                ActionId::ToggleGameMode
             };
             assert_eq!(agent_ctrl_g_rows, vec![expected]);
             assert!(row(expected).is_some());
             assert!(
                 row(if mode.is_minimal() {
-                    ActionId::ToggleTasks
+                    ActionId::ToggleGameMode
                 } else {
                     ActionId::EditPromptExternal
                 })
                 .is_none()
             );
+            // The tasks pane kept its action but not Ctrl+G: present as
+            // Ctrl+Shift+G outside minimal, absent in minimal.
+            assert_eq!(row(ActionId::ToggleTasks).is_some(), !mode.is_minimal());
         }
     }
 

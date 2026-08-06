@@ -449,6 +449,22 @@ mod tests {
         FeedbackUserConfig::default()
     }
 
+    /// Render `path` as one argument of the POSIX script `shell_c` runs.
+    ///
+    /// The Windows shell is still POSIX, so a `\` separator reads as an
+    /// escape: `H:\dev-cache\tmp\.tmpAB\runs` collapsed to
+    /// `H:dev-cachetmp.tmpABruns`, and the counter file landed in the crate
+    /// directory instead of the temp dir — every assertion below then read a
+    /// file that was never written. Quoting covers the spaces a real
+    /// `%TEMP%` (`C:\Users\First Last\...`) usually carries; on unix the
+    /// rendering is `display()` verbatim.
+    fn sh_arg(path: &std::path::Path) -> String {
+        let rendered = path.display().to_string();
+        #[cfg(windows)]
+        let rendered = rendered.replace('\\', "/");
+        format!("'{rendered}'")
+    }
+
     /// Runs the async resolver on a throwaway current-thread runtime so unit
     /// tests can stay synchronous.
     fn resolve(cfg: FeedbackUserConfig) -> ResolvedUserIdentity {
@@ -698,7 +714,7 @@ mod tests {
         let counter = dir.path().join("runs");
         let command = format!(
             "echo run >> {}; echo '{{\"name\": \"cached-user\"}}'",
-            counter.display()
+            sh_arg(&counter)
         );
         let cache = IdentityCache::new();
 
@@ -737,8 +753,8 @@ mod tests {
         let marker = dir.join("ready");
         let command = format!(
             "echo run >> {c}; if [ -f {p} ]; then echo '{then_json}'; else touch {p}; echo '{first_json}'; fi",
-            c = counter.display(),
-            p = marker.display()
+            c = sh_arg(&counter),
+            p = sh_arg(&marker)
         );
         (command, counter)
     }
@@ -883,7 +899,7 @@ mod tests {
         let counter = dir.path().join("runs");
         let command = format!(
             "echo run >> {}; sleep 0.2; echo '{{\"name\": \"once\", \"email\": \"once@example.com\"}}'",
-            counter.display()
+            sh_arg(&counter)
         );
         let cache = IdentityCache::new();
         let cfg = FeedbackUserConfig {

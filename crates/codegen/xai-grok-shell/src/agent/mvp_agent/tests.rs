@@ -1,4 +1,18 @@
 use super::*;
+/// Throwaway absolute cwd for the session-handle fixture below.
+///
+/// `/tmp` has a root but no prefix on Windows, so `Path::is_absolute` is
+/// false there and `AbsPathBuf::new` rejects it with `NotAbsolute`, which
+/// panicked `make_test_handle` before any assertion ran. Nothing here
+/// touches the filesystem through it, so the directory need not exist; it
+/// only has to be spelled the way the platform spells an absolute path.
+pub(super) fn test_cwd() -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::PathBuf::from(r"C:\tmp")
+    } else {
+        std::path::PathBuf::from("/tmp")
+    }
+}
 /// Build an unsigned JWT with a `tier` claim (header.payload.sig base64url).
 fn jwt_with_tier(tier: u64) -> String {
     use base64::Engine;
@@ -1260,7 +1274,7 @@ fn make_test_handle(
     let hunk_cancel = tokio_util::sync::CancellationToken::new();
     let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
         "test".to_string(),
-        std::path::PathBuf::from("/tmp"),
+        test_cwd(),
         hunk_event_tx,
         xai_hunk_tracker::TrackingMode::AllDirty,
         hunk_cancel,
@@ -1291,10 +1305,8 @@ fn make_test_handle(
         upload_queue: Arc::new(OnceLock::new()),
         upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tool_context: crate::tools::ToolContext::new_local_context(
-            xai_grok_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap(),
-            std::sync::Arc::new(xai_grok_workspace::file_system::LocalFs::new(
-                std::path::PathBuf::from("/tmp"),
-            )),
+            xai_grok_paths::AbsPathBuf::new(test_cwd()).unwrap(),
+            std::sync::Arc::new(xai_grok_workspace::file_system::LocalFs::new(test_cwd())),
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new(model),
@@ -1308,7 +1320,7 @@ fn make_test_handle(
         code_nav_enabled: false,
         ask_user_question_enabled: true,
         plan_mode: std::sync::Arc::new(parking_lot::Mutex::new(
-            crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from("/tmp")),
+            crate::session::plan_mode::PlanModeTracker::new(test_cwd()),
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
