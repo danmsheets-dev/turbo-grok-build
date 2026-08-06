@@ -93,6 +93,18 @@ pub fn default_collapsed() -> std::collections::HashSet<usize> {
 
 // Man-page body for the paste pseudo-row (Enter detail). Keep claims that
 // hold on every host (agent + dashboard); non-image file paths are agent-only.
+//
+// One bundle key per spelling. A single shared key can only ever carry one
+// platform's wording, and a bundle hit beats the `tr_or` fallback — which is
+// exactly how Windows and macOS users ended up being shown the Linux advice.
+// Per-OS keys keep all three strings translatable without that shadowing.
+#[cfg(target_os = "windows")]
+const PASTE_LONG_HELP_KEY: &str = "shortcuts_help.paste_long_help.windows";
+#[cfg(target_os = "macos")]
+const PASTE_LONG_HELP_KEY: &str = "shortcuts_help.paste_long_help.macos";
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+const PASTE_LONG_HELP_KEY: &str = "shortcuts_help.paste_long_help.linux";
+
 #[cfg(target_os = "windows")]
 const PASTE_LONG_HELP: &str = "\
 Pastes clipboard images into the prompt as chips, and plain text as typed.\n\
@@ -145,12 +157,12 @@ Press Enter to jump to a match and Esc to dismiss.";
 /// content; an unrecognised body yields an empty key so `tr_or` falls back
 /// to the literal rather than mistranslating it as another row.
 ///
-/// [`PASTE_LONG_HELP`] has three `#[cfg(target_os)]` spellings, so a bundle
-/// entry for its key can only ever be right on one platform and silently
-/// shadows the other two — `locales/en.yml` deliberately omits it.
+/// [`PASTE_LONG_HELP`] has three `#[cfg(target_os)]` spellings, so it gets one
+/// key per platform ([`PASTE_LONG_HELP_KEY`]): a single shared key can only
+/// ever be right on one platform and silently shadows the other two.
 fn pseudo_long_help_key(lh: &str) -> &'static str {
     if lh == PASTE_LONG_HELP {
-        "shortcuts_help.paste_long_help"
+        PASTE_LONG_HELP_KEY
     } else if lh == UNDO_LONG_HELP {
         "shortcuts_help.undo_long_help"
     } else if lh == REDO_LONG_HELP {
@@ -2145,6 +2157,27 @@ mod tests {
         assert!(item.keys.iter().any(|k| *k == key!('v', ALT)));
         #[cfg(not(target_os = "windows"))]
         assert!(!item.keys.iter().any(|k| *k == key!('v', ALT)));
+    }
+
+    /// The paste long help is per-OS, so the bundle carries one key per
+    /// platform. A single shared key once shipped the Linux wording to Windows
+    /// and macOS users, because a bundle hit beats `tr_or`'s fallback; the
+    /// guard against a repeat is that this host's key resolves to *this*
+    /// host's constant. If this fails, `locales/en.yml` and `PASTE_LONG_HELP`
+    /// have drifted — fix the bundle, do not drop the key (that would make a
+    /// user-facing string untranslatable).
+    #[test]
+    fn paste_long_help_key_is_per_os_and_matches_this_platform() {
+        assert_eq!(
+            pseudo_long_help_key(PASTE_LONG_HELP),
+            PASTE_LONG_HELP_KEY,
+            "the paste row must mint the per-OS key"
+        );
+        assert_eq!(
+            crate::i18n::tr_or(PASTE_LONG_HELP_KEY, "<no bundle entry>"),
+            PASTE_LONG_HELP,
+            "`{PASTE_LONG_HELP_KEY}` must translate this platform's PASTE_LONG_HELP"
+        );
     }
 
     /// Display-only Input rows for textarea undo/redo (mirrors paste).
