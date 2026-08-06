@@ -16,6 +16,9 @@ use crate::terminal::{
 };
 use crate::theme::{ThemeKind, color_support::ColorLevel};
 
+// Only the POSIX-gated ssh-wrap plan tests use these three helpers; see the
+// comment on `fix_preview_contains_exact_change_and_caveats` below.
+#[cfg(unix)]
 fn ssh_wrap_report() -> DiagnosticReport {
     let mut report = healthy_report();
     report.findings.push(DiagnosticFinding {
@@ -32,6 +35,7 @@ fn ssh_wrap_report() -> DiagnosticReport {
     report
 }
 
+#[cfg(unix)]
 fn local_terminal() -> TerminalContext {
     TerminalContext {
         brand: TerminalName::Ghostty,
@@ -40,6 +44,7 @@ fn local_terminal() -> TerminalContext {
     }
 }
 
+#[cfg(unix)]
 fn ssh_wrap_fix_request(home: &std::path::Path) -> crate::diagnostics::FixRequest {
     crate::diagnostics::FixRequest::new_for_test(
         crate::diagnostics::SSH_WRAP_ID,
@@ -610,6 +615,11 @@ fn human_mixed_fixture_is_exact() {
     );
 }
 
+// POSIX-only: these three drive a real ssh-wrap plan, and `plan_ssh_wrap` opens
+// with a `cfg!(windows)` short-circuit to `FixError::PlatformUnsupported`
+// (diagnostics/fix.rs). The Windows contract is pinned separately by
+// `diagnostics::fix::tests::windows_is_manual_only_before_shell_selection`.
+#[cfg(unix)]
 #[test]
 fn fix_preview_contains_exact_change_and_caveats() {
     let temp = tempfile::tempdir().unwrap();
@@ -637,6 +647,7 @@ fn fix_preview_contains_exact_change_and_caveats() {
     assert!(preview.contains("~^Z"));
 }
 
+#[cfg(unix)]
 #[test]
 fn decline_is_success_and_does_not_write() {
     let temp = tempfile::tempdir().unwrap();
@@ -669,6 +680,7 @@ fn decline_is_success_and_does_not_write() {
     assert!(!temp.path().join(".bashrc").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn non_tty_without_yes_fails_safely_before_write() {
     let temp = tempfile::tempdir().unwrap();

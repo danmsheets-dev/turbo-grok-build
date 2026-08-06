@@ -98,6 +98,9 @@ fn canonical_and_short_ids_resolve_to_canonical_id() {
     ));
 }
 
+// POSIX-only: `Here` requires a successful plan, and `plan_ssh_wrap` returns
+// `PlatformUnsupported` on Windows (diagnostics/fix.rs `plan_ssh_wrap`).
+#[cfg(unix)]
 #[test]
 fn applicable_fix_listing_uses_report_metadata_and_planner_availability() {
     let temp = tempfile::tempdir().unwrap();
@@ -116,6 +119,14 @@ fn applicable_fix_listing_uses_report_metadata_and_planner_availability() {
         local_fixes,
         vec![(SSH_WRAP_ID, "ssh-wrap", AutomaticFixAvailability::Here)]
     );
+}
+
+// The remote and manual-only arms never reach the planner, so they hold on
+// every platform.
+#[test]
+fn applicable_fix_listing_marks_remote_run_locally_and_drops_manual_only() {
+    let report = report();
+    let local = terminal();
 
     let mut remote = local.clone();
     remote.is_ssh = true;
@@ -709,6 +720,10 @@ fn tmux_stale_plan_and_idempotence_reuse_managed_writer_safety() {
     ));
 }
 
+// POSIX-only: mirrors the `cfg!(windows)` short-circuit that opens
+// `plan_ssh_wrap` (diagnostics/fix.rs). Windows keeps its own counterpart,
+// `windows_is_manual_only_before_shell_selection`, below.
+#[cfg(unix)]
 #[test]
 fn bash_zsh_and_fish_plans_use_exact_paths_and_aliases() {
     let temp = tempfile::tempdir().unwrap();
@@ -745,6 +760,10 @@ fn bash_zsh_and_fish_plans_use_exact_paths_and_aliases() {
     }
 }
 
+// POSIX-only: every arm here goes through `plan_ssh_wrap`, whose `cfg!(windows)`
+// guard fires before the remote, VS Code and shell checks are reached — which is
+// exactly what `windows_is_manual_only_before_shell_selection` pins.
+#[cfg(unix)]
 #[test]
 fn remote_vscode_and_unsupported_shell_are_refused() {
     let temp = tempfile::tempdir().unwrap();
@@ -779,6 +798,9 @@ fn windows_is_manual_only_before_shell_selection() {
     ));
 }
 
+// POSIX-only: reaching the conflict policy requires `plan_ssh_wrap` to get past
+// its `cfg!(windows)` guard (diagnostics/fix.rs).
+#[cfg(unix)]
 #[test]
 fn existing_alias_and_function_conflicts_are_preserved() {
     let cases = [
@@ -868,6 +890,10 @@ fn posix_function_scanner_requires_exact_ssh_name_boundary() {
     }
 }
 
+// POSIX-only: needs a real plan, which `plan_ssh_wrap`'s `cfg!(windows)` guard
+// refuses to produce (diagnostics/fix.rs). The scanners themselves are covered
+// cross-platform by the `detect_*` tests above.
+#[cfg(unix)]
 #[test]
 fn conflict_scan_uses_the_exact_validated_source_snapshot() {
     let temp = tempfile::tempdir().unwrap();
@@ -887,6 +913,9 @@ fn conflict_scan_uses_the_exact_validated_source_snapshot() {
     );
 }
 
+// POSIX-only: mirrors the `cfg!(windows)` guard in `plan_ssh_wrap`
+// (diagnostics/fix.rs).
+#[cfg(unix)]
 #[test]
 fn non_utf8_source_fails_closed_before_conflict_policy() {
     let temp = tempfile::tempdir().unwrap();
@@ -937,6 +966,9 @@ fn validator_prefers_custom_executable_shell_and_uses_path_for_basename_only() {
     );
 }
 
+// POSIX-only: mirrors the `cfg!(windows)` guard in `plan_ssh_wrap`
+// (diagnostics/fix.rs).
+#[cfg(unix)]
 #[test]
 fn comments_and_managed_alias_do_not_create_false_conflicts() {
     let temp = tempfile::tempdir().unwrap();
@@ -973,6 +1005,9 @@ fn managed_alias_with_later_unmanaged_conflict_is_not_configured() {
     }
 }
 
+// POSIX-only: mirrors the `cfg!(windows)` guard in `plan_ssh_wrap`
+// (diagnostics/fix.rs).
+#[cfg(unix)]
 #[test]
 fn stale_plan_is_rejected_and_apply_verifies_postcondition() {
     let temp = tempfile::tempdir().unwrap();
@@ -997,6 +1032,9 @@ fn stale_plan_is_rejected_and_apply_verifies_postcondition() {
     assert!(outcome.managed_alias_is_configured());
 }
 
+// POSIX-only: mirrors the `cfg!(windows)` guard in `plan_ssh_wrap`
+// (diagnostics/fix.rs).
+#[cfg(unix)]
 #[test]
 fn ssh_wrap_outcome_verifies_with_planned_shell_not_process_shell() {
     // Post-apply verification must use the shell stored on the outcome. Even if
@@ -1045,7 +1083,13 @@ fn configured_report_reaches_pass_state_only_for_exact_managed_alias() {
             .iter()
             .any(|finding| finding.id == SSH_WRAP_ID)
     );
+}
 
+// POSIX-only: mirrors the `cfg!(windows)` guard in `plan_ssh_wrap`
+// (diagnostics/fix.rs).
+#[cfg(unix)]
+#[test]
+fn healthy_report_still_plans_idempotent_ssh_wrap_setup() {
     let temp = tempfile::tempdir().unwrap();
     let mut healthy = report();
     healthy.findings.clear();
