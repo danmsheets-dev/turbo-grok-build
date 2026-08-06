@@ -777,6 +777,13 @@ fn client_features_decide_color_passthrough() {
 /// `ThemeKind::ALL` — which made them go red every time a theme was added while
 /// testing nothing about the formatter. They are hermetic now, so the real
 /// property lives here, stated structurally so it survives catalogue growth.
+///
+/// One assertion below does depend on the catalogue's *shape*, not just its
+/// size: `available_themes.len() < total_themes` under Ansi256 holds only while
+/// at least one `ThemeKind` returns true from `requires_truecolor()`. If every
+/// theme is ever made 256-color-safe, that line goes red — the correct fix is
+/// then to delete it (the filter has nothing left to narrow), not to go looking
+/// for a bug in the formatter.
 #[test]
 fn color_facts_track_the_live_theme_catalog() {
     use crate::theme::ThemeKind;

@@ -18,7 +18,7 @@ use crate::theme::{ThemeKind, color_support::ColorLevel};
 
 // Only the POSIX-gated ssh-wrap plan tests use these three helpers; see the
 // comment on `fix_preview_contains_exact_change_and_caveats` below.
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn ssh_wrap_report() -> DiagnosticReport {
     let mut report = healthy_report();
     report.findings.push(DiagnosticFinding {
@@ -35,7 +35,7 @@ fn ssh_wrap_report() -> DiagnosticReport {
     report
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn local_terminal() -> TerminalContext {
     TerminalContext {
         brand: TerminalName::Ghostty,
@@ -44,7 +44,7 @@ fn local_terminal() -> TerminalContext {
     }
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn ssh_wrap_fix_request(home: &std::path::Path) -> crate::diagnostics::FixRequest {
     crate::diagnostics::FixRequest::new_for_test(
         crate::diagnostics::SSH_WRAP_ID,
@@ -299,29 +299,75 @@ fn plain_standalone_snapshot(
     )
 }
 
+/// Stand-in for `apply_voice_probe`: sets the voice fact and appends the
+/// no-device finding, the shape the real probe produces on a mic-less host.
+fn fake_voice_probe(report: &mut DiagnosticReport, emit_missing_issue: bool) {
+    report.facts.voice = Some(crate::diagnostics::VoiceFacts::Missing {
+        error: "fake: no input device".to_owned(),
+    });
+    if emit_missing_issue {
+        report.findings.push(DiagnosticFinding {
+            id: crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID,
+            disposition: FindingDisposition::Issue,
+            message: "fake voice finding".to_owned(),
+            remediation: None,
+            automatic_remediation: None,
+            note: None,
+        });
+    }
+}
+
+/// Stand-in for `apply_oracle_model_pin_probe`: appends one recommendation.
+fn fake_oracle_probe(report: &mut DiagnosticReport, session_model: Option<&str>) {
+    assert_eq!(
+        session_model, None,
+        "standalone doctor has no live session model to compare against"
+    );
+    report.findings.push(DiagnosticFinding {
+        id: crate::diagnostics::ORACLE_MODEL_UNPINNED_ID,
+        disposition: FindingDisposition::Recommendation,
+        message: "fake oracle finding".to_owned(),
+        remediation: None,
+        automatic_remediation: None,
+        note: None,
+    });
+}
+
 /// The two live probes are part of the standalone contract — `grok doctor` has
 /// to report the voice fact and the oracle pin recommendation, neither of which
 /// any snapshot can carry. The fixture tests above deliberately call
 /// `compose_report`, so this is the one place that pins the probes still reach
-/// production reports, and that they only *append* to the composed view.
+/// the report, and that they only *append* to the composed view.
+///
+/// Hermetic: the probes are injected, so this asserts the plumbing without
+/// opening the test host's audio device or reading `~/.grok/config.toml`. What
+/// each real probe *decides* is covered by that probe's own tests; what is
+/// covered here is that whatever they decide lands after the composed findings
+/// and disturbs nothing before them.
 #[test]
 fn live_probes_transit_collect_report_with_and_only_append() {
     let terminal = TerminalContext::default();
+    let probes = LiveProbes {
+        voice: fake_voice_probe,
+        oracle: fake_oracle_probe,
+    };
     let composed = compose_report(plain_standalone_snapshot(&terminal));
-    let collected = collect_report_with(plain_standalone_snapshot(&terminal));
+    let collected = collect_report_with_probes(plain_standalone_snapshot(&terminal), &probes);
 
     assert!(
         composed.facts.voice.is_none(),
         "compose_report must not touch the host"
     );
-    if xai_grok_voice::AUDIO_SUPPORTED {
-        assert!(
-            collected.facts.voice.is_some(),
-            "the voice probe must reach the standalone report"
-        );
-    }
+    assert!(
+        collected.facts.voice.is_some(),
+        "the voice probe must reach the standalone report"
+    );
 
-    assert!(collected.findings.len() >= composed.findings.len());
+    assert_eq!(
+        collected.findings.len(),
+        composed.findings.len() + 2,
+        "each probe contributes exactly its own finding, and nothing is dropped"
+    );
     let (composed_through, appended) = collected.findings.split_at(composed.findings.len());
     assert_eq!(
         composed_through
@@ -332,19 +378,19 @@ fn live_probes_transit_collect_report_with_and_only_append() {
             .findings
             .iter()
             .map(|finding| finding.id)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "the probes reordered or replaced findings the view produced"
     );
-    assert!(
-        appended.iter().all(|finding| {
-            [
-                crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID,
-                crate::diagnostics::ORACLE_MODEL_UNPINNED_ID,
-                crate::diagnostics::ORACLE_MODEL_SAME_AS_SESSION_ID,
-                crate::diagnostics::ORACLE_MODEL_NOT_AGENT_READY_ID,
-            ]
-            .contains(&finding.id)
-        }),
-        "the live probes appended an unexpected finding: {appended:?}"
+    assert_eq!(
+        appended
+            .iter()
+            .map(|finding| finding.id)
+            .collect::<Vec<_>>(),
+        vec![
+            crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID,
+            crate::diagnostics::ORACLE_MODEL_UNPINNED_ID,
+        ],
+        "the probes must append in wiring order, voice then oracle"
     );
 }
 
@@ -619,7 +665,7 @@ fn human_mixed_fixture_is_exact() {
 // with a `cfg!(windows)` short-circuit to `FixError::PlatformUnsupported`
 // (diagnostics/fix.rs). The Windows contract is pinned separately by
 // `diagnostics::fix::tests::windows_is_manual_only_before_shell_selection`.
-#[cfg(unix)]
+#[cfg(not(windows))]
 #[test]
 fn fix_preview_contains_exact_change_and_caveats() {
     let temp = tempfile::tempdir().unwrap();
@@ -647,7 +693,7 @@ fn fix_preview_contains_exact_change_and_caveats() {
     assert!(preview.contains("~^Z"));
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 #[test]
 fn decline_is_success_and_does_not_write() {
     let temp = tempfile::tempdir().unwrap();
@@ -680,7 +726,7 @@ fn decline_is_success_and_does_not_write() {
     assert!(!temp.path().join(".bashrc").exists());
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 #[test]
 fn non_tty_without_yes_fails_safely_before_write() {
     let temp = tempfile::tempdir().unwrap();
