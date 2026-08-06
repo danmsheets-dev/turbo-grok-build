@@ -154,7 +154,7 @@ pub fn input_device_info() -> Result<crate::probe::InputDeviceInfo, VoiceError> 
             Err(e) => format!("default config unavailable: {e}"),
         };
         Ok(crate::probe::InputDeviceInfo { name, detail })
-    })
+    })?
 }
 
 /// Record mono PCM16 LE for a fixed duration (probe / diagnostics).
@@ -708,6 +708,47 @@ mod tests {
             assert!(
                 matches!(outcome, Ok(_) | Err(VoiceError::Config(_))),
                 "unexpected lookup outcome on attempt {attempt}: {outcome:?}"
+            );
+        }
+    }
+
+    /// Same regression as above, but on the path users actually crashed on.
+    ///
+    /// `input_device_info` only enumerates; push-to-talk goes through
+    /// `open_capture_stream`, which builds and starts a `cpal::Stream` on the
+    /// audio host, parks it in the host's registry, and releases it from a
+    /// *different* thread when the returned handle drops (`run_capture_poll_loop`
+    /// does exactly this at line ~352). None of that registry / cross-thread
+    /// release machinery was covered: every existing test either stops at
+    /// enumeration or never touches `cpal` at all.
+    ///
+    /// Like the lookup test, this needs no microphone — a host with no input
+    /// device reports `VoiceError::Config` and the point is that the process
+    /// survives repeated open/release cycles from short-lived threads to
+    /// report it.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn capture_stream_open_and_release_survive_repeated_short_lived_threads() {
+        for attempt in 0..3 {
+            let outcome = thread::spawn(|| {
+                let (sync_tx, _sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+                let stop = Arc::new(AtomicBool::new(false));
+                let dropped = Arc::new(AtomicUsize::new(0));
+                open_capture_stream(crate::config::DEFAULT_SAMPLE_RATE, sync_tx, stop, dropped).map(
+                    |(stream, device_name)| {
+                        // Release before this thread exits, exactly as the
+                        // capture poll loop does.
+                        drop(stream);
+                        device_name
+                    },
+                )
+            })
+            .join()
+            .unwrap_or_else(|_| panic!("capture-open thread {attempt} panicked"));
+
+            assert!(
+                matches!(outcome, Ok(_) | Err(VoiceError::Config(_))),
+                "unexpected capture-open outcome on attempt {attempt}: {outcome:?}"
             );
         }
     }

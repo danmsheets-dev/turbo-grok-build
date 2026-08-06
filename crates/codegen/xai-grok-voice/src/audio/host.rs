@@ -44,6 +44,19 @@
 //! Callers must not invoke [`call`] or [`open_stream`] (or drop a
 //! [`HostedStream`]) from inside a closure already running on the host: on
 //! Windows that would deadlock waiting for the host thread to service itself.
+//! A `debug_assert!` on the host's thread id turns that mistake into a failing
+//! test instead of a silent, permanent, process-wide audio deadlock.
+//!
+//! # Nothing here waits forever
+//!
+//! Funnelling every `cpal` call through one thread also funnels the blast
+//! radius: a single wedged call (cpal's WASAPI `Stream::drop` joins the device
+//! thread and can hang on a misbehaving driver) would otherwise wedge every
+//! later audio call in the process. Every wait below is therefore bounded —
+//! callers get a `VoiceError` (or, for a release, a leaked stream id and a
+//! logged error) rather than blocking forever. Teardown paths reach this
+//! synchronously from inside async tasks, so an unbounded wait here would park
+//! an executor thread for good.
 
 use crate::error::VoiceError;
 
@@ -60,10 +73,12 @@ impl Drop for HostedStream {
 
 /// Run `f` on the audio host and return its result.
 ///
-/// Blocks until the host has finished. A panic inside `f` (e.g. `cpal`'s
+/// Blocks until the host has finished, or until the host has been unresponsive
+/// long enough that waiting is worse than failing — then it returns
+/// `VoiceError::Config`. A panic inside `f` (e.g. `cpal`'s
 /// `CoCreateInstance().unwrap()`) is re-raised on the calling thread rather
 /// than killing the host.
-pub(crate) fn call<T, F>(f: F) -> T
+pub(crate) fn call<T, F>(f: F) -> Result<T, VoiceError>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -96,9 +111,25 @@ mod imp {
     use std::panic::AssertUnwindSafe;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc::{Sender, channel, sync_channel};
+    use std::sync::mpsc::{RecvTimeoutError, Sender, channel, sync_channel};
+    use std::thread::ThreadId;
+    use std::time::Duration;
 
     use crate::error::VoiceError;
+
+    /// How long a caller waits for a device enumeration or a stream build.
+    ///
+    /// Generous: WASAPI enumeration on a machine with a stalled driver is slow
+    /// but not unbounded, and the capture start-up handshake above this layer
+    /// already gives up at 5 s. This is the backstop for "never returns".
+    const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long teardown waits for the device to actually be released.
+    ///
+    /// Shorter, because a human is waiting: `CaptureHandle::stop()` joins the
+    /// capture thread, whose last act is dropping the stream through here, and
+    /// `stop()` is awaited from async tasks.
+    const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Streams currently alive on the host, keyed by [`Hosted::id`].
     type Streams = HashMap<u64, cpal::Stream>;
@@ -113,30 +144,38 @@ mod imp {
     impl Hosted {
         /// Drop the stream on the host and wait for it, so the device really is
         /// released by the time the caller continues.
+        ///
+        /// Bounded: if the host does not confirm within [`RELEASE_TIMEOUT`] the
+        /// id is left queued (the stream leaks, and is dropped whenever the host
+        /// unsticks) rather than parking the caller — which is a teardown path
+        /// reached synchronously from async tasks.
         pub(super) fn release(&mut self) {
-            let id = self.id;
-            let (done_tx, done_rx) = sync_channel::<()>(1);
-            let job: Job = Box::new(move |streams| {
-                drop(streams.remove(&id));
-                let _ = done_tx.send(());
-            });
-            if sender().send(job).is_ok() {
-                let _ = done_rx.recv();
-            }
+            host().release(self.id);
         }
     }
 
-    /// Channel to the host thread, created on first use.
+    /// The host thread plus everything needed to talk to it.
     ///
-    /// The `OnceLock` keeps the sender alive for the whole process, so the
-    /// host's `recv()` never disconnects and the thread never exits — which is
-    /// the entire point: its COM apartment must outlive every WASAPI object
-    /// `cpal` caches in its process-global enumerator.
-    fn sender() -> &'static Sender<Job> {
-        static HOST: OnceLock<Sender<Job>> = OnceLock::new();
-        HOST.get_or_init(|| {
+    /// One process-wide instance ([`host`]); tests build private ones so they
+    /// can wedge a host without poisoning the real one.
+    pub(super) struct Host {
+        tx: Sender<Job>,
+        /// Identity of the host thread, so a reentrant call can be caught.
+        thread_id: ThreadId,
+        call_timeout: Duration,
+        release_timeout: Duration,
+    }
+
+    impl Host {
+        /// Spawn a host thread that never exits.
+        ///
+        /// The caller keeps the `Sender`, so the host's `recv()` never
+        /// disconnects — which is the entire point: its COM apartment must
+        /// outlive every WASAPI object `cpal` caches in its process-global
+        /// enumerator.
+        pub(super) fn spawn(call_timeout: Duration, release_timeout: Duration) -> Self {
             let (tx, rx) = channel::<Job>();
-            std::thread::Builder::new()
+            let handle = std::thread::Builder::new()
                 .name("grok-audio-host".to_string())
                 .spawn(move || {
                     let mut streams: Streams = Streams::new();
@@ -149,24 +188,142 @@ mod imp {
                     }
                 })
                 .expect("spawn audio host thread");
-            tx
-        })
+            let thread_id = handle.thread().id();
+            Self {
+                tx,
+                thread_id,
+                call_timeout,
+                release_timeout,
+            }
+        }
+
+        /// Reentrancy guard for the rule documented at the top of this module.
+        ///
+        /// Calling back into the host from a closure already running on it waits
+        /// for a thread that is waiting for you: a permanent, process-wide,
+        /// silent audio deadlock (or, now, a `CALL_TIMEOUT` stall on every audio
+        /// call for the rest of the session). Assert instead, so it shows up as
+        /// a failing test rather than a hang in the field.
+        fn assert_not_reentrant(&self, what: &str) {
+            debug_assert!(
+                std::thread::current().id() != self.thread_id,
+                "reentrant audio-host call ({what}): the audio host cannot service itself"
+            );
+        }
+
+        pub(super) fn call<T, F>(&self, f: F) -> Result<T, VoiceError>
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            self.assert_not_reentrant("call");
+            let (reply_tx, reply_rx) = sync_channel::<T>(1);
+            let job: Job = Box::new(move |_| {
+                let _ = reply_tx.send(f());
+            });
+            self.tx.send(job).expect("audio host thread accepts jobs");
+            match reply_rx.recv_timeout(self.call_timeout) {
+                Ok(value) => Ok(value),
+                Err(RecvTimeoutError::Disconnected) => panic!("audio host job panicked"),
+                Err(RecvTimeoutError::Timeout) => Err(self.wedged("call")),
+            }
+        }
+
+        pub(super) fn open_stream<T, F>(&self, build: F) -> Result<(Hosted, T), VoiceError>
+        where
+            F: FnOnce() -> Result<(cpal::Stream, T), VoiceError> + Send + 'static,
+            T: Send + 'static,
+        {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+            self.assert_not_reentrant("open_stream");
+            let (reply_tx, reply_rx) = sync_channel::<Result<T, VoiceError>>(1);
+            let job: Job = Box::new(move |streams| {
+                let reply = build().map(|(stream, extra)| {
+                    streams.insert(id, stream);
+                    extra
+                });
+                let _ = reply_tx.send(reply);
+            });
+            self.tx.send(job).expect("audio host thread accepts jobs");
+
+            let extra = match reply_rx.recv_timeout(self.call_timeout) {
+                Ok(reply) => reply?,
+                Err(RecvTimeoutError::Disconnected) => panic!("audio host job panicked"),
+                // The build may still land later and park a live stream under
+                // `id` that nobody will ever release. Leaking one stream on a
+                // host that has already stopped responding beats never
+                // returning to the caller.
+                Err(RecvTimeoutError::Timeout) => return Err(self.wedged("open_stream")),
+            };
+            Ok((Hosted { id }, extra))
+        }
+
+        pub(super) fn release(&self, id: u64) {
+            self.assert_not_reentrant("release");
+            let (done_tx, done_rx) = sync_channel::<()>(1);
+            let job: Job = Box::new(move |streams| {
+                drop(streams.remove(&id));
+                let _ = done_tx.send(());
+            });
+            if self.tx.send(job).is_err() {
+                return;
+            }
+            if done_rx.recv_timeout(self.release_timeout) == Err(RecvTimeoutError::Timeout) {
+                tracing::error!(
+                    stream_id = id,
+                    timeout_ms = self.release_timeout.as_millis() as u64,
+                    "audio host did not release the stream in time; leaking it and continuing \
+                     (the device may stay busy until the host unsticks)"
+                );
+            }
+        }
+
+        /// Park the host thread until the returned sender fires (or 30 s pass),
+        /// simulating a `cpal` call that never comes back.
+        ///
+        /// Test-only, and deliberately not routed through [`Self::call`]: the
+        /// point is to occupy the host *without* the caller waiting for it.
+        #[cfg(test)]
+        pub(super) fn wedge_for_test(&self) -> std::sync::mpsc::Sender<()> {
+            let (unwedge_tx, unwedge_rx) = channel::<()>();
+            let job: Job = Box::new(move |_| {
+                let _ = unwedge_rx.recv_timeout(Duration::from_secs(30));
+            });
+            self.tx.send(job).expect("audio host thread accepts jobs");
+            unwedge_tx
+        }
+
+        /// Log and describe an expired wait. Shared so every timeout reads the
+        /// same in logs and in the toast the caller ends up showing.
+        fn wedged(&self, what: &str) -> VoiceError {
+            let ms = self.call_timeout.as_millis() as u64;
+            tracing::error!(
+                operation = what,
+                timeout_ms = ms,
+                "audio host did not respond; a cpal call is wedged and audio is unavailable \
+                 for the rest of this session"
+            );
+            VoiceError::Config(format!(
+                "audio host did not respond within {ms} ms ({what}); \
+                 the audio device driver appears to be stuck"
+            ))
+        }
     }
 
-    pub(super) fn call<T, F>(f: F) -> T
+    /// The process-wide host, created on first use.
+    fn host() -> &'static Host {
+        static HOST: OnceLock<Host> = OnceLock::new();
+        HOST.get_or_init(|| Host::spawn(CALL_TIMEOUT, RELEASE_TIMEOUT))
+    }
+
+    pub(super) fn call<T, F>(f: F) -> Result<T, VoiceError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let (reply_tx, reply_rx) = sync_channel::<T>(1);
-        let job: Job = Box::new(move |_| {
-            let _ = reply_tx.send(f());
-        });
-        sender().send(job).expect("audio host thread accepts jobs");
-        match reply_rx.recv() {
-            Ok(value) => value,
-            Err(_) => panic!("audio host job panicked"),
-        }
+        host().call(f)
     }
 
     pub(super) fn open_stream<T, F>(build: F) -> Result<(Hosted, T), VoiceError>
@@ -174,24 +331,7 @@ mod imp {
         F: FnOnce() -> Result<(cpal::Stream, T), VoiceError> + Send + 'static,
         T: Send + 'static,
     {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-
-        let (reply_tx, reply_rx) = sync_channel::<Result<T, VoiceError>>(1);
-        let job: Job = Box::new(move |streams| {
-            let reply = build().map(|(stream, extra)| {
-                streams.insert(id, stream);
-                extra
-            });
-            let _ = reply_tx.send(reply);
-        });
-        sender().send(job).expect("audio host thread accepts jobs");
-
-        let extra = match reply_rx.recv() {
-            Ok(reply) => reply?,
-            Err(_) => panic!("audio host job panicked"),
-        };
-        Ok((Hosted { id }, extra))
+        host().open_stream(build)
     }
 }
 
@@ -212,12 +352,14 @@ mod imp {
         }
     }
 
-    pub(super) fn call<T, F>(f: F) -> T
+    /// Inline, so there is no host to be unresponsive: the `Result` exists only
+    /// to keep one signature across platforms.
+    pub(super) fn call<T, F>(f: F) -> Result<T, VoiceError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        f()
+        Ok(f())
     }
 
     pub(super) fn open_stream<T, F>(build: F) -> Result<(Hosted, T), VoiceError>
@@ -236,7 +378,7 @@ mod tests {
 
     #[test]
     fn call_returns_the_closure_result() {
-        assert_eq!(call(|| 6 * 7), 42);
+        assert_eq!(call(|| 6 * 7).expect("healthy host answers"), 42);
     }
 
     /// The host is process-global, so it has to keep serving after any one
@@ -246,9 +388,64 @@ mod tests {
         for i in 0..8u32 {
             let got = std::thread::spawn(move || call(move || i * 2))
                 .join()
-                .expect("caller thread should not panic");
+                .expect("caller thread should not panic")
+                .expect("healthy host answers");
             assert_eq!(got, i * 2);
         }
+    }
+
+    /// Every audio call in the process now funnels through one thread, so a
+    /// single wedged `cpal` call (WASAPI's `Stream::drop` joins the device
+    /// thread and can hang on a bad driver) would wedge *every* later audio
+    /// call — including `CaptureHandle::stop()`, which async tasks await.
+    /// A later caller must fail, not hang.
+    ///
+    /// Runs against a private host: wedging the process-global one would break
+    /// every other test in this binary, which is exactly the blast radius the
+    /// timeout exists to bound.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_wedged_job_cannot_block_a_later_caller_forever() {
+        use std::time::{Duration, Instant};
+
+        let budget = Duration::from_millis(250);
+        let host = imp::Host::spawn(budget, budget);
+        let unwedge = host.wedge_for_test();
+
+        let started = Instant::now();
+        let outcome = host.call(|| 6 * 7);
+        let waited = started.elapsed();
+
+        assert!(
+            outcome.is_err(),
+            "a caller queued behind a wedged job must fail, not receive a value"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "caller waited {waited:?} on a wedged host; the wait is not bounded"
+        );
+
+        // Let the host thread finish so it is not left parked for 30 s.
+        let _ = unwedge.send(());
+    }
+
+    /// The reentrancy rule at the top of this module is otherwise unenforced,
+    /// and breaking it is a silent permanent process-wide audio deadlock.
+    /// `debug_assert!` makes it a panic on the host thread, which the caller
+    /// re-raises — a failing test instead of a hang.
+    ///
+    /// Debug-only: with `debug_assert!` compiled out the inner call really does
+    /// wait for the host to service itself, and only the timeout saves it.
+    #[cfg(all(target_os = "windows", debug_assertions))]
+    #[test]
+    fn a_reentrant_call_panics_instead_of_deadlocking() {
+        let outcome = std::panic::catch_unwind(|| call(|| call(|| 6 * 7)));
+        assert!(
+            outcome.is_err(),
+            "a call issued from inside a host closure must be rejected loudly"
+        );
+        // The guard must not have taken the process-global host down with it.
+        assert_eq!(call(|| "still here").expect("host survives"), "still here");
     }
 
     /// A panicking job (e.g. cpal's `CoCreateInstance().unwrap()`) must surface
@@ -258,6 +455,6 @@ mod tests {
     fn a_panicking_job_does_not_kill_the_host() {
         let panicked = std::panic::catch_unwind(|| call(|| panic!("boom"))).is_err();
         assert!(panicked, "the panic should reach the caller");
-        assert_eq!(call(|| "still here"), "still here");
+        assert_eq!(call(|| "still here").expect("host survives"), "still here");
     }
 }
