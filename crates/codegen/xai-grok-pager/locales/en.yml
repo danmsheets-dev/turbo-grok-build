@@ -97,7 +97,10 @@ shortcuts_help.category.session: "Session"
 shortcuts_help.category.dashboard: "Dashboard"
 shortcuts_help.search_scrollback: "Search scrollback"
 shortcuts_help.paste_desc: "Paste images (and text) from the clipboard"
-shortcuts_help.paste_long_help: "Pastes clipboard images into the prompt as chips, and plain text as typed.\nUse Ctrl+V for screenshots, browser \"Copy Image\", and file-manager image copies.\nYou can also drag an image file into the prompt."
+# No `shortcuts_help.paste_long_help` here on purpose: `PASTE_LONG_HELP` has
+# three `#[cfg(target_os)]` spellings and a bundle entry can only carry one,
+# so any entry silently shadows the Windows and macOS text with the other
+# platform's advice. See views/shortcuts_help.rs::pseudo_long_help_key.
 shortcuts_help.dimmed_note: "(not active in current context)"
 
 # Permission dialog (views/permission_view.rs, views/question_view.rs)

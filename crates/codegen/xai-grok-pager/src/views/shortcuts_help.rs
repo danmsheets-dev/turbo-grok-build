@@ -144,6 +144,10 @@ Press Enter to jump to a match and Esc to dismiss.";
 /// scrollback search). The consts are `&'static str` values compared by
 /// content; an unrecognised body yields an empty key so `tr_or` falls back
 /// to the literal rather than mistranslating it as another row.
+///
+/// [`PASTE_LONG_HELP`] has three `#[cfg(target_os)]` spellings, so a bundle
+/// entry for its key can only ever be right on one platform and silently
+/// shadows the other two — `locales/en.yml` deliberately omits it.
 fn pseudo_long_help_key(lh: &str) -> &'static str {
     if lh == PASTE_LONG_HELP {
         "shortcuts_help.paste_long_help"
