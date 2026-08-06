@@ -11,6 +11,11 @@
 //!   drops; see [`capture_subprocess`].
 //! - **Windows**: `cpal` (WASAPI) in-process; its memory cost is modest.
 //!
+//! Every in-process `cpal` call — capture here and live speaker playback in
+//! `crate::live` — is funnelled through [`host`], which on Windows owns them
+//! all from one thread that never exits; see that module for the WASAPI
+//! use-after-free that requires.
+//!
 //! The fixed-duration probe capture stays in-process on macOS/Windows: it only
 //! runs in short-lived diagnostic processes, where the memory dies at exit.
 //!
@@ -21,6 +26,12 @@
 //!   subprocess and the in-process fallback;
 //! - Windows → `capture::CaptureHandle` (in-process cpal stream).
 
+// Single-owner host for every in-process `cpal` call. On Windows it is a
+// dedicated thread that never exits, which is what keeps cpal's process-global
+// WASAPI enumerator inside a live COM apartment; elsewhere it runs inline. See
+// [`host`] for the use-after-free it prevents.
+#[cfg(not(target_os = "linux"))]
+pub(crate) mod host;
 // cpal-based capture: the Windows backend, the macOS fallback, and the macOS
 // `__mic-capture` child implementation.
 #[cfg(not(target_os = "linux"))]

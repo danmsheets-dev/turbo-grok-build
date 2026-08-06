@@ -15,6 +15,15 @@
 //! `__mic-capture` helper instead; this module provides that child
 //! ([`run_capture_child_cli`]) and the in-process fallback for when self-exec
 //! is unavailable (e.g. the on-disk binary was replaced by an update).
+//!
+//! # Where the `cpal` calls run
+//!
+//! Every `cpal` call below is dispatched to the audio host ([`super::host`])
+//! instead of running on the capture thread. On Windows the capture thread
+//! exits at stop, and `cpal` caches its WASAPI device enumerator in a
+//! process-global whose COM apartment dies with the thread that created it —
+//! see [`super::host`] for the use-after-free that causes. On macOS the host
+//! runs the same closures inline, so nothing about the timing changes there.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -26,6 +35,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use tokio::sync::mpsc as async_mpsc;
 
+use super::host::{self, HostedStream};
 use crate::error::VoiceError;
 
 /// Stop handle for the cpal input stream (owned by a background thread).
@@ -119,7 +129,10 @@ pub fn spawn_pcm_capture(
     })
 }
 
-/// Default cpal input device, or a config error when the host has none.
+/// Default cpal input device, or a config error when the cpal host has none.
+///
+/// Reaches cpal's process-global WASAPI enumerator, so it must only be called
+/// from inside a [`host`] closure — never directly.
 fn default_input_device() -> Result<cpal::Device, VoiceError> {
     cpal::default_host()
         .default_input_device()
@@ -128,18 +141,20 @@ fn default_input_device() -> Result<cpal::Device, VoiceError> {
 
 /// Default input device without opening a stream ([`crate::probe::input_device_info`]).
 pub fn input_device_info() -> Result<crate::probe::InputDeviceInfo, VoiceError> {
-    let device = default_input_device()?;
-    let name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
-    let detail = match device.default_input_config() {
-        Ok(c) => format!(
-            "{} Hz, {} ch, {:?}",
-            c.sample_rate().0,
-            c.channels(),
-            c.sample_format()
-        ),
-        Err(e) => format!("default config unavailable: {e}"),
-    };
-    Ok(crate::probe::InputDeviceInfo { name, detail })
+    host::call(|| {
+        let device = default_input_device()?;
+        let name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+        let detail = match device.default_input_config() {
+            Ok(c) => format!(
+                "{} Hz, {} ch, {:?}",
+                c.sample_rate().0,
+                c.channels(),
+                c.sample_format()
+            ),
+            Err(e) => format!("default config unavailable: {e}"),
+        };
+        Ok(crate::probe::InputDeviceInfo { name, detail })
+    })
 }
 
 /// Record mono PCM16 LE for a fixed duration (probe / diagnostics).
@@ -228,7 +243,8 @@ fn run_capture_loop(
     run_capture_poll_loop(stream, stop, dropped, device_name);
 }
 
-/// Open the input device, build, and start the cpal capture stream. All
+/// Open the input device, build, and start the cpal capture stream on the audio
+/// host, where the stream stays until the returned handle is dropped. All
 /// device/config/permission failures surface here as a `VoiceError` so the
 /// caller can report them before entering the steady-state loop.
 pub(super) fn open_capture_stream(
@@ -236,77 +252,79 @@ pub(super) fn open_capture_stream(
     sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
     dropped: Arc<AtomicUsize>,
-) -> Result<(cpal::Stream, String), VoiceError> {
-    let device = default_input_device()?;
+) -> Result<(HostedStream, String), VoiceError> {
+    host::open_stream(move || {
+        let device = default_input_device()?;
 
-    let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+        let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
 
-    let default_config = device.default_input_config().map_err(|e| {
-        VoiceError::Config(format!(
-            "default input config for {device_name}: {e} (grant mic permission in System Settings)"
-        ))
-    })?;
+        let default_config = device.default_input_config().map_err(|e| {
+            VoiceError::Config(format!(
+                "default input config for {device_name}: {e} (grant mic permission in System Settings)"
+            ))
+        })?;
 
-    // Prefer a device-native `sample_rate` (e.g. a mic that supports 16 kHz
-    // directly) so we can skip resampling entirely; fall back to the device
-    // default and the linear resampler when no native config matches.
-    let supported = native_rate_config(&device, sample_rate).unwrap_or(default_config);
+        // Prefer a device-native `sample_rate` (e.g. a mic that supports 16 kHz
+        // directly) so we can skip resampling entirely; fall back to the device
+        // default and the linear resampler when no native config matches.
+        let supported = native_rate_config(&device, sample_rate).unwrap_or(default_config);
 
-    let stream_rate = supported.sample_rate().0;
-    let in_channels = supported.channels();
-    let sample_format = supported.sample_format();
-    let stream_config: cpal::StreamConfig = supported.into();
+        let stream_rate = supported.sample_rate().0;
+        let in_channels = supported.channels();
+        let sample_format = supported.sample_format();
+        let stream_config: cpal::StreamConfig = supported.into();
 
-    tracing::info!(
-        device = %device_name,
-        stream_rate,
-        channels = in_channels,
-        ?sample_format,
-        target_rate = sample_rate,
-        "voice capture stream"
-    );
+        tracing::info!(
+            device = %device_name,
+            stream_rate,
+            channels = in_channels,
+            ?sample_format,
+            target_rate = sample_rate,
+            "voice capture stream"
+        );
 
-    let params = CaptureStreamParams {
-        device: &device,
-        stream_config,
-        in_channels,
-        stream_rate,
-        target_rate: sample_rate,
-        sync_tx,
-        stop,
-        dropped,
-    };
+        let params = CaptureStreamParams {
+            device: &device,
+            stream_config,
+            in_channels,
+            stream_rate,
+            target_rate: sample_rate,
+            sync_tx,
+            stop,
+            dropped,
+        };
 
-    let stream = match sample_format {
-        SampleFormat::F32 => build_capture_stream::<f32>(params)?,
-        SampleFormat::F64 => build_capture_stream::<f64>(params)?,
-        SampleFormat::I8 => build_capture_stream::<i8>(params)?,
-        SampleFormat::I16 => build_capture_stream::<i16>(params)?,
-        SampleFormat::I32 => build_capture_stream::<i32>(params)?,
-        SampleFormat::I64 => build_capture_stream::<i64>(params)?,
-        SampleFormat::U8 => build_capture_stream::<u8>(params)?,
-        SampleFormat::U16 => build_capture_stream::<u16>(params)?,
-        SampleFormat::U32 => build_capture_stream::<u32>(params)?,
-        SampleFormat::U64 => build_capture_stream::<u64>(params)?,
-        other => {
-            return Err(VoiceError::Config(format!(
-                "unsupported input sample format {other:?} on {device_name} \
-                 (supported: f32/f64/i8/i16/i32/i64/u8/u16/u32/u64)"
-            )));
-        }
-    };
+        let stream = match sample_format {
+            SampleFormat::F32 => build_capture_stream::<f32>(params)?,
+            SampleFormat::F64 => build_capture_stream::<f64>(params)?,
+            SampleFormat::I8 => build_capture_stream::<i8>(params)?,
+            SampleFormat::I16 => build_capture_stream::<i16>(params)?,
+            SampleFormat::I32 => build_capture_stream::<i32>(params)?,
+            SampleFormat::I64 => build_capture_stream::<i64>(params)?,
+            SampleFormat::U8 => build_capture_stream::<u8>(params)?,
+            SampleFormat::U16 => build_capture_stream::<u16>(params)?,
+            SampleFormat::U32 => build_capture_stream::<u32>(params)?,
+            SampleFormat::U64 => build_capture_stream::<u64>(params)?,
+            other => {
+                return Err(VoiceError::Config(format!(
+                    "unsupported input sample format {other:?} on {device_name} \
+                     (supported: f32/f64/i8/i16/i32/i64/u8/u16/u32/u64)"
+                )));
+            }
+        };
 
-    stream
-        .play()
-        .map_err(|e| VoiceError::Config(format!("play input stream: {e}")))?;
+        stream
+            .play()
+            .map_err(|e| VoiceError::Config(format!("play input stream: {e}")))?;
 
-    Ok((stream, device_name))
+        Ok((stream, device_name))
+    })
 }
 
 /// Steady-state loop: wait for shutdown and report dropped frames off the
 /// real-time audio thread (logging here keeps the callback allocation/lock-free).
 fn run_capture_poll_loop(
-    stream: cpal::Stream,
+    stream: HostedStream,
     stop: Arc<AtomicBool>,
     dropped: Arc<AtomicUsize>,
     device_name: String,
@@ -662,6 +680,36 @@ mod tests {
         let input: Vec<i16> = (0..48).map(|i| (i * 100) as i16).collect();
         let out = resample_mono_i16(&input, 48_000, 16_000);
         assert_eq!(out.len(), 16);
+    }
+
+    /// Regression for the WASAPI use-after-free (see [`super::super::host`]).
+    ///
+    /// `cpal` caches its device enumerator in a process-global whose COM
+    /// apartment belongs to whichever thread touched `cpal` first. Before the
+    /// audio host existed, that thread's exit ran `CoUninitialize` and freed
+    /// the enumerator, so the *second* lookup from a fresh short-lived thread
+    /// dereferenced freed memory — an access violation that kills the process
+    /// outright, with no panic and no unwind.
+    ///
+    /// Confirmed to fail against the unfixed code: with `input_device_info`
+    /// reverted to call `cpal` on the calling thread, this aborts the test
+    /// binary with `STATUS_ACCESS_VIOLATION` (0xc0000005) on iteration 1. It
+    /// needs no microphone — the enumerator is cached even when the lookup
+    /// returns "no default input audio device".
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn input_device_lookup_survives_repeated_short_lived_threads() {
+        for attempt in 0..4 {
+            let outcome = thread::spawn(input_device_info)
+                .join()
+                .unwrap_or_else(|_| panic!("device-lookup thread {attempt} panicked"));
+            // A host with no microphone reports a config error; either outcome
+            // is fine, the point is that the process survives to report it.
+            assert!(
+                matches!(outcome, Ok(_) | Err(VoiceError::Config(_))),
+                "unexpected lookup outcome on attempt {attempt}: {outcome:?}"
+            );
+        }
     }
 
     #[test]

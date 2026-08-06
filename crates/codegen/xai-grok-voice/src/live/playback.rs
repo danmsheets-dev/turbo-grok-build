@@ -809,83 +809,99 @@ fn start_windows_cpal(
     queue: Arc<PlaybackQueue>,
     stopped: Arc<AtomicBool>,
 ) -> Result<(JoinHandle<()>, Teardown), VoiceError> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use cpal::{SampleFormat, SampleRate};
+    let stopped_for_build = Arc::clone(&stopped);
+    // The device, the stream, and its teardown all live on the audio host —
+    // this bridge thread exits when playback stops, and a cpal object whose
+    // COM apartment dies with its creating thread is exactly the WASAPI
+    // use-after-free `crate::audio::host` exists to prevent.
+    let (stream, ()) = crate::audio::host::open_stream(move || {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::{SampleFormat, SampleRate};
 
-    let device = cpal::default_host()
-        .default_output_device()
-        .ok_or_else(|| VoiceError::Config("no default output audio device".into()))?;
-    let supported = device
-        .default_output_config()
-        .map_err(|e| VoiceError::Config(format!("default output config: {e}")))?;
-    let stream_rate = supported.sample_rate().0;
-    let channels = supported.channels();
-    let sample_format = supported.sample_format();
-    let stream_config: cpal::StreamConfig = cpal::StreamConfig {
-        channels,
-        sample_rate: SampleRate(stream_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
+        // Rebound so the body below reads unchanged; the bridge thread keeps
+        // the original handle.
+        let stopped = stopped_for_build;
+        let device = cpal::default_host()
+            .default_output_device()
+            .ok_or_else(|| VoiceError::Config("no default output audio device".into()))?;
+        let supported = device
+            .default_output_config()
+            .map_err(|e| VoiceError::Config(format!("default output config: {e}")))?;
+        let stream_rate = supported.sample_rate().0;
+        let channels = supported.channels();
+        let sample_format = supported.sample_format();
+        let stream_config: cpal::StreamConfig = cpal::StreamConfig {
+            channels,
+            sample_rate: SampleRate(stream_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
 
-    // The resampler + leftover state is persisted across callbacks in a Mutex
-    // so interpolation spans chunk boundaries AND excess resampled output
-    // carries to the next callback (finding 5: no output tails lost).
-    let resampler: Arc<parking_lot::Mutex<ResamplerState>> = Arc::new(parking_lot::Mutex::new(
-        ResamplerState::new(sample_rate, stream_rate),
-    ));
-    let stop_cb = Arc::clone(&stopped);
-    let queue_for_cb = Arc::clone(&queue);
-    let source_rate = sample_rate;
+        // The resampler + leftover state is persisted across callbacks in a Mutex
+        // so interpolation spans chunk boundaries AND excess resampled output
+        // carries to the next callback (finding 5: no output tails lost).
+        let resampler: Arc<parking_lot::Mutex<ResamplerState>> = Arc::new(parking_lot::Mutex::new(
+            ResamplerState::new(sample_rate, stream_rate),
+        ));
+        let stop_cb = Arc::clone(&stopped);
+        let queue_for_cb = Arc::clone(&queue);
+        let source_rate = sample_rate;
 
-    let stream = match sample_format {
-        SampleFormat::F32 => build_cpal_stream::<f32>(
-            &device,
-            &stream_config,
-            queue_for_cb,
-            Arc::clone(&resampler),
-            stop_cb,
-            source_rate,
-            stream_rate,
-            channels,
-        )?,
-        SampleFormat::I16 => build_cpal_stream::<i16>(
-            &device,
-            &stream_config,
-            Arc::clone(&queue),
-            Arc::clone(&resampler),
-            Arc::clone(&stopped),
-            source_rate,
-            stream_rate,
-            channels,
-        )?,
-        SampleFormat::U16 => build_cpal_stream::<u16>(
-            &device,
-            &stream_config,
-            queue,
-            resampler,
-            stopped.clone(),
-            source_rate,
-            stream_rate,
-            channels,
-        )?,
-        other => {
-            return Err(VoiceError::Config(format!(
-                "unsupported output sample format {other:?}"
-            )));
-        }
-    };
-    stream
-        .play()
-        .map_err(|e| VoiceError::Config(format!("play output stream: {e}")))?;
+        let stream = match sample_format {
+            SampleFormat::F32 => build_cpal_stream::<f32>(
+                &device,
+                &stream_config,
+                queue_for_cb,
+                Arc::clone(&resampler),
+                stop_cb,
+                source_rate,
+                stream_rate,
+                channels,
+            )?,
+            SampleFormat::I16 => build_cpal_stream::<i16>(
+                &device,
+                &stream_config,
+                Arc::clone(&queue),
+                Arc::clone(&resampler),
+                Arc::clone(&stopped),
+                source_rate,
+                stream_rate,
+                channels,
+            )?,
+            SampleFormat::U16 => build_cpal_stream::<u16>(
+                &device,
+                &stream_config,
+                queue,
+                resampler,
+                stopped.clone(),
+                source_rate,
+                stream_rate,
+                channels,
+            )?,
+            other => {
+                return Err(VoiceError::Config(format!(
+                    "unsupported output sample format {other:?}"
+                )));
+            }
+        };
+        stream
+            .play()
+            .map_err(|e| VoiceError::Config(format!("play output stream: {e}")))?;
+
+        Ok((stream, ()))
+    })?;
 
     // The cpal callback reads the queue directly; this thread just owns the
-    // stream lifetime and exits when stopped so cpal teardown is deterministic.
+    // stream handle and exits when stopped so cpal teardown is deterministic.
     let thread = thread::spawn(move || {
-        let _ = (sample_rate, stream_rate, channels);
         while !stopped.load(Ordering::Acquire) {
             thread::sleep(RECV_POLL);
         }
-        // `stream` drops here, stopping cpal.
+        // Drop explicitly: a `move` closure only captures what its body names,
+        // so naming the handle here is what moves it into this thread at all —
+        // otherwise the stream would be released the moment
+        // `start_windows_cpal` returned. The audio host stops and releases
+        // cpal, and this returns only once it has.
+        drop(stream);
     });
     Ok((thread, Teardown::Cpal))
 }
