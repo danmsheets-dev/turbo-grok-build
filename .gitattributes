@@ -84,3 +84,27 @@ crates/codegen/xai-grok-pager/npm/grok/bin/grok text eol=lf
 # build. `eol=lf` makes the worktree bytes — and therefore the shipped bytes —
 # the same everywhere.
 *.md text eol=lf
+
+# ---------------------------------------------------------------------------
+# Other embedded text assets — LF everywhere
+# ---------------------------------------------------------------------------
+# Same reasoning as markdown, for the rest of what `include_str!`/
+# `include_bytes!` compiles into the binary. Enumerating the call sites gives
+# 17 .md (above), 12 .rs, 8 .txt, 7 .tmTheme, 5 .json, 3 .rhai, and the .ttf /
+# .png handled as binary. Of those the .rs ones are all inside `#[test]` string
+# scanners and are terminator-insensitive, so only these four extensions are
+# left host-dependent:
+#   - assets/logo/logo0{5,7}.txt          rendered ASCII art (welcome/logo.rs)
+#   - xai-grok-compaction templates/*.txt shipped compaction prompts
+#   - default_models.json, platform_{catalog,registry}.json,
+#     pi_provider_parity.json, schema/tool_meta.schema.json
+#   - session/workflows/*.rhai            shipped workflow scripts
+#   - the six syntax .tmTheme files
+# Pinned by extension rather than by path so a new asset dropped next to an
+# existing one inherits the rule. Safe to force `text` here: every file matching
+# these four patterns is `i/lf` today (verified with `git ls-files --eol`), so
+# none is relying on the NUL heuristic to be left alone.
+*.txt     text eol=lf
+*.json    text eol=lf
+*.rhai    text eol=lf
+*.tmTheme text eol=lf
