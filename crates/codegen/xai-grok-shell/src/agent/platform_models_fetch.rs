@@ -678,7 +678,9 @@ fn lock_radius_cache() -> Option<std::fs::File> {
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => return Some(lock),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            // Windows reports contention as ERROR_LOCK_VIOLATION, not
+            // `WouldBlock` — without this the retry loop was skipped entirely.
+            Err(error) if xai_grok_workspace::util::is_lock_contended(&error) => {
                 if std::time::Instant::now() >= deadline {
                     return None;
                 }

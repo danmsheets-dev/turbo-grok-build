@@ -1221,7 +1221,10 @@ fn acquire_init_lock(grok_home: &std::path::Path) -> std::io::Result<std::fs::Fi
     for _ in 0..50 {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            // Windows reports contention as ERROR_LOCK_VIOLATION, not
+            // `WouldBlock` — without this the retry loop was skipped entirely
+            // and a concurrent marketplace op failed instead of waiting.
+            Err(e) if xai_grok_workspace::util::is_lock_contended(&e) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             Err(e) => return Err(e),

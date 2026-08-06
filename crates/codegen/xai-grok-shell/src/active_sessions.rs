@@ -114,7 +114,12 @@ where
             let _ = lock_file.unlock();
             result.map(Some)
         }
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        // Contention is not an error here — the caller (a signal handler) just
+        // skips. Windows reports it as ERROR_LOCK_VIOLATION (os error 33),
+        // whose `ErrorKind` is `Uncategorized`, not `WouldBlock`, so a bare
+        // `WouldBlock` check turned every contended unregister into a hard
+        // failure there. `is_lock_contended` covers both spellings.
+        Err(e) if xai_grok_workspace::util::is_lock_contended(&e) => Ok(None),
         Err(e) => Err(e),
     }
 }

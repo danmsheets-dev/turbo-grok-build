@@ -239,12 +239,37 @@ impl LeaderLock {
         }
     }
 
+    /// Sibling of the lock file holding the same PID, readable while the lock
+    /// file itself is locked.
+    ///
+    /// `fs2`'s Windows `lock_exclusive` is `LockFileEx` over the whole byte
+    /// range, and Windows refuses `ReadFile` on a range another handle holds
+    /// locked (ERROR_LOCK_VIOLATION). So on Windows the PID inside the lock
+    /// file is unreadable *exactly while a leader is live* — which is the only
+    /// time anyone asks for it. Every `read_pid` consumer (liveness probes,
+    /// `skip_connect`, vacate requests) saw `None` there. The sidecar is never
+    /// locked, so it answers. Written on all platforms so there is one code
+    /// path; on Unix the direct read already succeeds and the fallback below
+    /// is never taken.
+    fn pid_path_for(lock_path: &Path) -> PathBuf {
+        let mut p = lock_path.as_os_str().to_owned();
+        p.push(".pid");
+        PathBuf::from(p)
+    }
+
     /// Write our PID to the lock file. Call after acquiring lock.
     pub fn write_pid(&mut self) -> Result<(), LockError> {
         if let Some(ref mut file) = self.lock_file {
             file.set_len(0)?;
             write!(file, "{}", std::process::id())?;
             file.sync_all()?;
+            // Best effort: leadership must not fail because the sidecar could
+            // not be written. A missing sidecar just restores the old
+            // (Unix-correct, Windows-blind) behaviour.
+            let _ = fs::write(
+                Self::pid_path_for(&self.lock_path),
+                std::process::id().to_string(),
+            );
         }
         Ok(())
     }
@@ -256,10 +281,19 @@ impl LeaderLock {
 
     pub(crate) fn read_pid_from_path(path: &Path) -> Option<u32> {
         let mut content = String::new();
-        File::open(path)
-            .and_then(|mut f| f.read_to_string(&mut content))
-            .ok()?;
-        content.trim().parse().ok()
+        match File::open(path).and_then(|mut f| f.read_to_string(&mut content)) {
+            Ok(_) => content.trim().parse().ok(),
+            // The lock file is held by a live leader and this platform will not
+            // let us read a locked range (see [`Self::pid_path_for`]). Ask the
+            // unlocked sidecar instead. Narrowed to the contention error so a
+            // missing or deleted lock file still reports `None` rather than
+            // resurrecting a stale sidecar PID.
+            Err(e) if is_lock_contended(&e) => {
+                let sidecar = fs::read_to_string(Self::pid_path_for(path)).ok()?;
+                sidecar.trim().parse().ok()
+            }
+            Err(_) => None,
+        }
     }
 
     /// Delete the socket file. Call while holding the lock.
@@ -310,6 +344,7 @@ impl Drop for LeaderLock {
         // This ensures the spawner doesn't delete files when handing off to the leader.
         if self.was_leader {
             let _ = fs::remove_file(&self.lock_path);
+            let _ = fs::remove_file(Self::pid_path_for(&self.lock_path));
             let _ = fs::remove_file(&self.sock_path);
         }
     }

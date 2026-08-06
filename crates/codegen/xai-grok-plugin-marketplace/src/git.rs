@@ -114,6 +114,16 @@ fn sync_cache_locked(
     }
 }
 
+/// True if `e` reports that an advisory lock is held by someone else.
+///
+/// Mirrors `xai_grok_workspace::util::is_lock_contended`; duplicated because
+/// this crate does not depend on `xai-grok-workspace`.
+fn is_lock_contended(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::WouldBlock
+        || (e.raw_os_error().is_some()
+            && e.raw_os_error() == fs2::lock_contended_error().raw_os_error())
+}
+
 fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, String> {
     let file = OpenOptions::new()
         .read(true)
@@ -126,7 +136,11 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, Strin
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            // Unix spells contention `EWOULDBLOCK`; Windows spells it
+            // ERROR_LOCK_VIOLATION (os error 33), whose `ErrorKind` is
+            // `Uncategorized`. Matching only `WouldBlock` skipped the whole
+            // wait loop there and failed a merely-busy cache immediately.
+            Err(e) if is_lock_contended(&e) => {
                 if Instant::now() >= deadline {
                     return Err(format!(
                         "cache lock timeout after {}s for {}",
