@@ -1,4 +1,4 @@
-﻿//! Path-not-found enrichment hints for tool error messages.
+//! Path-not-found enrichment hints for tool error messages.
 //!
 //! Enriches "does not exist" errors from `list_dir`, `read_file`,
 //! `search_replace`, and `grep` with actionable hints.

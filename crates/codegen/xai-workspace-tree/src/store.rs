@@ -1,4 +1,4 @@
-﻿//! Durable store under `~/.grok/workspace-trees/<id>/`.
+//! Durable store under `~/.grok/workspace-trees/<id>/`.
 
 use crate::config::WorkspaceTreeConfig;
 use crate::error::{Error, Result};

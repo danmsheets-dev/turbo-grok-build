@@ -1,4 +1,4 @@
-﻿//! `resolve_path` â€” map a free-form name / guessed path to ranked real paths.
+//! `resolve_path` â€” map a free-form name / guessed path to ranked real paths.
 //!
 //! Wraps `xai_workspace_tree::resolve_path`. Prefer this before inventing folders.
 

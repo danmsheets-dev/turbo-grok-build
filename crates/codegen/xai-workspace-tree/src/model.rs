@@ -1,4 +1,4 @@
-﻿//! Core data model for the workspace tree atlas.
+//! Core data model for the workspace tree atlas.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

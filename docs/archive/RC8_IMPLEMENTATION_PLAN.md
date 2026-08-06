@@ -1,4 +1,4 @@
-﻿# Hyper RC8 Implementation Plan
+# Hyper RC8 Implementation Plan
 
 **Release target:** `0.2.114-r8` (RC8)  
 **Date:** 2026-08-01  

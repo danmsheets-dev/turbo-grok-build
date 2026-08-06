@@ -1,4 +1,4 @@
-﻿//! Query API: summary, list, search, resolve_path.
+//! Query API: summary, list, search, resolve_path.
 
 use crate::error::{Error, Result};
 use crate::model::{Freshness, NodeKind, TreeIndex, TreeNode};

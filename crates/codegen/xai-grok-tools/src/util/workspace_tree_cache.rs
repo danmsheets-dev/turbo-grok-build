@@ -1,4 +1,4 @@
-﻿//! Process-local workspace tree index cache.
+//! Process-local workspace tree index cache.
 //!
 //! Phase 1 (PR-B): tools load the atlas on first use via [`get_or_load`].
 //! Callers may also fire-and-forget [`kickoff_load`] at trusted workspace open

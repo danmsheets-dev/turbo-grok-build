@@ -1,4 +1,4 @@
-﻿//! Budgeted markdown inject card for session start.
+//! Budgeted markdown inject card for session start.
 
 use crate::config::{InjectMode, WorkspaceTreeConfig};
 use crate::model::{NodeKind, TreeIndex, TreeNode};

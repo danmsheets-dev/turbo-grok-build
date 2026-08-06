@@ -1,4 +1,4 @@
-﻿# Design: Workspace Tree (Tree Logging)
+# Design: Workspace Tree (Tree Logging)
 
 **Status:** Draft developer specification (world-class / not schedule-bound)  
 **Product:** Turbo / Hyper Grok Build harness  

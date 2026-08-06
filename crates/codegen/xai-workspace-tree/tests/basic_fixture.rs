@@ -1,4 +1,4 @@
-﻿//! Integration tests against `tests/fixtures/basic`.
+//! Integration tests against `tests/fixtures/basic`.
 
 use std::path::{Path, PathBuf};
 use xai_workspace_tree::{

@@ -1,4 +1,4 @@
-﻿//! `workspace_tree` â€' query the workspace directory atlas (summary/list/search/stats/refresh).
+//! `workspace_tree` â€' query the workspace directory atlas (summary/list/search/stats/refresh).
 //!
 //! Wraps `xai_workspace_tree`. Never dumps the full tree into the model context.
 

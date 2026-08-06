@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to **Turbo** (`turbo` binary) are documented here.
 

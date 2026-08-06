@@ -1,4 +1,4 @@
-﻿//! Directory walker: gitignore + hard excludes + collapse.
+//! Directory walker: gitignore + hard excludes + collapse.
 
 use crate::config::{
     default_hard_exclude_exts, effective_hard_exclude_names, WorkspaceTreeConfig,
