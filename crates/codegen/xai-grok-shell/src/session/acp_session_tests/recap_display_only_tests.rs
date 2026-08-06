@@ -9,6 +9,27 @@ use super::support::*;
 use super::*;
 use xai_grok_sampling_types::ConversationItem;
 
+/// A recorded request to a localhost mock must carry NO `x-grok-*` header.
+///
+/// The sampler strips product/session identity for any base URL that is not a
+/// first-party xAI endpoint (`is_first_party_grok_endpoint`,
+/// crates/codegen/xai-grok-sampler/src/client.rs:69, applied at client.rs:1451),
+/// and `MockInferenceServer` serves plain `http://127.0.0.1:<port>`. Asserting
+/// the absence end-to-end keeps these tests honest about what reaches the wire
+/// and pins the privacy control from the session's side.
+fn assert_no_x_grok_headers(req: &xai_grok_test_support::mock_server::LogEntry) {
+    let leaked: Vec<&str> = req
+        .headers
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| name.to_ascii_lowercase().starts_with("x-grok-"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a non-first-party base URL must receive no x-grok-* headers, got {leaked:?}"
+    );
+}
+
 /// Serializes `items` the way a main turn would, so auxiliary calls can be compared against the real wire shape.
 fn main_turn_input(items: Vec<ConversationItem>) -> Vec<serde_json::Value> {
     let request = xai_grok_sampling_types::ConversationRequest {
@@ -135,14 +156,35 @@ async fn side_question_routes_on_the_session_id_when_the_key_is_not_forwarded() 
             let requests = server.requests();
             let req = requests.last().expect("a request must be recorded");
             let session_id = actor.session_info.id.to_string();
+            // The wire cannot answer this: a localhost mock is not a
+            // first-party endpoint, so the sampler strips every `x-grok-*`
+            // header before sending (`is_first_party_grok_endpoint`,
+            // xai-grok-sampler/src/client.rs:69). Pin that stripping here, then
+            // assert the routing rule on the request the session actually built.
+            assert_no_x_grok_headers(req);
+
+            let built = actor.parent_cached_request(
+                super::recap::AuxCall {
+                    items: vec![ConversationItem::user("what does xor mean here?")],
+                    tools: vec![],
+                    hosted_tools: vec![],
+                    model: "test-model".into(),
+                    reasoning_effort: None,
+                    backend: xai_grok_sampling_types::ApiBackend::ChatCompletions,
+                    conv_id: "btw-abc".into(),
+                    req_id: "xai-btw-abc".into(),
+                },
+            );
+            assert!(
+                !xai_grok_sampling_types::ApiBackend::ChatCompletions.forwards_prompt_cache_key(),
+                "fixture premise: this backend must be one that drops the cache key"
+            );
             assert_eq!(
-                req.header("x-grok-conv-id"),
+                built.x_grok_conv_id.as_deref(),
                 Some(session_id.as_str()),
                 "on a backend that drops the cache key the conv id must be the parent session id"
             );
-            let req_id = req
-                .header("x-grok-req-id")
-                .expect("req id must still be sent");
+            let req_id = built.x_grok_req_id.expect("req id must still be set");
             assert!(
                 req_id.starts_with("xai-btw-"),
                 "the btw label moves to the req id: {req_id}"
@@ -839,14 +881,11 @@ async fn recap_request_rides_parent_prompt_cache() {
                 .find(|r| r.path.contains("responses"))
                 .expect("a responses request must be recorded");
 
-            let conv_id = recap_req
-                .header("x-grok-conv-id")
-                .expect("recap must send x-grok-conv-id");
-            assert!(
-                conv_id.starts_with("recap-"),
-                "conv id keeps the recap-* label: {conv_id}"
-            );
-
+            assert_no_x_grok_headers(recap_req);
+            // The `recap-*` conv-id label itself is asserted where it is
+            // observable — `parent_cached_request_labels_recap_and_btw_calls`
+            // below — because the sampler strips every `x-grok-*` header on a
+            // non-first-party base URL, and a localhost mock is never one.
             let body = recap_req.body.as_ref().expect("recap body must be JSON");
             assert_eq!(
                 body["prompt_cache_key"].as_str(),
@@ -1070,14 +1109,10 @@ async fn side_question_request_rides_parent_prompt_cache() {
                 .find(|r| r.path.contains("responses"))
                 .expect("a responses request must be recorded");
 
-            let conv_id = btw_req
-                .header("x-grok-conv-id")
-                .expect("side question must send x-grok-conv-id");
-            assert!(
-                conv_id.starts_with("btw-"),
-                "conv id keeps the btw-* label: {conv_id}"
-            );
-
+            assert_no_x_grok_headers(btw_req);
+            // The `btw-*` conv-id label is asserted in
+            // `parent_cached_request_labels_recap_and_btw_calls` below; it
+            // cannot ride a localhost mock (see that test's comment).
             let body = btw_req.body.as_ref().expect("btw body must be JSON");
             assert_eq!(
                 body["prompt_cache_key"].as_str(),
@@ -1259,6 +1294,90 @@ async fn side_question_trims_reasoning_orphaned_by_mid_turn_truncation() {
                 !kinds.contains(&"function_call"),
                 "the in-flight tool call must be trimmed: {kinds:?}"
             );
+        })
+        .await;
+}
+
+/// Conv-id labelling for the two auxiliary calls, asserted at the only place it
+/// is observable.
+///
+/// `recap` / `btw` calls carry a `recap-*` / `btw-*` conv id **only** on a
+/// backend that forwards `prompt_cache_key` (the Responses mapping); on every
+/// other backend the conv id is the one thing tying the call to its
+/// conversation, so it falls back to the parent session id. The wire cannot
+/// show this: `x-grok-*` headers are stripped for any non-first-party base URL
+/// (`is_first_party_grok_endpoint`, xai-grok-sampler/src/client.rs:69), which is
+/// every localhost mock — the sibling e2e tests above assert that stripping.
+#[tokio::test(flavor = "current_thread")]
+async fn parent_cached_request_labels_recap_and_btw_calls() {
+    use xai_grok_sampling_types::ApiBackend;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let session_id = actor.session_info.id.to_string();
+
+            let call = |backend: ApiBackend, conv_id: &str, req_id: &str| super::recap::AuxCall {
+                items: vec![ConversationItem::user("q")],
+                tools: vec![],
+                hosted_tools: vec![],
+                model: "test-model".into(),
+                reasoning_effort: None,
+                backend,
+                conv_id: conv_id.to_string(),
+                req_id: req_id.to_string(),
+            };
+
+            assert!(
+                ApiBackend::Responses.forwards_prompt_cache_key(),
+                "fixture premise: Responses forwards the cache key"
+            );
+            for (label_conv, label_req) in [("recap-abc", "xai-recap-abc"), ("btw-abc", "xai-btw-abc")]
+            {
+                let built =
+                    actor.parent_cached_request(call(ApiBackend::Responses, label_conv, label_req));
+                assert_eq!(
+                    built.x_grok_conv_id.as_deref(),
+                    Some(label_conv),
+                    "cache-key backend keeps the {label_conv} label as the conv id"
+                );
+                assert_eq!(
+                    built.x_grok_req_id.as_deref(),
+                    Some(label_req),
+                    "the req id always keeps the label"
+                );
+                assert_eq!(
+                    built.prompt_cache_key.as_deref(),
+                    Some(session_id.as_str()),
+                    "auxiliary calls ride the parent session's prefix cache"
+                );
+                assert_eq!(
+                    built.x_grok_session_id.as_deref(),
+                    Some(session_id.as_str()),
+                    "session id is always the parent's"
+                );
+
+                // The same call on a backend that drops the key falls back.
+                let built = actor.parent_cached_request(call(
+                    ApiBackend::ChatCompletions,
+                    label_conv,
+                    label_req,
+                ));
+                assert_eq!(
+                    built.x_grok_conv_id.as_deref(),
+                    Some(session_id.as_str()),
+                    "no cache key on the wire ⇒ the conv id must be the parent session id"
+                );
+                assert_eq!(
+                    built.x_grok_req_id.as_deref(),
+                    Some(label_req),
+                    "the label survives on the req id even when the conv id falls back"
+                );
+            }
         })
         .await;
 }

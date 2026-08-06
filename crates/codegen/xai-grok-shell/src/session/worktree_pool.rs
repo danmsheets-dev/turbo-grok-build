@@ -1849,10 +1849,23 @@ pool_size = 3
         let base = pool_base_directory();
         let instance_dir = base.join("test-instance-uuid");
         assert!(instance_dir.starts_with(&base));
-        assert!(
-            instance_dir
-                .to_string_lossy()
-                .contains("worktree_pool/test-instance-uuid")
+        // Compare path components, not a `/`-joined substring: `join` uses the
+        // host separator, so the rendered string is `worktree_pool\…` on
+        // Windows. Components also pin the *adjacency* the substring implied.
+        let tail: Vec<_> = instance_dir
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            tail,
+            vec![
+                "test-instance-uuid".to_string(),
+                "worktree_pool".to_string()
+            ],
+            "instance dir must be a direct child of a `worktree_pool` directory: {}",
+            instance_dir.display()
         );
     }
 

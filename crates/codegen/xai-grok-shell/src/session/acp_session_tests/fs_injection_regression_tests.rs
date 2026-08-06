@@ -6,7 +6,15 @@ use xai_grok_tools::registry::types::{SessionContext, ToolConfig, ToolServerConf
 /// A ToolBridge built with a custom FileSystem must route writes through it.
 #[tokio::test]
 async fn tool_bridge_routes_writes_through_injected_fs() {
-    let cwd = std::path::PathBuf::from("/tmp/fs-injection-test-nonexistent");
+    // The cwd must be a real directory: write tools fail closed when the
+    // session cwd is gone (`enforce_write_roots` →
+    // `WriteRootError::CwdMissing`, xai-grok-tools/src/types/resources.rs:899),
+    // and that check stats the real filesystem no matter which
+    // `AsyncFileSystem` is injected. A deliberately-nonexistent path therefore
+    // never reached the FS layer at all. The write still must NOT land on
+    // disk — asserted below — so routing through `MockFs` is what is proven.
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
     let file_path = cwd.join("new.txt");
 
     let mock_fs = std::sync::Arc::new(MockFs::new());
@@ -95,4 +103,9 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         .await
         .expect("Write went to disk instead of injected FileSystem");
     assert_eq!(String::from_utf8(written).unwrap(), "hello from ACP\n");
+    assert!(
+        !file_path.exists(),
+        "the injected FileSystem must absorb the write; nothing may reach real disk at {}",
+        file_path.display()
+    );
 }

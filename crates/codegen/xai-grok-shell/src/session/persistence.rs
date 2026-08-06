@@ -2299,6 +2299,19 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
             let Some(name) = rel_path.to_str() else {
                 continue;
             };
+            // Archive entry names are a portable, `/`-separated namespace — the
+            // sibling collector hardcodes `mcp_stderr/{file}` (see
+            // `collect_mcp_stderr_logs` above) and the uploaded session archive
+            // is read back on any platform. `strip_prefix` hands back native
+            // separators, so a Windows host would otherwise emit
+            // `prompts\prompt_0.txt`, which no archive reader splits. On a
+            // platform whose separator already is `/` this is a no-op, so a
+            // literal backslash inside a POSIX filename is left alone.
+            let name = if std::path::MAIN_SEPARATOR == '/' {
+                name.to_string()
+            } else {
+                name.replace(std::path::MAIN_SEPARATOR, "/")
+            };
             let data = match std::fs::read(&path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -2306,10 +2319,7 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
                     continue;
                 }
             };
-            files.push(CopiedSessionFile {
-                name: name.to_string(),
-                data,
-            });
+            files.push(CopiedSessionFile { name, data });
         } else if path.is_dir() {
             collect_session_files_recursive(base, &path, files);
         }

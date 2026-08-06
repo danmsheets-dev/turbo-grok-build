@@ -2949,6 +2949,24 @@ mod inline_auto_compact_flow_tests {
         )
         .await
     }
+    /// True once `bytes` holds a complete HTTP/1.1 request: the header block
+    /// plus, when the headers declare one, a full `Content-Length` body.
+    fn http_request_is_complete(bytes: &[u8]) -> bool {
+        let Some(header_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        bytes.len() >= header_end + 4 + content_length
+    }
     async fn spawn_status_body_server(status: u16, body: &'static str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2964,13 +2982,36 @@ mod inline_auto_compact_flow_tests {
                 };
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // Drain the WHOLE request before answering. A compaction
+                    // request body is far larger than one 4 KiB read, and
+                    // closing a socket that still holds unread bytes in its
+                    // receive queue makes Windows send RST instead of FIN; the
+                    // client then throws away the response it had already
+                    // buffered and reqwest reports "error sending request for
+                    // url", which looked like a compaction bug rather than a
+                    // half-duplex mock.
                     let mut buf = [0u8; 4096];
-                    let _ = stream.read(&mut buf).await;
+                    let mut request = Vec::new();
+                    loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                        if http_request_is_complete(&request) {
+                            break;
+                        }
+                    }
                     let resp = format!(
                         "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len(),
                     );
                     let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.flush().await;
+                    // Graceful FIN so the client is guaranteed to see the body.
+                    let _ = stream.shutdown().await;
                 });
             }
         });

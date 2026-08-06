@@ -100,9 +100,19 @@ async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permiss
                 text.contains("Rejected: file edits are not allowed in plan mode"),
                 "rejection text: {text}"
             );
+            // Ask the tracker for the path rather than hardcoding the POSIX
+            // spelling: the fixture seeds the session dir as `/tmp/test-session`
+            // but `plan_file_path()` joins with the host separator, so on
+            // Windows the product legitimately prints `/tmp/test-session\plan.md`.
+            let plan_file = actor
+                .plan_mode
+                .lock()
+                .plan_file_path()
+                .display()
+                .to_string();
             assert!(
-                text.contains("/tmp/test-session/plan.md"),
-                "must name the plan file so the model knows the one editable path: {text}"
+                text.contains(&plan_file),
+                "must name the plan file ({plan_file}) so the model knows the one editable path: {text}"
             );
             assert!(
                 !text.contains("exit_plan_mode"),

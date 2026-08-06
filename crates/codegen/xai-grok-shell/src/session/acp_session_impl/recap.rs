@@ -55,17 +55,22 @@ fn log_prompt_cache_hit(
 }
 
 /// What differs between the two calls that ride the parent's prompt cache. The shared parts live in [`SessionActor::parent_cached_request`].
-struct AuxCall {
-    items: Vec<ConversationItem>,
-    tools: Vec<ToolSpec>,
-    hosted_tools: Vec<xai_grok_sampling_types::HostedTool>,
-    model: String,
+///
+/// Crate-visible because the id-routing contract can only be asserted here: the
+/// `x-grok-*` headers it decides are stripped before the wire on any
+/// non-first-party base URL (`is_first_party_grok_endpoint`, xai-grok-sampler
+/// client.rs:69), which every localhost test mock is.
+pub(crate) struct AuxCall {
+    pub(crate) items: Vec<ConversationItem>,
+    pub(crate) tools: Vec<ToolSpec>,
+    pub(crate) hosted_tools: Vec<xai_grok_sampling_types::HostedTool>,
+    pub(crate) model: String,
     /// Must match the main turn's, or the prompt differs before the conversation history even starts.
-    reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+    pub(crate) reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
     /// Says whether the cache key gets sent, which is what decides the conv id below.
-    backend: crate::sampling::ApiBackend,
-    conv_id: String,
-    req_id: String,
+    pub(crate) backend: crate::sampling::ApiBackend,
+    pub(crate) conv_id: String,
+    pub(crate) req_id: String,
 }
 
 impl SessionActor {
@@ -205,7 +210,7 @@ impl SessionActor {
 
     /// Request skeleton for an auxiliary call that replays the parent conversation under the parent's `prompt_cache_key`.
     /// Temperature stays unset: cli-chat-proxy may inject a `thinking` config, and the Messages API then requires temperature == 1.
-    fn parent_cached_request(&self, call: AuxCall) -> ConversationRequest {
+    pub(crate) fn parent_cached_request(&self, call: AuxCall) -> ConversationRequest {
         let session_id = self.session_info.id.to_string();
         // Only the Responses mapping sends the cache key. On the other backends the conv id is what ties a call to its conversation,
         // so it has to stay the parent session id; the `btw-`/`recap-` label still shows up in `x_grok_req_id`.

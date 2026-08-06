@@ -20,8 +20,11 @@ use super::inference_metrics::{InferenceLatencyStats, compute_percentiles};
 
 /// Sample the process resident-set high-water mark in bytes.
 ///
-/// Uses `getrusage(RUSAGE_SELF)` on Unix; returns 0 if sampling fails or on
-/// non-Unix targets. Cheap enough to call once per turn.
+/// Uses `getrusage(RUSAGE_SELF)` on Unix and `GetProcessMemoryInfo`'s
+/// `PeakWorkingSetSize` on Windows — the working set is Windows' resident set,
+/// and the *peak* field is the direct analogue of `ru_maxrss`. Returns 0 if
+/// sampling fails or on a platform with neither API. Cheap enough to call once
+/// per turn.
 pub(crate) fn sample_rss_bytes() -> u64 {
     #[cfg(unix)]
     {
@@ -44,7 +47,25 @@ pub(crate) fn sample_rss_bytes() -> u64 {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows::Win32::System::Threading::GetCurrentProcess;
+
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let size = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).unwrap_or(0);
+        // SAFETY: `counters` is a live, correctly sized POD out-parameter and
+        // `GetCurrentProcess` returns a pseudo-handle that needs no closing.
+        let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) }.is_ok();
+        if ok {
+            counters.PeakWorkingSetSize as u64
+        } else {
+            0
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         0
     }

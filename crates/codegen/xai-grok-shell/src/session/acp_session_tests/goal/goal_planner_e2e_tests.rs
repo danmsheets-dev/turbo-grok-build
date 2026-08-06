@@ -69,11 +69,16 @@ fn spawn_planner_coordinator_capturing(
                     .lock()
                     .unwrap()
                     .push(req.runtime_overrides.model.clone());
-                // The prompt embeds the path several times; we
-                // just need any one. Walk left from the first
-                // `/plan.md` occurrence to find the absolute path.
-                let plan_path = req.prompt.find("/plan.md").map(|end_idx| {
-                    let end = end_idx + "/plan.md".len();
+                // The prompt embeds the path several times; we just need any
+                // one. Walk left from the first `<sep>plan.md` occurrence to
+                // find the absolute path. The separator must be the *native*
+                // one: the prompt is built from `GoalTracker::plan_path()`
+                // (goal_tracker.rs:826), a `PathBuf` rendered with the host's
+                // separator, so a hardcoded `/` never matched on Windows and
+                // the stub silently wrote no plan at all.
+                let needle = format!("{}plan.md", std::path::MAIN_SEPARATOR);
+                let plan_path = req.prompt.find(&needle).map(|end_idx| {
+                    let end = end_idx + needle.len();
                     let start = req.prompt[..end_idx]
                         .rfind(|c: char| !c.is_ascii_graphic() || c == '`')
                         .map(|i| i + 1)
@@ -850,8 +855,12 @@ async fn lifecycle_fail_pause_resume_retry_success() {
                 while let Some(ev) = rx.recv().await {
                     if let SubagentEvent::Spawn(req) = ev {
                         let n = count_task.fetch_add(1, SeqOrd::SeqCst);
-                        let plan_path = req.prompt.find("/plan.md").map(|end_idx| {
-                            let end = end_idx + "/plan.md".len();
+                        // Native separator, as in `spawn_planner_coordinator_capturing`
+                        // above: the prompt renders `GoalTracker::plan_path()`
+                        // (goal_tracker.rs:826) with the host separator.
+                        let needle = format!("{}plan.md", std::path::MAIN_SEPARATOR);
+                        let plan_path = req.prompt.find(&needle).map(|end_idx| {
+                            let end = end_idx + needle.len();
                             let start = req.prompt[..end_idx]
                                 .rfind(|c: char| !c.is_ascii_graphic() || c == '`')
                                 .map(|i| i + 1)

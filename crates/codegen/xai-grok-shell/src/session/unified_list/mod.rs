@@ -963,16 +963,28 @@ mod tests {
         }
         {
             let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
+            // The env var is only half the gate: `process_chat_mode_enabled()`
+            // is hard-off in release builds (chat_modes.rs:23), which compiles
+            // the force-rewrite out entirely and lets every client request pass
+            // through untouched. Key the expectations on the same predicate
+            // `parse_list_req` reads, so this pins real behaviour in either
+            // build instead of asserting a branch that cannot run here. Sibling
+            // `conversations_lane_active_truth_table` above takes the same view.
+            let chat_mode = crate::agent::chat_modes::process_chat_mode_enabled();
+            let chat = vec![serde_json::json!("chat")];
+            let build = vec![serde_json::json!("build")];
+            // `kind: ["build"]` is a recognized client kind, so it survives the
+            // rewrite under `local-workspace`; otherwise chat mode replaces it.
+            let forced_over_client_kind = chat_mode && !cfg!(feature = "local-workspace");
             let req = parse_list_req(&raw).expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected_build = if cfg!(feature = "local-workspace") {
-                Some(&vec![serde_json::json!("build")])
-            } else {
-                Some(&vec![serde_json::json!("build")])
-            };
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
-                expected_build,
+                Some(if forced_over_client_kind {
+                    &chat
+                } else {
+                    &build
+                }),
                 "client kind=build under process chat mode"
             );
             assert_eq!(
@@ -982,23 +994,35 @@ mod tests {
             );
             let req = parse_list_req("{}").expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected = None;
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
-                expected,
-                "absent client kind still forces chat under process chat mode"
+                chat_mode.then_some(&chat),
+                "absent client kind is forced to chat exactly when chat mode is live"
             );
-            for bad in [
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
+            // None of these is a recognized `chat`/`build` kind, so chat mode —
+            // when live — replaces each with `["chat"]`; with it compiled out
+            // each is echoed back verbatim (`value_list` wraps a non-array in a
+            // one-element vec, so `null` becomes `[null]`).
+            for (bad, passthrough) in [
+                (
+                    serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
+                    vec![],
+                ),
+                (
+                    serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
+                    vec![serde_json::Value::Null],
+                ),
+                (
+                    serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
+                    vec![serde_json::json!("other")],
+                ),
             ] {
                 let req = parse_list_req(&bad.to_string()).expect("parse");
                 let parsed = ParsedMeta::parse(req.meta.as_ref());
                 assert_eq!(
                     parsed.facet_filters.get(KIND_FACET_KEY),
-                    expected,
-                    "empty/null/unknown kind must still force chat: {bad}"
+                    Some(if chat_mode { &chat } else { &passthrough }),
+                    "empty/null/unknown kind is never treated as a client kind: {bad}"
                 );
             }
         }

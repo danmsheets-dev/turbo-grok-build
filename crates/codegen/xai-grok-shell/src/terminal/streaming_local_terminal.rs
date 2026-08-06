@@ -1229,6 +1229,73 @@ mod tests {
             .collect()
     }
 
+    /// A long-running foreground command, spelled for the shell the product
+    /// actually launches (`xai_grok_config::shell::shell_command_argv`, used at
+    /// line 875), which is PowerShell on a default Windows host.
+    fn sleep_cmd(secs: u64) -> String {
+        #[cfg(windows)]
+        {
+            format!("Start-Sleep -Seconds {secs}")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sleep {secs}")
+        }
+    }
+
+    /// A shell that spawns two long-running children and waits on them, so a
+    /// kill has a whole process tree to reap rather than a single leaf.
+    fn sleep_tree_cmd(secs: u64) -> String {
+        #[cfg(windows)]
+        {
+            // `Start-Process -Wait` keeps the parent alive while real child
+            // processes run; the JobObject wrap (line 946) is what must reap
+            // them. `-NoNewWindow` keeps the children inside this job.
+            format!(
+                "$a = Start-Process -NoNewWindow -PassThru powershell \
+                 -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds {secs}'; \
+                 $b = Start-Process -NoNewWindow -PassThru powershell \
+                 -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds {secs}'; \
+                 Wait-Process -Id $a.Id, $b.Id"
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sleep {secs} & sleep {secs} & wait")
+        }
+    }
+
+    /// Assert that `result` describes a process the terminal killed.
+    ///
+    /// `extract_exit_status` reports a signal name only on Unix — the Windows
+    /// arm is hardcoded `None` (see the `#[cfg(not(unix))] let signal` binding
+    /// in `extract_exit_status`, streaming_local_terminal.rs:961), because
+    /// Windows terminates a process by exit code rather than by signal. Both
+    /// arms still assert the kill was observable in the result, so neither
+    /// platform loses coverage.
+    fn assert_killed_by_terminal(result: &TerminalRunResult) {
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                result.signal,
+                Some("signal 9".to_string()),
+                "SIGKILL must be reported as the terminating signal"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            assert_eq!(
+                result.signal, None,
+                "Windows reports no signal (streaming_local_terminal.rs:961)"
+            );
+            assert!(
+                result.exit_code.is_some_and(|code| code != 0),
+                "a terminated process must not report success, got {:?}",
+                result.exit_code
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_streaming_sends_status_updates() {
         let session_id = format!("s1-status-{}", std::process::id());
@@ -1268,7 +1335,9 @@ mod tests {
                 };
 
                 let handle = tokio::task::spawn_local(async move {
-                    runner.run(make_request(&tool_id_clone, "sleep 30")).await
+                    runner
+                        .run(make_request(&tool_id_clone, &sleep_cmd(30)))
+                        .await
                 });
 
                 // Wait for the process to start
@@ -1292,7 +1361,7 @@ mod tests {
                 );
 
                 let result = handle.await.unwrap().unwrap();
-                assert_eq!(result.signal, Some("signal 9".to_string()));
+                assert_killed_by_terminal(&result);
 
                 let statuses = extract_statuses(&notifier.notifications.lock().await);
                 assert_eq!(statuses.last(), Some(&acp::ToolCallStatus::Failed));
@@ -1481,7 +1550,7 @@ mod tests {
 
                 let handle = tokio::task::spawn_local(async move {
                     runner
-                        .run(make_request(&tool_id_clone, "sleep 300 & sleep 300 & wait"))
+                        .run(make_request(&tool_id_clone, &sleep_tree_cmd(300)))
                         .await
                 });
 
@@ -1504,10 +1573,7 @@ mod tests {
                 );
 
                 let result = handle.await.unwrap().unwrap();
-                assert!(
-                    result.signal.is_some(),
-                    "process should have been killed by signal"
-                );
+                assert_killed_by_terminal(&result);
             })
             .await;
     }

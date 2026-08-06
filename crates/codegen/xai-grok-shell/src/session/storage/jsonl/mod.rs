@@ -270,9 +270,20 @@ impl JsonlStorageAdapter {
     /// the torn record is terminated as its own (single) corrupt line. This
     /// bounds the damage of any torn write to exactly one record, which the
     /// lenient readers (e.g. [`Self::read_chat_history_sync`]) then skip.
+    /// Re-open `path` purely to raise a durability barrier on it.
+    ///
+    /// The handle must carry *write* access: on Windows `sync_all` is
+    /// `FlushFileBuffers`, which the kernel rejects with `ERROR_ACCESS_DENIED`
+    /// (os error 5) unless the handle was opened for writing. A read-only
+    /// handle therefore turned every summary-file barrier into a spurious
+    /// `AppendCwdSwitchError::Committed { source: PermissionDenied }`, i.e.
+    /// every working-directory switch reported a durability failure on
+    /// Windows even though the data was on disk. `write(true)` neither
+    /// truncates nor creates, so the file contents are untouched, and on
+    /// Unix `fsync` is happy with a writable handle too.
     async fn sync_file_path_durable(path: PathBuf) -> io::Result<()> {
         tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new().read(true).open(&path)?;
+            let file = OpenOptions::new().read(true).write(true).open(&path)?;
             Self::sync_file_durable(&file)
         })
         .await
