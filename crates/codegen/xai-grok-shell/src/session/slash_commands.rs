@@ -515,11 +515,17 @@ impl<'a> EffectiveCommandCatalog<'a> {
             .chain(PROMPT_COMMANDS.iter())
             .filter(|builtin| availability.allows(builtin.gate))
             .collect();
+        // Names and aliases the pager handles locally. Mirrored by
+        // `shell_collision_contract_covers_every_pager_command_and_alias` in
+        // xai-grok-pager/src/slash/commands/mod.rs — a pager command missing
+        // here is registered bare for a same-named skill/workflow and then
+        // shadowed by the pager, so the skill becomes unreachable.
         const PAGER_COMMAND_KEYS: &[&str] = &[
             "agents",
             "agents-dashboard",
             "always-approve",
             "announcements",
+            "atlas",
             "auto",
             "btw",
             "cd",
@@ -604,6 +610,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "toggle-mouse-reporting",
             "tour",
             "transcript",
+            "tree",
             "tutorial",
             "t",
             "undo",
@@ -613,6 +620,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "voice",
             "welcome",
             "workflows",
+            "workspace-tree",
             "yolo",
         ];
         let mut taken: HashSet<String> = builtins

@@ -386,6 +386,30 @@ mod tests {
         );
     }
 
+    // The shipping half of the pair below. A community build soft-ignores a
+    // SuperGrok consumer gate entirely (`impose_gate`, this file:150), so the
+    // deferral protocol has no subject there — pin the bypass so the arm the
+    // Turbo default set actually compiles is not untested.
+    #[cfg(feature = "community-build")]
+    #[test]
+    fn impose_gate_soft_ignores_consumer_gate_on_community_build() {
+        let mut app = test_app();
+        let effs = app.impose_gate(watch_gate());
+
+        assert!(effs.is_empty(), "soft-ignore emits no verification work");
+        assert!(app.has_access(), "consumer gate must not paywall the TUI");
+        assert!(
+            app.pending_gate_verification.is_none(),
+            "nothing is deferred: the gate was dropped, not held"
+        );
+
+        // The bypass is consumer-only — a team session still gates.
+        let mut team = test_app();
+        team.team_name = Some("acme".into());
+        let _ = team.impose_gate(watch_gate());
+        assert!(!team.has_access(), "team/enterprise gates still apply");
+    }
+
     // Community builds soft-ignore SuperGrok consumer gates (multi-provider).
     // Upstream gate semantics are still tested without that feature.
     #[cfg(not(feature = "community-build"))]

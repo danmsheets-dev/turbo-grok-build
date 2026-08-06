@@ -202,11 +202,30 @@ fn file_path_regex() -> &'static regex::Regex {
         // space-free so `…/bar here.` does not eat the word `here`.
         // Alternation prefers the spaced form first so it wins over the shorter
         // no-space prefix at the same start position.
-        let pat = format!(
+        let posix = format!(
             r"~?/(?:{seg}/)+(?:{spaced}|{seg})",
             seg = PATH_SEGMENT,
             spaced = PATH_SEGMENT_SPACED,
         );
+        // Native Windows paths (`C:\src\main.rs`, `C:/src/main.rs`). The
+        // `/`-only pattern above cannot match one, so on a Windows host no
+        // path in agent prose or command output was clickable at all. A
+        // drive-rooted path is already complete, so zero intermediate
+        // segments are allowed (`C:\notes.md`).
+        //
+        // Windows-only on purpose: on POSIX a `C:\…` string is a *relative*
+        // path, so it would produce an overlay whose `file://` URL cannot be
+        // built — a dead link region. Keeping the POSIX arm on Windows too
+        // preserves WSL / Git-Bash output and `~/…`.
+        let pat = if cfg!(windows) {
+            format!(
+                r"(?:[a-zA-Z]:[\\/](?:{seg}[\\/])*(?:{spaced}|{seg})|{posix})",
+                seg = PATH_SEGMENT,
+                spaced = PATH_SEGMENT_SPACED,
+            )
+        } else {
+            posix
+        };
         regex::Regex::new(&pat).expect("file path regex")
     })
 }
@@ -222,7 +241,15 @@ fn quoted_file_path_regex() -> &'static regex::Regex {
         // `/`-separated components required.
         // `"/Users/me/My Dir/file.app"` or `'~/Desktop/My Notes/todo.md'`
         let seg = r#"[^/"']+"#;
-        let pat = format!(r#"(["'])(~?/(?:{seg}/)+{seg})"#);
+        let posix = format!(r#"~?/(?:{seg}/)+{seg}"#);
+        // Drive-rooted Windows arm, matching `file_path_regex`'s reasoning:
+        // `"C:\Program Files\My App\notes.md"`.
+        let pat = if cfg!(windows) {
+            let wseg = r#"[^\\/"']+"#;
+            format!(r#"(["'])([a-zA-Z]:[\\/](?:{wseg}[\\/])*{wseg}|{posix})"#)
+        } else {
+            format!(r#"(["'])({posix})"#)
+        };
         regex::Regex::new(&pat).expect("quoted file path regex")
     })
 }

@@ -3869,6 +3869,11 @@ fn suggestions_landing_after_bash_exit_are_dropped() {
 /// OFF: Tab fires a deterministic fetch, and the landing response runs the
 /// terminal Tab semantics — a single file candidate splices in place
 /// immediately and the drill-down refetch rides out with the dispatch.
+// Literal complement of the product guard: terminal-like Tab in bash mode is
+// `cfg!(not(windows))` at app/agent_view/prompt.rs:341, where Windows keeps
+// legacy focus-cycling because the completion tokenizer is POSIX-only. On
+// Windows the Tab keystroke never reaches this pipeline.
+#[cfg(not(windows))]
 #[test]
 fn tab_fetch_landing_insta_accepts_single_candidate_always_on() {
     use crate::views::suggestion_controller::{
@@ -3950,6 +3955,8 @@ fn tab_fetch_landing_insta_accepts_single_candidate_always_on() {
 /// dropdown (and installs no ghost) — the user picks with arrows + Tab.
 /// History rows model an OLD shell (new shells honor `tokenOnly` and send
 /// none on Tab fetches); whole-line sets must keep plain-open semantics.
+// Same product guard as the sibling above: app/agent_view/prompt.rs:341.
+#[cfg(not(windows))]
 #[test]
 fn tab_fetch_landing_opens_dropdown_for_ambiguous_set_always_on() {
     use crate::views::suggestion_controller::{

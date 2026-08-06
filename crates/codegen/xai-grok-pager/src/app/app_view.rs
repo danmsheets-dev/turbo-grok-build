@@ -6862,8 +6862,14 @@ pub(crate) mod tests {
             app.needs_animation(),
             "an open prompt history overlay must request animation ticks"
         );
+        // Wall-clock budget, not an iteration count: the results come from a
+        // background history daemon, so a fixed 1000-iteration spin is really
+        // a ~1s deadline that a loaded machine (a full `--workspace` run)
+        // blows through. The assertion is unchanged — delivery is still
+        // required — only the patience is now scheduler-independent.
         let mut delivered = false;
-        for _ in 0..1000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             if app.tick() && app.agents[&id].prompt.history_search.result_count() == 2 {
                 delivered = true;
                 break;

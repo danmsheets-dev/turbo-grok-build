@@ -2223,6 +2223,12 @@ fn gate_refreshed_no_effect_when_already_unblocked() {
 /// deferred for live verification instead of painting the paywall directly:
 /// the gate is held out of `app.gate` and a `CheckSubscription` +
 /// verify-timeout pair is emitted.
+// Literal complement of the product guard at app/subscription.rs:150: a
+// `community-build` soft-ignores a SuperGrok consumer gate outright, and
+// that bypass condition (`team_name.is_none() && !is_api_key_auth`) is a
+// superset of `is_consumer_session()`, so `defer_gate_for_verification` is
+// unreachable there and the whole deferral protocol below has no subject.
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn gate_refreshed_newly_blocked_defers_gate_for_verification() {
     let mut app = test_app();
@@ -2315,6 +2321,12 @@ fn verify_check_with_gated_meta_shows_gate() {
 
 /// The verification's own check failed (meta None) while its stale gate
 /// was deferred: err on blocking — the deferred gate is promoted.
+// Literal complement of the product guard at app/subscription.rs:150: a
+// `community-build` soft-ignores a SuperGrok consumer gate outright, and
+// that bypass condition (`team_name.is_none() && !is_api_key_auth`) is a
+// superset of `is_consumer_session()`, so `defer_gate_for_verification` is
+// unreachable there and the whole deferral protocol below has no subject.
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn verify_check_failure_promotes_pending_gate() {
     let mut app = test_app();
@@ -2369,6 +2381,12 @@ fn check_subscription_complete_failure_leaves_pending_gate_untouched() {
 
 /// A failed verification check from a SUPERSEDED deferral (older
 /// generation) must not promote the newer pending gate.
+// Literal complement of the product guard at app/subscription.rs:150: a
+// `community-build` soft-ignores a SuperGrok consumer gate outright, and
+// that bypass condition (`team_name.is_none() && !is_api_key_auth`) is a
+// superset of `is_consumer_session()`, so `defer_gate_for_verification` is
+// unreachable there and the whole deferral protocol below has no subject.
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn verify_check_stale_generation_failure_is_ignored() {
     let mut app = test_app();
@@ -2411,6 +2429,12 @@ fn check_subscription_complete_failure_without_pending_gate_is_noop() {
 /// The verification window expired before the live check resolved:
 /// err on blocking — the deferred gate is promoted, and the freshly shown
 /// paywall gets the 5s auto-lift chain.
+// Literal complement of the product guard at app/subscription.rs:150: a
+// `community-build` soft-ignores a SuperGrok consumer gate outright, and
+// that bypass condition (`team_name.is_none() && !is_api_key_auth`) is a
+// superset of `is_consumer_session()`, so `defer_gate_for_verification` is
+// unreachable there and the whole deferral protocol below has no subject.
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn gate_verify_timeout_promotes_pending_gate() {
     let mut app = test_app();
@@ -2463,6 +2487,12 @@ fn gate_verify_timeout_noop_when_already_resolved() {
 
 /// A timeout from a SUPERSEDED verification (older generation) must not
 /// promote a newer deferred gate whose own live check is still in flight.
+// Literal complement of the product guard at app/subscription.rs:150: a
+// `community-build` soft-ignores a SuperGrok consumer gate outright, and
+// that bypass condition (`team_name.is_none() && !is_api_key_auth`) is a
+// superset of `is_consumer_session()`, so `defer_gate_for_verification` is
+// unreachable there and the whole deferral protocol below has no subject.
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn gate_verify_timeout_stale_generation_is_ignored() {
     let mut app = test_app();
@@ -2559,6 +2589,12 @@ fn verified_gate_via_check_complete_starts_paywall_chain() {
 /// than the stale snapshot that produced it — and still run the lift
 /// bookkeeping (`CheckSubscription` for the JWT refresh), since the pending
 /// deferral means the user was conceptually blocked.
+// Literal complement of the product guard at app/subscription.rs:150: a
+// `community-build` soft-ignores a SuperGrok consumer gate outright, and
+// that bypass condition (`team_name.is_none() && !is_api_key_auth`) is a
+// superset of `is_consumer_session()`, so `defer_gate_for_verification` is
+// unreachable there and the whole deferral protocol below has no subject.
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn gate_refreshed_without_gate_clears_pending_verification() {
     let mut app = test_app();

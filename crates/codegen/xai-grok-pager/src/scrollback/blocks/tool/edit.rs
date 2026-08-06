@@ -1452,6 +1452,7 @@ mod tests {
     use crate::appearance::AppearanceConfig;
     use crate::diff::DiffLine;
     use crate::scrollback::types::DisplayMode;
+    use crate::test_util::{abs_file_url, abs_path, abs_path_buf, native_sep};
 
     fn test_ctx() -> BlockContext {
         BlockContext {
@@ -1546,7 +1547,8 @@ mod tests {
             None,
         );
         let text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Edit src/main.rs");
+        // Native spelling: the header normalizes through `Path::components()`.
+        assert_eq!(text, format!("Edit {}", native_sep("src/main.rs")));
     }
 
     #[test]
@@ -1584,7 +1586,7 @@ mod tests {
         assert_eq!(text, "Editing workflow cc-deep-research");
         assert!(
             block
-                .path_link_target(Some(Path::new("/repo")))
+                .path_link_target(Some(&abs_path_buf("repo")))
                 .and_then(|target| crate::render::osc8::resolve_link_target(&target))
                 .and_then(|resolved| resolved.osc8_url)
                 .is_some_and(|u| u.contains("cc-deep-research.rhai")),
@@ -1711,8 +1713,10 @@ mod tests {
 
     #[test]
     fn expanded_shows_relative_when_under_cwd_preamble_absolute() {
-        let abs = "/Users/me/project/src/foo.rs";
-        let cwd = Path::new("/Users/me/project");
+        let abs = abs_path("Users/me/project/src/foo.rs");
+        let abs = abs.as_str();
+        let cwd = abs_path_buf("Users/me/project");
+        let cwd = cwd.as_path();
         let block = EditToolCallBlock::new(abs, vec![]);
         let theme = Theme::current();
         let header = block.header_line(
@@ -1725,7 +1729,7 @@ mod tests {
             None,
         );
         let text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Edit src/foo.rs");
+        assert_eq!(text, format!("Edit {}", native_sep("src/foo.rs")));
 
         let mut ctx = test_ctx();
         ctx.mode = DisplayMode::Expanded;
@@ -1737,7 +1741,7 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(preamble_text, "Edit /Users/me/project/src/foo.rs");
+        assert_eq!(preamble_text, format!("Edit {abs}"));
     }
 
     #[test]
@@ -1756,8 +1760,10 @@ mod tests {
 
     #[test]
     fn header_link_target_is_absolute_file_for_all_surfaces() {
-        let abs = "/Users/me/project/src/foo.rs";
-        let cwd = Path::new("/Users/me/project");
+        let abs = abs_path("Users/me/project/src/foo.rs");
+        let abs = abs.as_str();
+        let cwd = abs_path_buf("Users/me/project");
+        let cwd = cwd.as_path();
         let block = EditToolCallBlock::new(abs, vec![]);
         let target = block.path_link_target(Some(cwd)).expect("file target");
         assert_eq!(
@@ -1770,7 +1776,7 @@ mod tests {
                 .osc8_url
                 .unwrap()
                 .as_ref(),
-            "file:///Users/me/project/src/foo.rs"
+            abs_file_url("Users/me/project/src/foo.rs")
         );
 
         let mut ctx = test_ctx();
@@ -1787,7 +1793,7 @@ mod tests {
         let expanded = block.output(&ctx);
         assert_eq!(
             expanded.lines[0].content.spans[1].content.as_ref(),
-            "src/foo.rs"
+            native_sep("src/foo.rs")
         );
         assert_eq!(expanded.lines[0].link_target.as_ref(), Some(&target));
     }

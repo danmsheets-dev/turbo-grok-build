@@ -305,14 +305,18 @@ fn shorten_path(path: &str) -> &str {
     let memory_root = xai_grok_config::grok_home().join("memory");
     let memory_prefix = memory_root.display().to_string();
     if let Some(rest) = path.strip_prefix(&memory_prefix) {
-        let rest = rest.strip_prefix('/').unwrap_or(rest);
-        if let Some(after_slash) = rest.find('/') {
-            return &rest[after_slash + 1..];
+        // Both separators: `grok_home()` is a native path, so on Windows the
+        // memory paths the tool reports are `\`-separated and a `/`-only scan
+        // leaves the leading separator in place (`\MEMORY.md`) and never finds
+        // the scope segment to drop.
+        let rest = rest.strip_prefix(['/', '\\']).unwrap_or(rest);
+        if let Some(after_sep) = rest.find(['/', '\\']) {
+            return &rest[after_sep + 1..];
         }
         return rest;
     }
     // Fallback: strip to filename
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 pub fn parse_memory_results(output: &str) -> Vec<MemoryResult> {
@@ -450,14 +454,29 @@ session content
     fn shorten_memory_path() {
         // Paths under the configured grok memory root keep one trailing segment group.
         let memory_root = xai_grok_config::grok_home().join("memory");
-        let session = memory_root.join("xai-50aa78f0/sessions/2026-05-01.md");
+        // Segment-by-segment `join` so the fixture is spelled the way the
+        // memory tool actually reports it — fully native, i.e. `\`-separated
+        // on Windows. (A single `join("a/b/c")` would leave literal `/`
+        // characters inside a Windows path and under-exercise the scan.)
+        let session = memory_root
+            .join("xai-50aa78f0")
+            .join("sessions")
+            .join("2026-05-01.md");
         let top = memory_root.join("MEMORY.md");
         assert_eq!(
             shorten_path(session.to_str().expect("utf8 path")),
-            "sessions/2026-05-01.md"
+            crate::test_util::native_sep("sessions/2026-05-01.md")
         );
         assert_eq!(shorten_path(top.to_str().expect("utf8 path")), "MEMORY.md");
-        // Outside the memory root falls back to the filename.
+        // A `/`-spelled tail under the same root shortens identically.
+        let posix_tail = format!(
+            "{}/xai-50aa78f0/sessions/2026-05-01.md",
+            memory_root.display()
+        );
+        assert_eq!(shorten_path(&posix_tail), "sessions/2026-05-01.md");
+        // Outside the memory root falls back to the filename, for either
+        // separator spelling.
         assert_eq!(shorten_path("/some/other/path.md"), "path.md");
+        assert_eq!(shorten_path(r"C:\some\other\path.md"), "path.md");
     }
 }

@@ -1515,12 +1515,28 @@ mod tests {
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
 
+        // The band the block actually paints on its content rows. Read it from
+        // the block rather than from `theme`: `UserPromptBlock` resolves its
+        // band through the process-global `Theme::current()`
+        // (scrollback/blocks/user.rs:256), which on Windows carries the
+        // contrast boost `Theme::current()` applies there
+        // (xai-grok-pager-render/src/theme/mod.rs:424) and the locally
+        // constructed `Theme::groknight()` does not.
+        let ctx = entry.context(width, &AppearanceConfig::default(), None);
+        let band = entry.block.output(&ctx).lines[0]
+            .background
+            .expect("user prompt paints a band on its content rows");
+        assert_ne!(
+            band, theme.bg_base,
+            "test premise: painted band must differ from the clear color"
+        );
+
         // Gutter cell carries the block background, proving the block fill
         // (not the bg_base clear) owns it. UserPrompt has vpad → content on row 1.
         let gutter_x = gutter_band(&renderer, width).start + 2;
         let gutter_cell = buf.cell((gutter_x, 1)).unwrap();
         assert_eq!(
-            gutter_cell.bg, theme.bg_light,
+            gutter_cell.bg, band,
             "background block gutter must use the block bg fill"
         );
     }

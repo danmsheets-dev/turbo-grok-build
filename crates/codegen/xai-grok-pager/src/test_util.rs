@@ -1,6 +1,94 @@
 //! Shared test utilities for the pager crate.
 //!
 //! Compiled only in `#[cfg(test)]` builds. Import via `crate::test_util`.
+
+/// Pin this crate's unit-test binary to the modern (non-legacy) glyph set.
+///
+/// The glyph a view paints is chosen at runtime by
+/// `xai_grok_pager_render::glyphs::is_legacy_windows_console()`
+/// (crates/codegen/xai-grok-pager-render/src/glyphs.rs:522), which
+/// default-denies to "legacy ConHost" on Windows whenever the terminal-brand
+/// probe returns `Unknown` — and under `cargo test` no terminal env var is
+/// set, so a Windows test host is misclassified as a legacy console. Every
+/// render assertion in this crate then sees the ASCII fallbacks (`>` for `›`,
+/// `x` for `✗`, `•` for `●`, `▒` for `▌`, an empty hero logo, …) instead of
+/// the glyphs it asserts.
+///
+/// On non-Windows hosts that probe is a compile-time `false`, so these tests
+/// have only ever exercised the modern glyph set. Pinning it here removes the
+/// host dependence without changing what any test asserts; the legacy
+/// substitution keeps its own direct coverage in
+/// `xai-grok-pager-render/src/glyphs.rs` (`decide_legacy_windows_console`,
+/// `to_legacy_glyphs`, `button_variants_have_stable_width`).
+///
+/// `GROK_FORCE_LEGACY_CONSOLE` is the escape hatch the probe already
+/// documents; `=0` forces the probe off. This must run pre-`main`, because
+/// the probe caches its answer in a `OnceLock` on first read and libtest
+/// gives no ordering guarantee between the test threads that read it.
+#[ctor::ctor]
+fn pin_modern_console_glyphs_for_tests() {
+    // SAFETY: `#[ctor]` runs before `main`, so no other thread exists yet.
+    unsafe { std::env::set_var("GROK_FORCE_LEGACY_CONSOLE", "0") };
+}
+
+/// Build a host-native **absolute** fixture path from `/`-separated segments.
+///
+/// `abs_path("Users/me/project/src/main.rs")` yields
+/// `/Users/me/project/src/main.rs` on POSIX and
+/// `C:\Users\me\project\src\main.rs` on Windows.
+///
+/// A bare POSIX literal is *not* absolute on Windows: `Path::is_absolute()`
+/// requires a `Prefix` component (a drive letter), so `/Users/me/x.rs` has a
+/// root but no prefix and reports `false`. Every consumer of an "absolute"
+/// path in the pager then takes its not-absolute arm silently —
+/// `url::Url::from_file_path` refuses it (so `osc8_url` is `None`, see
+/// xai-grok-pager-render/src/render/osc8.rs:236), and
+/// `file_link_presentation_for_resolved` classifies the painted text as
+/// relative (osc8.rs:269). Fixtures that mean "an absolute path on this host"
+/// must go through here.
+pub fn abs_path(segments: &str) -> String {
+    let segments = segments.trim_start_matches('/');
+    if cfg!(windows) {
+        format!(r"C:\{}", segments.replace('/', "\\"))
+    } else {
+        format!("/{segments}")
+    }
+}
+
+/// [`abs_path`] as a `PathBuf`.
+pub fn abs_path_buf(segments: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(abs_path(segments))
+}
+
+/// Rewrite `/` to the host path separator in an **expected** display string.
+///
+/// The pager paints paths with their native spelling: tool headers run the
+/// path through `xai_grok_paths::normalize_lexically`, which rebuilds the
+/// path from `Path::components()` and therefore emits `\` on Windows
+/// (crates/common/xai-grok-paths/src/lib.rs:169). An expectation of
+/// `"src/main.rs"` is a POSIX-only spelling of the same path.
+pub fn native_sep(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    }
+}
+
+/// `file://` URL for [`abs_path`]'s spelling of `segments`.
+///
+/// `url::Url::from_file_path` keeps the drive letter and forward slashes on
+/// Windows, so the same fixture is `file:///a/b` on POSIX and
+/// `file:///C:/a/b` on Windows.
+pub fn abs_file_url(segments: &str) -> String {
+    let segments = segments.trim_start_matches('/');
+    if cfg!(windows) {
+        format!("file:///C:/{segments}")
+    } else {
+        format!("file:///{segments}")
+    }
+}
+
 /// Minimal `AgentView` for unit tests outside the dispatch/handler modules
 /// (which keep their own richer factories).
 pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent_view::AgentView {

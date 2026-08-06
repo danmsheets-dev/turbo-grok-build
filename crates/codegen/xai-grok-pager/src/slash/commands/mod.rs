@@ -281,12 +281,19 @@ mod tests {
     }
     #[test]
     fn shell_collision_contract_covers_every_pager_command_and_alias() {
+        // Mirror of `PAGER_COMMAND_KEYS` in
+        // xai-grok-shell/src/session/slash_commands.rs:518 — the list that
+        // stops a skill or workflow from claiming a name the pager already
+        // handles locally (slash_commands.rs:625). This copy is hand-kept, so
+        // a new pager command has to be added in BOTH places; adding it only
+        // here reserves nothing.
         const SHELL_RESERVED: &[&str] = &[
             "agents",
             "agents-dashboard",
             "always-approve",
             "announcements",
             "anthropic",
+            "atlas",
             "auto",
             "btw",
             "cd",
@@ -388,22 +395,32 @@ mod tests {
             "toggle-mouse-reporting",
             "tour",
             "transcript",
+            "tree",
             "tutorial",
             "t",
             "undo",
             "usage",
             "view-plan",
             "vim-mode",
+            "workspace-tree",
             "voice",
             "welcome",
             "workflows",
             "yolo",
         ];
-        for command in builtin_commands() {
-            for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
-                assert!(SHELL_RESERVED.contains(&key), "unreserved pager key {key}");
-            }
-        }
+        // Report every gap at once — a one-key-at-a-time assert hides how far
+        // the list has drifted behind the command registry.
+        let commands = builtin_commands();
+        let missing: Vec<&str> = commands
+            .iter()
+            .flat_map(|command| {
+                std::iter::once(command.name())
+                    .chain(command.aliases().iter().copied())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|key| !SHELL_RESERVED.contains(key))
+            .collect();
+        assert!(missing.is_empty(), "unreserved pager keys: {missing:?}");
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {

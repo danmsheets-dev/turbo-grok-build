@@ -1437,6 +1437,31 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
     }
 }
 
+/// The separator the user is typing with — whichever of `/` or `\` appears
+/// last in the partial, falling back to the host separator.
+///
+/// Completion is string surgery on what the user typed, so it has to speak
+/// both spellings: a Windows path (`C:\src\plug`) contains no `/` at all, and
+/// a `/`-only scan silently treats the whole thing as a bare filename.
+fn typed_path_separator(partial: &str) -> char {
+    match partial.rfind(['/', '\\']) {
+        Some(idx) => partial[idx..]
+            .chars()
+            .next()
+            .unwrap_or(std::path::MAIN_SEPARATOR),
+        None => std::path::MAIN_SEPARATOR,
+    }
+}
+
+/// Split `path` into its directory prefix (separator included) and the
+/// trailing partial segment, for either separator spelling.
+fn split_at_last_separator(path: &str) -> (&str, &str) {
+    match path.rfind(['/', '\\']) {
+        Some(idx) => path.split_at(idx + 1),
+        None => ("", path),
+    }
+}
+
 /// Tab-complete a partial path by listing directory entries.
 ///
 /// Expands `~` to home directory. If the partial path is a directory,
@@ -1446,6 +1471,8 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
 pub fn tab_complete_path(partial: &str) -> Option<String> {
     use std::path::Path;
 
+    let sep = typed_path_separator(partial);
+
     if partial.is_empty() {
         return None;
     }
@@ -1453,10 +1480,10 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
     // Expand ~ to home directory.
     let expanded = if let Some(rest) = partial.strip_prefix('~') {
         let home = dirs::home_dir()?;
-        if rest.is_empty() || rest == "/" {
-            home.to_string_lossy().to_string() + "/"
+        if rest.is_empty() || rest == "/" || rest == "\\" {
+            format!("{}{sep}", home.to_string_lossy())
         } else {
-            home.join(rest.strip_prefix('/').unwrap_or(rest))
+            home.join(rest.strip_prefix(['/', '\\']).unwrap_or(rest))
                 .to_string_lossy()
                 .to_string()
         }
@@ -1466,8 +1493,8 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
 
     let path = Path::new(&expanded);
 
-    // If path is an existing directory (ends with /), list its contents.
-    if path.is_dir() && expanded.ends_with('/') {
+    // If path is an existing directory (ends with a separator), list its contents.
+    if path.is_dir() && expanded.ends_with(['/', '\\']) {
         let mut entries: Vec<String> = std::fs::read_dir(path)
             .ok()?
             .filter_map(|e| e.ok())
@@ -1476,7 +1503,7 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
                 let name = e.file_name().to_string_lossy().to_string();
                 let full = path.join(&name);
                 if full.is_dir() {
-                    format!("{expanded}{name}/")
+                    format!("{expanded}{name}{sep}")
                 } else {
                     format!("{expanded}{name}")
                 }
@@ -1510,16 +1537,11 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
         .map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             let full = parent.join(&name);
-            let parent_str = if expanded.contains('/') {
-                expanded
-                    .rsplit_once('/')
-                    .map(|(p, _)| format!("{p}/"))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+            // Keep exactly what the user typed ahead of the last separator —
+            // dropping it would rewrite `C:\src\plug` to a bare `plugin`.
+            let (parent_str, _) = split_at_last_separator(&expanded);
             if full.is_dir() {
-                format!("{parent_str}{name}/")
+                format!("{parent_str}{name}{sep}")
             } else {
                 format!("{parent_str}{name}")
             }
