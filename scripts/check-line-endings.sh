@@ -9,12 +9,16 @@
 # blob and the tree reports clean. The diagnostic is `git ls-files --eol`, not
 # `git status`.
 #
-# Three independent checks. Each has already fired on this repository:
+# Four independent checks. The first three have already fired on this repo:
 #   1. index line endings   — 34 files were stored CRLF until 06c749255a.
 #   2. UTF-8 byte-order marks — 13 files carried one until fddc74d2d.
 #   3. CR inside eol=lf paths — a `#!/bin/sh<CR>` shebang is "bad interpreter",
 #      and a lone CR can hide inside an otherwise LF file, which check 1 still
 #      classifies as `i/lf`.
+#   4. embedded assets that are not eol=lf paths — the converse of 3, and the
+#      invariant release.yml's deleted "Force LF" step used to cover by brute
+#      force. A new `include_str!` of an unpinned path ships bytes that differ
+#      by build host; nothing but this check would notice.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -81,6 +85,135 @@ if [ "${#cr_hits[@]}" -gt 0 ]; then
     "${cr_hits[@]}"
 fi
 echo "    $(wc -l < "$tmp/pinned" | tr -d ' ') path(s) are pinned to eol=lf"
+
+# ---------------------------------------------------------------------------
+# 4. Every file compiled into the binary must BE an eol=lf (or binary) path.
+# ---------------------------------------------------------------------------
+# Check 3 asks "does this eol=lf path contain a CR?". This asks the converse,
+# and it is the load-bearing half: "is every asset we bake into the binary
+# pinned at all?" Nothing else enforces that. `.gitattributes` pins asset
+# *extensions*, which is only as complete as the inventory someone took by
+# hand — the next `include_str!("foo.toml")` would silently ship bytes that
+# differ by build host (LF from a Linux runner, CRLF from a Windows one), and
+# `git status` would show nothing. This is the invariant that let release.yml
+# drop its "Force LF" step; without it that deletion is only true today.
+#
+# Resolution rules, applied to every tracked `.rs` file:
+#   include_str!("rel/path")          -> that path, relative to the source file
+#   include_str!(concat!("dir/", …))  -> every tracked file under `dir/`
+#   rust_i18n::i18n!("locales")       -> every tracked file under `locales/`
+#   concat!(env!("OUT_DIR"), …)       -> build-generated, never in git: skipped
+#   anything not in the index         -> doc-comment example: skipped
+echo "==> embedded assets are LF-pinned (include_str! / include_bytes!)"
+
+# `.rs` sources included into a #[test] that only substring-scans them. CRLF
+# vs LF cannot change a `contains()` result, and pinning `*.rs eol=lf` would
+# rewrite every source file in every Windows worktree. Listed by exact path,
+# not by extension, so a NEW `.rs` include still fails here and gets a
+# deliberate decision instead of inheriting a blanket exemption.
+scan_only_sources="
+crates/codegen/xai-grok-pager-minimal/src/lib.rs
+crates/codegen/xai-grok-pager-minimal/src/auth.rs
+crates/codegen/xai-grok-pager-minimal/src/commit.rs
+crates/codegen/xai-grok-pager-minimal/src/full_view.rs
+crates/codegen/xai-grok-pager-minimal/src/live.rs
+crates/codegen/xai-grok-pager-minimal/src/overlay.rs
+crates/codegen/xai-grok-pager-minimal/src/panel.rs
+crates/codegen/xai-grok-pager-minimal/src/plan.rs
+crates/codegen/xai-grok-pager-minimal/src/todo.rs
+crates/codegen/xai-grok-pager-minimal/src/welcome.rs
+crates/codegen/xai-grok-shell/src/agent/config.rs
+crates/codegen/xai-grok-tools/src/implementations/grok_build/read_file/mod.rs
+"
+printf '%s\n' $scan_only_sources | LC_ALL=C sort > "$tmp/scan_only"
+
+git ls-files | LC_ALL=C sort > "$tmp/tracked"
+git ls-files | git check-attr --stdin text | sed -n 's/: text: unset$//p' \
+  | LC_ALL=C sort > "$tmp/binary"
+
+# Collapse `path/a/../b` to `path/b` without touching the filesystem (the
+# target may be generated, and `realpath -m` is not portable enough here).
+normalize_path() {
+  local part
+  local -a parts out=()
+  IFS='/' read -ra parts <<< "$1"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      '' | '.') ;;
+      '..') [ "${#out[@]}" -gt 0 ] && unset 'out[${#out[@]}-1]' ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  local IFS=/
+  printf '%s' "${out[*]-}"
+}
+
+: > "$tmp/assets"
+while IFS= read -r source; do
+  [ -n "$source" ] || continue
+  source_dir="$(dirname "$source")"
+  # The macro's argument can wrap across lines (the `concat!` forms do), so
+  # flatten the file before matching.
+  flat="$(tr '\n' ' ' < "$source")"
+
+  # include_str!("…") / include_bytes!("…")
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    arg="${hit#*\"}"
+    printf '%s\n' "$(normalize_path "$source_dir/${arg%\"}")" >> "$tmp/assets"
+  done < <(printf '%s' "$flat" \
+    | grep -oE 'include_(str|bytes)! *\( *"[^"]*"' || true)
+
+  # include_str!(concat!("dir/", …)) — expand the directory.
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    rest="${hit#*concat!}"
+    rest="${rest#*(}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    case "$rest" in
+      env!*) ;; # OUT_DIR and friends: produced by build.rs, not in the index
+      '"'*)
+        lit="${rest#\"}"
+        git ls-files -- "$(normalize_path "$source_dir/${lit%%\"*}")" >> "$tmp/assets"
+        ;;
+      *)
+        report "unparsed include_str!/include_bytes! argument in $source" \
+          "teach scripts/check-line-endings.sh check 4 how to resolve it" \
+          "$rest"
+        ;;
+    esac
+  done < <(printf '%s' "$flat" \
+    | grep -oE 'include_(str|bytes)! *\( *concat! *\( *[^,]*' || true)
+
+  # `rust_i18n::i18n!("locales")` embeds the whole directory. Same invariant,
+  # different macro — and the one asset that was NOT pinned when this check was
+  # written, which is the point: the inventory has to be derived, not recalled.
+  # rust-i18n resolves its argument against CARGO_MANIFEST_DIR, not the source
+  # file, so walk up to the crate root first.
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    crate_dir="$source_dir"
+    while [ "$crate_dir" != "." ] && [ ! -f "$crate_dir/Cargo.toml" ]; do
+      crate_dir="$(dirname "$crate_dir")"
+    done
+    lit="${hit#*\"}"
+    git ls-files -- "$(normalize_path "$crate_dir/${lit%\"}")" >> "$tmp/assets"
+  done < <(printf '%s' "$flat" | grep -oE 'i18n! *\( *"[^"]*"' || true)
+done < <(git grep -l -E 'include_(str|bytes)!|i18n! *\(' -- '*.rs' || true)
+
+LC_ALL=C sort -u "$tmp/assets" > "$tmp/assets.sorted"
+# Only tracked paths are in scope: anything else is a doc-comment example or a
+# build artefact, and neither is stored in git for git to pin.
+LC_ALL=C comm -12 "$tmp/assets.sorted" "$tmp/tracked" > "$tmp/assets.tracked"
+# Acceptable: pinned to LF, git-detected binary, or an allowlisted self-scan.
+LC_ALL=C sort -u "$tmp/pinned" "$tmp/binary" "$tmp/scan_only" > "$tmp/assets.ok"
+mapfile -t unpinned < <(LC_ALL=C comm -23 "$tmp/assets.tracked" "$tmp/assets.ok")
+if [ "${#unpinned[@]}" -gt 0 ]; then
+  report "${#unpinned[@]} embedded asset(s) are not pinned to eol=lf" \
+    "add the extension (or path) to .gitattributes with 'text eol=lf', then git add --renormalize" \
+    "${unpinned[@]}"
+fi
+echo "    $(wc -l < "$tmp/assets.tracked" | tr -d ' ') tracked path(s) are embedded via include_str!/include_bytes!"
 
 if [ "$status" -ne 0 ]; then
   printf '\n!! repo hygiene FAILED\n' >&2

@@ -108,3 +108,9 @@ crates/codegen/xai-grok-pager/npm/grok/bin/grok text eol=lf
 *.json    text eol=lf
 *.rhai    text eol=lf
 *.tmTheme text eol=lf
+
+# The i18n bundle is embedded too, just not by `include_str!`: `rust_i18n::i18n!`
+# (xai-grok-pager/src/lib.rs) compiles every file under `locales/` into the
+# binary. Pinned by path rather than by `*.yml`, because the other 48 tracked
+# YAML files in this repo are CI config that is never baked into an artifact.
+crates/codegen/xai-grok-pager/locales/*.yml text eol=lf
