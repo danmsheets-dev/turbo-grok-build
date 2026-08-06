@@ -60,18 +60,6 @@ jobs:
       # Node 24 majors: silence "Node.js 20 is deprecated" runner warnings.
       - uses: actions/checkout@v5
 
-      # Avoid CRLF mutations of bundled/** text on windows-2022. Windows users
-      # otherwise receive CRLF .md/.py skills where Unix users get LF, so the
-      # two platforms ship different bytes for the same bundled runtime.
-      - name: Force LF for text files (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          git config core.autocrlf false
-          git config core.eol lf
-          git rm -rf --cached . >/dev/null 2>&1 || true
-          git reset --hard HEAD
-
       - name: Check tag matches VERSION file
         shell: bash
         run: |
@@ -289,9 +277,11 @@ jobs:
             Remove-Item -Recurse -Force
           Get-ChildItem (Join-Path $staging "bundled") -File -Recurse -Include "*.pyc", "*.pyo" |
             Remove-Item -Force
-          # Git on windows-2022 often checks out text as CRLF. Normalize bundled
-          # text to BOM-less LF before zip so the Windows archive is byte-identical
-          # to the Linux/macOS tarballs for the same bundled runtime.
+          # Backstop only. .gitattributes pins every extension currently under
+          # bundled/ (.md, .py) to eol=lf, so the checkout is already LF here and
+          # this loop is a no-op. It stays because bundled/** is a drop-in tree:
+          # if an unpinned text extension ever lands in it, this still makes the
+          # Windows archive byte-identical to the Linux/macOS tarballs.
           $textExt = @(".md", ".py", ".txt", ".json", ".toml", ".yml", ".yaml", ".sh", ".rhai", ".rs", ".skill")
           $utf8 = New-Object System.Text.UTF8Encoding $false
           Get-ChildItem (Join-Path $staging "bundled") -File -Recurse | ForEach-Object {
