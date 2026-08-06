@@ -2604,6 +2604,32 @@ mod tests {
     // `test_ctx` stamps `WorkspaceViewerContext { stream_tool_progress:
     // true }` by default, so these tests exercise the streaming path.
 
+    /// Portable "print `count` lines, one every `gap_ms` milliseconds", each
+    /// line `{prefix}{i}` with `i` zero-padded to three digits so the per-line
+    /// byte count is fixed.
+    ///
+    /// These tests run real commands through the product shell
+    /// (`xai_grok_config::shell::shell_command_argv`), which is PowerShell on a
+    /// default Windows host — a `for … do … done` literal is a parse error
+    /// there, so the command exited 1 without ever producing output to stream.
+    fn drip_cmd(prefix: &str, count: u32, gap_ms: u32) -> String {
+        #[cfg(windows)]
+        {
+            format!(
+                "foreach ($i in 1..{count}) {{ Write-Output ('{prefix}{{0:d3}}' -f $i); \
+                 Start-Sleep -Milliseconds {gap_ms} }}"
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let secs = format!("{}.{:03}", gap_ms / 1000, gap_ms % 1000);
+            format!(
+                "i=1; while [ $i -le {count} ]; do printf '{prefix}%03d\\n' \"$i\"; \
+                 sleep {secs}; i=$((i+1)); done"
+            )
+        }
+    }
+
     /// Build resources backed by the *real* `LocalTerminalBackend` so the
     /// terminal actor emits `BashOutputChunk`s. Returns the `TempDir` too so
     /// the caller keeps the session/cwd directory alive for the test.
@@ -2789,7 +2815,7 @@ mod tests {
         let mut stream = xai_tool_runtime::Tool::execute(
             &tool,
             ctx,
-            make_input("for i in 1 2 3; do echo $i; sleep 0.1; done"),
+            make_input(&drip_cmd("chunk_", 3, 100)),
         )
         .await;
 
@@ -2815,7 +2841,7 @@ mod tests {
                 assert_eq!(bash.exit_code, 0);
                 let out = String::from_utf8_lossy(&bash.output);
                 assert!(
-                    out.contains('1') && out.contains('3'),
+                    out.contains("chunk_001") && out.contains("chunk_003"),
                     "terminal preserved regardless of gate, got: {out}"
                 );
             }
@@ -2834,7 +2860,7 @@ mod tests {
         let mut stream = xai_tool_runtime::Tool::execute(
             &tool,
             test_ctx(resources.into_shared()),
-            make_input("for i in 1 2 3; do echo $i; sleep 0.1; done"),
+            make_input(&drip_cmd("chunk_", 3, 100)),
         )
         .await;
 
@@ -2863,7 +2889,10 @@ mod tests {
             Ok(BashToolOutput::Foreground(bash)) => {
                 assert_eq!(bash.exit_code, 0);
                 let out = String::from_utf8_lossy(&bash.output);
-                assert!(out.contains('1') && out.contains('3'), "got output: {out}");
+                assert!(
+                    out.contains("chunk_001") && out.contains("chunk_003"),
+                    "got output: {out}"
+                );
             }
             other => panic!("expected Terminal(Ok(Foreground)), got {other:?}"),
         }
@@ -2884,9 +2913,7 @@ mod tests {
         let mut stream = xai_tool_runtime::Tool::execute(
             &tool,
             test_ctx(resources.into_shared()),
-            make_input(
-                "for i in $(seq 1 60); do printf 'LINE%03d-XXXXXXXXXXXXXXXXXXXX\\n' \"$i\"; sleep 0.03; done",
-            ),
+            make_input(&drip_cmd("XXXXXXXXXXXXXXXXXXXX-LINE", 60, 30)),
         )
         .await;
 
@@ -3307,10 +3334,19 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_prefix_prepended() {
-        // We can test this via the static helper
+        // We can test this via the static helper.
+        //
+        // The separator is shell-dependent: `&&` on unix and on Windows with
+        // pwsh or Git Bash, `;` under powershell.exe 5.1 and cmd.exe, which
+        // have no pipeline-chain operators. See
+        // `xai_grok_config::shell::chain_separator` (xai-grok-config/src/shell.rs:237).
+        let sep = xai_grok_config::shell::chain_separator();
+        assert!(sep == "&&" || sep == ";", "unexpected separator {sep:?}");
+        #[cfg(unix)]
+        assert_eq!(sep, "&&");
         assert_eq!(
             BashTool::get_prefixed_command(&Some("source ~/.bashrc".to_string()), "ls"),
-            "source ~/.bashrc && ls"
+            format!("source ~/.bashrc {sep} ls")
         );
         assert_eq!(BashTool::get_prefixed_command(&None, "ls"), "ls");
     }

@@ -105,7 +105,13 @@ mod tests {
     #[test]
     fn regression_no_panic_on_absolute_path_without_git_root() {
         let gi = build_gitignore(Path::new("."), &["node_modules/", "*.log"]);
-        let abs_path = Path::new("/Users/someone/home/AGENTS.md");
+        // Must be absolute *on this host*: a `/`-rooted literal has no prefix
+        // on Windows, so `Path::is_absolute()` is false there and neither the
+        // raw crate's assert nor our guard would be reached. Derived from the
+        // host temp dir so it is absolute everywhere and outside the `.` root.
+        let abs_path = std::env::temp_dir().join("someone/home/AGENTS.md");
+        let abs_path = abs_path.as_path();
+        assert!(abs_path.is_absolute(), "{abs_path:?} must be absolute");
 
         // Proves the raw crate panics with these inputs.
         assert!(

@@ -619,7 +619,8 @@ mod tests {
     #[tokio::test]
     async fn falls_back_to_cwd_when_no_plan_file_path_resource() {
         let mut resources = Resources::new();
-        resources.insert(Cwd(PathBuf::from("/workspace/my-project")));
+        let cwd = PathBuf::from("/workspace/my-project");
+        resources.insert(Cwd(cwd.clone()));
         let shared = resources.into_shared();
 
         let result = xai_tool_runtime::Tool::run(
@@ -633,7 +634,13 @@ mod tests {
         let EnterPlanModeOutput::Entered {
             ref plan_file_path, ..
         } = result;
-        assert_eq!(plan_file_path, "/workspace/my-project/.grok/plan.md");
+        // `resolve_plan_file_path` joins with `Path::join`
+        // (types/resources.rs:428), so the separator it introduces is the
+        // host's — `\` on Windows. Join the same way instead of hardcoding `/`.
+        assert_eq!(
+            plan_file_path,
+            &cwd.join(".grok/plan.md").display().to_string()
+        );
     }
 
     #[tokio::test]

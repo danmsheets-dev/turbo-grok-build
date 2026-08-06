@@ -388,7 +388,23 @@ pub(crate) async fn run_read_file(
             }
             let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
             let display_path = display_dcwd.join(&input.path);
-            return Ok(match e.io_error_kind() {
+            // `ErrorKind::IsADirectory` is only produced from POSIX `EISDIR`.
+            // Windows fails the open with `ERROR_ACCESS_DENIED`, which maps to
+            // `PermissionDenied`, so reading a directory told the model
+            // "Permission denied: C:\dir" — pointing it at a problem it does
+            // not have instead of at the directory it asked for. Re-classify
+            // when the path really is a directory. Only widens an error that
+            // was already ambiguous; `NotFound` and `IsADirectory` are left
+            // exactly as the filesystem reported them.
+            let mut kind = e.io_error_kind();
+            if matches!(kind, Some(std::io::ErrorKind::PermissionDenied) | None)
+                && tokio::fs::metadata(&path)
+                    .await
+                    .is_ok_and(|meta| meta.is_dir())
+            {
+                kind = Some(std::io::ErrorKind::IsADirectory);
+            }
+            return Ok(match kind {
                 Some(std::io::ErrorKind::NotFound) => {
                     let msg = crate::util::format_not_found_error(
                         &display_path,

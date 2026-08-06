@@ -1401,13 +1401,19 @@ mod tests {
 
     #[test]
     fn task_tool_input_schema_includes_model() {
+        // Mirrors the `#[schemars(description = …)]` on `TaskToolInput::model`
+        // (xai-tool-types/src/task.rs:101). The wording was rewritten upstream
+        // to describe the per-agent pin cascade; this copy had not been updated
+        // with it.
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
         assert_eq!(
             schema["properties"]["model"]["description"],
             "Optional model slug for this agent. If provided, it must resolve to one of the \
-             available model slugs. If omitted, the subagent uses the same model as the parent \
-             agent. Do not pass if resume_from is set (prior model will be used). Only choose \
-             an explicit model when the user directly requests it."
+             available model slugs. If omitted, the runtime resolves the configured per-agent \
+             pin, then the agent definition, then the parent model. Do not pass if resume_from \
+             is set (the source model will be used). To apply a changed model pin, start a fresh \
+             child without resume_from and omit this field. Only choose an explicit model when \
+             the user directly requests it."
         );
     }
 
@@ -1605,7 +1611,13 @@ mod tests {
         assert!(ids.contains(&"read_file"));
         assert!(ids.contains(&"grep"));
         assert!(ids.contains(&"list_dir"));
-        assert!(ids.contains(&"task"));
+        // ReadOnly deliberately omits `ToolKind::Task` so a read-only child
+        // cannot spawn a nested write-capable agent — see the comment on the
+        // ReadOnly kind list (task/types.rs:304) and the sibling test
+        // `read_only_filter_strips_task_and_then_orphaned_background_tools`
+        // (task/types.rs:1274). This copy still asserted the pre-change
+        // behaviour and directly contradicted both.
+        assert!(!ids.contains(&"task"), "task should be removed");
         assert!(!ids.contains(&"search_replace"), "edit should be removed");
         assert!(!ids.contains(&"bash"), "execute should be removed");
     }

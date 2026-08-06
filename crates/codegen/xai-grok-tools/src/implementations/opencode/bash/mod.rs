@@ -839,7 +839,8 @@ mod tests {
     async fn output_file_path() {
         let mut resources = make_resources(MockTerminal::success("ok", 0));
         // Override with specific IDs so we can assert the path.
-        resources.insert(SessionFolder(PathBuf::from("/sessions/abc")));
+        let session_folder = PathBuf::from("/sessions/abc");
+        resources.insert(SessionFolder(session_folder.clone()));
 
         let tool = BashTool;
         let result = xai_tool_runtime::Tool::run(
@@ -852,7 +853,15 @@ mod tests {
 
         match result {
             BashToolOutput::Bash(bash) => {
-                assert_eq!(bash.output_file, "/sessions/abc/terminal/my-call-42.log");
+                // The tool builds this with `Path::join` (bash/mod.rs:385), so
+                // the separator it introduces is the host's — `\` on Windows.
+                assert_eq!(
+                    bash.output_file,
+                    session_folder
+                        .join("terminal")
+                        .join("my-call-42.log")
+                        .to_string_lossy()
+                );
             }
             BashToolOutput::BackgroundTaskStarted(_) => panic!("Expected foreground output"),
         }
@@ -1006,14 +1015,21 @@ mod tests {
     async fn workdir_end_to_end() {
         let mock = MockTerminal::success("ok\n", 0);
         let mut resources = make_resources(mock);
-        // Override Cwd to a different path so we can verify workdir takes precedence.
-        resources.insert(Cwd(PathBuf::from("/home/user")));
+        // Override Cwd to a different path so we can verify workdir takes
+        // precedence. Both have to be real directories: the tool refuses a
+        // working directory that is missing or not a directory
+        // (`ensure_cwd_directory`, bash/mod.rs:379), and POSIX literals like
+        // `/home/user` are neither absolute nor present on Windows — so the
+        // workdir override was never reached there.
+        let session_cwd = tempfile::TempDir::new().unwrap();
+        let override_dir = tempfile::TempDir::new().unwrap();
+        resources.insert(Cwd(session_cwd.path().to_path_buf()));
 
         let tool = BashTool;
         let input = BashInput {
             command: "pwd".to_string(),
             timeout: None,
-            workdir: Some("/tmp/test".to_string()),
+            workdir: Some(override_dir.path().to_string_lossy().into_owned()),
             description: "Check workdir".to_string(),
         };
 
@@ -1024,7 +1040,8 @@ mod tests {
         match result {
             BashToolOutput::Bash(bash) => {
                 // current_dir should be the resolved workdir, not the session Cwd.
-                assert_eq!(bash.current_dir, "/tmp/test");
+                assert_eq!(bash.current_dir, override_dir.path().to_string_lossy());
+                assert_ne!(bash.current_dir, session_cwd.path().to_string_lossy());
             }
             BashToolOutput::BackgroundTaskStarted(_) => panic!("Expected foreground output"),
         }

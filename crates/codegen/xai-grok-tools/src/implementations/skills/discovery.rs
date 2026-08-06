@@ -1397,8 +1397,11 @@ model: test-model
 
         let paths = find_skill_paths(&cursor_dir);
         let strs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        // Compare against the path we actually created rather than a
+        // "/"-joined substring: `find_skill_paths` returns native paths, so on
+        // Windows the separator is `\`.
         assert!(
-            strs.iter().any(|p| p.contains("skills/mine")),
+            paths.contains(&standard.join("SKILL.md")),
             "standard skills/ layout must still be found: {strs:?}"
         );
         assert!(
@@ -1480,7 +1483,12 @@ model: test-model
             (grok_shell.join("SKILL.md"), SkillScope::User),
         ]);
         assert_eq!(skills.len(), 1, "cursor builtin must be dropped");
-        assert!(skills[0].path.contains("/.grok/"));
+        // `Skill::path` is the native path string, so `/.grok/` only matches on
+        // POSIX; assert the exact path the survivor should be instead.
+        assert_eq!(
+            skills[0].path,
+            grok_shell.join("SKILL.md").display().to_string()
+        );
     }
 
     #[test]
