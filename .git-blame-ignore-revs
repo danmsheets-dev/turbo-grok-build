@@ -1,0 +1,15 @@
+# Revisions that touched every line of a file without changing any of them.
+#
+# `git blame` and `git log -L` would otherwise stop at these commits and report
+# them as the author of code they only re-terminated. Opt in once per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub, GitLab and Sourcegraph read this file automatically.
+#
+# Only whitespace-only, mechanically produced commits belong here. The test for
+# admission is that `git show --ignore-cr-at-eol <sha>` prints an empty diff.
+
+# chore: renormalize line endings to LF (whitespace only, no content change)
+# 34 files, +25667/-25667, produced by `git add --renormalize .`.
+06c749255a2d8ac4b000c968d9811b755836776b
