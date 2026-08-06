@@ -78,10 +78,25 @@ fn configured_report_for_terminal(
     crate::diagnostics::configured_report(report, configured)
 }
 
+/// Pure snapshot→report composition. Reads nothing but the snapshot.
+///
+/// Split out of [`collect_report_with`] so tests can compose a report from
+/// synthetic probe facts without the live host probes below reaching for this
+/// machine's audio devices or `~/.grok/config.toml`.
+fn compose_report(
+    snapshot: crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_>,
+) -> DiagnosticReport {
+    crate::diagnostics::view(snapshot.into())
+}
+
+/// [`compose_report`] plus the live host probes every production caller needs.
+///
+/// Both probes only ever *append* to the composed report — they add a voice
+/// fact and findings, never remove or reorder what the view produced.
 fn collect_report_with(
     snapshot: crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_>,
 ) -> DiagnosticReport {
-    let mut report = crate::diagnostics::view(snapshot.into());
+    let mut report = compose_report(snapshot);
     crate::diagnostics::apply_voice_probe(&mut report, true);
     // No live session headless — the same-as-session arm needs a model id the
     // standalone report does not have.

@@ -769,3 +769,46 @@ fn client_features_decide_color_passthrough() {
             .collect::<Vec<_>>()
     );
 }
+
+/// The theme facts track the *live* catalogue, and the truecolor filter is the
+/// only thing that narrows them.
+///
+/// The doctor goldens used to cover this by accident, by building fixtures from
+/// `ThemeKind::ALL` — which made them go red every time a theme was added while
+/// testing nothing about the formatter. They are hermetic now, so the real
+/// property lives here, stated structurally so it survives catalogue growth.
+#[test]
+fn color_facts_track_the_live_theme_catalog() {
+    use crate::theme::ThemeKind;
+
+    let terminal = TerminalContext::default();
+
+    let mut truecolor = snapshot(&terminal, plain_tmux(), available_runtime(), false);
+    truecolor.color_level = RuntimeEvidence::Available(ColorLevel::TrueColor);
+    let facts = view(truecolor).facts.color;
+    assert_eq!(facts.total_themes, ThemeKind::ALL.len());
+    assert_eq!(facts.available_themes, ThemeKind::ALL.to_vec());
+
+    let mut reduced = snapshot(&terminal, plain_tmux(), available_runtime(), false);
+    reduced.color_level = RuntimeEvidence::Available(ColorLevel::Ansi256);
+    let facts = view(reduced).facts.color;
+    // `total_themes` is the whole catalogue even when only some render.
+    assert_eq!(facts.total_themes, ThemeKind::ALL.len());
+    assert_eq!(
+        facts.available_themes,
+        ThemeKind::ALL
+            .iter()
+            .copied()
+            .filter(|kind| !kind.requires_truecolor())
+            .collect::<Vec<_>>()
+    );
+    assert!(!facts.available_themes.is_empty());
+    assert!(facts.available_themes.len() < facts.total_themes);
+
+    // No color evidence at all means no theme list, not the full catalogue.
+    let mut unavailable = snapshot(&terminal, plain_tmux(), available_runtime(), false);
+    unavailable.color_level = RuntimeEvidence::Unavailable;
+    let facts = view(unavailable).facts.color;
+    assert!(facts.available_themes.is_empty());
+    assert_eq!(facts.total_themes, ThemeKind::ALL.len());
+}

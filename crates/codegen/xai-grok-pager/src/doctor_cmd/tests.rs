@@ -92,6 +92,23 @@ fn unavailable_tmux_facts() -> TmuxProbeFacts {
     }
 }
 
+/// Hermetic theme catalogue for the golden fixtures below.
+///
+/// Deliberately **not** `ThemeKind::ALL`. These are goldens of the *formatter*,
+/// which never reads the live catalogue — it only compares
+/// `available_themes.len()` against the plain `total_themes` usize. Importing
+/// the real catalogue made every golden go red the moment a theme was added
+/// (5 → 19). `color_facts_track_the_live_theme_catalog` in
+/// `diagnostics/view_tests.rs` covers the catalogue-tracking property
+/// structurally instead.
+const FIXTURE_THEMES: &[ThemeKind] = &[
+    ThemeKind::GrokNight,
+    ThemeKind::TokyoNight,
+    ThemeKind::GrokDay,
+    ThemeKind::RosePineMoon,
+    ThemeKind::OscuraMidnight,
+];
+
 fn healthy_report() -> DiagnosticReport {
     DiagnosticReport {
         facts: DiagnosticFacts {
@@ -109,8 +126,8 @@ fn healthy_report() -> DiagnosticReport {
             },
             color: ColorFacts {
                 level: RuntimeFact::Available(ColorLevel::TrueColor),
-                available_themes: ThemeKind::ALL.to_vec(),
-                total_themes: ThemeKind::ALL.len(),
+                available_themes: FIXTURE_THEMES.to_vec(),
+                total_themes: FIXTURE_THEMES.len(),
             },
             keyboard: None,
             newline: None,
@@ -144,7 +161,7 @@ fn mixed_report() -> DiagnosticReport {
     report.facts.color = ColorFacts {
         level: RuntimeFact::Available(ColorLevel::Ansi256),
         available_themes: vec![ThemeKind::GrokNight, ThemeKind::GrokDay],
-        total_themes: ThemeKind::ALL.len(),
+        total_themes: FIXTURE_THEMES.len(),
     };
     report.facts.keyboard = Some(KeyboardFact {
         modifier_delivery: ModifierDelivery::new_for_test(
@@ -241,7 +258,7 @@ fn fake_standalone_facts_compose_through_shared_view() {
         false,
         RuntimeEvidence::Available(ColorLevel::TrueColor),
     );
-    let report = collect_report_with(snapshot);
+    let report = compose_report(snapshot);
 
     assert_eq!(report.issue_count(), 1);
     assert!(
@@ -253,6 +270,76 @@ fn fake_standalone_facts_compose_through_shared_view() {
     assert_eq!(
         report.findings[0].id,
         DiagnosticId::new("terminal", "tmux-clipboard")
+    );
+}
+
+fn plain_standalone_snapshot(
+    terminal: &TerminalContext,
+) -> crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_> {
+    crate::diagnostics::probes::collect_standalone_from(
+        terminal,
+        unavailable_tmux_facts(),
+        WaylandProbeFacts {
+            is_wayland: false,
+            data_control: TmuxProbeResult::Unavailable,
+            wl_copy_available: false,
+        },
+        "pbcopy",
+        LOCAL_ROUTE.clone(),
+        false,
+        HostOs::Macos,
+        DisplayServer::Unknown,
+        false,
+        RuntimeEvidence::Available(ColorLevel::TrueColor),
+    )
+}
+
+/// The two live probes are part of the standalone contract — `grok doctor` has
+/// to report the voice fact and the oracle pin recommendation, neither of which
+/// any snapshot can carry. The fixture tests above deliberately call
+/// `compose_report`, so this is the one place that pins the probes still reach
+/// production reports, and that they only *append* to the composed view.
+#[test]
+fn live_probes_transit_collect_report_with_and_only_append() {
+    let terminal = TerminalContext::default();
+    let composed = compose_report(plain_standalone_snapshot(&terminal));
+    let collected = collect_report_with(plain_standalone_snapshot(&terminal));
+
+    assert!(
+        composed.facts.voice.is_none(),
+        "compose_report must not touch the host"
+    );
+    if xai_grok_voice::AUDIO_SUPPORTED {
+        assert!(
+            collected.facts.voice.is_some(),
+            "the voice probe must reach the standalone report"
+        );
+    }
+
+    assert!(collected.findings.len() >= composed.findings.len());
+    let (composed_through, appended) = collected.findings.split_at(composed.findings.len());
+    assert_eq!(
+        composed_through
+            .iter()
+            .map(|finding| finding.id)
+            .collect::<Vec<_>>(),
+        composed
+            .findings
+            .iter()
+            .map(|finding| finding.id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        appended.iter().all(|finding| {
+            [
+                crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID,
+                crate::diagnostics::ORACLE_MODEL_UNPINNED_ID,
+                crate::diagnostics::ORACLE_MODEL_SAME_AS_SESSION_ID,
+                crate::diagnostics::ORACLE_MODEL_NOT_AGENT_READY_ID,
+            ]
+            .contains(&finding.id)
+        }),
+        "the live probes appended an unexpected finding: {appended:?}"
     );
 }
 
@@ -280,7 +367,7 @@ fn standalone_wayland_missing_is_issue_but_no_seats_or_errors_are_not() {
             false,
             RuntimeEvidence::Available(ColorLevel::TrueColor),
         );
-        let report = collect_report_with(snapshot);
+        let report = compose_report(snapshot);
         let has_issue = report
             .findings
             .iter()
@@ -394,7 +481,7 @@ fn standalone_runtime_and_tmux_are_unavailable_without_false_wezterm_finding() {
         false,
         RuntimeEvidence::Available(ColorLevel::TrueColor),
     );
-    let report = collect_report_with(snapshot);
+    let report = compose_report(snapshot);
 
     assert!(report.findings.iter().all(|finding| {
         finding.id != DiagnosticId::new("terminal", "wezterm-kitty")
