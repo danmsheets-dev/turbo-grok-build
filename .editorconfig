@@ -1,0 +1,26 @@
+# EditorConfig — https://editorconfig.org
+#
+# Mirrors .gitattributes so editors stop generating line-ending drift at the
+# source. .gitattributes fixes what git *stores*; this fixes what an editor
+# *writes*, which is where the drift originated in the first place.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+# Windows-native shells. Matches the `*.ps1 *.bat *.cmd text eol=crlf` rules in
+# .gitattributes: cmd.exe reads batch files incrementally and mis-handles `goto`
+# labels when they are LF-terminated.
+[*.{ps1,bat,cmd}]
+end_of_line = crlf
+
+# The agent system prompts are XOR-encrypted into
+# xai-grok-agent/src/prompt/prompt_encrypted.rs with a position-dependent key,
+# and none of the three currently ends in a newline. An editor silently adding
+# one shifts every subsequent ciphertext byte and stales a shipped asset, so
+# final-newline insertion is deliberately not applied here. Regenerate with
+# scripts/encrypt_templates.py if these ever do change.
+[crates/codegen/xai-grok-agent/templates/*.md]
+insert_final_newline = unset

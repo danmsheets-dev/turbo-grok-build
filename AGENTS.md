@@ -146,6 +146,33 @@ Guidelines:
 - `target/release-dist` mid-ship-build
 - `target/release-dist/turbo.exe` (or `turbo`) when you still need the ship binary
 
+## Line endings (do not diagnose this with `git status`)
+
+The index is LF everywhere; `.gitattributes` enforces it and `.editorconfig`
+keeps editors from reintroducing the drift. Shipped and `include_str!`-embedded
+files are pinned `eol=lf` so a Windows build and a Linux build of the same
+commit produce identical bytes.
+
+`git status` is structurally blind to this class of problem — git's safe-autocrlf
+conversion is asymmetric, so a worktree in either spelling cleans back to the
+same blob and reports clean. A tree can be "clean" and still be corrupt. Use:
+
+```powershell
+git ls-files --eol                                # i/ = stored blob, w/ = worktree
+git ls-files --eol | Select-String '^i/(crlf|mixed)'   # must match nothing
+bash scripts/check-line-endings.sh                # index + BOM + CR guards, as CI runs them
+```
+
+Rules of thumb for agents:
+
+- Never "fix" a file by rewriting it whole with a Python/PowerShell round trip
+  unless you check the line endings afterwards — `read().split('\n')` plus
+  `'\n'.join(...)` silently converts a CRLF file to mixed.
+- `git add --renormalize .` updates the index but **not** the worktree; the
+  files on disk stay wrong until you re-checkout.
+- Do not add `-text` (or `binary`) to a text path to make a diff go away. It
+  freezes the current worktree bytes into history permanently.
+
 ## Product context (short)
 
 - Product: **Turbo Grok Build** · CLI: **`turbo`** · wire version in `VERSION`

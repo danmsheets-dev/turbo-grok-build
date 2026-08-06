@@ -1,0 +1,32 @@
+name: Repo hygiene
+
+# Byte-level guards for the corruption classes `git status` structurally cannot
+# show: CR stored in the index, UTF-8 byte-order marks, and CR bytes inside the
+# LF-pinned scripts and templates that ship to end users or are compiled into
+# the binary with include_str!/include_bytes!.
+#
+# No toolchain and no build, so this runs on every push and pull request rather
+# than being path-filtered — the whole point is to catch a file nobody thought
+# was in scope.
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  line-endings:
+    name: line endings, BOMs, shipped scripts
+    runs-on: ubuntu-24.04
+    steps:
+      # Must be a clean checkout with the repo's own .gitattributes applied:
+      # the CR check reads the eol=lf path set back out of git, so a checkout
+      # that skipped the attributes would silently check nothing.
+      - uses: actions/checkout@v5
+
+      - name: Check line endings, BOMs and shipped-script terminators
+        run: ./scripts/check-line-endings.sh
