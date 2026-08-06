@@ -400,8 +400,11 @@ mod tests {
             }
         }
 
-        let path_var = format!("{}:{}", bin1.to_str().unwrap(), bin2.to_str().unwrap());
-        let result = scan_path_from(&path_var);
+        // `scan_path_from` splits with `std::env::split_paths`, so the
+        // separator is `;` on Windows — build the list the same way rather
+        // than hard-coding `:`, which Windows reads as one bogus entry.
+        let path_var = std::env::join_paths([&bin1, &bin2]).unwrap();
+        let result = scan_path_from(path_var.to_str().unwrap());
         assert_eq!(result, vec!["shared_cmd"]);
     }
 }

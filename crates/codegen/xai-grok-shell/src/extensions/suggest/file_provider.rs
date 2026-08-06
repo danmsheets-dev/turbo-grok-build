@@ -869,6 +869,10 @@ mod tests {
         )
     }
 
+    // `FilePathProvider::suggest` short-circuits to `Vec::new()` on
+    // Windows by design (POSIX shell_token quoting), so a non-empty
+    // expectation can only hold on unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_end_to_end_file_cmd() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -889,6 +893,8 @@ mod tests {
 
     /// A capped scan stamps `truncated` on every row — the pager must not
     /// insta-accept a "sole" match a hidden entry could disprove.
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_capped_scan_stamps_truncated_rows() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -903,6 +909,8 @@ mod tests {
 
     /// THE closed-quote round trip (cursor right after the closer): the
     /// completed insert keeps the closing quote instead of dropping it.
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_quote_closed_at_cursor_keeps_closer() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -922,6 +930,8 @@ mod tests {
     }
 
     /// Unknown commands complete their args too — at priority 0, no boost.
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_end_to_end_any_command() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -950,6 +960,8 @@ mod tests {
     /// Arg-token range with text after the cursor: the range ends at the
     /// cursor so the tail (`| wc -l`) is out of the replaced span, and the
     /// compat whole-line `insert_text` keeps that tail too.
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_arg_range_ends_at_cursor_mid_text() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -966,6 +978,8 @@ mod tests {
 
     /// THE quoting round-trip: `cat "My Fi` completes `My File.txt` with the
     /// token extent covering the opening quote and the insert closing it.
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_open_quote_completes_spaced_file() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -981,6 +995,8 @@ mod tests {
 
     /// Unquoted completion of a spaced name backslash-escapes it; the next
     /// request tokenizes that insert back to the same directory (round-trip).
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_unquoted_spaced_dir_escapes_and_drills_down() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1008,6 +1024,8 @@ mod tests {
 
     /// Same drill-down through an open double quote: the dir insert keeps
     /// the quote open; the file completion inside closes it.
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_quoted_dir_drill_down_closes_quote_on_file() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1029,6 +1047,8 @@ mod tests {
         assert_eq!(results[0].replace_range, Some((4, text.len())));
     }
 
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_nested_dir_range_and_insert() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1044,6 +1064,8 @@ mod tests {
         assert_eq!(results[0].replace_range, Some((4, 9)));
     }
 
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_end_to_end_path_like_first_token() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1067,6 +1089,8 @@ mod tests {
         );
     }
 
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_exact_prefix_ranks_before_case_insensitive() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1079,6 +1103,8 @@ mod tests {
         assert_eq!(results[1].display, "Notes Archive/");
     }
 
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial]
     async fn suggest_var_prefix_lists_expansion_inserts_raw() {
@@ -1103,6 +1129,8 @@ mod tests {
     /// listing targets a directory literally named `$HOME` — the accepted
     /// candidate names exactly the file shown (no env expansion, whatever
     /// the real `$HOME` is).
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_quoted_var_lists_literal_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1121,6 +1149,8 @@ mod tests {
     /// A dash-leading candidate inserts `./`-anchored, so single-candidate
     /// insta-accept can never silently write a flag (`rm ` + Tab must not
     /// become `rm -rf`).
+    // unix-only: `suggest` returns `Vec::new()` on Windows by design.
+    #[cfg(unix)]
     #[tokio::test]
     async fn suggest_dash_leading_candidate_anchored_as_path() {
         let tmp = tempfile::TempDir::new().unwrap();
