@@ -1,0 +1,86 @@
+# Line-ending and diff policy for the turbo-grok-build workspace.
+#
+# Goal: the index is always LF, binaries are never touched, and every file that
+# is baked into a shipped artifact has host-independent bytes.
+#
+# Rule ordering matters: within this file the LAST matching pattern wins, so the
+# `* text=auto` catch-all below is deliberately first and every later section
+# narrows it.
+
+# ---------------------------------------------------------------------------
+# Catch-all
+# ---------------------------------------------------------------------------
+# `text=auto` (NOT bare `text`, and NOT `text eol=lf`): git keeps applying its
+# NUL-byte content heuristic, so a file it detects as binary is still left
+# byte-for-byte alone. A bare `text` resolves to `text: set` — forced conversion
+# with no detection — which would corrupt ~2.3 MB across the 9 binary assets
+# below. Verified with `git check-attr text eol diff`.
+* text=auto
+
+# ---------------------------------------------------------------------------
+# Binary assets — belt and braces
+# ---------------------------------------------------------------------------
+# The catch-all's heuristic already protects these, but stating them explicitly
+# means the result does not *depend* on the heuristic. `binary` is git's alias
+# for `-text -diff`.
+#
+# Deliberately NOT listed: *.glb. The only .glb files in this repo are five
+# 7-byte text stubs under crates/codegen/xai-workspace-tree/tests/fixtures/,
+# currently LF in the index and mixed in the worktree; marking them `binary`
+# would freeze the corrupt worktree bytes into history. Real glTF binaries
+# carry NUL bytes and are caught by the heuristic.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.wasm  binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+
+# ---------------------------------------------------------------------------
+# Shipped POSIX executables — must be LF
+# ---------------------------------------------------------------------------
+# A `#!/bin/sh\r\n` first line makes the kernel reject the script with
+# "bad interpreter". These reach end users, so they are pinned regardless of the
+# platform the checkout happens on.
+*.sh text eol=lf
+*.py text eol=lf
+
+# Extensionless shebang files (`#!/usr/bin/env dotslash` and `#!/usr/bin/env
+# node`). Neither has an extension for a pattern to catch, so name them.
+bin/protoc                                      text eol=lf
+crates/codegen/xai-grok-pager/npm/grok/bin/grok text eol=lf
+
+# ---------------------------------------------------------------------------
+# Windows-native executables — CRLF
+# ---------------------------------------------------------------------------
+# PowerShell tolerates LF, but cmd.exe reads batch files incrementally and is
+# documented to mis-handle multi-line constructs and `goto` labels when they are
+# LF-terminated. These files are only ever executed by a Windows shell, so
+# pinning CRLF costs nothing on unix and removes that hazard class outright.
+# Pinned (not left to `text=auto`) so a Linux checkout produces the same bytes.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ---------------------------------------------------------------------------
+# Markdown — LF everywhere
+# ---------------------------------------------------------------------------
+# Not cosmetic. Markdown in this repo is compiled into the binary with
+# `include_str!`/`include_bytes!`:
+#   - crates/codegen/xai-grok-agent/templates/*.md are XOR-encrypted into
+#     src/prompt/prompt_encrypted.rs, whose ciphertext is position-dependent;
+#   - crates/codegen/xai-grok-shell/src/session/templates/*.md are rendered at
+#     runtime and asserted on at exact byte offsets;
+#   - bundled/skills/**/*.md ship to end users.
+# Under `text=auto` alone these are checked out CRLF on Windows and LF on unix,
+# so the shipped system prompt would differ depending on which host ran the
+# build. `eol=lf` makes the worktree bytes — and therefore the shipped bytes —
+# the same everywhere.
+*.md text eol=lf
