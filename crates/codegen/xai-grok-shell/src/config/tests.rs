@@ -3390,7 +3390,16 @@ fn validate_hooks_path_rejects_relative_path() {
 }
 #[test]
 fn validate_hooks_path_rejects_outside_grok_home() {
-    let result = validate_hooks_path("/tmp/evil-hooks");
+    // Must be absolute on THIS host: `validate_hooks_path` rejects a
+    // non-absolute path first (config/mod.rs:1839), and on Windows
+    // `Path::new("/tmp/evil-hooks").is_absolute()` is false — it has a root but
+    // no prefix — so the POSIX literal never reached the ~/.grok check at all.
+    let outside = if cfg!(windows) {
+        r"C:\tmp\evil-hooks"
+    } else {
+        "/tmp/evil-hooks"
+    };
+    let result = validate_hooks_path(outside);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(

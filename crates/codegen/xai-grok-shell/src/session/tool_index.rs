@@ -781,9 +781,13 @@ mod tests {
     }
 
     #[test]
-    fn search_exact_bare_name_ambiguous_returns_first_match() {
-        // Two servers register tools with the same bare name.
-        // `find()` returns the first match — the model might have wanted the second.
+    fn search_exact_bare_name_returns_every_server_match() {
+        // Two servers register tools with the same bare name. This test used to
+        // pin the old "first match wins" behaviour and its own comments called
+        // that a hazard: the model could not discover the second tool without
+        // already knowing its qualified name. `search_snapshot` now returns ALL
+        // exact bare-name matches (see the "dual search_docs hazard" comment at
+        // tool_index.rs:183); assert the fixed contract.
         let tools = vec![
             ToolMetadata {
                 qualified_name: "server_a__fetch".into(),
@@ -804,12 +808,23 @@ mod tests {
         ];
         let index = Bm25ToolSearchIndex::new(make_snapshot(tools));
 
-        // Bare name "fetch" → returns server_a (first in Vec), silently ignoring server_b
+        // Bare name "fetch" → both servers' tools, in registration order, so
+        // the model can pick the one it meant.
         let snap = index.search_snapshot("fetch", 5);
-        assert_eq!(snap.results.len(), 1);
-        assert_eq!(snap.results[0].tool_name, "server_a__fetch");
-        // server_b__fetch is never returned — the model can't discover it
-        // without knowing the qualified name
+        let names: Vec<&str> = snap
+            .results
+            .iter()
+            .map(|r| r.tool_name.as_str())
+            .collect();
+        assert_eq!(names, ["server_a__fetch", "server_b__fetch"]);
+        let servers: Vec<&str> = snap
+            .results
+            .iter()
+            .map(|r| r.server_name.as_str())
+            .collect();
+        assert_eq!(servers, ["server_a", "server_b"]);
+        // An exact hit short-circuits BM25, so both carry the sentinel score.
+        assert!(snap.results.iter().all(|r| r.score == 1.0));
     }
 
     // -- e2e tests with real Grafana + Mattermost tool data --

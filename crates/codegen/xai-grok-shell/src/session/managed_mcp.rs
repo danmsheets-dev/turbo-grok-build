@@ -674,6 +674,14 @@ mod tests {
     fn client_cursor_server_kept_when_cursor_mcps_enabled() {
         let cwd = empty_cwd();
         write_cursor_project_mcp(cwd.path(), "killswitch-cache");
+        // `.cursor/mcp.json` is itself a trust-sensitive repo config, and the
+        // folder-trust gate is on by default for every build, so without an
+        // explicit grant `filter_untrusted_project_mcp` (managed_mcp.rs:217)
+        // drops the server and this test measures trust, not the compat
+        // switch. The sibling `..._dropped_when_cursor_mcps_disabled` asserts
+        // absence and so passed either way. Uses the same
+        // `record_for_test` seam as `project_scope_gates_repo_local_mcp` below.
+        crate::agent::folder_trust::record_for_test(cwd.path(), true);
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
         let merged = merge_managed_mcp_servers(
             vec![client_stdio("killswitch-cache")],
@@ -735,6 +743,11 @@ args = ["ok"]
         )
         .unwrap();
         git2::Repository::init(cwd.path()).unwrap();
+        // Both `.cursor/mcp.json` and `.grok/config.toml` [mcp_servers] are
+        // trust-sensitive repo configs; without a grant the project scope is
+        // filtered out entirely and the toml claim this test is about never
+        // gets a chance to survive. See the sibling test above.
+        crate::agent::folder_trust::record_for_test(cwd.path(), true);
 
         let mut compat = xai_grok_tools::types::compat::CompatConfig::default();
         compat.cursor.mcps = false;

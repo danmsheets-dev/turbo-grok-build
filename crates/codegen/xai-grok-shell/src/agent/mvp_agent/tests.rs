@@ -4379,8 +4379,39 @@ fn build_agent_with_auth_and_proxy(
     MvpAgent,
     tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
 ) {
+    let (agent, rx, _home) = build_agent_with_auth_and_proxy_isolated(auth, proxy_url, mode);
+    (agent, rx)
+}
+/// Like [`build_agent_with_auth_and_proxy`] but hands back the `GROK_HOME`
+/// guard so the caller can hold the isolation for the whole test.
+///
+/// `MvpAgent::new` → `agent::init::bootstrap` →
+/// `ensure_remote_settings_side_effects` (agent/init.rs:59) pre-fills
+/// `cfg.remote_settings` when it is `None`, using an
+/// `AuthManager::new(grok_home(), …).current()` read of the REAL
+/// `~/.grok/auth.json` against the REAL production proxy
+/// (agent/models/fetch.rs:245). On a developer machine that is logged in and
+/// online that prefetch SUCCEEDS, and `maybe_fetch_post_auth_settings` then
+/// returns at its very first line (`remote_settings.is_some()`) without ever
+/// touching the test's mock — so the post-auth-settings tests silently
+/// measured nothing and only passed on a credential-less, offline host.
+/// Pointing `GROK_HOME` at an empty tempdir leaves no credentials to prefetch
+/// with, so `remote_settings` stays `None` and the fetch under test runs.
+/// Callers must be `#[serial]` (process-global env).
+#[must_use]
+fn build_agent_with_auth_and_proxy_isolated(
+    auth: crate::auth::GrokAuth,
+    proxy_url: String,
+    mode: crate::agent::config::AgentMode,
+) -> (
+    MvpAgent,
+    tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
+    (tempfile::TempDir, xai_grok_test_support::EnvGuard),
+) {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, GrokComConfig};
+    let grok_home = tempfile::tempdir().unwrap();
+    let home_guard = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
     let temp_dir = tempfile::tempdir().unwrap();
     let auth_manager =
         std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
@@ -4393,7 +4424,7 @@ fn build_agent_with_auth_and_proxy(
     };
     cfg.endpoints.cli_chat_proxy_base_url = Some(proxy_url);
     let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
-    (agent, rx)
+    (agent, rx, (grok_home, home_guard))
 }
 /// Drain the gateway, returning `true` if any `x.ai/settings/update`
 /// notification was emitted (and acking each so the sender doesn't warn).
@@ -4479,8 +4510,8 @@ async fn post_auth_settings_xai_upgrades_writeback_emits_and_opens_gate() {
         ..GrokAuth::test_default()
     };
     assert!(xai_auth.is_xai_auth(), "precondition: first-party xAI auth");
-    let (agent, mut rx) =
-        build_agent_with_auth_and_proxy(xai_auth, server.url(), AgentMode::Leader);
+    let (agent, mut rx, _home) =
+        build_agent_with_auth_and_proxy_isolated(xai_auth, server.url(), AgentMode::Leader);
     assert_eq!(
         agent.storage_mode(),
         StorageMode::Local,
@@ -4526,8 +4557,8 @@ async fn post_auth_settings_non_xai_keeps_local_but_still_emits() {
         !api_auth.is_xai_auth(),
         "precondition: non-first-party auth"
     );
-    let (agent, mut rx) =
-        build_agent_with_auth_and_proxy(api_auth, server.url(), AgentMode::Leader);
+    let (agent, mut rx, _home) =
+        build_agent_with_auth_and_proxy_isolated(api_auth, server.url(), AgentMode::Leader);
     xai_grok_telemetry::external::suppress_external_otel_until_settings();
     agent.maybe_fetch_post_auth_settings().await;
     assert_eq!(
@@ -4557,7 +4588,8 @@ async fn post_auth_settings_failure_resolves_gate_onto_local_policy() {
         oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
         ..GrokAuth::test_default()
     };
-    let (agent, _rx) = build_agent_with_auth_and_proxy(xai_auth, server.url(), AgentMode::Leader);
+    let (agent, _rx, _home) =
+        build_agent_with_auth_and_proxy_isolated(xai_auth, server.url(), AgentMode::Leader);
     xai_grok_telemetry::external::suppress_external_otel_until_settings();
     assert!(!xai_grok_telemetry::external::is_settings_gate_open());
     agent.maybe_fetch_post_auth_settings().await;
@@ -4667,8 +4699,11 @@ async fn settings_not_cached_when_identity_logs_out_during_fetch() {
         oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
         ..GrokAuth::test_default()
     };
-    let (agent, _rx) =
-        build_agent_with_auth_and_proxy(xai_auth.clone(), server.url(), AgentMode::Leader);
+    let (agent, _rx, _home) = build_agent_with_auth_and_proxy_isolated(
+        xai_auth.clone(),
+        server.url(),
+        AgentMode::Leader,
+    );
     agent.auth_manager.clear_in_memory();
     agent.refresh_remote_settings(&xai_auth).await;
     assert!(

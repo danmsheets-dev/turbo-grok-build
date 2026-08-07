@@ -116,6 +116,28 @@ pub(crate) async fn test_agent_with_user_message_template(
     )
     .await
 }
+/// A fresh, unshared directory for one test bridge's persisted tool state.
+///
+/// `finalize_builder` derives `<state_path>/../resources_state.json` and
+/// **loads it into `Resources`** (xai-grok-tools/src/registry/types.rs:1122).
+/// The fixture used to hardcode `/tmp/tool_state.json`, so every test bridge in
+/// every run shared one real file: a test that persisted `TodoState` or
+/// `ReportedTaskCompletions` left it on disk for the next test — and for the
+/// next `cargo test` days later. Unique per actor, so nothing is inherited.
+#[cfg(test)]
+fn isolated_tool_state_path() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "grok-shell-test-state-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    // Best effort: a missing directory just means nothing loads and nothing
+    // persists, which is still isolated.
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("tool_state.json")
+}
 #[cfg(test)]
 async fn test_agent_from_config(
     config: xai_grok_tools::registry::types::ToolServerConfig,
@@ -139,7 +161,7 @@ async fn test_agent_from_config(
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
+        state_path: isolated_tool_state_path(),
         memory_backend: None,
         web_search_config: Default::default(),
         web_fetch_config: Default::default(),

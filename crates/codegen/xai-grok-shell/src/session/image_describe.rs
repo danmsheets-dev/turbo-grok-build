@@ -539,10 +539,29 @@ mod tests {
         let img = ImageContent::new(png, "image/png");
         let msg = persist_and_prepend_image_files(dir.path(), &[img], "hello").unwrap();
         assert!(msg.contains("<image_files>"));
-        assert!(msg.contains("/assets/image-"));
         assert!(msg.ends_with("hello") || msg.contains("\n\nhello"));
-        let assets = std::fs::read_dir(dir.path().join("assets")).unwrap();
-        assert_eq!(assets.count(), 1);
+        let mut assets: Vec<_> = std::fs::read_dir(dir.path().join("assets"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(assets.len(), 1);
+        // Assert the block names the file that was actually written, rather
+        // than a `/`-joined substring: the path comes from `PathBuf::display`
+        // (image_describe.rs:518), so it carries the host separator and
+        // `/assets/image-` never matched on Windows.
+        let written = assets.pop().unwrap();
+        assert!(
+            written
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("image-")),
+            "asset must keep the image-* naming: {}",
+            written.display()
+        );
+        assert!(
+            msg.contains(&written.display().to_string()),
+            "block must name the persisted asset {}: {msg}",
+            written.display()
+        );
     }
     fn user(text: &str) -> ConversationItem {
         ConversationItem::User(UserItem {

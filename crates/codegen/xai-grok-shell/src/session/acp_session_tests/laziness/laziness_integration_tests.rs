@@ -625,10 +625,11 @@ async fn debug_mode_bypasses_idle_wait() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            const IDLE_THRESHOLD_MS: u64 = 60_000;
             let (actor, _tmp, log_path) = make_debug_actor(LazinessDetectorPerModelConfig {
                 enabled: false,
                 max_nudges_per_session: 0,
-                idle_threshold_ms: Some(60_000),
+                idle_threshold_ms: Some(IDLE_THRESHOLD_MS),
                 min_confidence: None,
                 include_reasoning: None,
             })
@@ -637,17 +638,23 @@ async fn debug_mode_bypasses_idle_wait() {
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             let elapsed = started.elapsed();
             drop(Arc::try_unwrap(actor).ok().unwrap());
-            // 2s ceiling: the bypass path still does a chat-state
-            // MPSC roundtrip, two tool-bridge reads,
-            // `prepare_chat_completion` + JWT refresh, a TCP
-            // connect attempt against localhost, and a JSONL
-            // append — all of which can run slowly on shared CI.
-            // 2s is still 30_000× faster than the configured
-            // 60_000ms idle threshold, so the bypass signal is
-            // unambiguous.
+            // Ceiling is a tenth of the configured threshold, not a magic
+            // constant, so it stays meaningful if the threshold moves: waiting
+            // out the idle timer is the only thing that could put `elapsed`
+            // anywhere near it. The bypass path still does a chat-state MPSC
+            // roundtrip, two tool-bridge reads, `prepare_chat_completion` +
+            // JWT refresh, a TCP connect attempt against the fixture's
+            // non-listening `http://localhost` (support.rs:253), and a JSONL
+            // append. That connect is the dominant cost and is
+            // platform-dependent: on Windows `localhost` resolves to both `::1`
+            // and `127.0.0.1` and each family must time out, which measured a
+            // steady ~2.8s here versus well under a second on POSIX. The old
+            // flat 2s ceiling sat right under that fixed floor.
+            let ceiling = std::time::Duration::from_millis(IDLE_THRESHOLD_MS / 10);
             assert!(
-                elapsed < std::time::Duration::from_millis(2000),
-                "idle threshold must be bypassed in debug mode (took {elapsed:?})",
+                elapsed < ceiling,
+                "idle threshold must be bypassed in debug mode \
+                 (took {elapsed:?}, ceiling {ceiling:?}, threshold {IDLE_THRESHOLD_MS}ms)",
             );
             // Sanity: the classifier did reach the sampler and
             // record an outcome, confirming the wait was

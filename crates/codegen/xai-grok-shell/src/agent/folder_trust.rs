@@ -671,7 +671,14 @@ mod tests {
         // home; GROK_HOME-isolated store; GROK_FOLDER_TRUST unset so the
         // default-on flag applies.
         let home = tempfile::tempdir().unwrap();
+        // Override BOTH: `resolved_home_dir` (xai-grok-workspace/src/lib.rs:128)
+        // reads USERPROFILE FIRST and only then HOME, so setting HOME alone
+        // leaves the real Windows profile in place and the tempdir is never
+        // recognised as `$HOME` — `is_unsafe_trust_root` then reports a
+        // perfectly recordable key and revoke seeds the cache deny this test
+        // exists to forbid. Same value in both, so the precedence is moot.
         let _home = EnvGuard::set("HOME", home.path());
+        let _userprofile = EnvGuard::set("USERPROFILE", home.path());
         let grok_home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("GROK_HOME", grok_home.path());
         let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");

@@ -200,7 +200,35 @@ mod tests {
         let report = resolve_without_env(Ok(&effective_config));
 
         assert!(!report.remote_settings_loaded);
-        assert_eq!(report.cells.len(), 13);
+        // Spell out the whole runtime-supported grid rather than a bare count:
+        // a magic `13` silently went stale when `omp/sessions` joined
+        // COMPAT_CELLS (xai-grok-tools/src/types/compat.rs:130), and a count
+        // alone would not have said which cell moved. Codex and Omp are
+        // sessions-only by `CompatCell::is_runtime_supported` (compat.rs:120).
+        let grid: Vec<(&str, &str)> = report
+            .cells
+            .iter()
+            .map(|cell| (cell.vendor.as_str(), cell.surface.as_str()))
+            .collect();
+        assert_eq!(
+            grid,
+            vec![
+                ("cursor", "skills"),
+                ("cursor", "rules"),
+                ("cursor", "agents"),
+                ("cursor", "mcps"),
+                ("cursor", "hooks"),
+                ("cursor", "sessions"),
+                ("claude", "skills"),
+                ("claude", "rules"),
+                ("claude", "agents"),
+                ("claude", "mcps"),
+                ("claude", "hooks"),
+                ("claude", "sessions"),
+                ("codex", "sessions"),
+                ("omp", "sessions"),
+            ]
+        );
         assert!(
             report
                 .cells

@@ -637,6 +637,42 @@ mod tests {
         format!("let meta = #{{ name: \"{name}\", description: \"d\" }};\ncomplete(\"ok\");")
     }
 
+    /// A git repo the folder-trust gate explicitly trusts, for tests whose
+    /// subject is the workflow registry rather than the gate.
+    ///
+    /// `.grok/workflows` is itself a trust-sensitive repo-local config kind
+    /// (`collect_repo_config_kinds`, xai-grok-workspace/src/folder_trust.rs:255),
+    /// and the gate is on by default for every build — stamped or not
+    /// (`folder_trust_enabled`, same file, line 158). So the instant a test
+    /// creates a project workflow directory, `project_scope_allowed` denies it
+    /// and the registry sees no project scope at all. Seed a real store grant
+    /// (the same shape as `folder_trust::tests::project_scope_allowed_allows_store_trusted_repo`)
+    /// instead of disabling the gate, so these tests still exercise the real
+    /// trust path. Returns the guards; hold them for the test's lifetime.
+    ///
+    /// git-init matters: `workspace_key` resolves to the git-repo root, so an
+    /// un-inited tempdir inside a checkout would collapse onto a shared
+    /// ambient key and leak the grant to other tests.
+    #[must_use]
+    fn trusted_project_repo() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        xai_grok_test_support::EnvGuard,
+        xai_grok_test_support::EnvGuard,
+    ) {
+        use xai_grok_test_support::EnvGuard;
+        use xai_grok_workspace::trust::{TrustStore, workspace_key};
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let home_guard = EnvGuard::set("GROK_HOME", grok_home.path());
+        let flag_guard = EnvGuard::unset("GROK_FOLDER_TRUST");
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let mut store = TrustStore::load();
+        store.set_trusted(&workspace_key(dir.path())).unwrap();
+        (dir, grok_home, home_guard, flag_guard)
+    }
+
     #[test]
     fn inline_resolution_validates_name_and_size() {
         let ok = resolve_inline(script("valid-name"));
@@ -653,9 +689,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn deterministic_scan_uses_git_root_and_skips_invalid_filename() {
-        let dir = tempfile::tempdir().unwrap();
-        git2::Repository::init(dir.path()).unwrap();
+        let (dir, _grok_home, _home_guard, _flag_guard) = trusted_project_repo();
         let cwd = dir.path().join("nested");
         let wf_dir = dir.path().join(".grok").join("workflows");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -831,8 +867,12 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn save_is_validated_atomic_and_no_clobber() {
-        let dir = tempfile::tempdir().unwrap();
+        // Trust matters here too: the FIRST save used to succeed only because
+        // the repo had no `.grok/` yet (provisional "no configs" allow), and
+        // the second then hit `UntrustedPath` instead of the no-clobber `Io`.
+        let (dir, _grok_home, _home_guard, _flag_guard) = trusted_project_repo();
         let path = save_project_workflow(dir.path(), "saved", &script("saved")).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), script("saved"));
 
