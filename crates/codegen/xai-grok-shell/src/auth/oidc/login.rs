@@ -569,8 +569,15 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             format!("http://127.0.0.1:{}", l.local_addr().unwrap().port())
         };
+        // `new_test_isolated`, not `new`: `AuthManager::new` resolves its path
+        // through `resolve_auth_json_path` (auth/storage.rs:86), which IGNORES
+        // the `grok_home` argument whenever the process-global `GROK_AUTH_PATH`
+        // is set by a parallel test. When that raced, this manager bound to a
+        // foreign auth.json, contended on that file's `auth.json.lock`, and
+        // `update()` failed with "could not acquire auth.json lock" — while the
+        // assertion below still read `temp_dir`'s (never-written) auth.json.
         let auth_manager = Arc::new(
-            AuthManager::new(temp_dir.path(), GrokComConfig::default())
+            AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default())
                 .with_proxy_base_url(&dead_proxy),
         );
 

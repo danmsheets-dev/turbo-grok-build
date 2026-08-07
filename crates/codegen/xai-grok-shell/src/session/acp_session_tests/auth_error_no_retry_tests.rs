@@ -488,7 +488,22 @@ async fn pre_flight_soft_expired_transient_fail_retains_seed() {
                 AlwaysFail(call_count.clone())
             });
             let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            // `new_test_isolated`, not `new`: `AuthManager::new` routes through
+            // `resolve_auth_json_path` (auth/storage.rs:86), which IGNORES the
+            // `grok_home` argument whenever the process-global `GROK_AUTH_PATH`
+            // happens to be set — and two sibling tests in this very module set
+            // it (`reconstruct_full_config_prefers_codex_resolver_over_session_auth_manager`,
+            // `reconstruct_full_config_no_session_resolver_for_open_platform_endpoint`).
+            // When that raced, this manager silently bound to the sibling's
+            // auth.json, both refreshes contended on the same `auth.json.lock`,
+            // and this one timed out (~4s) and returned the still-hard-valid
+            // seed without ever reaching the refresher. Same constructor
+            // `auth_manager_with_refresher` above already uses, for the same
+            // stated reason.
+            let am = Arc::new(AuthManager::new_test_isolated(
+                dir.path(),
+                GrokComConfig::default(),
+            ));
             // Inside the early-invalidation buffer but still hard-valid.
             am.hot_swap(GrokAuth {
                 key: "buffered-test-key".into(),
@@ -504,6 +519,35 @@ async fn pre_flight_soft_expired_transient_fail_retains_seed() {
                 "buffered-test-key".to_string(),
             )
             .await;
+
+            // Pin the gate input. `refresh_token_if_expired` only refreshes
+            // when `auth_gate(..).active()`, and with an `Unknown` BYOK status
+            // on the fixture's non-first-party `http://localhost` the gate is
+            // OFF (sampler_turn.rs:412). `model_auth_facts` falls back to
+            // `resolve_model_auth_facts_and_provider`, which loads the ambient
+            // `~/.grok` effective config on a scoped thread
+            // (agent/config.rs:5833) — so the status was `NotByok` or `Unknown`
+            // depending on whether that unsynchronised load happened to
+            // succeed while sibling tests hammered the same files. Seeding the
+            // memo (same shape the provider tests use, see `seed_provider_memo`)
+            // makes the premise explicit and the test hermetic.
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                    model_id: actor
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .map(|c| c.model)
+                        .unwrap_or_default(),
+                    facts: crate::agent::config::ModelAuthFacts {
+                        byok: crate::agent::auth_method::ModelByok::NotByok,
+                        auth_scheme: Default::default(),
+                        oauth_platform: None,
+                        platform_oauth_active: false,
+                    },
+                    provider: None,
+                }));
 
             actor.refresh_token_if_expired().await;
 

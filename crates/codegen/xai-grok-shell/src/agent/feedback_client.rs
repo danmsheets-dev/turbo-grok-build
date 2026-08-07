@@ -1165,7 +1165,10 @@ mod auth_refresh_tests {
         let (addr, _server) = start_server(router).await;
 
         let dir = tempfile::tempdir().unwrap();
-        let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let am = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         am.hot_swap(GrokAuth {
             key: "fresh-from-auth-manager".into(),
             auth_mode: AuthMode::ApiKey,
@@ -1217,7 +1220,10 @@ mod auth_refresh_tests {
         let (addr, _server) = start_server(router).await;
 
         let dir = tempfile::tempdir().unwrap();
-        let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let am = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         let fresh = GrokAuth {
             key: "fresh-from-auth-manager".into(),
             auth_mode: AuthMode::ApiKey,
@@ -1277,7 +1283,15 @@ mod auth_refresh_tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
         let scope = cfg.auth_scope();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg));
+        // `new_test_isolated`, not `new`: `AuthManager::new` goes through
+        // `resolve_auth_json_path` (auth/storage.rs:86), which IGNORES the
+        // `grok_home` argument whenever the process-global `GROK_AUTH_PATH` is
+        // set — and several tests elsewhere in this crate set it. When that
+        // raced, the manager bound to a foreign auth.json and the "disk already
+        // holds a fresh token" premise below silently stopped holding. Every
+        // manager in this module is `hot_swap`ed immediately, so skipping the
+        // constructor's disk load costs nothing.
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg));
 
         // In-memory: stale token (the one the server rejected).
         am.hot_swap(GrokAuth {
@@ -1338,7 +1352,10 @@ mod auth_refresh_tests {
     #[tokio::test]
     async fn try_refresh_credentials_returns_false_on_terminal_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let am = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
 
         // LegacySession: no refresh_token, no recovery possible.
         am.hot_swap(GrokAuth {
