@@ -2215,6 +2215,14 @@ mod tests {
 
     // ----- try_read_image_from_path ----------------------------------------
 
+    // POSIX-only by product design: `shell_unescape` passes drive-rooted and
+    // UNC paths through untouched (prompt_images.rs:890, guarded by
+    // `looks_like_windows_path`, prompt_images.rs:878) because `\` is the
+    // Windows path separator, not an escape. A Windows tempdir is always
+    // drive-rooted, so the "terminal pasted a backslash-escaped path" shape
+    // this test builds cannot occur there. The Windows convention — quoting —
+    // is covered by `token_to_path_round_trips_quoted_windows_path`.
+    #[cfg(not(windows))]
     #[test]
     fn try_read_image_with_escaped_parens() {
         let dir = tempfile::tempdir().unwrap();
@@ -2237,6 +2245,9 @@ mod tests {
         );
     }
 
+    // POSIX-only for the same reason as `try_read_image_with_escaped_parens`
+    // above (`shell_unescape`, prompt_images.rs:890).
+    #[cfg(not(windows))]
     #[test]
     fn try_read_image_with_escaped_spaces() {
         let dir = tempfile::tempdir().unwrap();
@@ -2599,6 +2610,11 @@ mod tests {
         );
     }
 
+    // POSIX-only for the same reason as `try_read_image_with_escaped_parens`
+    // above: after quote stripping the token is still a drive-rooted path on
+    // Windows, so `shell_unescape` (prompt_images.rs:890) leaves the `\ `
+    // intact and the file is correctly not found.
+    #[cfg(not(windows))]
     #[test]
     fn quoted_path_with_internal_backslash_escape() {
         let dir = tempfile::tempdir().unwrap();
@@ -2624,7 +2640,15 @@ mod tests {
 
         // `file://localhost/...` is accepted by the `url` crate and
         // yields the same local path as `file:///...`. Pins behavior.
-        let pasted = format!("file://localhost{}", p.display());
+        //
+        // Built by swapping the empty host of the real `file:///…` URL for
+        // `localhost` rather than by string-concatenating `p.display()`: a
+        // native Windows path does not start with `/`, so concatenation
+        // produced `file://localhostC:\…` and tested nothing.
+        let mut url = url::Url::from_file_path(&p).expect("absolute path");
+        url.set_host(Some("localhost")).expect("host");
+        let pasted = url.to_string();
+        assert!(pasted.starts_with("file://localhost/"), "got {pasted}");
         assert!(try_read_image_from_path(&pasted).is_some());
     }
 
@@ -2939,6 +2963,15 @@ mod tests {
         // suffix as a query string.
         let dir = tempfile::tempdir().unwrap();
         let txt = dir.path().join("query?file.txt");
+        // Win32 reserves `?` in filenames (CreateFile fails with
+        // ERROR_INVALID_NAME / 123), so the file can only be created on POSIX.
+        // The assertion below does not need it: the `file://` arm of
+        // `try_read_dropped_path` intercepts URLs to missing files on purpose
+        // (prompt_images.rs:1170), and `canon` falls back to the raw path when
+        // canonicalisation fails — exactly as the product does
+        // (prompt_images.rs:1178). The subject here is the URL parser, not the
+        // filesystem.
+        #[cfg(not(windows))]
         std::fs::write(&txt, b"x").unwrap();
 
         let encoded = txt.display().to_string().replace('?', "%3F");

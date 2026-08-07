@@ -212,6 +212,7 @@ pub fn path_for_tool_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{abs_path, abs_path_buf, native_sep};
 
     #[test]
     fn shorten_path_fits() {
@@ -284,16 +285,17 @@ mod tests {
 
     #[test]
     fn expanded_surface_normalizes_and_classifies_against_cwd() {
-        let cwd = Path::new("/Users/me/project");
+        let cwd = abs_path_buf("Users/me/project");
+        let cwd = cwd.as_path();
         assert_eq!(
             path_for_tool_surface(
-                "/Users/me/project/src/main.rs",
+                &abs_path("Users/me/project/src/main.rs"),
                 ToolPathSurface::Expanded,
                 Some(cwd),
                 None,
                 0
             ),
-            "src/main.rs"
+            native_sep("src/main.rs")
         );
         assert_eq!(
             path_for_tool_surface(
@@ -303,7 +305,7 @@ mod tests {
                 None,
                 0
             ),
-            "src/main.rs"
+            native_sep("src/main.rs")
         );
         assert_eq!(
             path_for_tool_surface(
@@ -313,7 +315,7 @@ mod tests {
                 None,
                 0
             ),
-            "/Users/me/outside.rs"
+            abs_path("Users/me/outside.rs")
         );
     }
 
@@ -350,36 +352,47 @@ mod tests {
 
     #[test]
     fn expanded_outside_cwd_stays_normalized_target() {
-        let cwd = Path::new("/Users/me/project");
-        let got =
-            path_for_tool_surface("/etc/hosts", ToolPathSurface::Expanded, Some(cwd), None, 0);
+        let cwd = abs_path_buf("Users/me/project");
+        let got = path_for_tool_surface(
+            &abs_path("etc/hosts"),
+            ToolPathSurface::Expanded,
+            Some(cwd.as_path()),
+            None,
+            0,
+        );
         assert!(Path::new(&got).is_absolute(), "got {got}");
         assert!(got.ends_with("hosts"), "got {got}");
-        assert!(!got.starts_with("/Users/me/project"), "got {got}");
+        assert!(!got.starts_with(&abs_path("Users/me/project")), "got {got}");
     }
 
     #[test]
     fn expanded_surface_uses_worktree_cwd() {
-        let cwd = Path::new("/Users/me/.grok/worktrees/foo");
-        let path = "/Users/me/.grok/worktrees/foo/crates/x/a.rs";
+        let cwd = abs_path_buf("Users/me/.grok/worktrees/foo");
+        let path = abs_path("Users/me/.grok/worktrees/foo/crates/x/a.rs");
         assert_eq!(
-            path_for_tool_surface(path, ToolPathSurface::Expanded, Some(cwd), None, 0),
-            "crates/x/a.rs"
+            path_for_tool_surface(
+                &path,
+                ToolPathSurface::Expanded,
+                Some(cwd.as_path()),
+                None,
+                0
+            ),
+            native_sep("crates/x/a.rs")
         );
     }
 
     #[test]
     fn fullscreen_surface_uses_anchored_or_honestly_relative_target() {
-        let cwd = Path::new("/Users/me/project");
+        let cwd = abs_path_buf("Users/me/project");
         assert_eq!(
             path_for_tool_surface(
                 "src/main.rs",
                 ToolPathSurface::Fullscreen,
-                Some(cwd),
+                Some(cwd.as_path()),
                 None,
                 0
             ),
-            "/Users/me/project/src/main.rs"
+            abs_path("Users/me/project/src/main.rs")
         );
         let relative = resolve_tool_path("src/../main.rs", None);
         assert_eq!(relative.display_path, PathBuf::from("main.rs"));

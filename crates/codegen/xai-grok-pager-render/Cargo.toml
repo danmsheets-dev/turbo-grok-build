@@ -100,6 +100,9 @@ windows-sys = { version = "0.59", features = ["Win32_Graphics_Gdi"] }
 pretty_assertions = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
+# Pre-main pin of the console-class probe
+# (`test_util::pin_modern_console_glyphs_for_tests`).
+ctor = { workspace = true }
 
 [features]
 # Exposes `#[cfg(test)]` test-only helpers (mock setters, test guards,

@@ -684,6 +684,12 @@ mod tests {
 
     use ratatui::style::Color;
 
+    // Fixture paths must be absolute *on this host*: a POSIX literal has a
+    // root but no `Prefix` component on Windows, so `Path::is_absolute()` is
+    // false, `url::Url::from_file_path` refuses it, and every `osc8_url`
+    // assertion below sees `None`. See `crate::test_util::abs_path`.
+    use crate::test_util::{abs_file_url, abs_path, abs_path_buf, native_sep};
+
     /// Scan rows as independent logical lines (hard breaks between rows) —
     /// the common shape for tests that don't exercise soft-wrap joining.
     fn scan_unjoined<'a>(
@@ -755,11 +761,13 @@ mod tests {
 
     #[test]
     fn tool_path_file_target_resolves_relative_against_cwd() {
-        let cwd = Path::new("/Users/me/project");
-        let target = tool_path_file_target("src/main.rs", Some(cwd)).expect("target");
+        let cwd = abs_path_buf("Users/me/project");
+        let target = tool_path_file_target("src/main.rs", Some(cwd.as_path())).expect("target");
         assert_eq!(
             target,
-            LinkTarget::File(Arc::from(Path::new("/Users/me/project/src/main.rs")))
+            LinkTarget::File(Arc::from(
+                abs_path_buf("Users/me/project/src/main.rs").as_path()
+            ))
         );
         assert_eq!(
             resolve_link_target(&target)
@@ -767,17 +775,15 @@ mod tests {
                 .osc8_url
                 .unwrap()
                 .as_ref(),
-            "file:///Users/me/project/src/main.rs"
+            abs_file_url("Users/me/project/src/main.rs")
         );
     }
 
     #[test]
     fn tool_path_file_target_accepts_absolute_without_existing_file() {
-        let target = tool_path_file_target("/tmp/does-not-exist-xyz/foo.rs", None).expect("target");
-        assert_eq!(
-            target,
-            LinkTarget::File(Arc::from(Path::new("/tmp/does-not-exist-xyz/foo.rs")))
-        );
+        let raw = abs_path("tmp/does-not-exist-xyz/foo.rs");
+        let target = tool_path_file_target(&raw, None).expect("target");
+        assert_eq!(target, LinkTarget::File(Arc::from(Path::new(&raw))));
         assert!(
             resolve_link_target(&target)
                 .unwrap()
@@ -789,11 +795,12 @@ mod tests {
 
     #[test]
     fn tool_path_file_target_preserves_parent_segments_for_os_resolution() {
-        let target = tool_path_file_target("/repo/link/../target.rs", None).expect("target");
+        let raw = abs_path("repo/link/../target.rs");
+        let target = tool_path_file_target(&raw, None).expect("target");
         let LinkTarget::File(path) = target else {
             panic!("expected file target");
         };
-        assert_eq!(&*path, Path::new("/repo/link/../target.rs"));
+        assert_eq!(&*path, Path::new(&raw));
         assert!(
             file_path_to_url(&path)
                 .unwrap()
@@ -846,11 +853,12 @@ mod tests {
         assert!(resolve_link_target(&unsafe_url).is_none());
         assert!(resolve_link_open_target(&unsafe_url).is_none());
 
-        let file = LinkTarget::File(Arc::from(Path::new("/tmp/a b.rs")));
+        let spaced = abs_path("tmp/a b.rs");
+        let file = LinkTarget::File(Arc::from(Path::new(&spaced)));
         assert_eq!(
             resolve_link_target(&file).unwrap(),
             ResolvedLinkTarget {
-                osc8_url: Some(Arc::from("file:///tmp/a%20b.rs")),
+                osc8_url: Some(Arc::from(abs_file_url("tmp/a%20b.rs").as_str())),
                 open_target: Some(file.clone()),
             }
         );
@@ -866,11 +874,12 @@ mod tests {
             terminal: TerminalContext,
             target: LinkTarget,
             presentation: LinkPresentation,
-            expected_osc8: Option<&'static str>,
+            expected_osc8: Option<String>,
             expected_open: bool,
         }
 
-        let file = LinkTarget::File(Arc::from(Path::new("/worktree/src/main.rs")));
+        let file = LinkTarget::File(Arc::from(abs_path_buf("worktree/src/main.rs").as_path()));
+        let file_url = abs_file_url("worktree/src/main.rs");
         let web = LinkTarget::Url(Arc::from("https://example.com/docs"));
         let official_remote = TerminalContext {
             brand: TerminalName::VsCode,
@@ -887,7 +896,7 @@ mod tests {
                 },
                 target: file.clone(),
                 presentation: LinkPresentation::SelfResolvingPath,
-                expected_osc8: Some("file:///worktree/src/main.rs"),
+                expected_osc8: Some(file_url.clone()),
                 expected_open: true,
             },
             Case {
@@ -903,7 +912,7 @@ mod tests {
                 terminal: official_remote.clone(),
                 target: file.clone(),
                 presentation: LinkPresentation::Opaque,
-                expected_osc8: Some("file:///worktree/src/main.rs"),
+                expected_osc8: Some(file_url.clone()),
                 expected_open: true,
             },
             Case {
@@ -915,7 +924,7 @@ mod tests {
                 },
                 target: file.clone(),
                 presentation: LinkPresentation::SelfResolvingPath,
-                expected_osc8: Some("file:///worktree/src/main.rs"),
+                expected_osc8: Some(file_url.clone()),
                 expected_open: true,
             },
             Case {
@@ -923,7 +932,7 @@ mod tests {
                 terminal: official_remote,
                 target: web,
                 presentation: LinkPresentation::Opaque,
-                expected_osc8: Some("https://example.com/docs"),
+                expected_osc8: Some("https://example.com/docs".to_owned()),
                 expected_open: true,
             },
             Case {
@@ -935,7 +944,7 @@ mod tests {
                 },
                 target: file.clone(),
                 presentation: LinkPresentation::SelfResolvingPath,
-                expected_osc8: Some("file:///worktree/src/main.rs"),
+                expected_osc8: Some(file_url.clone()),
                 expected_open: true,
             },
             Case {
@@ -947,7 +956,7 @@ mod tests {
                 },
                 target: file,
                 presentation: LinkPresentation::SelfResolvingPath,
-                expected_osc8: Some("file:///worktree/src/main.rs"),
+                expected_osc8: Some(file_url.clone()),
                 expected_open: true,
             },
         ];
@@ -958,7 +967,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{} should resolve", case.name));
             assert_eq!(
                 resolved.osc8_url.as_deref(),
-                case.expected_osc8,
+                case.expected_osc8.as_deref(),
                 "{} OSC 8 policy",
                 case.name
             );
@@ -1215,7 +1224,8 @@ mod tests {
 
     #[test]
     fn scan_detects_absolute_file_path() {
-        let line = make_line("Error in /Users/foo/src/main.rs at line 10");
+        let path = abs_path("Users/foo/src/main.rs");
+        let line = make_line(&format!("Error in {path} at line 10"));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
@@ -1224,7 +1234,7 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///Users/foo/src/main.rs"
+            abs_file_url("Users/foo/src/main.rs")
         );
     }
 
@@ -1282,7 +1292,8 @@ mod tests {
     fn scan_detects_grok_session_media_path() {
         // Dot-directory (`.grok`), percent-encoded session segment, and a
         // trailing sentence period — the shape of `image_gen` output prose.
-        let line = make_line("Saved to /Users/alice/.grok/sessions/%2Fabc/00000000/images/1.jpg.");
+        let path = abs_path("Users/alice/.grok/sessions/%2Fabc/00000000/images/1.jpg");
+        let line = make_line(&format!("Saved to {path}."));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
@@ -1292,7 +1303,7 @@ mod tests {
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             // `%` is itself percent-encoded (`%25`) when building the file URL.
-            "file:///Users/alice/.grok/sessions/%252Fabc/00000000/images/1.jpg",
+            abs_file_url("Users/alice/.grok/sessions/%252Fabc/00000000/images/1.jpg"),
         );
     }
 
@@ -1302,17 +1313,26 @@ mod tests {
         // across visual rows (`joiner: Some("")` mid-word break). Previously
         // each row was scanned in isolation, so only the `/Users/alice`
         // fragment on the first row matched and became clickable.
-        let row0 =
-            make_line("Image generated and saved to /Users/alice/.grok/sessions/%2FUsers%2Fali");
-        let row1 = make_line("ce%2Fcode%2Fxai/00000000-0000-0000-0000-000000000001/images/1.jpg");
+        let path = abs_path(
+            "Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
+             00000000-0000-0000-0000-000000000001/images/1.jpg",
+        );
+        // Break mid-segment, exactly where a narrow pane would: `…%2Fali` /
+        // `ce%2Fcode…`.
+        let (head, tail) = path.split_at(path.find("ce%2Fcode").expect("wrap point"));
+        let prose = "Image generated and saved to ";
+        let row0 = make_line(&format!("{prose}{head}"));
+        let row1 = make_line(tail);
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
             vec![(3, &row0, None), (4, &row1, Some(""))];
         let mut overlay = LinkOverlay::new();
         scan_lines_for_url_overlays(rows.into_iter(), 2, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 2, "one overlay region per row");
-        let expected_url = "file:///Users/alice/.grok/sessions/%252FUsers%252Fali\
-                            ce%252Fcode%252Fxai/00000000-0000-0000-0000-000000000001/images/1.jpg";
+        let expected_url = abs_file_url(
+            "Users/alice/.grok/sessions/%252FUsers%252Falice%252Fcode%252Fxai/\
+             00000000-0000-0000-0000-000000000001/images/1.jpg",
+        );
         for link in overlay.links() {
             assert_eq!(
                 &*resolve_link_target(&link.target)
@@ -1322,34 +1342,28 @@ mod tests {
             );
         }
         // Row 0: path starts after the prose and runs to the row's end.
-        let prose = "Image generated and saved to ";
         let l0 = &overlay.links()[0];
         assert_eq!(l0.screen_row, 3);
         assert_eq!(l0.col_start, 2 + UnicodeWidthStr::width(prose) as u16);
         assert_eq!(
             l0.col_end,
-            2 + UnicodeWidthStr::width(
-                "Image generated and saved to /Users/alice/.grok/sessions/%2FUsers%2Fali"
-            ) as u16
+            2 + UnicodeWidthStr::width(prose) as u16 + UnicodeWidthStr::width(head) as u16
         );
         // Row 1: the continuation fragment covers the entire row.
         let l1 = &overlay.links()[1];
         assert_eq!(l1.screen_row, 4);
         assert_eq!(l1.col_start, 2);
-        assert_eq!(
-            l1.col_end,
-            2 + UnicodeWidthStr::width(
-                "ce%2Fcode%2Fxai/00000000-0000-0000-0000-000000000001/images/1.jpg"
-            ) as u16
-        );
+        assert_eq!(l1.col_end, 2 + UnicodeWidthStr::width(tail) as u16);
     }
 
     #[test]
     fn scan_wrapped_path_trailing_sentence_period_excluded() {
         // Wrapped path ending mid-sentence: trailing `.` on the last row is
         // trimmed from the clickable region.
-        let row0 = make_line("Saved to /Users/me/.grok/sessions/%2Fabc/019f3a86/ima");
-        let row1 = make_line("ges/1.jpg. Enjoy!");
+        let path = abs_path("Users/me/.grok/sessions/%2Fabc/019f3a86/images/1.jpg");
+        let (head, tail) = path.split_at(path.find("ges").expect("wrap point"));
+        let row0 = make_line(&format!("Saved to {head}"));
+        let row1 = make_line(&format!("{tail}. Enjoy!"));
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
             vec![(0, &row0, None), (1, &row1, Some(""))];
         let mut overlay = LinkOverlay::new();
@@ -1361,13 +1375,13 @@ mod tests {
                 &*resolve_link_target(&link.target)
                     .and_then(|resolved| resolved.osc8_url)
                     .expect("url"),
-                "file:///Users/me/.grok/sessions/%252Fabc/019f3a86/images/1.jpg"
+                abs_file_url("Users/me/.grok/sessions/%252Fabc/019f3a86/images/1.jpg")
             );
         }
         assert_eq!(overlay.links()[1].col_start, 0);
         assert_eq!(
             overlay.links()[1].col_end,
-            UnicodeWidthStr::width("ges/1.jpg") as u16
+            UnicodeWidthStr::width(tail) as u16
         );
     }
 
@@ -1422,8 +1436,12 @@ mod tests {
         // A `Some(" ")` joiner re-inserts the collapsed space, so a spaced
         // final segment (`Demo App.app`) wrapped at the space still
         // matches as one path.
-        let row0 = make_line("open /tmp/release/Demo");
-        let row1 = make_line("App.app now");
+        let path = abs_path("tmp/release/Demo App.app");
+        let (head, tail) = path.split_at(path.find(' ').expect("wrap point"));
+        // The space itself belongs to no row — the `Some(" ")` joiner re-adds it.
+        let tail = &tail[1..];
+        let row0 = make_line(&format!("open {head}"));
+        let row1 = make_line(&format!("{tail} now"));
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
             vec![(0, &row0, None), (1, &row1, Some(" "))];
         let mut overlay = LinkOverlay::new();
@@ -1435,7 +1453,7 @@ mod tests {
                 &*resolve_link_target(&link.target)
                     .and_then(|resolved| resolved.osc8_url)
                     .expect("url"),
-                "file:///tmp/release/Demo%20App.app"
+                abs_file_url("tmp/release/Demo%20App.app")
             );
         }
         // Row 1's region covers only `App.app` (the joiner space belongs
@@ -1443,7 +1461,7 @@ mod tests {
         assert_eq!(overlay.links()[1].col_start, 0);
         assert_eq!(
             overlay.links()[1].col_end,
-            UnicodeWidthStr::width("App.app") as u16
+            UnicodeWidthStr::width(tail) as u16
         );
     }
 
@@ -1451,7 +1469,7 @@ mod tests {
     fn scan_hard_break_rows_not_joined() {
         // `None` joiner = separate source lines: fragments must not be glued
         // into a single false path across rows.
-        let row0 = make_line("prefix /Users/alice");
+        let row0 = make_line(&format!("prefix {}", abs_path("Users/alice")));
         let row1 = make_line("suffix.txt more");
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
             vec![(0, &row0, None), (1, &row1, None)];
@@ -1463,7 +1481,7 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///Users/alice"
+            abs_file_url("Users/alice")
         );
         assert_eq!(overlay.links()[0].screen_row, 0);
     }
@@ -1472,10 +1490,12 @@ mod tests {
     fn scan_path_split_across_styled_spans_single_row() {
         // Markdown styling can split one row into multiple spans; the path
         // must still be matched across span boundaries.
+        let dir_span = abs_path("Users/foo/");
+        let file_span = native_sep("images/1.jpg");
         let line = make_styled_line(vec![
             ("Saved to ", Color::Gray),
-            ("/Users/foo/", Color::Blue),
-            ("images/1.jpg", Color::Green),
+            (&dir_span, Color::Blue),
+            (&file_span, Color::Green),
         ]);
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1485,7 +1505,7 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///Users/foo/images/1.jpg"
+            abs_file_url("Users/foo/images/1.jpg")
         );
         assert_eq!(
             overlay.links()[0].col_start,
@@ -1495,7 +1515,10 @@ mod tests {
 
     #[test]
     fn scan_file_path_stops_at_colon() {
-        let line = make_line("/Users/foo/bar.rs:45:10: error message");
+        let line = make_line(&format!(
+            "{}:45:10: error message",
+            abs_path("Users/foo/bar.rs")
+        ));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
@@ -1504,7 +1527,7 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///Users/foo/bar.rs",
+            abs_file_url("Users/foo/bar.rs"),
             "colon-delimited line number should be excluded"
         );
     }
@@ -1541,7 +1564,10 @@ mod tests {
 
     #[test]
     fn scan_url_and_file_path_coexist() {
-        let line = make_line("See https://docs.rs/foo and /Users/me/src/lib.rs end.");
+        let line = make_line(&format!(
+            "See https://docs.rs/foo and {} end.",
+            abs_path("Users/me/src/lib.rs")
+        ));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
@@ -1556,15 +1582,16 @@ mod tests {
             })
             .collect();
         assert!(urls.iter().any(|url| url.as_ref() == "https://docs.rs/foo"));
-        assert!(
-            urls.iter()
-                .any(|url| url.as_ref() == "file:///Users/me/src/lib.rs")
-        );
+        let expected_file = abs_file_url("Users/me/src/lib.rs");
+        assert!(urls.iter().any(|url| url.as_ref() == expected_file));
     }
 
     #[test]
     fn scan_file_path_with_dots_and_hyphens() {
-        let line = make_line("Reading /tmp/grok-impl-summary.md now.");
+        let line = make_line(&format!(
+            "Reading {} now.",
+            abs_path("tmp/grok-impl-summary.md")
+        ));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
@@ -1573,13 +1600,16 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///tmp/grok-impl-summary.md"
+            abs_file_url("tmp/grok-impl-summary.md")
         );
     }
 
     #[test]
     fn scan_file_path_with_at_sign() {
-        let line = make_line("In /node_modules/@scope/package/index.js now.");
+        let line = make_line(&format!(
+            "In {} now.",
+            abs_path("node_modules/@scope/package/index.js")
+        ));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
@@ -1588,7 +1618,7 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///node_modules/@scope/package/index.js"
+            abs_file_url("node_modules/@scope/package/index.js")
         );
     }
 
@@ -1596,7 +1626,7 @@ mod tests {
     fn scan_file_path_with_space_in_segment_quoted() {
         // Tutor report: path underline/click target stopped at the space in
         // `Demo App.app` (macOS app bundle name), inside quotes.
-        let path = "/Users/alice/src/app/release/mac-arm64/Demo App.app";
+        let path = abs_path("Users/alice/src/app/release/mac-arm64/Demo App.app");
         let line = make_line(&format!("open \"{path}\""));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1611,7 +1641,7 @@ mod tests {
             &*resolve_link_target(&link.target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///Users/alice/src/app/release/mac-arm64/Demo%20App.app",
+            abs_file_url("Users/alice/src/app/release/mac-arm64/Demo%20App.app"),
             "space must be percent-encoded in the file URL"
         );
         // Clickable region must cover the *entire* displayed path, including
@@ -1620,7 +1650,7 @@ mod tests {
         assert_eq!(link.col_start, UnicodeWidthStr::width(prefix) as u16);
         assert_eq!(
             link.col_end,
-            (UnicodeWidthStr::width(prefix) + UnicodeWidthStr::width(path)) as u16
+            (UnicodeWidthStr::width(prefix) + UnicodeWidthStr::width(path.as_str())) as u16
         );
     }
 
@@ -1628,7 +1658,7 @@ mod tests {
     fn scan_file_path_with_space_in_segment_unquoted() {
         // Same filename without surrounding quotes — final segment has a
         // space plus extension, so the unquoted regex should still match.
-        let path = "/tmp/release/Demo App.app";
+        let path = abs_path("tmp/release/Demo App.app");
         let line = make_line(&format!("open {path} now"));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1638,12 +1668,12 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///tmp/release/Demo%20App.app"
+            abs_file_url("tmp/release/Demo%20App.app")
         );
         assert_eq!(overlay.links()[0].col_start, 5); // "open "
         assert_eq!(
             overlay.links()[0].col_end,
-            5 + UnicodeWidthStr::width(path) as u16
+            5 + UnicodeWidthStr::width(path.as_str()) as u16
         );
     }
 
@@ -1651,7 +1681,8 @@ mod tests {
     fn scan_file_path_space_does_not_swallow_trailing_sentence() {
         // A space followed by prose (no `.ext` in the final segment) must not
         // extend the link past the real path.
-        let line = make_line("See /tmp/foo/bar here.");
+        let path = abs_path("tmp/foo/bar");
+        let line = make_line(&format!("See {path} here."));
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
@@ -1660,11 +1691,14 @@ mod tests {
             &*resolve_link_target(&overlay.links()[0].target)
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
-            "file:///tmp/foo/bar"
+            abs_file_url("tmp/foo/bar")
         );
-        // "See " = 4 cols; path is 12 cols (`/tmp/foo/bar`).
+        // "See " = 4 cols; the path region stops before ` here.`.
         assert_eq!(overlay.links()[0].col_start, 4);
-        assert_eq!(overlay.links()[0].col_end, 4 + 12);
+        assert_eq!(
+            overlay.links()[0].col_end,
+            4 + UnicodeWidthStr::width(path.as_str()) as u16
+        );
     }
 
     // ── Home-relative (`~/`) path detection ──

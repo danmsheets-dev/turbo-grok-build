@@ -9,5 +9,7 @@ pub mod prompt_images;
 pub mod render;
 pub mod syntax;
 pub mod terminal;
+#[cfg(test)]
+mod test_util;
 pub mod theme;
 pub mod util;

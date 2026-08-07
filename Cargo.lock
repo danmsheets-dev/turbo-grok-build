@@ -16483,6 +16483,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "crossterm",
+ "ctor",
  "dark-light",
  "dirs 5.0.1",
  "documented",

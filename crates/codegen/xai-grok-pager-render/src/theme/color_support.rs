@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 use ratatui::style::Color;
 
+use crate::host::HostOs;
 use crate::render::color::{indexed_to_rgb, nearest_indexed};
 use crate::terminal::{TerminalName, terminal_context};
 
@@ -166,6 +167,7 @@ pub fn standalone(terminal: TerminalName) -> StandaloneColorEvidence {
         std::io::stderr().is_terminal(),
         controlling_terminal_available(),
         terminal,
+        HostOs::current(),
     )
 }
 
@@ -197,6 +199,7 @@ fn standalone_from_env(
     stderr_is_terminal: bool,
     controlling_terminal: bool,
     terminal: TerminalName,
+    host: HostOs,
 ) -> StandaloneColorEvidence {
     if env.contains_key("NO_COLOR") {
         return StandaloneColorEvidence::Available(ColorLevel::None);
@@ -208,7 +211,7 @@ fn standalone_from_env(
     if colorterm
         .as_deref()
         .is_some_and(|value| value == "truecolor" || value == "24bit")
-        || terminal_supports_truecolor_brand(terminal)
+        || terminal_supports_truecolor_brand(terminal, host)
     {
         return StandaloneColorEvidence::Available(ColorLevel::TrueColor);
     }
@@ -279,10 +282,13 @@ pub fn quantize(color: Color) -> Color {
 /// this fallback our themes get quantized to the 16-color ANSI palette there
 /// and the subtle bg/border/muted gradations collapse onto each other.
 fn terminal_supports_truecolor() -> bool {
-    terminal_supports_truecolor_brand(terminal_context().brand)
+    terminal_supports_truecolor_brand(terminal_context().brand, HostOs::current())
 }
 
-fn terminal_supports_truecolor_brand(terminal: TerminalName) -> bool {
+/// `host` is a parameter rather than a `cfg!` so the Windows short-circuit
+/// below is drivable from a test on any host — otherwise the whole
+/// `COLORTERM` → brand → `TERM` ladder is unreachable on a Windows test host.
+fn terminal_supports_truecolor_brand(terminal: TerminalName, host: HostOs) -> bool {
     if matches!(
         terminal,
         TerminalName::Iterm2
@@ -301,7 +307,7 @@ fn terminal_supports_truecolor_brand(terminal: TerminalName) -> bool {
     // Native Windows: assume ConHost has VT processing enabled. Pre-1709
     // hosts are effectively extinct and would gracefully degrade by
     // ignoring the SGR 38;2;... sequences.
-    cfg!(target_os = "windows")
+    host == HostOs::Windows
 }
 
 // ── 256 → 16 mapping ────────────────────────────────────────────────────
@@ -385,6 +391,13 @@ mod tests {
             .collect()
     }
 
+    // The `TERM` ladder is only reachable when the host does not already
+    // assume truecolor. `terminal_supports_truecolor_brand` short-circuits to
+    // `true` for *any* brand on Windows (color_support.rs:310), so these
+    // cases pin the POSIX host explicitly rather than inheriting the test
+    // host's own OS.
+    const POSIX: HostOs = HostOs::Linux;
+
     #[test]
     fn standalone_color_uses_stderr_terminal_not_stdout() {
         assert_eq!(
@@ -393,6 +406,7 @@ mod tests {
                 true,
                 false,
                 TerminalName::Unknown,
+                POSIX,
             ),
             StandaloneColorEvidence::Available(ColorLevel::TrueColor)
         );
@@ -402,6 +416,7 @@ mod tests {
                 true,
                 false,
                 TerminalName::Unknown,
+                POSIX,
             ),
             StandaloneColorEvidence::Available(ColorLevel::Ansi256)
         );
@@ -411,6 +426,7 @@ mod tests {
                 false,
                 false,
                 TerminalName::Ghostty,
+                POSIX,
             ),
             StandaloneColorEvidence::Unavailable
         );
@@ -420,6 +436,7 @@ mod tests {
                 false,
                 false,
                 TerminalName::Ghostty,
+                POSIX,
             ),
             StandaloneColorEvidence::Available(ColorLevel::None)
         );
@@ -433,6 +450,7 @@ mod tests {
                 false,
                 true,
                 TerminalName::Unknown,
+                POSIX,
             ),
             StandaloneColorEvidence::Available(ColorLevel::Ansi256)
         );
@@ -446,8 +464,83 @@ mod tests {
                 true,
                 false,
                 TerminalName::WezTerm,
+                POSIX,
             ),
             StandaloneColorEvidence::Available(ColorLevel::TrueColor)
+        );
+    }
+
+    // The Windows half of the same ladder: ConHost is assumed VT-capable, so
+    // an unrecognised brand reports truecolor even though `TERM` says 256 —
+    // while `NO_COLOR` and the "no terminal evidence at all" arms still win,
+    // since they are checked before the brand probe.
+    #[test]
+    fn standalone_color_assumes_truecolor_for_any_brand_on_windows() {
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("TERM", "xterm-256color")]),
+                true,
+                false,
+                TerminalName::Unknown,
+                HostOs::Windows,
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::TrueColor)
+        );
+        assert_eq!(
+            standalone_from_env(
+                &env(&[]),
+                true,
+                false,
+                TerminalName::Unknown,
+                HostOs::Windows
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::TrueColor)
+        );
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("NO_COLOR", "1")]),
+                true,
+                false,
+                TerminalName::Unknown,
+                HostOs::Windows,
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::None)
+        );
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("TERM", "xterm-256color")]),
+                false,
+                false,
+                TerminalName::Unknown,
+                HostOs::Windows,
+            ),
+            StandaloneColorEvidence::Unavailable
+        );
+    }
+
+    // An empty / `dumb` `TERM` is only "no evidence" where the host does not
+    // already assume truecolor.
+    #[test]
+    fn standalone_color_dumb_term_is_unavailable_on_posix() {
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("TERM", "dumb")]),
+                true,
+                false,
+                TerminalName::Unknown,
+                POSIX
+            ),
+            StandaloneColorEvidence::Unavailable
+        );
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("TERM", "xterm")]),
+                true,
+                false,
+                TerminalName::Unknown,
+                POSIX
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::Basic)
         );
     }
 

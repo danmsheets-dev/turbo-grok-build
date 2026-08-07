@@ -685,8 +685,10 @@ mod tests {
         }
     }
 
-    // On the (non-Windows) test host the helpers must return the fancy
-    // glyphs, and the `char` helpers must agree with their `&str` siblings.
+    // The test binary is pinned to the modern glyph set pre-`main`
+    // (`crate::test_util::pin_modern_console_glyphs_for_tests`), so on every
+    // host the helpers must return the fancy glyphs and the `char` helpers
+    // must agree with their `&str` siblings.
     #[test]
     fn glyph_helpers_return_fancy_on_non_legacy() {
         assert!(!is_legacy_windows_console());
@@ -738,8 +740,8 @@ mod tests {
         );
     }
 
-    // On the (non-Windows) test host the funnel must be a zero-copy borrow
-    // so non-legacy toasts are byte-identical to the input.
+    // With the modern glyph set pinned (see `test_util`), the funnel must be
+    // a zero-copy borrow so non-legacy toasts are byte-identical to the input.
     #[test]
     fn legacy_glyph_fallback_is_borrow_on_non_legacy() {
         assert!(!is_legacy_windows_console());
