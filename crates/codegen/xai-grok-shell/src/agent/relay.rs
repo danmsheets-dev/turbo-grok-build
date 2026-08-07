@@ -1000,7 +1000,18 @@ mod tests {
         let cfg = crate::auth::GrokComConfig::default();
         let scope = cfg.auth_scope();
         let am = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),
+            // `new_test_isolated`, not `new`: `AuthManager::new` resolves its
+            // path from the process-global `GROK_AUTH_PATH` and ignores the
+            // `grok_home` argument entirely when that is set (manager.rs:308).
+            // Tests elsewhere in this binary set it (auth/storage.rs:2018,
+            // cli_models.rs:121, agent/config.rs:6756, ...), so a parallel run
+            // could bind this manager to a foreign auth.json — the refreshed
+            // token then landed there and the `auth.json must be recreated`
+            // read below found nothing. Every manager here is `hot_swap`ed
+            // immediately, so skipping the constructor's disk load costs
+            // nothing.
+            AuthManager::new_test_isolated(dir.path(), cfg.clone())
+                .with_proxy_base_url("http://127.0.0.1:1"),
         );
         let expired_session = GrokAuth {
             auth_mode: AuthMode::Oidc,
@@ -1051,7 +1062,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::auth::GrokComConfig::default();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
         let fresh_session = GrokAuth {
             auth_mode: AuthMode::Oidc,
             oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
@@ -1105,7 +1116,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::auth::GrokComConfig::default();
         let scope = cfg.auth_scope();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg));
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg));
         am.hot_swap(test_auth("old-key"));
         write_test_auth_to_disk(dir.path(), &scope, &test_auth("new-key"));
         let config = RelayConfig {
@@ -1158,7 +1169,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::auth::GrokComConfig::default();
         let scope = cfg.auth_scope();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg));
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg));
         am.hot_swap(test_auth("old-key"));
         write_test_auth_to_disk(dir.path(), &scope, &test_auth("old-key"));
         let config = RelayConfig {

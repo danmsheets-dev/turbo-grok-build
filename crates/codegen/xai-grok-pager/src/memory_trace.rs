@@ -518,8 +518,13 @@ pub(crate) mod test_support {
         SinkGuard(prev)
     }
 
-    pub(crate) fn record_sample_for_tests() {
-        with_sink(|s| s.record("sample", None));
+    /// A sink that is *not* installed process-globally, so nothing else in the
+    /// test binary can write into it. Use this whenever a test asserts on the
+    /// whole contents of a trace file.
+    // `pub(super)`, not `pub(crate)`: `Sink` itself is only visible inside
+    // `memory_trace`, so a wider visibility would leak a private type.
+    pub(super) fn private_sink(path: PathBuf, rotate_bytes: u64) -> Sink {
+        Sink::new(path, rotate_bytes, u64::MAX >> 1)
     }
 }
 
@@ -561,17 +566,26 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(MEMTRACE_SINK)]
     fn sample_events_are_valid_jsonl_and_rotate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
-        let _guard = test_support::install_test_sink(path.clone(), 256);
+        // Drive a *private* sink instead of installing the process-global one.
+        // `SINK` is shared by the whole lib test binary, and every product path
+        // that hits a memory cliff records a `purge` event into whichever sink
+        // is installed at that instant (`release_retained_memory_with`,
+        // memory_release.rs:77 — reached from app/dispatch/session/modal.rs:21,
+        // app/agent_view/media.rs:39, app/subagent.rs:205 and a dozen more).
+        // Those callers are ordinary untagged tests, so `serial(MEMTRACE_SINK)`
+        // cannot exclude them and a foreign `purge` line would land in this
+        // file. A private sink is what makes the "every line is a sample"
+        // assertion below both true and worth asserting.
+        let sink = test_support::private_sink(path.clone(), 256);
 
         // Enough samples to exceed the 256-byte cap at least twice; the
         // post-rotation file is created lazily by the NEXT write, so the
         // final sample guarantees both files exist.
         for _ in 0..16 {
-            test_support::record_sample_for_tests();
+            sink.record("sample", None);
         }
         // Rotation happened at the tiny cap: a `.1` exists and both files
         // hold only valid JSON lines with the expected shape.
