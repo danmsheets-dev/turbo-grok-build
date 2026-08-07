@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use xai_grok_hooks::config::{HookSpec, parse_hook_file};
+use xai_grok_hooks::config::{HookSpec, parse_hook_file_with_env};
 use xai_grok_hooks::event::HookEventName;
 
 use super::manifest::substitute_env_vars;
@@ -91,14 +91,6 @@ fn process_hooks_content(
         ));
     }
 
-    let (mut specs, parse_errors) = parse_hook_file(&filtered_content, source_path);
-
-    for err in &parse_errors {
-        let msg = format!("plugin {plugin_name}: {err}");
-        tracing::warn!("{msg}");
-        warnings.push(msg);
-    }
-
     // Native `GROK_PLUGIN_*` vars plus their vendor-compat aliases.
     let plugin_env: HashMap<String, String> = HashMap::from([
         ("GROK_PLUGIN_ROOT".to_string(), plugin_root.to_string()),
@@ -106,6 +98,20 @@ fn process_hooks_content(
         ("GROK_PLUGIN_DATA".to_string(), plugin_data.to_string()),
         ("CLAUDE_PLUGIN_DATA".to_string(), plugin_data.to_string()),
     ]);
+
+    // Hand the plugin-owned map to the parser's load-time expansion. All four
+    // of these names are exported into hook children, so a Grok launched from
+    // inside plugin A's hook carries A's values in its own environment — and
+    // without this the parser would expand plugin B's `${CLAUDE_PLUGIN_ROOT}`
+    // from that ambient value and point B's command at A's directory.
+    let (mut specs, parse_errors) =
+        parse_hook_file_with_env(&filtered_content, source_path, &plugin_env);
+
+    for err in &parse_errors {
+        let msg = format!("plugin {plugin_name}: {err}");
+        tracing::warn!("{msg}");
+        warnings.push(msg);
+    }
 
     for spec in &mut specs {
         // Plugin-owned keys always win over user-declared `env`, or a plugin
@@ -376,9 +382,18 @@ mod tests {
             .iter()
             .map(|s| s.command.as_ref().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(commands.contains(&"/opt/plugins/gb1183/hooks/pre.sh".to_string()));
-        assert!(commands.contains(&"/opt/plugins/gb1183/hooks/alias.sh".to_string()));
-        assert!(commands.contains(&"/var/plugins/gb1183/cache/post.sh".to_string()));
+        assert!(
+            commands.contains(&"/opt/plugins/gb1183/hooks/pre.sh".to_string()),
+            "{commands:?}"
+        );
+        assert!(
+            commands.contains(&"/opt/plugins/gb1183/hooks/alias.sh".to_string()),
+            "{commands:?}"
+        );
+        assert!(
+            commands.contains(&"/var/plugins/gb1183/cache/post.sh".to_string()),
+            "{commands:?}"
+        );
 
         // None of the resolved commands should still contain the literal
         // `${...}` placeholder.

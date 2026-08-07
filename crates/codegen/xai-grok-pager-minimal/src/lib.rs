@@ -38,6 +38,9 @@ pub mod welcome;
 #[cfg(test)]
 mod guard;
 
+#[cfg(test)]
+mod test_util;
+
 use crossterm::QueueableCommand;
 use crossterm::terminal::BeginSynchronizedUpdate;
 

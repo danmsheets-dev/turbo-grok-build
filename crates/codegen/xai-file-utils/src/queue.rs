@@ -4568,6 +4568,16 @@ mod tests {
         }
         state.unauthorized.store(false, Ordering::SeqCst);
         draining.store(true, Ordering::Relaxed);
+        // Snapshot *after* the drain flag is set rather than asserting a literal
+        // count: a parked item also re-probes on its own interval
+        // (`parked_item_probe_retries_without_token_change` below), so the number
+        // of attempts made before the park is a property of host timing, not of
+        // this test's subject. On a loaded host an extra probe landed between the
+        // `auth_parked` observation above and this line and the literal `2`
+        // failed with `3` — while the property under test ("the wake must never
+        // reach the wire once draining is set") still held. This asserts that
+        // property exactly.
+        let before_wake = state.request_count.load(Ordering::SeqCst);
         resolver.signal_recovery();
         let result = tokio::time::timeout(Duration::from_secs(2), task)
             .await
@@ -4576,7 +4586,7 @@ mod tests {
         assert!(result.is_err(), "drain wins over a pending wake");
         assert_eq!(
             state.request_count.load(Ordering::SeqCst),
-            2,
+            before_wake,
             "no wire attempt after draining is set"
         );
     }

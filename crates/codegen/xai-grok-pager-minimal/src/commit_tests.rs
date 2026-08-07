@@ -541,9 +541,15 @@ fn assert_committed_fits_entry(label: &str, entry: &ScrollbackEntry, width: u16)
 fn committed_block_uses_owning_session_cwd_for_tool_paths() {
     use ratatui::buffer::Buffer;
 
-    let cwd = std::path::Path::new("/alternate/worktree");
-    let mut entry =
-        ScrollbackEntry::new(RenderBlock::edit("/alternate/worktree/src/main.rs", None));
+    // Host-native absolute spellings: the elision compares the block's path
+    // against the owning session cwd, and a POSIX literal is not absolute on
+    // Windows (`Path::is_absolute()` wants a drive prefix).
+    let cwd_owned = crate::test_util::abs_path_buf("alternate/worktree");
+    let cwd = cwd_owned.as_path();
+    let mut entry = ScrollbackEntry::new(RenderBlock::edit(
+        &crate::test_util::abs_path("alternate/worktree/src/main.rs"),
+        None,
+    ));
     entry.set_display_mode(DisplayMode::Expanded);
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
@@ -560,9 +566,13 @@ fn committed_block_uses_owning_session_cwd_for_tool_paths() {
             text.push_str(buf[(x, y)].symbol());
         }
     }
-    assert!(text.contains("src/main.rs"), "rendered text: {text:?}");
+    // The painted path keeps its native separator (`normalize_lexically`
+    // rebuilds it from `Path::components()`), so the expectation must too.
+    let rel = crate::test_util::native_sep("src/main.rs");
+    assert!(text.contains(&rel), "rendered text: {text:?}");
+    let prefix = crate::test_util::abs_path("alternate/worktree");
     assert!(
-        !text.contains("/alternate/worktree"),
+        !text.contains(&prefix),
         "session prefix should be elided: {text:?}"
     );
 }
@@ -783,6 +793,18 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     use ratatui::layout::Rect;
     use similar::ChangeTag;
     use xai_grok_pager::diff::DiffLine;
+
+    // `Theme::current()` reads the process-global theme cache, and
+    // `terminal_native_lock_paints_only_native_colors` (above) flips that
+    // global's terminal-native lock on for the duration of its body. Under the
+    // lock `Theme::current()` returns `terminal_default()`, whose `diff_*_bg`
+    // are `Color::Reset` — `diff_uses_line_fg()` then makes the renderer paint
+    // a whole-line foreground instead of a background band, and this test's
+    // subject disappears. Hold the same mutex the lock test holds so the two
+    // never overlap.
+    let _theme_guard = xai_grok_pager::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     let hunk = vec![
         DiffLine {

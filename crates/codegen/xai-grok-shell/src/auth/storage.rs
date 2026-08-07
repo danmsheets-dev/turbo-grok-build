@@ -258,10 +258,46 @@ pub(super) fn write_auth_json(auth_file: &Path, auth_store: &AuthStore) -> std::
     write_auth_json_with(auth_file, auth_store, write_auth_json_atomic)
 }
 
+/// Counts successful `auth.json` writes made by **this process**.
+///
+/// Read into [`AuthFileStamp`](super::manager) so the static-key memo cannot
+/// survive a rewrite this process performed. The stat triple alone is not
+/// sufficient on Windows: there is no stable inode there (`ino` is hardcoded to
+/// `0`), and NTFS last-write times are stamped from the system clock, which
+/// advances on the ~15.6 ms timer tick — so two same-length rewrites inside one
+/// tick (a key rotation, `first-key` → `fresh-key`) produce a byte-identical
+/// stamp and the memo keeps serving the old key.
+///
+/// This closes the same-process window completely. A rewrite by a *sibling*
+/// process within one timer tick that also preserves the byte length remains
+/// invisible until the next tick; catching that needs a real Windows file id
+/// (`GetFileInformationByHandle`), which `std::fs::Metadata` does not expose on
+/// stable Rust.
+static AUTH_WRITE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Current value of [`AUTH_WRITE_GENERATION`].
+pub(super) fn auth_write_generation() -> u64 {
+    AUTH_WRITE_GENERATION.load(Ordering::Acquire)
+}
+
 /// Dispatch helper: run `atomic`, and on `StorageFull` fall back to an
 /// in-place write. Split out (with `atomic` injectable) so the disk-full
 /// fallback is unit-testable without an actually-full filesystem.
 fn write_auth_json_with(
+    auth_file: &Path,
+    auth_store: &AuthStore,
+    atomic: fn(&Path, &AuthStore) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let result = write_auth_json_dispatch(auth_file, auth_store, atomic);
+    if result.is_ok() {
+        // Release-ordered so a reader that observes the new generation also
+        // observes the bytes this write published.
+        AUTH_WRITE_GENERATION.fetch_add(1, Ordering::Release);
+    }
+    result
+}
+
+fn write_auth_json_dispatch(
     auth_file: &Path,
     auth_store: &AuthStore,
     atomic: fn(&Path, &AuthStore) -> std::io::Result<()>,
@@ -2173,7 +2209,12 @@ mod write_fallback_tests {
 
         write_auth_json(&link, &sample_store()).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(read_key(&target).as_deref(), Some("secret-key"));
     }
 

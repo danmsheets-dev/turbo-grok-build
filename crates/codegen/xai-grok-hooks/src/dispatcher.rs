@@ -905,7 +905,13 @@ mod tests {
     #[tokio::test]
     async fn stop_exit2_fail_open_and_context() {
         let registry = registry_from_specs(vec![
-            stop_spec("exit2", "echo 'fix the build' >&2; exit 2"),
+            // Portable: PowerShell has no `1>&2`, so a POSIX literal here
+            // would be a parse error on a default Windows host and this hook
+            // would exit 1 (no block) instead of 2 with a reason.
+            stop_spec(
+                "exit2",
+                &crate::test_support::stderr_then_exit("fix the build", 2),
+            ),
             stop_spec("crasher", "exit 1"),
             stop_spec(
                 "ctx",

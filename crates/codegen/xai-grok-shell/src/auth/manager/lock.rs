@@ -381,8 +381,8 @@ fn try_acquire_once(lock_path: &Path, stuck_live: StuckLivePolicy) -> LockAttemp
             }
         }
 
-        // Step 4: EWOULDBLOCK — lock is held by someone else.
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+        // Step 4: contended — the lock is held by someone else.
+        Err(e) if is_lock_contended(&e) => {
             let breakable = match holder_state(&mut file) {
                 HolderState::Dead => true,
                 HolderState::StuckLive => match stuck_live {
@@ -573,6 +573,31 @@ pub(crate) async fn try_lock_auth_file_async(
     timeout: StdDuration,
 ) -> Option<AuthFileLock> {
     try_lock_auth_file_async_with(auth_json_path, timeout, STUCK_LIVE_CONFIRM_DELAY).await
+}
+
+/// Whether a failed `try_lock_exclusive` means "someone else holds it" rather
+/// than a real I/O failure.
+///
+/// `ErrorKind::WouldBlock` alone is a POSIX-only test. On Windows the failure
+/// is `ERROR_LOCK_VIOLATION` (raw OS error 33), which `std::io` maps to
+/// `ErrorKind::Uncategorized` — an unmatchable, non-exhaustive kind. Every
+/// contended acquire therefore fell through to the catch-all `Err` arm and was
+/// classified `LockAttempt::Failed`, with two consequences on Windows:
+///
+///  * Phase 1 of [`try_lock_auth_file_async_with`] returns `None` on `Failed`,
+///    so a contended acquire gave up *instantly* instead of waiting out the
+///    holder in Phase 2. The loser of any two-way race silently dropped its
+///    write (visibly: `/user` enrichment landing only ~2 times in 3).
+///  * The dead-holder / stuck-holder recovery lives inside this arm, so it was
+///    unreachable — one stale `auth.json.lock` left by a crashed process would
+///    wedge login and refresh permanently.
+///
+/// `fs2::lock_contended_error()` is the crate's own answer for the running
+/// platform, so this stays correct if the mapping ever changes.
+fn is_lock_contended(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::WouldBlock
+        || (e.raw_os_error().is_some()
+            && e.raw_os_error() == fs2::lock_contended_error().raw_os_error())
 }
 
 /// Phase-2 (blocking-wait) budget: the total `timeout` minus a reservation

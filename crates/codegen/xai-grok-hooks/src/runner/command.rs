@@ -119,7 +119,29 @@ pub async fn run_command_hook(
         }
         #[cfg(not(unix))]
         {
-            let inv = xai_grok_config::shell::shell_command_argv(&command_str);
+            // The native Windows shell is PowerShell or `cmd` (see
+            // `detect_windows_shell`, xai-grok-config/src/shell.rs:30), and
+            // NEITHER understands POSIX `${VAR}` / `$VAR` syntax: PowerShell
+            // reads `${CLAUDE_PROJECT_DIR}` as a *PowerShell* variable (unset →
+            // empty), and `cmd` leaves it literal. The documented external hook
+            // contract is written in POSIX form
+            // ("$CLAUDE_PROJECT_DIR/.claude/hooks/foo.sh", see
+            // `RUNNER_ALWAYS_SET_ENV` and the rustdoc on
+            // `test_claude_project_dir_is_exported`), so on Windows the runner
+            // has to do the substitution itself or every such hook silently
+            // resolves to a bare `/foo.sh`.
+            //
+            // Only plain `${VAR}` / `$VAR` forms are substituted;
+            // `expand_env_vars_with_extra` preserves parameter-expansion
+            // modifier forms (`${VAR:-x}`) verbatim, which is correct — those
+            // are POSIX-shell grammar with no PowerShell/cmd equivalent, so
+            // rewriting them would be worse than leaving them alone.
+            let inv = xai_grok_config::shell::shell_command_argv(&expand_for_native_shell(
+                &command_str,
+                spec,
+                envelope,
+                ctx,
+            ));
             let mut c = tokio::process::Command::new(&inv.program);
             c.args(&inv.args).envs(inv.env);
             c
@@ -297,6 +319,45 @@ pub async fn run_command_hook(
 ///   map (those attempts would be silently ignored by the spawn-time
 ///   precedence ordering anyway, but stripping them at load time gives
 ///   users a clear "ignored, reserved key" warning).
+/// Substitute POSIX `${VAR}` / `$VAR` references before handing a command to
+/// the native Windows shell, which cannot do it itself.
+///
+/// The lookup order mirrors the spawn-time env precedence documented in
+/// [`run_command_hook`] exactly: user/plugin `extra_env` first, runner-injected
+/// vars last so they always win. Getting this backwards would let a plugin
+/// spoof `CLAUDE_PROJECT_DIR` in the *command string* even though it cannot
+/// spoof it in the child's environment.
+///
+/// Anything not found in either map falls through to the Grok process's own
+/// environment (inside `expand_env_vars_with_extra`), which is what the child
+/// inherits — and anything unresolved anywhere has already been rejected by
+/// [`find_unresolved_env_vars`] before this runs.
+#[cfg(not(unix))]
+fn expand_for_native_shell(
+    command_str: &str,
+    spec: &HookSpec,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> String {
+    let mut env: std::collections::HashMap<String, String> = spec.extra_env.clone();
+    // Runner-injected vars last: highest precedence, same as `.env(...)` at spawn.
+    env.insert(
+        "GROK_HOOK_EVENT".to_string(),
+        envelope.hook_event_name.to_string(),
+    );
+    env.insert("GROK_HOOK_NAME".to_string(), spec.name.clone());
+    env.insert("GROK_SESSION_ID".to_string(), ctx.session_id.to_string());
+    env.insert(
+        "GROK_WORKSPACE_ROOT".to_string(),
+        ctx.workspace_root.to_string(),
+    );
+    env.insert(
+        "CLAUDE_PROJECT_DIR".to_string(),
+        ctx.workspace_root.to_string(),
+    );
+    crate::env_expand::expand_env_vars_with_extra(command_str, &env)
+}
+
 pub(crate) const RUNNER_ALWAYS_SET_ENV: &[&str] = &[
     "GROK_HOOK_EVENT",
     "GROK_HOOK_NAME",
@@ -1049,24 +1110,23 @@ mod tests {
 
     /// Regression: a hook command that uses `${VAR}` interpolation
     /// without any other shell metacharacters must still be invoked via
-    /// `sh -c` so that the env var supplied via `extra_env` is expanded.
+    /// the shell so that the env var supplied via `extra_env` is expanded.
     /// Previously the runner treated `${...}` as part of a literal path
     /// and `command_path.exists()` failed; the hook silently never ran.
     /// Now the env-var pre-spawn check refuses with a clear reason when
     /// the var is unset (and the dispatcher fail-opens, so the tool call
     /// itself is not blocked).
+    ///
+    /// The script body, its extension and the invocation syntax all come from
+    /// [`crate::test_support`], because the shell is `sh -c` only on unix — on
+    /// Windows it is whatever `detect_windows_shell()` picked, which cannot run
+    /// a `#!`-script and does not read POSIX `${VAR}` syntax (the runner
+    /// substitutes it first; see `expand_for_native_shell`).
     #[tokio::test]
     async fn test_env_var_interpolation_runs_via_shell() {
         let tmp = tempfile::tempdir().unwrap();
-        let script = tmp.path().join("hook.sh");
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
+        let script = crate::test_support::write_exit0_script(tmp.path());
+        let command = crate::test_support::invoke_script_via_env("GB1183_PLUGIN_ROOT", &script);
 
         let mut extra_env = std::collections::HashMap::new();
         extra_env.insert(
@@ -1081,8 +1141,8 @@ mod tests {
             configured_matcher: None,
             matcher: None,
             enabled: true,
-            command: Some(std::path::PathBuf::from("${GB1183_PLUGIN_ROOT}/hook.sh")),
-            command_raw: Some("${GB1183_PLUGIN_ROOT}/hook.sh".to_string()),
+            command: Some(std::path::PathBuf::from(&command)),
+            command_raw: Some(command.clone()),
             url: None,
             url_raw: None,
             timeout_ms: 5000,
@@ -1097,7 +1157,8 @@ mod tests {
 
         assert!(
             matches!(result, HookRunnerResult::Success),
-            "hook with ${{VAR}} interpolation should be expanded via sh -c, got {:?}",
+            "hook with ${{VAR}} interpolation should be expanded by the shell branch, \
+             got {:?} for command {command:?}",
             result
         );
     }
@@ -1106,30 +1167,24 @@ mod tests {
     /// to the workspace/project root and is set for ALL hooks (not just
     /// plugin-scoped ones). Plugin hooks frequently reference it as
     /// `"$CLAUDE_PROJECT_DIR/.claude/hooks/foo.sh"`. The runner must export
-    /// it on the spawned child so shell expansion via the `sh -c` branch
+    /// it on the spawned child so shell expansion via the shell branch
     /// resolves correctly; otherwise such hooks fail to find the
     /// command.
+    ///
+    /// The script body, its extension and the invocation syntax come from
+    /// [`crate::test_support`] so the fixture speaks whatever shell
+    /// `run_command_hook` will actually use on this host.
     #[tokio::test]
     async fn test_claude_project_dir_is_exported() {
         let tmp = tempfile::tempdir().unwrap();
-        let script = tmp.path().join("hook.sh");
         // Exit 0 only if CLAUDE_PROJECT_DIR matches the workspace root.
         let workspace = tmp.path().to_string_lossy().into_owned();
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\ntest \"${{CLAUDE_PROJECT_DIR}}\" = \"{workspace}\"\n",
-                workspace = workspace
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
+        let script = crate::test_support::write_env_check_script(
+            tmp.path(),
+            "CLAUDE_PROJECT_DIR",
+            &workspace,
+        );
+        let command = crate::test_support::invoke_script_via_env("CLAUDE_PROJECT_DIR", &script);
 
         let spec = HookSpec {
             name: "test-claude-project-dir".into(),
@@ -1139,9 +1194,9 @@ mod tests {
             matcher: None,
             enabled: true,
             // Use ${CLAUDE_PROJECT_DIR} in the path itself so this also exercises
-            // the `$` -> sh -c routing.
-            command: Some(std::path::PathBuf::from("${CLAUDE_PROJECT_DIR}/hook.sh")),
-            command_raw: Some("${CLAUDE_PROJECT_DIR}/hook.sh".to_string()),
+            // the `$` -> shell routing.
+            command: Some(std::path::PathBuf::from(&command)),
+            command_raw: Some(command.clone()),
             url: None,
             url_raw: None,
             timeout_ms: 5000,
@@ -1160,7 +1215,8 @@ mod tests {
 
         assert!(
             matches!(result, HookRunnerResult::Success),
-            "hook should see CLAUDE_PROJECT_DIR set to the workspace root, got {:?}",
+            "hook should see CLAUDE_PROJECT_DIR set to the workspace root, \
+             got {:?} for command {command:?}",
             result
         );
     }

@@ -250,7 +250,8 @@ pub fn global_process_scope() -> &'static ProcessScope {
 ///
 /// On non-Windows this is a no-op.
 pub fn enter_self_job_object_if_requested(force: bool) {
-    let env_on = std::env::var("TURBO_JOB_OBJECT").or_else(|_| std::env::var("HYPER_JOB_OBJECT"))
+    let env_on = std::env::var("TURBO_JOB_OBJECT")
+        .or_else(|_| std::env::var("HYPER_JOB_OBJECT"))
         .map(|v| {
             let t = v.trim();
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
@@ -451,7 +452,23 @@ mod tests {
         assert!(!group.wants_hangup());
 
         let terminal = scope.enroll_terminal_pid(pid).unwrap();
-        assert!(terminal.wants_hangup());
+        // `ProcessGroup::wants_hangup` is `cfg!(unix) && self.hangup_first`
+        // (xai-tty-utils/src/lib.rs:541-543), and `hangup()` itself is
+        // documented as `Ok(())` on Windows (lib.rs:533) because the Job Object
+        // takes the whole tree. Mirror that product guard literally instead of
+        // gating the test away — the enrollment path above still has to work on
+        // both platforms, and the Windows complement is worth pinning too.
+        #[cfg(unix)]
+        assert!(
+            terminal.wants_hangup(),
+            "a terminal enrollment must be hung up before the kill"
+        );
+        #[cfg(not(unix))]
+        assert!(
+            !terminal.wants_hangup(),
+            "no hangup on Windows: it is a no-op there and the Job Object reaps \
+             the tree (xai-tty-utils/src/lib.rs:541)"
+        );
 
         scope.kill_all();
     }

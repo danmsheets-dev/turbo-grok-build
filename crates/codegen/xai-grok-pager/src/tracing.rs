@@ -472,9 +472,24 @@ mod tests {
     /// (non-lazy) macro argument.
     struct FilterlessNoOp;
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for FilterlessNoOp {}
+    /// Serializes the two `run_payload_event` callers.
+    ///
+    /// `tracing` caches a callsite's `Interest` **globally**, keyed by the
+    /// callsite — and both tests emit through the single `tracing::debug!`
+    /// inside `run_payload_event`, so they share one. `FilterlessNoOp` above
+    /// deliberately reports `Interest::always()`, so whichever test registered
+    /// the callsite first pinned the answer for the other: running the
+    /// `...target_on` case first left the callsite cached as always-enabled and
+    /// the `...target_off` case then emitted (and serialized) its payload
+    /// anyway. Holding this mutex across the whole
+    /// install → rebuild → emit sequence keeps each test's dispatcher the only
+    /// one the cache can see.
+    static PAYLOAD_CALLSITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Emit the production-shaped payload event against a registry with the
     /// given payload-target directive; return (serialized?, line received?).
     fn run_payload_event(directive: &str) -> (bool, bool) {
+        let _callsite = PAYLOAD_CALLSITE.lock().unwrap_or_else(|e| e.into_inner());
         use tracing_subscriber::layer::SubscriberExt as _;
         use tracing_subscriber::{EnvFilter, Layer as _};
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -488,6 +503,9 @@ mod tests {
             .with(fmt_layer)
             .with(FilterlessNoOp);
         tracing::subscriber::with_default(subscriber, || {
+            // Discard whatever the previous caller's dispatcher cached for this
+            // callsite, so the directive under test is the one that decides.
+            tracing::callsite::rebuild_interest_cache();
             tracing::debug!(
                 target: "acp_update_payload",
                 payload = %LazyJson(&probe),

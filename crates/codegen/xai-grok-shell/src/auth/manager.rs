@@ -2688,18 +2688,29 @@ struct StaticKeyCacheEntry {
     key: Option<String>,
 }
 
-/// (inode, mtime, len). `write_auth_json`'s temp+rename allocates a new inode
-/// per rewrite, so even a same-length same-mtime rewrite misses the memo.
-/// Windows has no stable inode (0 there); its fine mtimes suffice.
-type AuthFileStamp = (u64, Option<std::time::SystemTime>, u64);
+/// (this process's auth-write generation, inode, mtime, len).
+///
+/// `write_auth_json`'s temp+rename allocates a new inode per rewrite, so on
+/// unix even a same-length same-mtime rewrite misses the memo.
+///
+/// Windows has no stable inode here (`ino` is `0`), and NTFS last-write times
+/// come from the system clock, which advances on the ~15.6 ms timer tick — so
+/// there a same-length rewrite inside one tick produced a byte-identical
+/// `(0, mtime, len)` and the memo went on serving the *old* key after a
+/// rotation. The leading generation counter
+/// ([`super::storage::auth_write_generation`]) makes every write by this
+/// process invalidate the memo unconditionally; the residual window is a
+/// sibling process rewriting the same byte length inside one tick.
+type AuthFileStamp = (u64, u64, Option<std::time::SystemTime>, u64);
 
 fn auth_file_stamp(path: &Path) -> Option<AuthFileStamp> {
+    let generation = super::storage::auth_write_generation();
     let meta = std::fs::metadata(path).ok()?;
     #[cfg(unix)]
     let ino = std::os::unix::fs::MetadataExt::ino(&meta);
     #[cfg(not(unix))]
     let ino = 0;
-    Some((ino, meta.modified().ok(), meta.len()))
+    Some((generation, ino, meta.modified().ok(), meta.len()))
 }
 
 impl AuthManager {

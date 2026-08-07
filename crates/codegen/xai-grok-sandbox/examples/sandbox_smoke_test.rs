@@ -14,9 +14,35 @@
 //! cargo run -p xai-grok-sandbox --example sandbox_smoke_test -- read-only
 //! ```
 
+//! # Platform
+//!
+//! Kernel enforcement is POSIX-only: the backing crate (`nono`) and
+//! `SandboxManager::support_info` are both
+//! `#[cfg(all(feature = "enforce", unix))]`
+//! (crates/codegen/xai-grok-sandbox/src/lib.rs:266), and the errno checks
+//! below need `libc`, which this crate takes only under
+//! `[target.'cfg(unix)'.dependencies]`. Cargo's `required-features` cannot
+//! express "unix only", so the gate lives here — otherwise
+//! `cargo check --all-targets` fails to compile this example on Windows.
+
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use xai_grok_sandbox::{ProfileName, SandboxManager};
 
+/// Nothing to enforce off POSIX: there is no Landlock/Seatbelt equivalent
+/// this crate drives, so the smoke test has no subject rather than a
+/// failing one.
+#[cfg(not(unix))]
+fn main() {
+    println!(
+        "sandbox_smoke_test: kernel sandbox enforcement is POSIX-only \
+         (Linux Landlock / macOS Seatbelt). Nothing to smoke-test on {}.",
+        std::env::consts::OS
+    );
+}
+
+#[cfg(unix)]
 fn main() {
     // Parse profile from args (default: workspace).
     let profile_name = std::env::args()
@@ -124,6 +150,7 @@ fn main() {
     println!("\n✅ Smoke test complete");
 }
 
+#[cfg(unix)]
 fn test_read(label: &str, path: &Path) {
     if path.is_file() {
         match std::fs::read(path) {
@@ -153,6 +180,7 @@ fn test_read(label: &str, path: &Path) {
     }
 }
 
+#[cfg(unix)]
 fn test_write(label: &str, path: &Path) {
     match std::fs::write(path, b"sandbox-test") {
         Ok(()) => {

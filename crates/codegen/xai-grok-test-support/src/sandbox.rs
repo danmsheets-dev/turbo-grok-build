@@ -313,7 +313,12 @@ fn baseline_env_from_parent(
 ) -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::new();
     for key in platform_allowlist() {
-        if let Some(value) = parent_env.get(OsStr::new(key)) {
+        if let Some(value) = lookup_parent_env(parent_env, key) {
+            // Insert under the allowlist's canonical spelling, not the parent's.
+            // The sandbox map is the child's *entire* env block
+            // (`env_clear().envs(...)`, see `TestSandbox::apply`), so canonical
+            // keys also keep the later `env.insert("PATH", ...)` from adding a
+            // second entry beside a parent-spelled `Path`.
             env.insert((*key).into(), value.to_owned());
         }
     }
@@ -366,7 +371,7 @@ fn apply_hermetic_git_env(
     parent_cwd: &Path,
     parent_env: &BTreeMap<OsString, OsString>,
 ) {
-    let Some(git_bin) = parent_env.get(OsStr::new("GIT_BIN_PATH")) else {
+    let Some(git_bin) = lookup_parent_env(parent_env, "GIT_BIN_PATH") else {
         return;
     };
     let git_bin = PathBuf::from(git_bin);
@@ -380,13 +385,47 @@ fn apply_hermetic_git_env(
     };
 
     let mut paths = vec![parent.to_owned()];
-    if let Some(path) = parent_env.get(OsStr::new("PATH")) {
+    if let Some(path) = lookup_parent_env(parent_env, "PATH") {
         paths.extend(std::env::split_paths(path));
     }
     let path = std::env::join_paths(paths).unwrap_or_else(|_| parent.as_os_str().to_owned());
     env.insert("GIT_BIN_PATH".into(), git_bin.into_os_string());
     env.insert("GIT_EXEC_PATH".into(), parent.into_os_string());
     env.insert("PATH".into(), path);
+}
+
+/// Read `key` out of a parent-environment snapshot, matching the platform's own
+/// name-comparison rules.
+///
+/// Windows environment-variable names are **case-insensitive** — `GetEnvironmentVariableW`
+/// (and therefore `std::env::var_os`) finds `SystemRoot` no matter how the block
+/// spells it — but `std::env::vars_os()` reports each name with whatever casing
+/// the parent process block carries, and a `BTreeMap<OsString, _>` compares raw
+/// bytes. The same test binary launched from PowerShell sees `SystemRoot` /
+/// `ComSpec` / `Path`, and launched from Git Bash or MSYS sees `SYSTEMROOT` /
+/// `COMSPEC` / `PATH`.
+///
+/// An exact `get()` therefore dropped `SystemRoot` and `ComSpec` from the
+/// sandbox whenever the runner was a bash-family shell, and since the sandbox
+/// map *replaces* the child's environment (`env_clear()`), every sandboxed
+/// child then started without `%SystemRoot%` — enough to make `powershell.exe`
+/// fail to launch. Same hazard for `PATH` inside
+/// [`apply_hermetic_git_env`], which would silently build a PATH containing
+/// only the git directory.
+fn lookup_parent_env<'a>(
+    parent_env: &'a BTreeMap<OsString, OsString>,
+    key: &str,
+) -> Option<&'a OsString> {
+    if let Some(value) = parent_env.get(OsStr::new(key)) {
+        return Some(value);
+    }
+    if cfg!(windows) {
+        return parent_env
+            .iter()
+            .find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case(key))
+            .map(|(_, value)| value);
+    }
+    None
 }
 
 fn platform_allowlist() -> &'static [&'static str] {
@@ -396,6 +435,13 @@ fn platform_allowlist() -> &'static [&'static str] {
             "PATH",
             "PATHEXT",
             "SystemRoot",
+            // Windows defines `%ProgramData%` in the registry as
+            // `%SystemDrive%\ProgramData`, so a child that inherits no
+            // `SystemDrive` expands it *literally* and creates a real
+            // `%SystemDrive%\ProgramData\...` tree relative to its CWD — which,
+            // under `cargo test`, is a crate directory inside the repo. It is a
+            // machine constant like `SystemRoot`, not user data.
+            "SystemDrive",
             "WINDIR",
             "ComSpec",
             "NUMBER_OF_PROCESSORS",
@@ -566,6 +612,54 @@ mod tests {
             parent_cwd,
             &parent_env,
         )
+    }
+
+    /// A Windows parent block may spell the platform essentials in any case —
+    /// PowerShell hands down `SystemRoot` / `ComSpec` / `Path`, Git Bash and
+    /// MSYS hand down `SYSTEMROOT` / `COMSPEC` / `PATH`. The allowlist copy is a
+    /// byte-exact `BTreeMap` lookup, so it used to drop whichever spelling did
+    /// not match the constant, and the sandbox replaces the child's environment
+    /// wholesale — a child launched with no `%SystemRoot%` cannot start
+    /// `powershell.exe` at all.
+    ///
+    /// Driven through the injectable `parent_env` seam so the assertion does
+    /// not depend on how *this* test binary happened to be launched.
+    #[cfg(windows)]
+    #[test]
+    fn windows_allowlist_matches_parent_env_case_insensitively() {
+        let parent = tempfile::tempdir().expect("create parent cwd fixture");
+        let env = resolved_baseline_env(
+            parent.path(),
+            BTreeMap::from([
+                (OsString::from("SYSTEMROOT"), OsString::from(r"C:\Windows")),
+                (
+                    OsString::from("COMSPEC"),
+                    OsString::from(r"C:\Windows\system32\cmd.exe"),
+                ),
+                (OsString::from("Path"), OsString::from(r"C:\Windows")),
+                (OsString::from("pathext"), OsString::from(".COM;.EXE")),
+            ]),
+        );
+        for (canonical, expected) in [
+            ("SystemRoot", r"C:\Windows"),
+            ("ComSpec", r"C:\Windows\system32\cmd.exe"),
+            ("PATH", r"C:\Windows"),
+            ("PATHEXT", ".COM;.EXE"),
+        ] {
+            assert_eq!(
+                env.get(OsStr::new(canonical)).map(OsString::as_os_str),
+                Some(OsStr::new(expected)),
+                "{canonical} must survive an oddly-cased parent env"
+            );
+        }
+        // Copied under the canonical spelling only — one entry per variable, so
+        // the later unconditional inserts cannot create a case-variant twin.
+        for parent_spelling in ["SYSTEMROOT", "COMSPEC", "Path", "pathext"] {
+            assert!(
+                env.get(OsStr::new(parent_spelling)).is_none(),
+                "{parent_spelling} must not appear beside its canonical form"
+            );
+        }
     }
 
     #[test]
@@ -811,9 +905,16 @@ mod tests {
     #[test]
     fn windows_platform_essentials_are_allowlisted() {
         let sandbox = TestSandbox::new();
-        for essential in ["PATH", "PATHEXT", "SystemRoot", "ComSpec"] {
+        // Driven off `platform_allowlist()` rather than a hand-copied subset, so
+        // a name added there is covered automatically. `std::env::var_os` is the
+        // reference oracle: it is case-insensitive on Windows, which is exactly
+        // the property the allowlist copy has to match.
+        for essential in platform_allowlist() {
             if std::env::var_os(essential).is_some() {
-                assert!(env_value(&sandbox, essential).is_some(), "{essential}");
+                assert!(
+                    env_value(&sandbox, essential).is_some(),
+                    "{essential} is set in this process but missing from the sandbox"
+                );
             }
         }
     }

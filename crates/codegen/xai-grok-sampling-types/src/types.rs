@@ -1286,11 +1286,29 @@ impl ApiBackend {
         matches!(self, Self::Messages)
     }
 
-    /// Whether [`ConversationRequest::prompt_cache_key`] reaches the wire. Only the Responses mapping sends it, so a key set elsewhere is inert.
+    /// Whether this backend's request mapping carries
+    /// [`ConversationRequest::prompt_cache_key`] onto the wire. A key set on a
+    /// backend that drops it is inert, and its absence looks like a 0% cache
+    /// hit rather than a bug — which is why callers gate on this.
+    ///
+    /// Both OpenAI-shaped mappings send it: `CreateResponse::from` for the
+    /// Responses wire (`Responses` / `CodexResponses`, which share
+    /// [`Self::is_responses_wire`] and the sampler's
+    /// `stamp_responses_prompt_cache_key`), and `ChatCompletionRequest::from`
+    /// for Chat Completions, which has carried `prompt_cache_key` since the
+    /// OpenAI-prompt-cache work (conversation.rs:2463). The Messages,
+    /// GoogleGenerateContent, BedrockConverseStream and PiMessages mappings
+    /// have no such field. `prompt_cache_key_reaches_the_wire_only_where_the_backend_claims`
+    /// (conversation.rs) holds this honest against the mappings themselves.
+    ///
+    /// This is the **mapping-level** answer. On Chat Completions a per-model
+    /// `RequestCompat::supports_prompt_cache_key == false` can still strip the
+    /// field in the sampler (xai-grok-sampler/src/client.rs:1717), so a `true`
+    /// here means "this backend can send it", not "this request did".
     ///
     /// [`ConversationRequest::prompt_cache_key`]: crate::conversation::ConversationRequest::prompt_cache_key
     pub fn forwards_prompt_cache_key(&self) -> bool {
-        matches!(self, Self::Responses)
+        self.is_responses_wire() || matches!(self, Self::ChatCompletions)
     }
 }
 
@@ -1858,8 +1876,8 @@ mod tests {
             },
             "finish_reason": null
         }"#;
-        let choice: ChatChunkChoice = serde_json::from_str(json)
-            .expect("ChatChunkChoice with null index should deserialize");
+        let choice: ChatChunkChoice =
+            serde_json::from_str(json).expect("ChatChunkChoice with null index should deserialize");
         assert_eq!(choice.index, 0);
         assert_eq!(choice.delta.content.as_deref(), Some("x"));
     }

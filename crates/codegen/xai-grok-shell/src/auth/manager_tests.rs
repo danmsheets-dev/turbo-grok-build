@@ -2611,19 +2611,37 @@ async fn enrichment_task_preserves_interleaved_token_rotation() {
 
     // Wait for both spawned tasks to land. Each: 50ms /user + lock
     // wait + write. We poll for the eventually-consistent state.
+    //
+    // The budget is a liveness bound, not the property under test: the
+    // assertions below are on the final content, and a violation fails them
+    // whatever the budget is. This test's long-standing intermittent red was
+    // NOT slowness — it was `is_lock_contended` (manager/lock.rs) failing to
+    // recognise Windows' ERROR_LOCK_VIOLATION, so whichever enrichment task
+    // lost the race for `auth.json.lock` gave up instantly and `team_id` never
+    // landed. With that fixed this converges in one poll; the raised budget
+    // only stops a heavily loaded host from re-creating a spurious red, and
+    // `last_seen` names the field that never arrived if it ever times out.
     let auth_path = dir.path().join("auth.json");
     let mut final_state = None;
-    for _ in 0..30 {
+    let mut last_seen = None;
+    for _ in 0..150 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let store = read_auth_json(&auth_path).unwrap();
         let entry = store.values().next().unwrap().clone();
+        last_seen = Some((
+            entry.key.clone(),
+            entry.refresh_token.clone(),
+            entry.team_id.clone(),
+            store.len(),
+        ));
         // Both rotations done AND enrichment landed.
         if entry.refresh_token.as_deref() == Some("rt-v2") && entry.team_id.is_some() {
             final_state = Some(entry);
             break;
         }
     }
-    let final_state = final_state.expect("v2 + enrichment must land within 3s");
+    let final_state = final_state
+        .unwrap_or_else(|| panic!("v2 + enrichment must land within 15s; last seen {last_seen:?}"));
 
     // Core invariant: v2's tokens survive both enrichment writes.
     assert_eq!(
@@ -3994,6 +4012,77 @@ async fn shared_api_key_provider_disk_memo_follows_rewrites() {
 
     crate::auth::clear_api_key(dir.path()).unwrap();
     assert_eq!(provider.current_api_key_async().await, None);
+}
+
+/// The static-key memo must notice a rewrite that the stat triple cannot see.
+///
+/// `shared_api_key_provider_disk_memo_follows_rewrites` above asserts the
+/// user-visible consequence, but it only *catches* the defect when the two
+/// writes land in different filesystem timestamp ticks — which is exactly why
+/// it was an intermittent red on Windows rather than a permanent one. This
+/// removes the luck: `first-key` and `fresh-key` are the same byte length, and
+/// the mtime is pinned to one instant on both writes, so `(ino, mtime, len)` is
+/// byte-identical on Windows (where `ino` is hardcoded to `0`). Only the
+/// write-generation component of `AuthFileStamp` can tell them apart.
+#[test]
+fn auth_file_stamp_changes_when_the_stat_triple_cannot_tell() {
+    /// Force a known last-write time so the two rewrites cannot be
+    /// distinguished by mtime.
+    fn pin_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
+    let pinned = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+
+    // Written through `write_auth_json` (the same funnel `store_api_key` uses)
+    // with one fixed record, so the only thing that varies between the two
+    // writes is the nine-byte key. Going through `store_api_key` would stamp a
+    // fresh timestamp each time and the serialized length would drift.
+    let base = GrokAuth {
+        auth_mode: AuthMode::ApiKey,
+        ..GrokAuth::test_default()
+    };
+    let write = |key: &str| {
+        let mut store = crate::auth::model::AuthStore::new();
+        store.insert(
+            crate::auth::model::API_KEY_SCOPE.to_owned(),
+            GrokAuth {
+                key: key.to_owned(),
+                ..base.clone()
+            },
+        );
+        crate::auth::storage::write_auth_json(&path, &store).unwrap();
+    };
+
+    write("first-key");
+    pin_mtime(&path, pinned);
+    let first = super::auth_file_stamp(&path).expect("auth.json exists after the first write");
+
+    write("fresh-key");
+    pin_mtime(&path, pinned);
+    let second = super::auth_file_stamp(&path).expect("auth.json exists after the rewrite");
+
+    // Fixture premises — if either of these stops holding, the test has stopped
+    // testing what it claims and must be rebuilt, not relaxed.
+    assert_eq!(
+        first.2, second.2,
+        "fixture premise: both writes must carry the pinned mtime"
+    );
+    assert_eq!(
+        first.3, second.3,
+        "fixture premise: the two keys are the same length, so `len` cannot \
+         distinguish the rewrites"
+    );
+
+    assert_ne!(
+        first, second,
+        "a rewrite must invalidate the static-key memo even when the stat \
+         triple (ino, mtime, len) is identical — otherwise a rotated API key \
+         keeps resolving to the old value"
+    );
 }
 
 #[tokio::test]

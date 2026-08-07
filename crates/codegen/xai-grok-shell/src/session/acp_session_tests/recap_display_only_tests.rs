@@ -139,7 +139,7 @@ async fn side_question_routes_on_the_session_id_when_the_key_is_not_forwarded() 
             server.set_response("an answer");
             let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
             cfg.base_url = server.url();
-            cfg.api_backend = xai_grok_sampling_types::ApiBackend::ChatCompletions;
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Messages;
             actor.chat_state_handle.update_sampling_config(cfg);
 
             actor.chat_state_handle.replace_conversation(vec![
@@ -163,20 +163,23 @@ async fn side_question_routes_on_the_session_id_when_the_key_is_not_forwarded() 
             // assert the routing rule on the request the session actually built.
             assert_no_x_grok_headers(req);
 
-            let built = actor.parent_cached_request(
-                super::recap::AuxCall {
-                    items: vec![ConversationItem::user("what does xor mean here?")],
-                    tools: vec![],
-                    hosted_tools: vec![],
-                    model: "test-model".into(),
-                    reasoning_effort: None,
-                    backend: xai_grok_sampling_types::ApiBackend::ChatCompletions,
-                    conv_id: "btw-abc".into(),
-                    req_id: "xai-btw-abc".into(),
-                },
-            );
+            let built = actor.parent_cached_request(super::recap::AuxCall {
+                items: vec![ConversationItem::user("what does xor mean here?")],
+                tools: vec![],
+                hosted_tools: vec![],
+                model: "test-model".into(),
+                reasoning_effort: None,
+                backend: xai_grok_sampling_types::ApiBackend::Messages,
+                conv_id: "btw-abc".into(),
+                req_id: "xai-btw-abc".into(),
+            });
+            // Chat Completions *does* forward the key (its mapping has carried
+            // `prompt_cache_key` since the OpenAI-prompt-cache work); Messages
+            // has no such field. The premise is asserted, not assumed, so the
+            // routing rule below is exercised against a backend that really
+            // drops it.
             assert!(
-                !xai_grok_sampling_types::ApiBackend::ChatCompletions.forwards_prompt_cache_key(),
+                !xai_grok_sampling_types::ApiBackend::Messages.forwards_prompt_cache_key(),
                 "fixture premise: this backend must be one that drops the cache key"
             );
             assert_eq!(
@@ -1336,7 +1339,8 @@ async fn parent_cached_request_labels_recap_and_btw_calls() {
                 ApiBackend::Responses.forwards_prompt_cache_key(),
                 "fixture premise: Responses forwards the cache key"
             );
-            for (label_conv, label_req) in [("recap-abc", "xai-recap-abc"), ("btw-abc", "xai-btw-abc")]
+            for (label_conv, label_req) in
+                [("recap-abc", "xai-recap-abc"), ("btw-abc", "xai-btw-abc")]
             {
                 let built =
                     actor.parent_cached_request(call(ApiBackend::Responses, label_conv, label_req));
@@ -1362,11 +1366,8 @@ async fn parent_cached_request_labels_recap_and_btw_calls() {
                 );
 
                 // The same call on a backend that drops the key falls back.
-                let built = actor.parent_cached_request(call(
-                    ApiBackend::ChatCompletions,
-                    label_conv,
-                    label_req,
-                ));
+                let built =
+                    actor.parent_cached_request(call(ApiBackend::Messages, label_conv, label_req));
                 assert_eq!(
                     built.x_grok_conv_id.as_deref(),
                     Some(session_id.as_str()),

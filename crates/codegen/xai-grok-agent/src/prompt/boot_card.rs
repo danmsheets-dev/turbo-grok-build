@@ -95,9 +95,7 @@ impl BootCardContext {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "turbo".into());
         let git_summary = quick_git_summary(cwd).unwrap_or_else(|| "no".into());
-        let developer_log_dir = xai_grok_developer_log::default_root()
-            .display()
-            .to_string();
+        let developer_log_dir = xai_grok_developer_log::default_root().display().to_string();
         let developer_log_enabled = xai_grok_developer_log::is_enabled();
         let feature_request_log_dir = xai_grok_developer_log::fr_default_root()
             .display()
@@ -141,7 +139,10 @@ impl BootCardContext {
 /// Looks for `…/.grok/worktrees/…/subagent-…` (Unix or Windows separators).
 /// Does **not** claim worktree when CWD is the parent repo.
 pub fn infer_isolation_label(cwd: &Path) -> String {
-    let s = cwd.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let s = cwd
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     let under_worktrees = s.contains("/.grok/worktrees/") || s.contains("/grok/worktrees/");
     let looks_like_child = s.contains("subagent-");
     if under_worktrees && looks_like_child {
@@ -313,9 +314,8 @@ pub fn render_boot_card(mode: BootCardMode, ctx: &BootCardContext) -> Option<Ren
     // Soft budget enforcement: if over, drop provider notes by re-rendering short only.
     let (text, mode, token_estimate) = if mode == BootCardMode::Full && token_estimate > 1800 {
         let short = render_short(ctx);
-        let wrapped = format!(
-            "<turbo_boot_card version=\"1\" mode=\"short\">\n{short}\n</turbo_boot_card>"
-        );
+        let wrapped =
+            format!("<turbo_boot_card version=\"1\" mode=\"short\">\n{short}\n</turbo_boot_card>");
         let te = wrapped.chars().count().div_ceil(4);
         (wrapped, BootCardMode::Short, te)
     } else if mode == BootCardMode::Short && token_estimate > 1650 {
@@ -535,12 +535,28 @@ fn render_full(ctx: &BootCardContext) -> String {
     s
 }
 
+/// Closing marker appended to a truncated card so the tag still balances.
+const TRUNCATION_SUFFIX: &str = "\n…</turbo_boot_card>\n";
+
+/// Cut `s` to at most `max_chars` **characters**, including the
+/// [`TRUNCATION_SUFFIX`] that re-closes the tag.
+///
+/// The reservation must be the suffix's own char count. It used to be a
+/// hardcoded `20` against a 21-char suffix, so every truncated card came back
+/// exactly one character over `max_chars` — and since the caller passes
+/// `budget * 4` and then re-derives `chars.div_ceil(4)`, that single character
+/// pushed `token_estimate` to `budget + 1`. The soft cap that exists to
+/// guarantee the budget was itself the thing breaking it.
 fn truncate_to_budget(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(max_chars.saturating_sub(20)).collect();
-    out.push_str("\n…</turbo_boot_card>\n");
+    let suffix_chars = TRUNCATION_SUFFIX.chars().count();
+    let mut out: String = s
+        .chars()
+        .take(max_chars.saturating_sub(suffix_chars))
+        .collect();
+    out.push_str(TRUNCATION_SUFFIX);
     out
 }
 
@@ -698,5 +714,30 @@ mod tests {
         );
         assert!(card.text.contains("VERIFY"));
         assert!(!card.text.contains("turbo subagent land"));
+    }
+
+    /// The soft cap must actually cap. The suffix reservation used to be a
+    /// hardcoded 20 against a 21-char suffix, so a truncated card came back one
+    /// character over — enough to push `token_estimate` past the budget the cap
+    /// exists to enforce. Asserted directly here so a future edit to
+    /// `TRUNCATION_SUFFIX` cannot reintroduce the drift silently.
+    #[test]
+    fn truncate_to_budget_never_exceeds_the_budget() {
+        let long = "x".repeat(10_000);
+        for max_chars in [TRUNCATION_SUFFIX.chars().count(), 64, 1650 * 4, 1800 * 4] {
+            let out = truncate_to_budget(&long, max_chars);
+            assert!(
+                out.chars().count() <= max_chars,
+                "truncation to {max_chars} produced {} chars",
+                out.chars().count()
+            );
+            assert!(
+                out.ends_with(TRUNCATION_SUFFIX),
+                "a truncated card must still close its tag"
+            );
+        }
+        // Under budget: returned verbatim, no suffix.
+        let short = "short card";
+        assert_eq!(truncate_to_budget(short, 1000), short);
     }
 }

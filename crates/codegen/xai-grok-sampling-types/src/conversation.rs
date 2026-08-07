@@ -4420,10 +4420,14 @@ mod tests {
         for backend in [
             crate::ApiBackend::ChatCompletions,
             crate::ApiBackend::Responses,
+            // Same `CreateResponse::from` mapping as `Responses` — they share
+            // the Responses wire (`ApiBackend::is_responses_wire`), so the
+            // predicate has to answer the same for both.
+            crate::ApiBackend::CodexResponses,
             crate::ApiBackend::Messages,
         ] {
             let on_wire = match backend {
-                crate::ApiBackend::Responses => {
+                crate::ApiBackend::Responses | crate::ApiBackend::CodexResponses => {
                     rs::CreateResponse::from(&request())
                         .prompt_cache_key
                         .as_deref()

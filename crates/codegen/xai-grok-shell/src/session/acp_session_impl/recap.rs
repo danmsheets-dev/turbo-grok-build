@@ -212,8 +212,10 @@ impl SessionActor {
     /// Temperature stays unset: cli-chat-proxy may inject a `thinking` config, and the Messages API then requires temperature == 1.
     pub(crate) fn parent_cached_request(&self, call: AuxCall) -> ConversationRequest {
         let session_id = self.session_info.id.to_string();
-        // Only the Responses mapping sends the cache key. On the other backends the conv id is what ties a call to its conversation,
-        // so it has to stay the parent session id; the `btw-`/`recap-` label still shows up in `x_grok_req_id`.
+        // The OpenAI-shaped mappings (Responses wire + Chat Completions) send the cache key, so affinity to the parent conversation
+        // survives without help and the conv id is free to carry the `btw-`/`recap-` label. On a backend that drops the key
+        // (Messages, Google, Bedrock, Pi) the conv id is all that ties a call to its conversation, so it has to stay the parent
+        // session id; the label still shows up in `x_grok_req_id`.
         let conv_id = if call.backend.forwards_prompt_cache_key() {
             call.conv_id
         } else {
@@ -641,7 +643,8 @@ impl SessionActor {
                     xai_grok_sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
                 xai_grok_sampler::collect_response(events).await
             }
-            crate::sampling::ApiBackend::Responses | crate::sampling::ApiBackend::CodexResponses => {
+            crate::sampling::ApiBackend::Responses
+            | crate::sampling::ApiBackend::CodexResponses => {
                 let (raw, meta, doom_loop) = sampling_client
                     .conversation_stream_responses(request)
                     .await

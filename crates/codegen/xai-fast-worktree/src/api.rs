@@ -1592,8 +1592,7 @@ pub mod gc {
             const STILL_ACTIVE: u32 = 259;
             // SAFETY: Win32 process query APIs; handle closed on all paths.
             unsafe {
-                let handle: HANDLE =
-                    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
                 if handle.is_null() {
                     return false;
                 }
@@ -1618,7 +1617,8 @@ pub mod gc {
         #[allow(dead_code)]
         Unsupported,
         /// Enumerator failed or unusable — age path fail-closes.
-        #[allow(dead_code)] // constructed on Linux/macOS enumerators; Windows uses Unsupported
+        #[allow(dead_code)]
+        // constructed on Linux/macOS enumerators; Windows uses Unsupported
         Failed,
     }
 
@@ -2162,15 +2162,21 @@ pub mod gc {
             let mut fresh = rec_at("/no/such/wt", 1);
             fresh.last_accessed_at = Some(now + 10);
             assert!(!is_reclaimable(&fresh, now, &[], &base));
-            // A live creator pid protects it (Unix probe only; non-Unix is never alive).
+            // A live creator pid protects it. `is_pid_alive` has a real probe on
+            // both Unix (`kill(pid, 0)`, api.rs:1571) and Windows (`OpenProcess`
+            // + `GetExitCodeProcess`/STILL_ACTIVE, api.rs:1581); only a platform
+            // that is neither fails closed (api.rs:1606).
             let mut live_creator = rec_at("/no/such/wt", 1);
             live_creator.creator_pid = Some(std::process::id());
-            #[cfg(unix)]
-            assert!(!is_reclaimable(&live_creator, now, &[], &base));
-            #[cfg(not(unix))]
+            #[cfg(any(unix, windows))]
+            assert!(
+                !is_reclaimable(&live_creator, now, &[], &base),
+                "a live creator pid must guard the worktree"
+            );
+            #[cfg(not(any(unix, windows)))]
             assert!(
                 is_reclaimable(&live_creator, now, &[], &base),
-                "non-Unix PID probe is fail-closed (never alive)"
+                "PID probe is fail-closed (never alive) where there is no probe"
             );
             // A live process CWD inside the tree protects it.
             let inside = std::path::PathBuf::from("/no/such/wt/sub");

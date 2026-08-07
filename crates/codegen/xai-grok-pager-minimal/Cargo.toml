@@ -45,5 +45,9 @@ xai-token-estimation = { workspace = true }
 # (`test_agent_view`, yolo/auto setters), gated behind its test-only
 # helpers.
 xai-grok-pager = { path = "../xai-grok-pager", default-features = false, features = ["test-support"] }
+# Pre-`main` hook for `test_util::pin_modern_console_glyphs_for_tests`: the
+# glyph/color probe in xai-grok-pager-render caches its answer in a `OnceLock`,
+# so `GROK_FORCE_LEGACY_CONSOLE` has to be set before any test thread reads it.
+ctor = { workspace = true }
 
 [features]

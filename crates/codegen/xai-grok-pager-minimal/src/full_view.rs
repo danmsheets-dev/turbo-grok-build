@@ -408,21 +408,30 @@ mod tests {
         let appearance = super::super::commit::committed_appearance(
             &xai_grok_pager::appearance::AppearanceConfig::default(),
         );
-        let entry =
-            ScrollbackEntry::new(RenderBlock::edit("/alternate/worktree/src/main.rs", None));
+        // Host-native absolute spellings: the elision compares the block's
+        // path against the owning session cwd, and a POSIX literal is not
+        // absolute on Windows (`Path::is_absolute()` wants a drive prefix).
+        let entry = ScrollbackEntry::new(RenderBlock::edit(
+            &crate::test_util::abs_path("alternate/worktree/src/main.rs"),
+            None,
+        ));
         let mut out = String::new();
 
         render_entry_to_ansi(
             &entry,
             &theme,
             &appearance,
-            std::path::Path::new("/alternate/worktree"),
+            &crate::test_util::abs_path_buf("alternate/worktree"),
             &mut out,
         );
 
-        assert!(out.contains("src/main.rs"), "transcript: {out:?}");
+        // The painted path keeps its native separator (`normalize_lexically`
+        // rebuilds it from `Path::components()`), so the expectation must too.
+        let rel = crate::test_util::native_sep("src/main.rs");
+        assert!(out.contains(&rel), "transcript: {out:?}");
+        let prefix = crate::test_util::abs_path("alternate/worktree");
         assert!(
-            !out.contains("/alternate/worktree"),
+            !out.contains(&prefix),
             "session prefix should be elided: {out:?}"
         );
     }

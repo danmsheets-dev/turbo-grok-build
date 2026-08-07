@@ -301,6 +301,7 @@ pub fn parse_hooks_from_value_with_dir(
             source_dir,
             error_path,
             provenance: HookProvenance::File,
+            base_env: &HashMap::new(),
         },
     )
 }
@@ -349,6 +350,7 @@ pub fn parse_hooks_from_config_layers(
                 source_dir: &source_dir,
                 error_path,
                 provenance: layer.provenance(),
+                base_env: &HashMap::new(),
             },
         );
         all_specs.extend(specs);
@@ -359,6 +361,28 @@ pub fn parse_hooks_from_config_layers(
 }
 
 pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
+    parse_hook_file_with_env(content, file_path, &HashMap::new())
+}
+
+/// [`parse_hook_file`], but with a caller-supplied env map that outranks both
+/// the handler's own `env` block and the Grok process environment when
+/// `command` / `url` are expanded.
+///
+/// This exists for the plugin adapter. Plugin path placeholders
+/// (`${CLAUDE_PLUGIN_ROOT}`, `${GROK_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`,
+/// `${GROK_PLUGIN_DATA}`) are **plugin-owned**: the adapter forces them into
+/// `extra_env` precisely so a plugin author cannot repoint another plugin's
+/// root. Without this seam the load-time expansion below would already have
+/// resolved them from the *ambient process environment* — and those four names
+/// really are exported into hook children (`HookSpec::extra_env` is passed to
+/// `Command::envs`), so a Grok started from inside plugin A's hook would
+/// resolve every plugin B command against A's directory. Passing the
+/// plugin-owned map here makes the first expansion the authoritative one.
+pub fn parse_hook_file_with_env(
+    content: &str,
+    file_path: &Path,
+    base_env: &HashMap<String, String>,
+) -> (Vec<HookSpec>, Vec<HookError>) {
     let specs = Vec::new();
     let mut errors = Vec::new();
 
@@ -410,6 +434,7 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
             source_dir: &source_dir,
             error_path: file_path,
             provenance: HookProvenance::File,
+            base_env,
         },
     )
 }
@@ -500,6 +525,10 @@ struct SpecContext<'a> {
     source_dir: &'a Path,
     error_path: &'a Path,
     provenance: HookProvenance,
+    /// Caller-owned env that outranks the handler's own `env` block when
+    /// `command` / `url` are expanded. Empty for every path except the plugin
+    /// adapter; see [`parse_hook_file_with_env`].
+    base_env: &'a HashMap<String, String>,
 }
 
 /// Build one [`HookSpec`] from a handler entry, or the [`HookError`] preventing it.
@@ -523,6 +552,17 @@ fn build_one_spec(
     let mut extra_env: HashMap<String, String> = handler.env;
     strip_reserved_env_keys(&mut extra_env, &name, ctx.error_path);
 
+    // Expansion-only view: `ctx.base_env` outranks the handler's own `env`, but
+    // is NOT written into `spec.extra_env` — the caller that supplied it owns
+    // that merge (see `parse_hook_file_with_env`).
+    let expansion_env = if ctx.base_env.is_empty() {
+        std::borrow::Cow::Borrowed(&extra_env)
+    } else {
+        let mut merged = extra_env.clone();
+        merged.extend(ctx.base_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        std::borrow::Cow::Owned(merged)
+    };
+
     let handler_type = match handler.handler_type.parse::<HandlerType>() {
         Ok(ht) => ht,
         Err(()) => {
@@ -543,7 +583,7 @@ fn build_one_spec(
                     detail: "command handler requires a 'command' field".into(),
                 });
             };
-            let expanded = crate::env_expand::expand_env_vars_with_extra(&command, &extra_env);
+            let expanded = crate::env_expand::expand_env_vars_with_extra(&command, &expansion_env);
             (Some(PathBuf::from(expanded)), Some(command), None, None)
         }
         HandlerType::Http => {
@@ -554,7 +594,7 @@ fn build_one_spec(
                     detail: "http handler requires a 'url' field".into(),
                 });
             };
-            let expanded = crate::env_expand::expand_env_vars_with_extra(&url, &extra_env);
+            let expanded = crate::env_expand::expand_env_vars_with_extra(&url, &expansion_env);
             (None, None, Some(expanded), Some(url))
         }
     };
