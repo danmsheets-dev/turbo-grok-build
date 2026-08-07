@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.119--r1%20RC15-blue" alt="RC15">
+  <img src="https://img.shields.io/badge/version-0.2.119--r2%20RC2-blue" alt="RC2">
   <img src="https://img.shields.io/badge/rust-1.93.0-orange?logo=rust" alt="Rust 1.93">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **RC15** · wire version **`0.2.119-r1`** (synced to xAI upstream 0.2.119).
+Current release line: **RC2** · wire version **`0.2.119-r2`** (upstream base 0.2.119).
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
 
@@ -62,12 +62,31 @@ is a multi-agent development runtime** built on that foundation.
 | UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) |
 | Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
-### Highlights (RC15 + disk/tools closeout)
+### Highlights (RC2 — `0.2.119-r2`)
 
-**RC15** synced the wire line to **0.2.119** (xAI upstream) with Windows/security
-fixes. The latest closeout (see **Unreleased** in [`CHANGELOG.md`](./CHANGELOG.md))
-hardens densify disk safety and CI schema checks:
+**RC2** is a correctness release. It kills a Windows crash that could take the app
+down mid-session, overhauls Game Mode, and repairs a test suite that had not been
+able to run to completion. See [`CHANGELOG.md`](./CHANGELOG.md) for full detail.
 
+- **Windows voice crash fixed (release blocker)** — `cpal`'s process-global WASAPI
+  device enumerator outlived the COM apartment that created it, so the **second**
+  push-to-talk dictation in a session hard-crashed the process (exit 139, no
+  panic, unsent draft lost). Voice mode is on by default, so this was reachable
+  by anyone dictating twice. All in-process `cpal` work now runs on one
+  long-lived audio host thread
+- **Game Mode overhaul** — hover tooltips on the **Supervisor** (model, phase,
+  turn elapsed, context usage, seats, branch) and on the **MCP server rack**
+  (per-server status, tool counts, failure detail, backed by a live status cache);
+  eleven new sprite animations; and the office no longer pins the event loop at
+  ~12 Hz while idle. Full audit: [`docs/RC2_GAME_MODE_AUDIT.md`](./docs/RC2_GAME_MODE_AUDIT.md)
+- **Test suite green for the first time in a long while** — the crash above
+  aborted the harness partway, hiding everything ordered after it. With it fixed:
+  **26 652 tests pass, 0 fail** across the workspace, and
+  `cargo check --workspace --all-targets` is clean
+- **Line endings made deterministic** — 34 files carried CRLF **in the git index**,
+  so Windows and Linux builders shipped different bytes. Now a `.gitattributes`
+  + a CI guard that *derives* the embedded-asset inventory rather than trusting a
+  hand-written list
 - **`turbo tools list [--require …]`** — prove `spawn_subagent` (and peers) are
   registered after config resolve; no model turn. Honors `GROK_SUBAGENTS=0`
 - **`turbo disk report|check|clean --safe`** — free-space gate status, keep-N vs
@@ -76,6 +95,11 @@ hardens densify disk safety and CI schema checks:
   `GROK_MIN_FREE_GB=40` fail-closed before isolation=worktree create
 - **Agent cargo policy** — package-scoped tests, `CARGO_INCREMENTAL=0` one-shots,
   clean debug after ship builds (see [`AGENTS.md`](./AGENTS.md))
+
+Three bugs were found only because the suite could finally run: Codex Live's
+Windows speaker output was **silently dead** (the stream dropped the instant it
+was created), Windows and macOS users were shown **Linux** paste instructions, and
+`locales/en.yml` was compiled into the binary without an LF pin.
 
 Still ships from earlier RCs: **`web_fetch`** + workflow routing (RC14), isolation
 FS jail (RC12), Workspace Tree inject (RC13), Game Mode (RC11), baselines + Boot
@@ -105,7 +129,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Agent Boot Card** | Ops brief: tools, isolation, recovery, logging, workflows | RC9 / RC14 |
 | **Auto Developer Log** | Structured product issues (`developer_log` + `turbo issues`) | RC9 |
 | **Feature Request Log** | Missing capability surface (`feature_request_log` + `turbo features`) | RC11 |
-| **Game Mode** | `Ctrl+G` pixel office of supervisor + subagent desks | RC11 |
+| **Game Mode** | `Ctrl+G` pixel office of supervisor + subagent desks; hover tooltips (Supervisor / MCP rack), 11 animations, parks when idle | RC11 / RC2 |
 | **Multi-provider** | Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, … | r2+ |
 | **Headless honesty** | Streaming-json tool/subagent events, confine, trust gates | RC6 |
 
@@ -125,8 +149,12 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **r12** | `0.2.114-r12` | Isolation **FS jail**, densify lifecycle, MCP harden, Game Mode polish |
 | **r13** | `0.2.114-r13` | **Workspace Tree** inject, densify engines, Game Mode performance |
 | **r14** | `0.2.114-r14` | **`web_fetch`** + **workflow routing** |
-| **r15** | **`0.2.119-r1`** | **Upstream 0.2.119 sync**, security + Windows correctness |
-| **r16** (in progress) | — | Disk keep-N / free gate, **`turbo tools list`**, disk check/clean |
+| **r15** | `0.2.119-r1` | **Upstream 0.2.119 sync**, security + Windows correctness |
+| **r2** | **`0.2.119-r2`** | **Windows voice-crash fix**, **Game Mode overhaul**, green suite, LF normalization, disk keep-N / free gate, **`turbo tools list`** |
+
+> RC numbering follows the **wire version**, which restarted at `r1` when RC15
+> synced upstream `0.2.119`. So the release after RC15 is **r2** (`0.2.119-r2`),
+> not "r16".
 
 Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 
@@ -148,7 +176,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **RC15** · `0.2.119-r1` (+ RC2 disk/tools closeout on `dev`) |
+| Release line | upstream cadence | **RC2** · `0.2.119-r2` |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -179,21 +207,21 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v0.2.119-r1
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v0.2.119-r2
 ```
 
 ```powershell
-# Windows — pin RC15
+# Windows — pin RC2
 irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
 # or from a clone after a release tag exists:
-# .\install.ps1 -Version v0.2.119-r1
+# .\install.ps1 -Version v0.2.119-r2
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
 (`%USERPROFILE%\.turbo\bin\turbo.exe` on Windows).
 
 > **Note:** Prebuilt install requires a published GitHub Release for
-> `v0.2.119-r1`. Until then, [build from source](#building-from-source) and copy
+> `v0.2.119-r2`. Until then, [build from source](#building-from-source) and copy
 > `target/release-dist/turbo` into `~/.turbo/bin`.  
 > Repo: [danmsheets-dev/turbo-grok-build](https://github.com/danmsheets-dev/turbo-grok-build).
 
@@ -370,9 +398,28 @@ the boot card when indexing is enabled.
 ## Game Mode
 
 `Ctrl+G` opens a pixel **office** view of the Supervisor (main agent) and
-subagent desks (added **RC11**, polished RC12–RC13). Chat composer stays
-available. Compact terminals fall back to a simpler layout. Tasks pane:
-`Ctrl+Shift+G`.
+subagent desks (added **RC11**, polished RC12–RC13, overhauled **RC2**). Chat
+composer stays available. Compact terminals fall back to a simpler layout. Tasks
+pane: `Ctrl+Shift+G`.
+
+**Hover tooltips (RC2).** Hover the **Supervisor** for model, phase, turn elapsed,
+context window used/total, seat + overflow counts and git branch. Hover the **MCP
+server rack** for per-server status, tool counts and failure detail — backed by a
+live status cache, so it stays current outside the `/mcps` modal. `Tab` /
+`Shift+Tab` cycle desks; `Esc` clears.
+
+**Animations (RC2).** Eleven added: debug-rage pose on failure, arms-up celebrate
+with confetti, papers flying during handoff, monitor glow + compile flash, a door
+that swings on spawn/exit, MCP rack LEDs bursting on **real tool calls**,
+coffee-sip idle, a real day/night wall clock, an office-wide success wave, typing
+cadence driven by token throughput, and a floor robot that patrols only while the
+office is busy.
+
+**Idle cost (RC2).** An open office used to wake the event loop ~12×/sec forever.
+A frozen room now parks — Compact and Unicode tiers at zero wakeups, the pixel
+office at a budgeted ~0.33 Hz ambient tick that drives the idle animations.
+Closing the view now also releases ~8–10 MB of image caches that previously
+leaked for the life of the process.
 
 ![Game Mode](docs/assets/screenshot-game-mode.png)
 
@@ -412,8 +459,8 @@ Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
 # Or only: target\release-dist\{incremental,deps,build,.fingerprint}
 ```
 
-RC15 plans a productized `turbo disk report|clean` surface (see feature request
-log / [`CHANGELOG.md`](./CHANGELOG.md) Unreleased).
+`turbo disk report|check|clean --safe` shipped in **RC2** — see
+[`CHANGELOG.md`](./CHANGELOG.md).
 
 ---
 
