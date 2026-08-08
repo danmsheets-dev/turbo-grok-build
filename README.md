@@ -89,8 +89,9 @@ able to run to completion. See [`CHANGELOG.md`](./CHANGELOG.md) for full detail.
   hand-written list
 - **`turbo tools list [--require …]`** — prove `spawn_subagent` (and peers) are
   registered after config resolve; no model turn. Honors `GROK_SUBAGENTS=0`
-- **`turbo disk report|check|clean --safe`** — free-space gate status, keep-N vs
-  worktree count, safe reclaim of `target/debug` + old soft-preserved trees
+- **`turbo disk report|check|clean --safe|prune`** — multi-path free-space gate,
+  category reclaim (`--include debug-pdbs|release|release-dist-caches|…`),
+  JSON `reclaimed_bytes`, unified prune (RC3 full Disk Clean)
 - **Keep-N + free gate defaults** — `GROK_SUBAGENT_KEEP_N=3` (age-only when `0`);
   `GROK_MIN_FREE_GB=40` fail-closed before isolation=worktree create
 - **Agent cargo policy** — package-scoped tests, `CARGO_INCREMENTAL=0` one-shots,
@@ -119,7 +120,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Soft-preserve + keep-N** | Live worktrees kept for review; `GROK_SUBAGENT_KEEP_N` (default 3; `0` = age-only) | RC9 / RC12 / RC2 |
 | **Free-space gate** | Pre-spawn + `turbo disk check` (`GROK_MIN_FREE_GB`, default 40) | RC12 / RC2 |
 | **`turbo tools list`** | Headless schema assert (`--require spawn_subagent`) without a model turn | RC2 |
-| **`turbo disk`** | Report / check / safe clean (`target/debug`, old worktrees, tree store) | RC15 / RC2 |
+| **`turbo disk`** | Report / check / category clean / prune (multi-path free space) | RC15 / RC2 / **RC3** |
 | **FS confine (worktree)** | Write path + shell operand jail fail closed | RC12 |
 | **`/deepaudit`** | Parallel investigate → independent verify → verified report | RC8 |
 | **`/deep-research`** | Bounded research with claim cross-check | earlier + RC14 routing |

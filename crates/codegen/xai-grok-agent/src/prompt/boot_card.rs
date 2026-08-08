@@ -425,7 +425,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - capability gaps: feature_request_log — file when a needed product surface is missing
 - surface: spawn={spawn} · isolation={isolation} · adl=`{adl_root}` · frl=`{frl_root}`
 - CLI: `{bin} issues|features file --class …` (aliases `--error-class` / `--request-class`)
-- disk: `{bin} disk report|check|clean --safe` · `{bin} subagent prune` · `{bin} tree prune`
+- disk: `{bin} disk report|check|clean --safe [--include …]` · `{bin} disk prune` · `{bin} subagent prune` · `{bin} tree prune`
 - tools: `{bin} tools list [--require spawn_subagent]` (headless schema assert)
 
 {workflows}

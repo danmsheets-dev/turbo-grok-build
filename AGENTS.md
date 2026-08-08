@@ -104,11 +104,21 @@ Do not delete a `build_*.txt` / `*_now.txt` that an active `Out-File` is still w
 Before `cargo test --workspace` or `cargo build --profile release-dist`:
 
 ```powershell
-# Product gate (exit 1 under GROK_MIN_FREE_GB, default 40)
+# Product gate (exit 1 under GROK_MIN_FREE_GB, default 40; multi-path)
 turbo disk check
-# Or dry-run safe reclaim of target/debug + old worktrees:
+turbo disk report --json   # category sizes + per-path free space
+
+# Dry-run safe reclaim of target/debug + old worktrees (RC2 default set):
 turbo disk clean --safe --dry-run
 turbo disk clean --safe --if-low-space
+
+# RC3 category clean (examples):
+turbo disk clean --safe --include debug-pdbs,debug-incremental --dry-run
+turbo disk clean --safe --include release --dry-run
+turbo disk clean --safe --include release-dist-caches --dry-run   # keeps turbo.exe
+turbo disk clean --safe --include cargo-home --i-accept-redownload --dry-run
+turbo disk prune --all --dry-run
+turbo disk prune --worktrees --execute
 ```
 
 Fallback without turbo:

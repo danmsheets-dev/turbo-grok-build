@@ -1056,7 +1056,31 @@ fn cmd_discard(cwd: &Path, r: &Resolved, drop_snapshot: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_prune(cwd: &str, session: Option<&str>, older_than: &str, execute: bool) -> Result<()> {
+/// Structured session-meta prune result (no I/O to stdout). Used by
+/// `turbo subagent prune` and `turbo disk prune --session-meta`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPruneReport {
+    pub older_than: String,
+    pub execute: bool,
+    pub candidates: Vec<SessionPruneCandidate>,
+    pub deleted: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPruneCandidate {
+    pub id: String,
+    pub session_id: String,
+    pub path: String,
+}
+
+/// Prune aged session subagent metadata dirs without printing.
+pub fn prune_session_meta(
+    cwd: &str,
+    session: Option<&str>,
+    older_than: &str,
+    execute: bool,
+) -> Result<SessionPruneReport> {
     let max_age = parse_duration(older_than)?;
     let cutoff = SystemTime::now()
         .checked_sub(max_age)
@@ -1064,47 +1088,88 @@ fn cmd_prune(cwd: &str, session: Option<&str>, older_than: &str, execute: bool) 
     let entries = list_entries(cwd, session)?;
     let mut candidates = Vec::new();
     for e in entries {
+        // Never prune metadata for active/running agents (recovery still needed).
+        if is_active_subagent_status(e.status.as_deref()) {
+            continue;
+        }
         let meta = PathBuf::from(&e.meta_path);
         let modified = fs::metadata(&meta)
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         if modified < cutoff {
-            candidates.push((e, meta.parent().map(|p| p.to_path_buf())));
+            let path = meta
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            candidates.push((
+                SessionPruneCandidate {
+                    id: e.id.clone(),
+                    session_id: e.session_id.clone(),
+                    path: path.clone(),
+                },
+                meta.parent().map(|p| p.to_path_buf()),
+            ));
         }
     }
-    if candidates.is_empty() {
+    let mut report = SessionPruneReport {
+        older_than: older_than.to_string(),
+        execute,
+        candidates: candidates.iter().map(|(c, _)| c.clone()).collect(),
+        deleted: Vec::new(),
+        failed: Vec::new(),
+    };
+    if !execute {
+        return Ok(report);
+    }
+    for (c, dir) in candidates {
+        if let Some(dir) = dir {
+            match fs::remove_dir_all(&dir) {
+                Ok(()) => report.deleted.push(dir.display().to_string()),
+                Err(err) => report
+                    .failed
+                    .push(format!("{}: {err}", dir.display())),
+            }
+        } else {
+            report.failed.push(format!("{} (no dir)", c.id));
+        }
+    }
+    Ok(report)
+}
+
+fn cmd_prune(cwd: &str, session: Option<&str>, older_than: &str, execute: bool) -> Result<()> {
+    let report = prune_session_meta(cwd, session, older_than, execute)?;
+    if report.candidates.is_empty() {
         println!("Nothing older than {older_than} to prune.");
         return Ok(());
     }
     println!(
         "{} subagent dir(s) older than {older_than}:",
-        candidates.len()
+        report.candidates.len()
     );
-    for (e, dir) in &candidates {
+    for c in &report.candidates {
         println!(
             "  {}  session={}  path={}",
-            e.id,
-            e.session_id,
-            dir.as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
+            c.id, c.session_id, c.path
         );
     }
     if !execute {
         println!("Dry-run only. Re-run with --execute to delete.");
         return Ok(());
     }
-    for (e, dir) in candidates {
-        if let Some(dir) = dir {
-            match fs::remove_dir_all(&dir) {
-                Ok(()) => println!("  deleted {}", dir.display()),
-                Err(err) => eprintln!("  failed {}: {err}", dir.display()),
-            }
-        } else {
-            eprintln!("  skip {} (no dir)", e.id);
-        }
+    for p in &report.deleted {
+        println!("  deleted {p}");
+    }
+    for f in &report.failed {
+        eprintln!("  failed {f}");
     }
     Ok(())
+}
+
+fn is_active_subagent_status(status: Option<&str>) -> bool {
+    matches!(
+        status.unwrap_or("").to_ascii_lowercase().as_str(),
+        "running" | "starting" | "pending" | "in_progress" | "active" | "queued"
+    )
 }
 
 fn parse_duration(s: &str) -> Result<Duration> {

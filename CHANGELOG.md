@@ -27,10 +27,59 @@ accelerated at r6; product rebrand to **Turbo** at r10.
 | r13 | `0.2.114-r13` | Workspace Tree inject, Game Mode perf |
 | r14 | `0.2.114-r14` | **web_fetch**, **workflow routing**, English-only |
 | r15 | `0.2.119-r1` | Upstream 0.2.119 sync, security + Windows correctness |
-| **r2** | **`0.2.119-r2`** | **Game Mode overhaul**, disk gates, tools list |
+| r2 | `0.2.119-r2` | Game Mode overhaul, disk gates, tools list |
+| **r3** | **`0.2.119-r3`** | **Full Disk Clean** (taxonomy, multi-path, prune, telemetry) |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
+
+---
+
+## [0.2.119-r3] - 2026-08-07
+
+**Turbo Grok Build RC3.** Full **Disk Clean** feature for post-agent Rust/cache
+reclaim — category taxonomy, multi-path free-space gates, unified prune, and
+JSON reclaim telemetry. Default `--safe` behavior remains RC2-compatible.
+
+### Added
+- **`turbo disk clean --safe --include <cats>`** — opt-in reclaim categories:
+  `debug`, `debug-pdbs`, `debug-incremental`, `release`, `release-dist-caches`,
+  `worktrees`, `tree-store`, `temp-grok`, `cargo-home` (requires
+  `--i-accept-redownload`). Omitted `--include` keeps the RC2 default set
+  (`debug` + aged worktrees + tree store).
+- **`turbo disk clean --json`** — machine-readable `reclaimed_bytes` by category
+  and `total_reclaimed_bytes` (agents / continuous-improve).
+- **`release-dist-caches`** — removes only
+  `incremental` / `deps` / `build` / `examples` / `.fingerprint` under the
+  resolved target root’s `release-dist`; **keeps** ship binaries (`turbo.exe`).
+  Safety is Cargo’s profile `.cargo-lock` (exclusive lock held through deletes);
+  existence of the lock file alone is not treated as “active.” Optional mtime
+  hints use `--active-build-grace-secs` (default 120).
+- **`CARGO_TARGET_DIR`** — report/clean sizes and reclaim use this path when set
+  (not only `<workspace>/target`).
+- **`turbo disk prune`** — unified `--worktrees` / `--tree-store` /
+  `--session-meta` / `--all` with dry-run default and `--execute`.
+- **Multi-path free-space report/check** — gates workspace root, worktrees base,
+  `CARGO_TARGET_DIR` (when set), and `GROK_HOME` (when set); fail closed with
+  path-labeled remediation.
+- **Report category breakdown** — debug PDBs, debug incremental, release-dist
+  caches, cargo-home registry/git cache sizes.
+
+### Safety (unchanged defaults)
+- Clean still requires `--safe`; cargo-home requires a second consent flag.
+- Fresh live worktrees (`.grok-subagent-live` within
+  `GROK_SUBAGENT_LIVE_MARKER_MAX_SECS`, default 12h) are protected; **stale**
+  markers are reclaimable (parity with spawn soft-preserve).
+- Ship profile binaries are never deleted by default safe clean.
+- Multi-path free-space also gates **cargo-home** and **TEMP** volumes.
+- `--if-low-space` only reclaims categories on **failing volumes** (no wiping
+  H:`target/debug` when only C: worktrees are low); gate disabled
+  (`GROK_MIN_FREE_GB=0`) no longer forces a full clean.
+- Profile locks for `debug` / `release` / `release-dist-caches` refuse reclaim
+  while cargo holds the profile lock.
+- Session-meta prune skips active statuses (`running`/`starting`/…).
+- JSON clean results include `free_bytes_before`/`after`, stable `skipped_reason`,
+  and report emits `suggested_clean` ranked by size for agents.
 
 ---
 
