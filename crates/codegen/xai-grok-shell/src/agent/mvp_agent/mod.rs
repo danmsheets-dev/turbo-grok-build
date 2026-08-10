@@ -1681,7 +1681,7 @@ impl MvpAgent {
                 update: crate::extensions::notification::SessionUpdate::TaskCompleted {
                     task_snapshot: snapshot,
                     will_wake: false,
-                },
+            },
                 meta: None,
             };
             if let Some(params) = crate::tools::task_completed_frame::encode(

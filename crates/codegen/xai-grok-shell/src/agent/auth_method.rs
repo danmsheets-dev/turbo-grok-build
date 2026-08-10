@@ -73,7 +73,10 @@ where
 
 /// Single advertise policy for `xai.api_key`: kill switch, BYOK, and first-party
 /// env gated by `first_party_env_ok` (probe result, or `true` for presence-only).
-/// BYOK still advertises without a probe.
+/// Independent BYOK (per-model api_key / non-first-party env_key / auth_provider)
+/// still advertises without a probe. Credentials that resolve *only* via
+/// `XAI_API_KEY` / `GROK_CODE_XAI_API_KEY` (e.g. `xai-direct/*` catalog env_keys)
+/// are gated by the probe so a dead first-party key cannot advertise as "BYOK".
 pub(crate) fn should_advertise_xai_api_key_with_env_ok<'a, I>(
     disable_api_key_auth: bool,
     models: I,
@@ -85,8 +88,40 @@ where
     if disable_api_key_auth {
         return false;
     }
-    let has_byok = models.into_iter().any(ModelEntry::has_own_credentials);
+    let has_byok = models
+        .into_iter()
+        .any(|m| model_has_independent_byok(m, first_party_env_ok));
     has_byok || (has_xai_api_key_env() && first_party_env_ok)
+}
+
+fn is_first_party_api_key_env(name: &str) -> bool {
+    name == XAI_API_KEY_ENV_VAR || name == LEGACY_XAI_API_KEY_ENV_VAR
+}
+
+/// Whether `model` has credentials that should advertise `xai.api_key` even
+/// when the first-party env probe failed.
+fn model_has_independent_byok(model: &ModelEntry, first_party_env_ok: bool) -> bool {
+    if model.auth_provider.is_some() {
+        return true;
+    }
+    if model
+        .api_key
+        .as_ref()
+        .is_some_and(|key| !key.trim().is_empty())
+    {
+        return true;
+    }
+    let Some(env_keys) = model.env_key.as_ref() else {
+        return false;
+    };
+    if first_party_env_ok {
+        return env_keys.resolve_value().is_some();
+    }
+    // Probe rejected first-party env: only a non-first-party env name counts.
+    env_keys.names().into_iter().any(|name| {
+        !is_first_party_api_key_env(name)
+            && std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+    })
 }
 
 /// Inputs to [`build_auth_methods`].
@@ -1051,8 +1086,16 @@ mod tests {
     #[test]
     #[serial]
     fn env_key_probe_unusable_suppresses_advertise_without_byok() {
-        let _set = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-dead-key");
+        // Isolate first: platform env keys + auth.json stamps would flip
+        // has_own_credentials and mask the "first-party env alone" path.
+        // Must run before setting XAI_API_KEY — the xAI provider's env_keys
+        // include XAI_API_KEY, so unset_all would clear a prior set.
+        let _byok = unset_all_byok_platform_api_key_envs();
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("no-auth.json");
+        let _auth_path = EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
         let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let _set = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-dead-key");
         let cfg = Config::default();
         let models = resolve_model_list(&cfg, None);
         assert!(

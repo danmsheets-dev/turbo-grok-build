@@ -21,6 +21,7 @@ fn summary(
         isolation: None,
         worktree_path: None,
         worktree_state: None,
+            isolation_requested: None,
     }
 }
 

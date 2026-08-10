@@ -557,6 +557,7 @@ pub(crate) fn present_child_completion(
         parent_channel_open,
     ) && disposition.should_surface;
     if completion_data.spawned_notification_emitted || request.run_in_background {
+        let iso = isolation_fields_for_finish(&request, &result);
         emit_subagent_notification(
             gateway,
             &request.parent_session_id,
@@ -573,6 +574,12 @@ pub(crate) fn present_child_completion(
                 tokens_used: completion_data.telemetry_tokens,
                 output: result.success.then(|| result.output.to_string()),
                 will_wake,
+                isolation: iso.isolation.clone(),
+                isolation_effective: iso.isolation.clone(),
+                isolation_requested: iso.isolation_requested,
+                isolation_fallback: iso.isolation_fallback,
+                worktree_path: iso.worktree_path,
+                worktree_state: iso.worktree_state,
             },
             completion_data.parent_cmd_tx.as_ref(),
         );
@@ -2529,9 +2536,13 @@ pub(crate) fn validate_subagent_worktree_materialized(worktree: &Path) -> Result
     Ok(())
 }
 
-pub(crate) fn write_live_worktree_marker(worktree: &Path) {
+/// Write the live-worktree marker so soft-preserve prune skips this tree.
+///
+/// Returns `Err` when the marker cannot be written — callers must fail spawn
+/// rather than run without prune protection (audit C4).
+pub(crate) fn write_live_worktree_marker(worktree: &Path) -> Result<(), String> {
     let marker = worktree.join(LIVE_WORKTREE_MARKER);
-    if let Err(e) = std::fs::write(
+    std::fs::write(
         &marker,
         format!(
             "pid={} ts={}\n",
@@ -2541,13 +2552,13 @@ pub(crate) fn write_live_worktree_marker(worktree: &Path) {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         ),
-    ) {
-        tracing::debug!(
-            worktree = %worktree.display(),
-            error = %e,
-            "failed to write live worktree marker"
-        );
-    }
+    )
+    .map_err(|e| {
+        format!(
+            "failed to write live worktree marker at {}: {e}",
+            marker.display()
+        )
+    })
 }
 
 /// Clear the live marker so soft-preserved trees become eligible for keep-N prune.
@@ -3267,6 +3278,13 @@ pub(crate) struct SubagentMeta {
     /// Worktree lifecycle after dispose: `live`, `cleaned`, or `preserved`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_state: Option<String>,
+    /// True when isolation was requested but the child ran shared (persisted
+    /// so orphan/replay SubagentFinished can restate isolation_fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_fallback: Option<bool>,
+    /// Isolation requested at spawn (`worktree` / `none`) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_requested: Option<String>,
     /// Session-local path to exported `changes.patch` (survives cleanup).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_path: Option<String>,
@@ -3621,11 +3639,63 @@ fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &Gc
     }
 }
 const ORPHAN_RECONCILE_REASON: &str = "interrupted by process restart";
+
+/// Wire isolation fields for `SubagentFinished` — same labels as
+/// [`xai_grok_tools::implementations::grok_build::task::completion_summary`].
+struct FinishIsolation {
+    isolation: Option<String>,
+    isolation_requested: Option<String>,
+    isolation_fallback: bool,
+    worktree_path: Option<String>,
+    worktree_state: Option<String>,
+}
+
+fn isolation_fields_for_finish(
+    request: &SubagentRequest,
+    result: &SubagentResult,
+) -> FinishIsolation {
+    let summary =
+        xai_grok_tools::implementations::grok_build::task::completion_summary(request, result);
+    FinishIsolation {
+        isolation: summary.isolation,
+        isolation_requested: summary.isolation_requested,
+        isolation_fallback: result.isolation_fallback,
+        worktree_path: summary.worktree_path,
+        worktree_state: summary.worktree_state,
+    }
+}
+
+/// Derive isolation honesty from durable meta when re-emitting a finish.
+fn isolation_fields_from_meta(meta: &SubagentMeta) -> FinishIsolation {
+    let worktree_path = meta.worktree_path.clone();
+    let worktree_state = meta.worktree_state.clone();
+    let isolation_fallback = meta.isolation_fallback.unwrap_or(false);
+    let isolation = if isolation_fallback {
+        Some("shared_fallback".to_owned())
+    } else if worktree_path.is_some()
+        || matches!(worktree_state.as_deref(), Some("preserved" | "cleaned" | "live"))
+        || meta.baseline_ref.is_some()
+        || meta.snapshot_ref.is_some()
+    {
+        Some("worktree".to_owned())
+    } else {
+        Some("none".to_owned())
+    };
+    FinishIsolation {
+        isolation,
+        isolation_requested: meta.isolation_requested.clone(),
+        isolation_fallback,
+        worktree_path,
+        worktree_state,
+    }
+}
+
 /// `SubagentFinished` for a force-terminated orphan; interrupt counts are zeroed.
 fn cancelled_orphan_finish(
     subagent_id: String,
     child_session_id: String,
     duration_ms: u64,
+    iso: FinishIsolation,
 ) -> SessionUpdate {
     SessionUpdate::SubagentFinished {
         subagent_id,
@@ -3640,6 +3710,12 @@ fn cancelled_orphan_finish(
         tokens_used: 0,
         output: None,
         will_wake: false,
+        isolation: iso.isolation.clone(),
+        isolation_effective: iso.isolation,
+        isolation_requested: iso.isolation_requested,
+        isolation_fallback: iso.isolation_fallback,
+        worktree_path: iso.worktree_path,
+        worktree_state: iso.worktree_state,
     }
 }
 /// Flip a stale `running` meta to `cancelled` and emit the missing finish.
@@ -3661,10 +3737,11 @@ fn finalize_orphaned_subagent(
     if !write_subagent_meta(subagent_meta_dir, &meta) {
         return false;
     }
+    let iso = isolation_fields_from_meta(&meta);
     emit_subagent_notification(
         gateway,
         &meta.parent_session_id,
-        cancelled_orphan_finish(meta.subagent_id, meta.child_session_id, duration_ms),
+        cancelled_orphan_finish(meta.subagent_id, meta.child_session_id, duration_ms, iso),
         parent_cmd_tx,
     );
     true
@@ -3690,6 +3767,33 @@ fn completed_finish_from_inspection(inspection: &SubagentInspection) -> Option<S
             return None;
         }
     };
+    let (isolation, isolation_fallback, worktree_path, worktree_state, isolation_requested) =
+        match &inspection.snapshot.status {
+            SubagentSnapshotStatus::Completed {
+                worktree_path,
+                isolation,
+                isolation_fallback,
+                worktree_state,
+                isolation_requested,
+                ..
+            } => (
+                isolation.clone(),
+                *isolation_fallback,
+                worktree_path.clone(),
+                worktree_state.clone(),
+                isolation_requested.clone(),
+            ),
+            _ => (Some("none".to_owned()), false, None, None, None),
+        };
+    let isolation = if isolation_fallback {
+        Some("shared_fallback".to_owned())
+    } else if isolation.is_some() {
+        isolation
+    } else if worktree_path.is_some() {
+        Some("worktree".to_owned())
+    } else {
+        Some("none".to_owned())
+    };
     Some(SessionUpdate::SubagentFinished {
         subagent_id: inspection.snapshot.subagent_id.clone(),
         child_session_id: inspection.child_session_id.clone(),
@@ -3703,6 +3807,12 @@ fn completed_finish_from_inspection(inspection: &SubagentInspection) -> Option<S
         tokens_used: 0,
         output: None,
         will_wake: false,
+        isolation: isolation.clone(),
+        isolation_effective: isolation,
+        isolation_requested,
+        isolation_fallback,
+        worktree_path,
+        worktree_state,
     })
 }
 /// Heal subagents stuck "Running" after a dead process: emit exactly one
@@ -3778,6 +3888,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                     status = %m.status,
                     "Re-emitting finish for rewound subagent (terminal meta survived)"
                 );
+                let iso = isolation_fields_from_meta(&m);
                 emit_subagent_notification(
                     gateway,
                     parent_session_id,
@@ -3794,6 +3905,12 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                         tokens_used: 0,
                         output: None,
                         will_wake: false,
+                        isolation: iso.isolation.clone(),
+                        isolation_effective: iso.isolation,
+                        isolation_requested: iso.isolation_requested,
+                        isolation_fallback: iso.isolation_fallback,
+                        worktree_path: iso.worktree_path,
+                        worktree_state: iso.worktree_state,
                     },
                     parent_cmd_tx,
                 );
@@ -3810,7 +3927,18 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 emit_subagent_notification(
                     gateway,
                     parent_session_id,
-                    cancelled_orphan_finish(subagent_id, child_session_id, 0),
+                    cancelled_orphan_finish(
+                        subagent_id,
+                        child_session_id,
+                        0,
+                        FinishIsolation {
+                            isolation: Some("none".to_owned()),
+                            isolation_requested: None,
+                            isolation_fallback: false,
+                            worktree_path: None,
+                            worktree_state: None,
+                        },
+                    ),
                     parent_cmd_tx,
                 );
             }

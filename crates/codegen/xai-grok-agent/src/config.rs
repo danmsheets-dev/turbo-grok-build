@@ -205,6 +205,9 @@ fn grok_computer_toolset() -> ToolServerConfig {
         (&grok_build::GrepTool).into(),
         (&grok_build::KillTerminalCommandTool).into(),
         (&grok_build::GetTerminalCommandOutputTool).into(),
+        // Boot card requires these product signals on primary sessions (C13).
+        (&grok_build::DeveloperLogTool).into(),
+        (&grok_build::FeatureRequestLogTool).into(),
     ];
     ToolServerConfig {
         tools,
@@ -371,6 +374,9 @@ fn codex_toolset() -> ToolServerConfig {
             (&search_tool::SearchTool).into(),
             (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
+            // Boot card requires these product signals on primary sessions (C13).
+            (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
         ],
         behavior_preset: None,
     }
@@ -616,6 +622,9 @@ fn opencode_toolset() -> ToolServerConfig {
             (&opencode::OpenCodeSkillTool).into(),
             kill_task_tool_config(),
             task_output_tool_config(),
+            // Boot card requires these product signals on primary sessions (C13).
+            (&grok_build::DeveloperLogTool).into(),
+            (&grok_build::FeatureRequestLogTool).into(),
         ],
         behavior_preset: None,
     }

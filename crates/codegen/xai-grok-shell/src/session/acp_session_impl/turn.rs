@@ -285,6 +285,11 @@ impl SessionActor {
                 if !origin.is_synthetic() {
                     self.cancel_pending_recap_for_new_prompt();
                 }
+                // Refuse before spending a sampler turn when the session is
+                // latched disk-full (and re-probe still fails). Completion
+                // reservations are already released above so a refused wake
+                // cannot strand a background task.
+                self.ensure_session_disk_writable().await?;
                 *self.turn_start_prompt_mode.lock() = prompt_mode;
                 *self.turn_prompt_mode.lock() = prompt_mode;
                 self.signals_handle().increment_turn();
@@ -819,6 +824,8 @@ impl SessionActor {
                             .await
                             .is_some()
                         {
+                            // History commit: send-now may cancel after this.
+                            self.mark_front_message_committed().await;
                             let (flush_tx, flush_rx) = oneshot::channel();
                             if self
                                 .notifications
@@ -827,7 +834,7 @@ impl SessionActor {
                                     respond_to: flush_tx,
                                 })
                                 .is_ok()
-                                && flush_rx.await.is_ok()
+                                && matches!(flush_rx.await, Ok(Ok(())))
                             {
                                 let _ = ack.send(());
                             } else {
@@ -846,6 +853,7 @@ impl SessionActor {
                         }
                     } else {
                         self.chat_state_handle.push_user_message(user_chat);
+                        self.mark_front_message_committed().await;
                     }
                 }
                 self.dispatch_hook(
@@ -899,7 +907,7 @@ impl SessionActor {
                 let turn_model_id = self.current_model_id().await;
                 let doom_event_model = turn_model_id.clone();
                 let turn_timer = std::time::Instant::now();
-                let result = {
+                let mut result = {
                     let mut round_trace = trace_gcs_config;
                     let mut round_artifact = artifact_tracker;
                     let mut stop_continuations_this_turn: u32 = 0;
@@ -1240,7 +1248,10 @@ impl SessionActor {
                 ) {
                     self.cancel_running_turn_subagents(prompt_id);
                 }
-                self.flush_to_disk().await;
+                // Flush after the turn; completed/stationarity outcomes must
+                // surface ENOSPC so the client can stop rather than silently
+                // drop durable history. Cancel/max-turns keep their stop reason.
+                let mut flush_error = self.flush_to_disk().await.err();
                 self.file_state_tracker
                     .end_prompt(&self.tool_context.fs, current_prompt_index)
                     .await;
@@ -1254,6 +1265,16 @@ impl SessionActor {
                         .notifications
                         .persistence_tx
                         .send(PersistenceMsg::RewindPoint(rewind_point));
+                    if flush_error.is_none() {
+                        flush_error = self.flush_to_disk().await.err();
+                    }
+                }
+                if matches!(
+                    &result,
+                    Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. })
+                ) && let Err(error) = self.disk_full_acp_error(flush_error.as_ref())
+                {
+                    result = Err(error);
                 }
                 match result {
                     Ok(outcome) => {

@@ -19,7 +19,6 @@ use crate::types::resources::{
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-use crate::types::resources::resolve_model_path;
 use crate::util::format_not_found_error;
 
 const DESCRIPTION: &str = r#"Edit a file using anchors${%- if tools.by_kind.read and tools.by_kind.search %} from ${{ tools.by_kind.read }} or ${{ tools.by_kind.search }}${%- elif tools.by_kind.read %} from ${{ tools.by_kind.read }}${%- elif tools.by_kind.search %} from ${{ tools.by_kind.search }}${%- endif %}.
@@ -295,7 +294,7 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             ));
         }
 
-        let (cwd, display_cwd, fs, scheme, hints_enabled, confine_root) = {
+        let (cwd, display_cwd, fs, scheme, hints_enabled, confine_root, allowed_paths) = {
             let res = resources.lock().await;
             let cwd = match ctx.extensions.get::<xai_tool_runtime::Cwd>() {
                 Some(dir) => dir.0.clone(),
@@ -315,14 +314,43 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             let confine_root = res
                 .get::<crate::types::resources::ConfineRoot>()
                 .map(|c| c.0.clone());
-            (cwd, display_cwd, fs, scheme, hints_enabled, confine_root)
+            let allowed_paths = res
+                .get::<crate::types::resources::AllowedWritePaths>()
+                .map(|a| a.0.clone());
+            (
+                cwd,
+                display_cwd,
+                fs,
+                scheme,
+                hints_enabled,
+                confine_root,
+                allowed_paths,
+            )
         };
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.
         crate::types::resources::enforce_write_path(&cwd, confine_root.as_deref())
             .map_err(|e| e.into_tool_error())?;
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
-        let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // Confine at resolve (resource ConfineRoot or process root) + allowed_paths.
+        let joined_path = crate::types::resources::resolve_write_model_path(
+            &cwd,
+            display_cwd.as_deref(),
+            confine_root
+                .as_deref()
+                .or_else(|| crate::types::resources::process_confine_root().map(|p| p.as_path())),
+            &input.file_path,
+        )
+        .map_err(|msg| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("hashline_edit").expect("valid"),
+                msg,
+            )
+        })?;
+        if let Some(ref prefixes) = allowed_paths {
+            crate::types::resources::enforce_allowed_write_paths(&cwd, &joined_path, prefixes)
+                .map_err(|e| e.into_tool_error())?;
+        }
         // Error-preserving variant: the Err arm drives new-file creation.
         let path = match crate::util::fs::try_canonicalize(&joined_path).await {
             Ok(p) => p,

@@ -123,7 +123,11 @@ async fn channel_backend_query_found() {
                     tool_calls: 2,
                     turns: 1,
                     worktree_path: None,
-                },
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
+        },
                 started_at_epoch_ms: 1000,
                 duration_ms: 200,
                 persona: Some("reviewer".to_string()),
@@ -145,11 +149,19 @@ async fn channel_backend_query_found() {
             tool_calls,
             turns,
             worktree_path,
+            isolation,
+            isolation_fallback,
+            worktree_state,
+            isolation_requested,
         } => {
             assert_eq!(output, "result");
             assert_eq!(*tool_calls, 2);
             assert_eq!(*turns, 1);
             assert!(worktree_path.is_none());
+            assert!(isolation.is_none());
+            assert!(!*isolation_fallback);
+            assert!(worktree_state.is_none());
+            assert!(isolation_requested.is_none());
         }
         other => panic!("Expected Completed, got {:?}", other),
     }

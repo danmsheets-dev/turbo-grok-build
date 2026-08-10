@@ -276,7 +276,7 @@ pub fn run(args: IssuesArgs) -> Result<()> {
                 println!("config file:  {}", config_file_path().display());
                 println!("env override: {DIR_ENV}");
                 println!(
-                    "enabled:      {} (set {DIR_ENV}=0 to disable)",
+                    "enabled:      {} (set GROK_DEVELOPER_LOG=0 to disable)",
                     xai_grok_developer_log::is_enabled()
                 );
             }

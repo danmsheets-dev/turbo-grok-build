@@ -1367,9 +1367,19 @@ async fn sign_out_clears_catalog_rebuilds_bundled_without_fetching() {
 }
 
 #[test]
+#[serial]
 fn from_config_without_prefetch_produces_usable_catalog() {
+    // `from_config` loads `ModelsCacheManager::new()` under `$GROK_HOME`.
+    // Isolate so a warm developer/suite cache cannot flip has_fetched_real_catalog.
+    // serial: mutates process-global GROK_HOME.
     let tmp = tempfile::TempDir::new().unwrap();
-    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let grok_home = tmp.path().join(".grok");
+    std::fs::create_dir_all(&grok_home).unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set(
+        "GROK_HOME",
+        grok_home.to_str().expect("utf-8 temp path"),
+    );
+    let auth_manager = Arc::new(AuthManager::new(&grok_home, GrokComConfig::default()));
     let cfg = config::Config::default();
 
     let mgr = ModelsManager::from_config(&cfg, None, auth_manager).unwrap();

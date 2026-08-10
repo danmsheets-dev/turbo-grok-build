@@ -394,6 +394,7 @@ impl SubagentCompletedOutput {
             text.push_str(&format!("\n\n<error_class>{class}</error_class>"));
         }
         // Hard isolation signal: supervisors must not treat worktree commits as main.
+        // Always emit a positive <isolation> label — including none.
         if self.isolation_fallback {
             text.push_str(
                 "\n\n<isolation>shared_fallback</isolation>\n\
@@ -412,6 +413,8 @@ impl SubagentCompletedOutput {
                  gate-green claims, or file SHAs apply only to that worktree until you \
                  explicitly land. They are **not** on parent main until landed.",
             );
+        } else {
+            text.push_str("\n\n<isolation>none</isolation>");
         }
         if let Some(ref path) = self.worktree_path {
             text.push_str(&format!("\n\n<worktree_path>{path}</worktree_path>"));

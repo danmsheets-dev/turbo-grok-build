@@ -1334,7 +1334,13 @@ pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {
         tokens_used: 0,
         output: None,
         will_wake: false,
-    }
+                isolation: None,
+                isolation_effective: None,
+                isolation_requested: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
+            }
 }
 pub(super) fn test_subagent_progress(
     parent_sid: &str,

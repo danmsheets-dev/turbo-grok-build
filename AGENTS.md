@@ -212,3 +212,36 @@ cargo test -p xai-grok-shell --lib prune_soft_preserved -- --nocapture
 
 File product issues with `developer_log` / `turbo issues`; capability gaps with
 `feature_request_log` / `turbo features`.
+
+## Never defer — always fix; always get a second opinion
+
+These rules are **hard product policy** for agents in this monorepo. They override
+convenience, time pressure, and “leave a follow-up” habits.
+
+### Never defer issues
+
+- **Do not** park work as “deferred”, “follow-up”, “out of scope for this PR”,
+  “nice-to-have later”, or “file a ticket and move on” when the issue is known
+  and in scope of the current request (audit findings, failing tests, honesty
+  gaps, isolation/safety lies, broken headless paths, missing wire fields).
+- **Always fix everything** that is identified as broken, incomplete, or
+  dishonest for the active task before claiming done. Partial “green paths”
+  that leave residual high/medium findings are not done.
+- If something is truly blocked (missing product surface, external dependency,
+  user decision required), **stop and ask the user** or file
+  `feature_request_log` / `developer_log` — do **not** silently defer inside
+  chat and continue as if finished.
+- Audit/test loops: fix → retest → re-audit until residual findings are fixed
+  or explicitly accepted by the human. “We’ll fix deferred next session” is
+  not an acceptable close-out.
+
+### Always get a second opinion
+
+- Before claiming a multi-file or multi-area change is complete, get an
+  independent check: `deep-audit` / review workflow, `check-work` /
+  verification skill, or a second agent pass on the same scope.
+- Do **not** self-certify complex merges (isolation, land/diff, headless
+  honesty, ADL/FRL, disk tools) from a single pass. Prefer a second model or
+  a registered audit workflow over re-reading your own diff alone.
+- When a second opinion finds issues, treat them as **new work to fix now**,
+  not as deferred backlog (same no-defer rule).

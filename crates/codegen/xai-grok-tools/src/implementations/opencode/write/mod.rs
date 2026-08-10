@@ -12,7 +12,7 @@ use crate::types::requirements::Expr;
 #[allow(unused_imports)]
 use crate::types::resources::{
     ConfineRoot, Cwd, DisplayCwd, FileSystem, NotificationHandle, SharedResources,
-    enforce_write_path, resolve_model_path,
+    enforce_write_path, resolve_write_model_path,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
@@ -124,8 +124,19 @@ impl xai_tool_runtime::Tool for WriteTool {
         // (worktree tombstone) before any path resolution or write.
         enforce_write_path(&cwd, confine_root.as_deref()).map_err(|e| e.into_tool_error())?;
 
-        // Resolve the model-provided path.
-        let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // Resolve under ConfineRoot when present (fail closed at resolve time).
+        let path = resolve_write_model_path(
+            &cwd,
+            display_cwd.as_deref(),
+            confine_root.as_deref(),
+            &input.file_path,
+        )
+        .map_err(|msg| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("write").expect("valid"),
+                msg,
+            )
+        })?;
 
         // Spawn allowed_paths: fail closed at write time (not only land).
         if let Some(ref prefixes) = allowed_paths {
@@ -139,20 +150,9 @@ impl xai_tool_runtime::Tool for WriteTool {
             Err(_) => (false, None),
         };
 
-        // ── Create parent directories if needed (via FS backend when confined) ──
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            // Prefer confined FS mkdir if available; fall back to host only when
-            // the backend does not implement it (LocalFs uses host under cwd).
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                let ce = crate::computer::types::ComputerError::from(e);
-                return Err(xai_tool_runtime::ToolError::execution(
-                    xai_tool_protocol::ToolId::new("write").expect("valid"),
-                    ce.to_string(),
-                ));
-            }
-        }
+        // Parent mkdir is performed inside fs.write_file (LocalFs / ConfinedFs
+        // checks the parent under the confine root). Never host create_dir_all
+        // before the FS choke point — that bypassed isolation (audit C1).
 
         // ── Write the file ───────────────────────────────────────
         fs.write_file(&path, input.content.as_bytes())

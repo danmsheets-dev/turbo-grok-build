@@ -111,27 +111,35 @@ fn collect_report_joins_registry_and_flags_untracked() {
     );
     assert_eq!(report.worktrees_outside_managed_roots, 1);
 
+    // Canonicalize so Windows path separators match collect_report's display
+    // (dunce may normalize `\` vs `/` relative to Path::join).
+    let tracked_path = dunce::canonicalize(&tracked)
+        .unwrap_or(tracked.clone())
+        .to_string_lossy()
+        .into_owned();
+    let untracked_path = dunce::canonicalize(&untracked)
+        .unwrap_or(untracked.clone())
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(report.worktrees.len(), 2, "tracked + untracked rows");
     assert_eq!(
-        report.worktrees,
-        vec![
-            WorktreeUsage {
-                last_modified_at: modified(&tracked),
-                path: tracked.to_string_lossy().into_owned(),
-                ..tracked_row(
-                    measured(&tracked).unwrap(),
-                    TrackedRow {
-                        label: Some("my-feature".into()),
-                        ..record("wt-tracked", 0)
-                    },
-                )
-            },
-            WorktreeUsage {
-                last_modified_at: modified(&untracked),
-                path: untracked.to_string_lossy().into_owned(),
-                ..untracked_row(measured(&untracked).unwrap())
-            },
-        ]
+        report.worktrees[0].path.replace('\\', "/"),
+        tracked_path.replace('\\', "/")
     );
+    assert_eq!(
+        report.worktrees[0].registration,
+        Registration::Tracked(TrackedRow {
+            label: Some("my-feature".into()),
+            ..record("wt-tracked", 0)
+        })
+    );
+    assert_eq!(report.worktrees[0].bytes, measured(&tracked));
+    assert_eq!(
+        report.worktrees[1].path.replace('\\', "/"),
+        untracked_path.replace('\\', "/")
+    );
+    assert_eq!(report.worktrees[1].registration, Registration::Untracked);
+    assert_eq!(report.worktrees[1].bytes, measured(&untracked));
 }
 
 #[cfg(unix)]

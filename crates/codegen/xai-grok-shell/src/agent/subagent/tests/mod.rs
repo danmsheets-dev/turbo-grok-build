@@ -234,7 +234,13 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
             tokens_used: 0,
             output: None,
             will_wake: false,
-        },
+                isolation: None,
+                isolation_effective: None,
+                isolation_requested: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
+            },
         Some(&cmd_tx),
     );
     let persisted_id = match cmd_rx.try_recv().expect("persist hop must fire") {
@@ -333,7 +339,7 @@ fn prune_soft_preserved_age_only_when_keep_zero() {
         std::fs::create_dir_all(p).unwrap();
         std::fs::write(p.join("marker.txt"), "x").unwrap();
     }
-    write_live_worktree_marker(&live);
+    write_live_worktree_marker(&live).expect("live marker");
     let past = filetime::FileTime::from_unix_time(1_600_000_000, 0);
     filetime::set_file_mtime(&old, past).unwrap();
     filetime::set_file_mtime(old.join("marker.txt"), past).unwrap();
@@ -363,7 +369,7 @@ fn prune_soft_preserved_skips_live_marked_worktrees() {
     }
     let live = base.path().join("subagent-live-running");
     std::fs::create_dir_all(&live).unwrap();
-    write_live_worktree_marker(&live);
+    write_live_worktree_marker(&live).expect("live marker");
     assert!(is_live_worktree_protected(&live));
 
     // Keep only 1 non-live tree — live must survive even if over the cap.
@@ -401,7 +407,7 @@ fn live_worktree_marker_roundtrip() {
     };
     let dir = tempfile::TempDir::new().unwrap();
     assert!(!is_live_worktree_protected(dir.path()));
-    write_live_worktree_marker(dir.path());
+    write_live_worktree_marker(dir.path()).expect("live marker");
     assert!(dir.path().join(LIVE_WORKTREE_MARKER).is_file());
     assert!(is_live_worktree_protected(dir.path()));
     clear_live_worktree_marker(dir.path());

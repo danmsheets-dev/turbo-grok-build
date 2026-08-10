@@ -23,7 +23,7 @@ use crate::types::requirements::{Expr, ToolParamsRequirement, ToolRequirement};
 use crate::types::resources::{
     ConfineRoot, Cwd, DisplayCwd, FileSystem, GitignoreFilter, NotificationHandle, Params,
     PathNotFoundHints, RespectGitignore, SharedResources, display_cwd_or_cwd, enforce_write_path,
-    resolve_model_path,
+    resolve_write_model_path,
 };
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -181,7 +181,18 @@ pub(crate) async fn run_search_replace(
     // RC13 Wave A: fail closed when session CWD / confine root is gone
     // (worktree tombstone) before any read/write.
     enforce_write_path(&cwd, confine_root.as_deref()).map_err(|e| e.into_tool_error())?;
-    let resolved = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+    let resolved = resolve_write_model_path(
+        &cwd,
+        display_cwd.as_deref(),
+        confine_root.as_deref(),
+        &input.file_path,
+    )
+    .map_err(|msg| {
+        xai_tool_runtime::ToolError::execution(
+            xai_tool_protocol::ToolId::new("search_replace").expect("valid"),
+            msg,
+        )
+    })?;
     let path = match crate::util::fs::try_canonicalize(&resolved).await {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

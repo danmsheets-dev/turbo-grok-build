@@ -27,8 +27,8 @@ Grok processes the prompt, runs any necessary tools, and prints the result to st
 | `-r, --resume <ID_OR_TITLE>` | Resume an existing session by ID, or by title for the current directory, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path; scripts should prefer IDs) |
 | `-c, --continue`        | Continue the most recent session in current directory  |
 | `--cwd <PATH>`          | Set working directory                                 |
-| `--output-format <FMT>` | Output format: `plain`, `json`, `streaming-json`, `streaming-messages-json` |
-| `--include-partial-messages` | Emit raw `stream_event` deltas. Only affects `--output-format streaming-messages-json`; ignored (with a warning) otherwise. |
+| `--output-format <FMT>` | Output format: `plain`, `json`, `streaming-json` (Turbo does **not** support `streaming-messages-json`) |
+| `--include-partial-messages` | **Not supported** in Turbo headless — the run fails loudly if set. |
 | `--yolo`                | Auto-approve all tool executions                      |
 | `--rules <TEXT>`        | Custom rules for the system prompt                    |
 | `--tools <TOOLS>`       | Allowlist of built-in tools (comma-separated). MCP meta-tools remain available unless denied. Headless only. |
@@ -247,6 +247,8 @@ API backend; other backends report what they carry.
 Grok may also emit `max_turns_reached` and `auto_compact_*` events; treat the list as non-exhaustive and switch on `type`.
 
 ### streaming-messages-json
+
+> **Turbo note:** This format is **not implemented** in Turbo headless. Use `streaming-json` instead. The section below is retained for upstream Grok Build documentation parity only.
 
 Newline-delimited JSON in the Messages API `stream-json` wire format. The data-bearing surface matches the Messages shape exactly. This includes the `assistant`/`user` message bodies, `usage`, `tool_use`/`tool_result`, inline web search, `stop_reason`, and the `--include-partial-messages` event framing. A consumer that reconstructs messages, reads spend, or detects errors works without changes.
 
@@ -671,6 +673,33 @@ These flags supplement the [Command-Line Options](#command-line-options) table a
 | `--no-alt-screen`             | Run inline (no alternate screen)                  |
 | `--worktree [NAME]`           | Start session in a new git worktree               |
 | `--ref <REF>` / `--worktree-ref <REF>` | Branch/tag/commit to base the worktree on (with `--worktree`) |
+| `--allow-interactive-questions` | Re-enable `ask_user_question` in headless (default: off) |
+| `--ask-answers-file <PATH>`   | JSON answers for headless questions (with `--allow-interactive-questions`) |
+
+### Headless interactive questions
+
+By default headless mode disables `ask_user_question` and cancels any reverse-request so the model cannot hang without a TUI. Pass `--allow-interactive-questions` only for harnesses that can supply answers:
+
+1. **`--ask-answers-file <path>`** — JSON object mapping question text → label (or label array), or an ordered JSON array of answers.
+2. **Env `GROK_ASK_ANSWERS_JSON`** — same JSON, used when the file flag is omitted.
+3. **First-option defaults** — if neither source is set, each question is answered with its first option (deterministic).
+
+Example answers file:
+
+```json
+{
+  "Which approach should we take?": "Option A",
+  "Deploy now?": ["Yes"]
+}
+```
+
+Or ordered:
+
+```json
+["Option A", "Yes"]
+```
+
+`turbo tools list` mirrors AgentBuilder gates (`GROK_SUBAGENTS`, empty discovery) so CI can assert the live tool surface with `--require spawn_subagent`.
 
 ---
 

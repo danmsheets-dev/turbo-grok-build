@@ -2014,6 +2014,10 @@ mod tests {
             tool_calls: 3,
             turns: 1,
             worktree_path: None,
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
         };
         query2
             .respond_to
@@ -2137,7 +2141,11 @@ mod tests {
                     tool_calls: 1,
                     turns: 1,
                     worktree_path: None,
-                },
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
+        },
                 started_at_epoch_ms: 0,
                 duration_ms: 100,
                 persona: None,
@@ -2374,7 +2382,11 @@ mod tests {
                 tool_calls: 1,
                 turns: 1,
                 worktree_path: None,
-            },
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
+        },
         )
         .await;
         answer_loop_unit_active(&mut subagent_rx, true).await;

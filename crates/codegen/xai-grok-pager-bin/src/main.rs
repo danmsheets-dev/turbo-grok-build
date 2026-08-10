@@ -2507,6 +2507,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 require_trust: args.require_trust,
                 stream_tool_io: args.stream_tool_io,
                 allow_interactive_questions: args.allow_interactive_questions,
+                ask_answers_file: args.ask_answers_file.clone(),
             },
         )
         .await;

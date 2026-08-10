@@ -418,7 +418,20 @@ pub(crate) async fn run_shell_child(
                             None
                         } else {
                             // Protect reused tree from keep-N prune while this child runs.
-                            write_live_worktree_marker(dest);
+                            if let Err(e) = write_live_worktree_marker(dest) {
+                                if isolation_requested && !allow_shared_fallback {
+                                    return child_run_output(
+                                        failure_result(&request, &e),
+                                        completion_data,
+                                        None,
+                                    );
+                                }
+                                tracing::warn!(
+                                    subagent_id = %request.id,
+                                    error = %e,
+                                    "live worktree marker write failed; prune may reclaim tree"
+                                );
+                            }
                             Some(dest.to_path_buf())
                         }
                     }
@@ -456,7 +469,20 @@ pub(crate) async fn run_shell_child(
                                     isolation_fallback = isolation_requested;
                                     None
                                 } else {
-                                    write_live_worktree_marker(&path);
+                                    if let Err(e) = write_live_worktree_marker(&path) {
+                                        if isolation_requested && !allow_shared_fallback {
+                                            return child_run_output(
+                                                failure_result(&request, &e),
+                                                completion_data,
+                                                None,
+                                            );
+                                        }
+                                        tracing::warn!(
+                                            subagent_id = %request.id,
+                                            error = %e,
+                                            "live worktree marker write failed; prune may reclaim tree"
+                                        );
+                                    }
                                     Some(path)
                                 }
                             }
@@ -716,7 +742,20 @@ pub(crate) async fn run_shell_child(
                     isolation_fallback = true;
                     None
                 } else {
-                    write_live_worktree_marker(&report.worktree_path);
+                    if let Err(e) = write_live_worktree_marker(&report.worktree_path) {
+                        if !allow_shared_fallback {
+                            return child_run_output(
+                                failure_result(&request, &e),
+                                completion_data,
+                                None,
+                            );
+                        }
+                        tracing::warn!(
+                            subagent_id = %request.id,
+                            error = %e,
+                            "live worktree marker write failed; prune may reclaim tree"
+                        );
+                    }
                     Some(report.worktree_path)
                 }
             }
@@ -1133,6 +1172,12 @@ pub(crate) async fn run_shell_child(
         } else {
             None
         },
+        isolation_fallback: Some(isolation_fallback),
+        isolation_requested: Some(if isolation_requested {
+            "worktree".to_string()
+        } else {
+            "none".to_string()
+        }),
         patch_path: None,
         diffstat: None,
         changed_paths: None,
@@ -1999,7 +2044,7 @@ pub(crate) async fn run_shell_child(
                             .map(|p| p.to_string_lossy().to_string()),
                         snapshot_ref: None,
                         worktree_state: None,
-                        patch_path: None,
+                    patch_path: None,
                         diffstat: None,
                         changed_paths: None,
                         baseline_ref: None,

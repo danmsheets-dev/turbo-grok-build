@@ -675,6 +675,14 @@ pub enum SubagentSnapshotStatus {
         tool_calls: u32,
         turns: u32,
         worktree_path: Option<String>,
+        /// Effective isolation: `worktree`, `none`, or `shared_fallback`.
+        isolation: Option<String>,
+        /// True when isolation was requested but the child ran shared.
+        isolation_fallback: bool,
+        /// Dispose lifecycle: `live` | `preserved` | `cleaned`.
+        worktree_state: Option<String>,
+        /// Spawn-time isolation request: `worktree` or `none` when known.
+        isolation_requested: Option<String>,
     },
     /// Child session failed or crashed.
     Failed { error: String },
@@ -752,6 +760,8 @@ pub struct SubagentCompletionSummary {
     pub worktree_path: Option<String>,
     /// Dispose lifecycle: `live` | `preserved` | `cleaned`.
     pub worktree_state: Option<String>,
+    /// Isolation requested at spawn (`worktree` / `none`) when known.
+    pub isolation_requested: Option<String>,
 }
 
 /// Multi-wait request: block until one or all of the listed subagents finish.
@@ -1543,6 +1553,10 @@ mod tests {
             tool_calls: 1,
             turns: 1,
             worktree_path: None,
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
         };
         assert!(status.is_terminal());
     }
@@ -1647,6 +1661,7 @@ mod tests {
             isolation: None,
             worktree_path: None,
             worktree_state: None,
+            isolation_requested: None,
         }];
         req.respond_to.send(summaries).unwrap();
 
@@ -1690,7 +1705,11 @@ mod tests {
                     tool_calls: 3,
                     turns: 1,
                     worktree_path: None,
-                },
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
+        },
                 started_at_epoch_ms: 1000,
                 duration_ms: 500,
                 persona: None,

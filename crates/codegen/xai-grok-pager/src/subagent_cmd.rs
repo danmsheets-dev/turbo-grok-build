@@ -461,18 +461,85 @@ fn cmd_restore(cwd: &Path, r: &Resolved, dest: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Whether `path` is under any allowed_paths prefix (forward-slash normalized).
+/// Whether `path` is under any allowed_paths prefix.
+///
+/// Uses the same normalize rules as tool land_subagent (`normalize_allowlist_path`):
+/// rejects absolute / drive / `..` escapes; collapses internal `.` / `..`.
 fn path_in_allowlist(path: &str, allowed: &[String]) -> bool {
     if allowed.is_empty() {
         return true;
     }
-    let p = path.replace('\\', "/");
-    let p = p.trim_start_matches("./");
-    allowed.iter().any(|a| {
-        let a = a.replace('\\', "/");
-        let a = a.trim_end_matches('/');
-        p == a || p.starts_with(&format!("{a}/"))
-    })
+    use xai_grok_tools::implementations::grok_build::subagent_worktree::{
+        normalize_allowlist_path, path_is_allowed,
+    };
+    let prefixes: Vec<String> = allowed
+        .iter()
+        .filter_map(|a| normalize_allowlist_path(a))
+        .collect();
+    // Non-empty raw allowlist that normalizes to nothing → deny all (C7).
+    if prefixes.is_empty() {
+        return false;
+    }
+    path_is_allowed(path, &prefixes)
+}
+
+/// Refuse paths that are absolute, drive-rooted, or contain `..` (parity with
+/// tool `refuse_patch_paths_in_repo`).
+fn refuse_escape_paths(paths: &[String]) -> anyhow::Result<()> {
+    use xai_grok_tools::implementations::grok_build::subagent_worktree::normalize_allowlist_path;
+    let mut bad = Vec::new();
+    for p in paths {
+        let s = p.trim().replace('\\', "/");
+        if s.is_empty() {
+            continue;
+        }
+        if s.starts_with('/')
+            || s.starts_with("//")
+            || (s.len() >= 2 && s.as_bytes()[1] == b':')
+            || s.split('/').any(|part| part == "..")
+            || normalize_allowlist_path(p).is_none()
+        {
+            bad.push(p.clone());
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let preview: Vec<&str> = bad.iter().take(6).map(String::as_str).collect();
+    anyhow::bail!(
+        "land refused: {} path(s) outside the repository (absolute or `..`): {}. \
+         Export a repo-relative patch only.",
+        bad.len(),
+        preview.join(", "),
+    )
+}
+
+/// When allowlist is non-empty and any path is outside it, refuse the whole
+/// land (tool land_subagent fail-closed parity — audit C8).
+fn refuse_outside_allowlist(paths: &[String], allow: &[String]) -> anyhow::Result<()> {
+    if allow.is_empty() {
+        return Ok(());
+    }
+    let denied: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !path_in_allowlist(p, allow))
+        .collect();
+    if denied.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "land refused: {} path(s) outside allowed_paths {:?}: {}{}. \
+         Re-spawn with a wider allowlist, or omit allowed_paths for unrestricted land.",
+        denied.len(),
+        allow,
+        denied.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
+        if denied.len() > 8 {
+            format!(" (+{} more)", denied.len() - 8)
+        } else {
+            String::new()
+        }
+    )
 }
 
 fn allowlist_pathspecs(r: &Resolved) -> Option<Vec<String>> {
@@ -632,36 +699,29 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
 fn land_from_worktree(cwd: &Path, wt: &Path, mode: &str, r: &Resolved) -> Result<()> {
     let pathspecs = allowlist_pathspecs(r);
     let diff = if let Some(ref allow) = pathspecs {
-        // Name list first so we can surface skipped out-of-allowlist paths.
-        let names = git(wt, &["diff", "--name-only", "HEAD"]).unwrap_or_default();
+        // Fail closed when any changed path is outside allowed_paths (C8).
+        // Git enumeration failure under allowlist must refuse (tool parity).
+        let names = git(wt, &["diff", "--name-only", "HEAD"]).map_err(|e| {
+            anyhow::anyhow!(
+                "land refused: cannot enumerate worktree changes under allowed_paths for {}: {e}",
+                r.id
+            )
+        })?;
         let all: Vec<String> = names
             .lines()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
-        let allowed = filter_name_list(&names, allow);
-        let skipped: Vec<&str> = all
-            .iter()
-            .map(String::as_str)
-            .filter(|p| !path_in_allowlist(p, allow))
-            .collect();
-        if !skipped.is_empty() {
-            println!(
-                "Skipping {} path(s) outside allowed_paths:",
-                skipped.len()
-            );
-            for p in skipped.iter().take(20) {
-                println!("  - {p}");
-            }
-        }
-        if allowed.is_empty() {
+        refuse_escape_paths(&all)?;
+        refuse_outside_allowlist(&all, allow)?;
+        if all.is_empty() {
             println!("No allowlisted tracked diff in live worktree for {}.", r.id);
             update_land_status(&r.meta_path, "landed_empty")?;
             return Ok(());
         }
         let mut args: Vec<&str> = vec!["diff", "--binary", "HEAD", "--"];
-        for p in &allowed {
+        for p in &all {
             args.push(p.as_str());
         }
         git(wt, &args)?
@@ -716,9 +776,10 @@ fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Resul
         .filter(|p| !p.is_empty() && p.len() <= 50)
     {
         // Non-isolation last resort only: path-scoped checkout when no baseline.
-        let mut filtered: Vec<String> = paths.clone();
+        let filtered: Vec<String> = paths.clone();
+        refuse_escape_paths(&filtered)?;
         if let Some(ref allow) = pathspecs {
-            filtered.retain(|p| path_in_allowlist(p, allow));
+            refuse_outside_allowlist(&filtered, allow)?;
         }
         if filtered.is_empty() {
             println!("No allowlisted changed_paths to land for {}.", r.id);
@@ -744,6 +805,26 @@ fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Resul
         );
     };
 
+    // Enumerate full agent-only name list first so allowlist refuse is not
+    // skipped when the pathspec-filtered diff is empty or git name-only fails.
+    let names = git(cwd, &["diff", "--name-only", base, snap]).map_err(|e| {
+        anyhow::anyhow!(
+            "land refused: cannot enumerate snapshot changes for {}: {e}",
+            r.id
+        )
+    })?;
+    let all: Vec<String> = names
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    refuse_escape_paths(&all)?;
+    if let Some(ref allow) = pathspecs {
+        refuse_outside_allowlist(&all, allow)?;
+    }
+    let landed_names = all;
+
     let diff = git_diff_range(cwd, base, snap, pathspecs.as_deref())?;
     if diff.trim().is_empty() {
         println!(
@@ -751,36 +832,6 @@ fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Resul
         );
         update_land_status(&r.meta_path, "landed_empty")?;
         return Ok(());
-    }
-
-    // Surface skipped allowlist paths when we can name them.
-    let mut landed_names: Vec<String> = Vec::new();
-    if let Ok(names) = git(cwd, &["diff", "--name-only", base, snap]) {
-        let all: Vec<&str> = names.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-        if let Some(ref allow) = pathspecs {
-            let skipped: Vec<&str> = all
-                .iter()
-                .copied()
-                .filter(|p| !path_in_allowlist(p, allow))
-                .collect();
-            if !skipped.is_empty() {
-                println!(
-                    "Skipping {} path(s) outside allowed_paths:",
-                    skipped.len()
-                );
-                for p in skipped.iter().take(20) {
-                    println!("  - {p}");
-                }
-            }
-            landed_names = all
-                .iter()
-                .copied()
-                .filter(|p| path_in_allowlist(p, allow))
-                .map(str::to_string)
-                .collect();
-        } else {
-            landed_names = all.iter().map(|s| (*s).to_string()).collect();
-        }
     }
 
     if mode == "merge" {
@@ -851,30 +902,11 @@ fn land_checkout_paths(cwd: &Path, snap: &str, paths: &[String], mode: &str) -> 
 
 fn land_from_patch(cwd: &Path, patch: &Path, mode: &str, r: &Resolved) -> Result<()> {
     let text = fs::read_to_string(patch).with_context(|| format!("read {}", patch.display()))?;
-    // Fail closed: refuse patch land when any path falls outside allowed_paths
-    // (filtering a unified diff is lossy; snapshot/worktree land filters instead).
+    // Fail closed: absolute/`..` escape paths and allowlist violations (C6/C7).
+    let paths = patch_changed_paths(&text);
+    refuse_escape_paths(&paths)?;
     if let Some(ref allow) = allowlist_pathspecs(r) {
-        let paths = patch_changed_paths(&text);
-        let denied: Vec<&str> = paths
-            .iter()
-            .map(String::as_str)
-            .filter(|p| !path_in_allowlist(p, allow))
-            .collect();
-        if !denied.is_empty() {
-            bail!(
-                "land refused: {} path(s) outside allowed_paths {:?}: {}{}. \
-                 Re-spawn with a wider allowlist or land from baseline_snapshot \
-                 (filters out-of-allowlist paths).",
-                denied.len(),
-                allow,
-                denied.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
-                if denied.len() > 8 {
-                    format!(" (+{} more)", denied.len() - 8)
-                } else {
-                    String::new()
-                }
-            );
-        }
+        refuse_outside_allowlist(&paths, allow)?;
     }
     apply_diff_text(cwd, &text, mode)?;
     update_land_status(&r.meta_path, "landed")?;

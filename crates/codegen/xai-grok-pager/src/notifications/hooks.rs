@@ -134,6 +134,20 @@ mod tests {
         format!("'{rendered}'")
     }
 
+    /// POSIX `sh` is required for product hooks; skip when Git Bash/MSYS is
+    /// not on PATH (common on minimal Windows CI images).
+    fn sh_available() -> bool {
+        Command::new("sh")
+            .arg("-c")
+            .arg("true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     fn test_event() -> NotificationEvent {
         NotificationEvent {
             kind: NotificationEventKind::TurnComplete,
@@ -145,6 +159,10 @@ mod tests {
 
     #[test]
     fn sets_environment_variables() {
+        if !sh_available() {
+            eprintln!("skip: sh not available");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
         let command = format!(
@@ -178,6 +196,10 @@ mod tests {
 
     #[test]
     fn omits_session_id_when_none() {
+        if !sh_available() {
+            eprintln!("skip: sh not available");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
         let command = format!("env > {}", sh_arg(&out));
@@ -238,6 +260,10 @@ mod tests {
 
     #[test]
     fn successful_command_completes_without_error() {
+        if !sh_available() {
+            eprintln!("skip: sh not available");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
         let command = format!("touch {}", sh_arg(&marker));
@@ -296,6 +322,10 @@ mod tests {
 
     #[test]
     fn run_hook_passes_correct_env_via_thread() {
+        if !sh_available() {
+            eprintln!("skip: sh not available");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
         let hook = NotificationHook {

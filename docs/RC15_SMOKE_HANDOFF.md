@@ -88,7 +88,12 @@ Use package-scoped tests first (disk hygiene):
 $env:RUST_MIN_STACK = "16777216"
 cargo test -p xai-grok-workspace --lib -- --test-threads=1 --quiet
 cargo test -p xai-grok-tools --lib subagent_worktree -- --test-threads=1 --quiet
+cargo test -p xai-grok-tools --lib spawn_queues -- --test-threads=1 --quiet
+cargo test -p xai-grok-shell --lib live_worktree -- --test-threads=1 --quiet
+cargo test -p xai-grok-shell --lib prune_soft_preserved -- --test-threads=1 --quiet
 cargo test -p xai-grok-pager --lib views::game_mode -- --test-threads=1 --quiet
+cargo test -p xai-grok-pager --lib disk_cmd -- --test-threads=1 --quiet
+cargo test -p xai-grok-pager --lib tools_cmd -- --test-threads=1 --quiet
 cargo test -p xai-grok-agent --lib boot_card -- --test-threads=1 --quiet
 cargo test -p xai-grok-developer-log --lib -- --test-threads=1 --quiet
 cargo test -p xai-fast-worktree --lib -- --test-threads=1 --quiet

@@ -67,7 +67,7 @@ fn recorded_completion(output: String) -> Value {
                 is_backgrounded: true,
             },
             will_wake: false,
-        },
+            },
         meta: None,
     };
     let mut record = serde_json::to_value(&notification).expect("serialize");

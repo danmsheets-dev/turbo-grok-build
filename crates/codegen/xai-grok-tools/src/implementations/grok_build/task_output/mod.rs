@@ -703,14 +703,34 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             tool_calls,
             turns,
             worktree_path,
+            isolation,
+            isolation_fallback,
+            worktree_state,
+            isolation_requested,
         } => {
             let mut output = format!(
                 "{output}\n\n<subagent_meta>id={}, type={}, tool_calls={tool_calls}, \
                  turns={turns}, duration_ms={}</subagent_meta>",
                 snap.subagent_id, snap.subagent_type, snap.duration_ms,
             );
+            // Isolation honesty for poll re-fetch (same tags as ToolOutput::SubagentCompleted).
+            let effective = if *isolation_fallback {
+                "shared_fallback"
+            } else {
+                isolation.as_deref().unwrap_or("none")
+            };
+            output.push_str(&format!("\n<isolation>{effective}</isolation>"));
+            if *isolation_fallback {
+                output.push_str("\n<isolation_fallback>true</isolation_fallback>");
+            }
+            if let Some(req) = &isolation_requested {
+                output.push_str(&format!("\n<isolation_requested>{req}</isolation_requested>"));
+            }
             if let Some(wt) = &worktree_path {
                 output.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
+            }
+            if let Some(st) = &worktree_state {
+                output.push_str(&format!("\n<worktree_state>{st}</worktree_state>"));
             }
             output.push_str("\n\n");
             output.push_str(&xai_tool_types::format_resume_footer(
@@ -2170,7 +2190,11 @@ mod tests {
                         tool_calls: 5,
                         turns: 2,
                         worktree_path: None,
-                    },
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
+        },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 1500,
                     persona: None,

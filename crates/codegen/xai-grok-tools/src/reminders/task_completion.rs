@@ -395,6 +395,51 @@ pub async fn resolve_task_output_tool_name(bridge: &ToolBridge) -> Option<String
 pub async fn resolve_read_tool_name(bridge: &ToolBridge) -> Option<String> {
     bridge.tool_for_kind(ToolKind::Read).await
 }
+
+/// Append isolation honesty tags used by boot-card / SubagentCompleted checks.
+///
+/// Always emits `<isolation>…</isolation>` when any isolation signal is present
+/// (including effective `none`). Emits `<isolation_fallback>true</isolation_fallback>`
+/// only on shared fallback. Also surfaces request intent and worktree lifecycle.
+fn append_isolation_honesty_tags(
+    out: &mut String,
+    isolation: Option<&str>,
+    isolation_requested: Option<&str>,
+    worktree_path: Option<&str>,
+    worktree_state: Option<&str>,
+) {
+    let effective = isolation
+        .or(if worktree_path.is_some()
+            || matches!(worktree_state, Some("preserved" | "cleaned" | "live"))
+        {
+            Some("worktree")
+        } else {
+            None
+        });
+    let Some(iso) = effective else {
+        // No signal at all — still prefer an explicit none when request is known.
+        if let Some(req) = isolation_requested {
+            out.push_str(&format!("\n<isolation_requested>{req}</isolation_requested>"));
+            out.push_str("\n<isolation>none</isolation>");
+        }
+        return;
+    };
+    out.push_str(&format!("\n<isolation>{iso}</isolation>"));
+    if iso == "shared_fallback" {
+        out.push_str("\n<isolation_fallback>true</isolation_fallback>");
+        out.push_str(" (NOT isolated — ran on parent workspace)");
+    }
+    if let Some(req) = isolation_requested {
+        out.push_str(&format!("\n<isolation_requested>{req}</isolation_requested>"));
+    }
+    if let Some(wt) = worktree_path {
+        out.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
+    }
+    if let Some(st) = worktree_state {
+        out.push_str(&format!("\n<worktree_state>{st}</worktree_state>"));
+    }
+}
+
 /// Format a model-facing message from a [`SubagentCompletionSummary`] for
 /// the next-tool-call reminder surface.
 ///
@@ -426,18 +471,14 @@ pub fn format_subagent_completion(
         c.tool_calls,
         c.turns,
     );
-    if let Some(ref iso) = c.isolation {
-        out.push_str(&format!("\nIsolation: {iso}"));
-        if iso == "shared_fallback" {
-            out.push_str(" (NOT isolated — ran on parent workspace)");
-        }
-        if let Some(ref wt) = c.worktree_path {
-            out.push_str(&format!(" | worktree: {wt}"));
-        }
-        if let Some(ref st) = c.worktree_state {
-            out.push_str(&format!(" | worktree_state: {st}"));
-        }
-    }
+    // Prefer XML tags so supervisors match boot-card isolation_fallback checks.
+    append_isolation_honesty_tags(
+        &mut out,
+        c.isolation.as_deref(),
+        c.isolation_requested.as_deref(),
+        c.worktree_path.as_deref(),
+        c.worktree_state.as_deref(),
+    );
     out.push_str(match task_output_name {
         Some(_) => "\n",
         None => "\n\n",
@@ -474,6 +515,26 @@ pub fn format_between_turn_completions(
             "- [{}] {:?} \u{2014} {status} ({secs:.1}s, {} tool calls)\n  subagent_id: {}",
             c.subagent_type, c.description, c.tool_calls, c.subagent_id,
         );
+        // Isolation honesty (keep in sync with [`format_subagent_completion`]).
+        {
+            let mut iso_buf = String::new();
+            append_isolation_honesty_tags(
+                &mut iso_buf,
+                c.isolation.as_deref(),
+                c.isolation_requested.as_deref(),
+                c.worktree_path.as_deref(),
+                c.worktree_state.as_deref(),
+            );
+            if !iso_buf.is_empty() {
+                // Indent multi-line tags under the bullet.
+                for line in iso_buf.lines() {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let _ = write!(buf, "\n  {line}");
+                }
+            }
+        }
         match task_output_name {
             Some(_) => buf.push_str(". "),
             None => buf.push_str("\n  "),
@@ -1533,6 +1594,7 @@ mod tests {
             isolation: None,
             worktree_path: None,
             worktree_state: None,
+            isolation_requested: None,
         }
     }
     #[tokio::test]
@@ -1884,6 +1946,36 @@ mod tests {
             "between-turn subagent inline output must be preserved verbatim"
         );
         assert!(!msg.contains("[Output truncated"));
+    }
+
+    #[test]
+    fn format_between_turn_completions_includes_isolation_honesty() {
+        let mut c = make_subagent_completion("sub-iso", true);
+        c.isolation = Some("shared_fallback".into());
+        c.worktree_path = None;
+        c.worktree_state = None;
+        let msg = format_between_turn_completions(&[c], Some("get_task_output"));
+        assert!(
+            msg.contains("<isolation>shared_fallback</isolation>"),
+            "between-turn must surface isolation tags: {msg}"
+        );
+        assert!(
+            msg.contains("<isolation_fallback>true</isolation_fallback>"),
+            "shared_fallback must set isolation_fallback tag: {msg}"
+        );
+        assert!(
+            msg.contains("NOT isolated"),
+            "shared_fallback must be explicit: {msg}"
+        );
+
+        let mut c2 = make_subagent_completion("sub-wt", true);
+        c2.isolation = Some("worktree".into());
+        c2.worktree_path = Some("/tmp/wt".into());
+        c2.worktree_state = Some("preserved".into());
+        let msg2 = format_between_turn_completions(&[c2], None);
+        assert!(msg2.contains("<isolation>worktree</isolation>"));
+        assert!(msg2.contains("<worktree_path>/tmp/wt</worktree_path>"));
+        assert!(msg2.contains("<worktree_state>preserved</worktree_state>"));
     }
     /// The reminder pipeline ignores `MonitorEventBuffer` — the turn loop
     /// owns the drain. Guards against the tool-result append path being

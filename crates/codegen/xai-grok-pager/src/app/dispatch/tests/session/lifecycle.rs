@@ -3062,6 +3062,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3107,6 +3108,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3166,6 +3168,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let _ = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -3203,6 +3206,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -3247,6 +3251,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -3290,6 +3295,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3336,6 +3342,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3409,6 +3416,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3482,6 +3490,7 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);

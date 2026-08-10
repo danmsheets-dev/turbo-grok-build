@@ -34,7 +34,7 @@ use crate::types::requirements::Expr;
 use crate::types::resources::Resources;
 #[allow(unused_imports)]
 use crate::types::resources::{
-    Cwd, DisplayCwd, FileSystem, NotificationHandle, SharedResources, resolve_model_path,
+    Cwd, DisplayCwd, FileSystem, NotificationHandle, SharedResources, resolve_write_model_path,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
@@ -184,7 +184,7 @@ impl xai_tool_runtime::Tool for EditTool {
         let resources = shared_resources(&ctx)?;
         let cwd = resolve_cwd(&ctx, &resources).await?;
 
-        let (display_cwd, fs, notification_handle, confine_root) = {
+        let (display_cwd, fs, notification_handle, confine_root, allowed_paths) = {
             let res = resources.lock().await;
             (
                 res.get::<DisplayCwd>().map(|d| d.0.clone()),
@@ -192,6 +192,8 @@ impl xai_tool_runtime::Tool for EditTool {
                 res.require::<NotificationHandle>()?.0.clone(),
                 res.get::<crate::types::resources::ConfineRoot>()
                     .map(|c| c.0.clone()),
+                res.get::<crate::types::resources::AllowedWritePaths>()
+                    .map(|a| a.0.clone()),
             )
         };
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.
@@ -201,8 +203,23 @@ impl xai_tool_runtime::Tool for EditTool {
 
         let replace_all = input.replace_all;
 
-        // Resolve the model-provided path.
-        let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // Resolve under ConfineRoot when present (audit C2).
+        let path = crate::types::resources::resolve_write_model_path(
+            &cwd,
+            display_cwd.as_deref(),
+            confine_root.as_deref(),
+            &input.file_path,
+        )
+        .map_err(|msg| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("edit").expect("valid"),
+                msg,
+            )
+        })?;
+        if let Some(ref prefixes) = allowed_paths {
+            crate::types::resources::enforce_allowed_write_paths(&cwd, &path, prefixes)
+                .map_err(|e| e.into_tool_error())?;
+        }
 
         // ── Validate input ──────────────────────────────────────────
         if path.is_dir() {
@@ -238,18 +255,9 @@ impl xai_tool_runtime::Tool for EditTool {
 // Helpers
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Create parent directories for a file path if they don't exist.
-async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), xai_tool_runtime::ToolError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("edit").expect("valid"),
-                e.to_string(),
-            )
-        })?;
-    }
+/// Parent dirs are created inside `fs.write_file` (LocalFs / ConfinedFs).
+/// Kept as a no-op so call sites stay readable; do not host-mkdir here (C1).
+async fn ensure_parent_dirs(_path: &std::path::Path) -> Result<(), xai_tool_runtime::ToolError> {
     Ok(())
 }
 

@@ -918,6 +918,7 @@ impl ToolOutput {
             ToolOutput::SubagentCompleted(sub) => {
                 let mut text = sub.output.clone();
                 // Hard isolation signal for supervisors (FR: label worktree vs parent).
+                // Always emit a positive <isolation> label — including none.
                 if sub.isolation_fallback {
                     text.push_str(
                         "\n\n<isolation>shared_fallback</isolation>\n\
@@ -937,6 +938,8 @@ impl ToolOutput {
                          explicitly `land_subagent` / `turbo subagent land`. They are **not** on \
                          parent main until landed.",
                     );
+                } else {
+                    text.push_str("\n\n<isolation>none</isolation>");
                 }
                 if let Some(ref wt) = sub.worktree_path {
                     text.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));

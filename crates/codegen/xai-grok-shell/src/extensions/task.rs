@@ -311,6 +311,7 @@ impl SubagentSnapshotDto {
                 tool_calls,
                 turns,
                 worktree_path,
+                ..
             } => {
                 dto.status = "completed".into();
                 dto.output = Some(output);
@@ -616,7 +617,11 @@ mod tests {
                 tool_calls: 8,
                 turns: 2,
                 worktree_path: None,
-            },
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
+        },
         };
         let dto =
             SubagentSnapshotDto::from_snapshot(snap, "p".into(), "c".into(), Default::default());
@@ -748,7 +753,11 @@ mod tests {
                 tool_calls: 7,
                 turns: 2,
                 worktree_path: None,
-            },
+            isolation: None,
+            isolation_fallback: false,
+            worktree_state: None,
+            isolation_requested: None,
+        },
         };
         let resp = GetSubagentResponse {
             snapshot: Some(SubagentSnapshotDto::from_snapshot(

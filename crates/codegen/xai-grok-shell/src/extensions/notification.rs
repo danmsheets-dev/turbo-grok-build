@@ -822,6 +822,30 @@ pub enum SessionUpdate {
         /// wire compatibility and other clients. Missing reads as `false`.
         #[serde(default)]
         will_wake: bool,
+        /// Effective isolation for harnesses: `worktree`, `none`, or
+        /// `shared_fallback` (requested worktree but ran on parent).
+        /// Older servers omit this field (deserializes as `None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        isolation: Option<String>,
+        /// Same value as `isolation`; serialized for harnesses that expect
+        /// the audit name `isolation_effective`. Prefer reading `isolation`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        isolation_effective: Option<String>,
+        /// Isolation requested at spawn (`worktree` / `none`) when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        isolation_requested: Option<String>,
+        /// True when isolation was requested but the child fell back to the
+        /// shared parent workspace (`GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`).
+        /// Harnesses must not claim the run was isolated when this is true.
+        /// Missing/older servers → `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        isolation_fallback: bool,
+        /// Live worktree path when isolation=worktree and the tree is present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_path: Option<String>,
+        /// Dispose lifecycle: `live` | `preserved` | `cleaned`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_state: Option<String>,
     },
     /// Task backgrounded notification — a bash command transitioned to background execution.
     /// Sent for both direct `is_background=true` tasks and foreground→background transitions.
@@ -1784,7 +1808,13 @@ mod tests {
             tokens_used: 50_000,
             output: None,
             will_wake: false,
-        })
+                isolation: None,
+                isolation_effective: None,
+                isolation_requested: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
+            })
         .unwrap();
         // All three should have distinct tags
         assert_eq!(spawned["sessionUpdate"], "subagent_spawned");
@@ -1838,7 +1868,13 @@ mod tests {
             tokens_used: 75_000,
             output: Some("done".into()),
             will_wake: false,
-        };
+                isolation: None,
+                isolation_effective: None,
+                isolation_requested: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
+            };
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(update, parsed);
@@ -1901,7 +1937,13 @@ mod tests {
             tokens_used: 1_100,
             output: Some("recommendation".into()),
             will_wake: false,
-        };
+                isolation: None,
+                isolation_effective: None,
+                isolation_requested: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
+            };
         let finished_json = serde_json::to_value(&finished).unwrap();
         assert_eq!(
             finished_json["termination_reason"],
@@ -1912,6 +1954,68 @@ mod tests {
             serde_json::from_value::<SessionUpdate>(finished_json).unwrap(),
             finished
         );
+    }
+
+    #[test]
+    fn subagent_finished_isolation_fields_roundtrip() {
+        let update = SessionUpdate::SubagentFinished {
+            subagent_id: "sa-iso".into(),
+            child_session_id: "cs-iso".into(),
+            status: "completed".into(),
+            error: None,
+            termination_reason: None,
+            usage: None,
+            tool_calls: 1,
+            turns: 1,
+            duration_ms: 100,
+            tokens_used: 10,
+            output: None,
+            will_wake: false,
+            isolation: Some("shared_fallback".into()),
+            isolation_effective: Some("shared_fallback".into()),
+            isolation_requested: Some("worktree".into()),
+            isolation_fallback: true,
+            worktree_path: None,
+            worktree_state: None,
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["isolation"], "shared_fallback");
+        assert_eq!(json["isolation_effective"], "shared_fallback");
+        assert_eq!(json["isolation_requested"], "worktree");
+        assert_eq!(json["isolation_fallback"], true);
+        let parsed: SessionUpdate = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, update);
+
+        // Older wire without isolation fields defaults honestly.
+        let old: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "subagent_finished",
+            "subagent_id": "sa-old",
+            "child_session_id": "c",
+            "status": "completed",
+            "tool_calls": 0,
+            "turns": 0,
+            "duration_ms": 1,
+        }))
+        .unwrap();
+        match old {
+            SessionUpdate::SubagentFinished {
+                isolation,
+                isolation_effective,
+                isolation_requested,
+                isolation_fallback,
+                worktree_path,
+                worktree_state,
+                ..
+            } => {
+                assert!(isolation.is_none());
+                assert!(isolation_effective.is_none());
+                assert!(isolation_requested.is_none());
+                assert!(!isolation_fallback);
+                assert!(worktree_path.is_none());
+                assert!(worktree_state.is_none());
+            }
+            other => panic!("expected finished, got {other:?}"),
+        }
     }
 
     #[test]

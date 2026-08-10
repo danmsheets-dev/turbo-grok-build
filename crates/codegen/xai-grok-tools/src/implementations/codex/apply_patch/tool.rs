@@ -137,18 +137,9 @@ enum FileChange {
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-/// Create parent directories for a file path if they don't exist.
-async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), xai_tool_runtime::ToolError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("apply_patch").expect("valid"),
-                e.to_string(),
-            )
-        })?;
-    }
+/// Parent dirs are created inside `fs.write_file` (LocalFs / ConfinedFs).
+/// Host `create_dir_all` here would bypass confine (audit C1).
+async fn ensure_parent_dirs(_path: &std::path::Path) -> Result<(), xai_tool_runtime::ToolError> {
     Ok(())
 }
 
@@ -356,7 +347,7 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (cwd, fs, notification_handle, confine_root);
+        let (cwd, fs, notification_handle, confine_root, allowed_paths);
         {
             cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
             let res = resources.lock().await;
@@ -365,6 +356,9 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
             confine_root = res
                 .get::<crate::types::resources::ConfineRoot>()
                 .map(|c| c.0.clone());
+            allowed_paths = res
+                .get::<crate::types::resources::AllowedWritePaths>()
+                .map(|a| a.0.clone());
         }
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.
         crate::types::resources::enforce_write_path(&cwd, confine_root.as_deref())
@@ -398,13 +392,39 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
             Err(msg) => return Ok(ApplyPatchOutput::ApplicationError(msg)),
         };
 
+        // Spawn allowed_paths: fail closed before any write (audit C3).
+        if let Some(ref prefixes) = allowed_paths {
+            for change in &changes {
+                let path = match change {
+                    FileChange::Add { path, .. }
+                    | FileChange::Delete { path, .. }
+                    | FileChange::Update { path, .. } => path,
+                    FileChange::Move {
+                        source_path,
+                        dest_path,
+                        ..
+                    } => {
+                        crate::types::resources::enforce_allowed_write_paths(
+                            &cwd,
+                            source_path,
+                            prefixes,
+                        )
+                        .map_err(|e| e.into_tool_error())?;
+                        dest_path
+                    }
+                };
+                crate::types::resources::enforce_allowed_write_paths(&cwd, path, prefixes)
+                    .map_err(|e| e.into_tool_error())?;
+            }
+        }
+
         // ── Phase 3: Apply all changes (write to filesystem) ─────
         let mut file_results = Vec::new();
 
         for change in &changes {
             match change {
                 FileChange::Add { path, content } => {
-                    // Create parent directories if needed.
+                    // Parent mkdir is inside fs.write_file (ConfinedFs-checked).
                     ensure_parent_dirs(path).await?;
                     fs.write_file(path, content.as_bytes()).await.map_err(|e| {
                         xai_tool_runtime::ToolError::execution(

@@ -638,7 +638,13 @@ async fn test_subagent_notifications_round_trip() {
             tokens_used: 0,
             output: None,
             will_wake: false,
-        },
+                isolation: None,
+                isolation_effective: None,
+                isolation_requested: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
+            },
         meta: None,
     };
     adapter.append_update(&info, &SessionUpdate::Xai(Box::new(finished))).await.unwrap();

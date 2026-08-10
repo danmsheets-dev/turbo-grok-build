@@ -1498,10 +1498,13 @@ mod tests {
 
     #[test]
     fn background_block_gutter_uses_block_background_fill() {
+        // UserPromptBlock reads Theme::current() for its band; pin GrokNight +
+        // TrueColor so Windows/CI without truecolor still paint a non-Reset band.
+        let _pin = crate::test_util::pin_theme();
         // Background blocks own the gutter via the existing full-area fill, so
         // the no-bg clear must not run for them. Concrete theme so bg_light !=
         // bg_base (Theme::current() quantizes both to Reset in the test env).
-        let theme = Theme::groknight();
+        let theme = Theme::current();
         assert_ne!(
             theme.bg_light, theme.bg_base,
             "test premise: block bg must differ from base bg"

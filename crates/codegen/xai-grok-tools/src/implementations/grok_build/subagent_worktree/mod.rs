@@ -706,19 +706,23 @@ pub fn normalize_allowlist_path(path: &str) -> Option<String> {
 }
 
 /// Effective allowlist from meta: non-empty cleaned prefixes, or `None` (unrestricted).
+///
+/// If meta.allowed_paths is present and non-empty but **every** entry fails
+/// normalize (absolute/`..`), returns `Some(vec![])` so land fail-closed
+/// rather than treating corrupt meta as unrestricted (audit C7).
 pub fn effective_allowed_paths(meta: &SubagentMetaView) -> Option<Vec<String>> {
     let raw = meta.allowed_paths.as_ref()?;
+    if raw.is_empty() {
+        return None;
+    }
     let mut out = Vec::new();
     for p in raw {
         if let Some(n) = normalize_allowlist_path(p) {
             out.push(n);
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    // Present-but-all-invalid → empty allowlist (deny-all at refuse site).
+    Some(out)
 }
 
 /// True when `path` is under any allowlist prefix (exact file or directory prefix).
@@ -770,6 +774,13 @@ pub fn refuse_land_outside_allowlist(
     let Some(allowed) = effective_allowed_paths(meta) else {
         return Ok(());
     };
+    if allowed.is_empty() {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "path_allowlist_violation",
+            "land refused: allowed_paths is set but contains no valid relative prefixes \
+             (all entries were absolute or contained `..`). Re-spawn with a valid allowlist.",
+        ));
+    }
     let (_ok, denied) = partition_by_allowlist(paths, &allowed);
     if denied.is_empty() {
         return Ok(());

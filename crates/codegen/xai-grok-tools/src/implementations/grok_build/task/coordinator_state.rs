@@ -746,6 +746,14 @@ pub(super) fn completed_snapshot(
             reason: child.result.error.clone(),
         }
     } else if child.result.success {
+        let summary = completion_summary(&child.request, &child.result);
+        let isolation_requested = child
+            .request
+            .runtime_overrides
+            .isolation
+            .as_ref()
+            .map(|m| m.as_str().to_owned())
+            .or_else(|| Some("none".to_owned()));
         SubagentSnapshotStatus::Completed {
             output: persisted_output
                 .map(str::to_owned)
@@ -753,6 +761,10 @@ pub(super) fn completed_snapshot(
             tool_calls: child.result.tool_calls,
             turns: child.result.turns,
             worktree_path: child.result.worktree_path.clone(),
+            isolation: summary.isolation,
+            isolation_fallback: child.result.isolation_fallback,
+            worktree_state: child.result.worktree_state.clone(),
+            isolation_requested,
         }
     } else {
         SubagentSnapshotStatus::Failed {
@@ -832,10 +844,17 @@ pub fn completion_summary(
         .is_some_and(|m| m.as_str() == "worktree")
     {
         // Requested worktree but no artifacts (create failed / dispose incomplete).
-        Some("worktree".to_owned())
+        // Do not claim "worktree" without evidence (audit C5).
+        Some("none".to_owned())
     } else {
         Some("none".to_owned())
     };
+    let isolation_requested = request
+        .runtime_overrides
+        .isolation
+        .as_ref()
+        .map(|m| m.as_str().to_owned())
+        .or_else(|| Some("none".to_owned()));
     SubagentCompletionSummary {
         subagent_id: request.id.clone(),
         subagent_type: request.subagent_type.clone(),
@@ -848,6 +867,7 @@ pub fn completion_summary(
         isolation,
         worktree_path: result.worktree_path.clone(),
         worktree_state: result.worktree_state.clone(),
+        isolation_requested,
     }
 }
 

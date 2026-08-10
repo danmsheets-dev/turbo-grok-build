@@ -536,20 +536,68 @@ pub fn enforce_allowed_write_paths(
         }
     };
     let rel_str = rel.to_string_lossy().replace('\\', "/");
-    // Exact path or directory prefix (same rules as land allowlist).
+    // Collapse `..` / reject absolute-style relative escapes so write-time
+    // gates match land_subagent normalize_allowlist_path semantics.
+    let Some(norm) = normalize_rel_allowlist_path(&rel_str) else {
+        return Err(AllowedPathsViolation {
+            path: rel_str,
+            allowed: allowed.to_vec(),
+        });
+    };
     let allowed_ok = allowed.iter().any(|prefix| {
-        let p = prefix.trim_end_matches('/');
-        rel_str == p
-            || rel_str.starts_with(&(p.to_owned() + "/"))
-            || (prefix.ends_with('/') && rel_str.starts_with(prefix.as_str()))
+        let Some(p) = normalize_rel_allowlist_path(prefix) else {
+            return false;
+        };
+        norm == p || norm.starts_with(&(p + "/"))
     });
     if allowed_ok {
         return Ok(());
     }
     Err(AllowedPathsViolation {
-        path: rel_str,
+        path: norm,
         allowed: allowed.to_vec(),
     })
+}
+
+/// Normalize a cwd-relative path for allowlist matching (same rules as
+/// land_subagent `normalize_allowlist_path`, kept here to avoid types↔impl cycles).
+fn normalize_rel_allowlist_path(path: &str) -> Option<String> {
+    let mut s = path.trim().replace('\\', "/");
+    if s.is_empty() {
+        return None;
+    }
+    if s.starts_with('/') || s.starts_with("//") {
+        return None;
+    }
+    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        return None;
+    }
+    while s.starts_with("./") {
+        s = s[2..].to_owned();
+    }
+    if s == "." {
+        return None;
+    }
+    if s.ends_with('/') && s.len() > 1 {
+        s.pop();
+    }
+    let mut stack: Vec<&str> = Vec::new();
+    for part in s.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                if stack.is_empty() {
+                    return None;
+                }
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    if stack.is_empty() {
+        return None;
+    }
+    Some(stack.join("/"))
 }
 
 /// Whether `path` is rooted for model-path rewriting.
@@ -642,6 +690,24 @@ pub fn resolve_model_path_confined(
             resolved.display(),
             confine_root.display()
         ))
+    }
+}
+
+/// Resolve a write-tool path: when a session [`ConfineRoot`] **or** process
+/// confine root is active, use [`resolve_model_path_confined`] so out-of-root
+/// absolutes fail at resolve time (not only at ConfinedFs write). Without any
+/// confine root, same as [`resolve_model_path`].
+pub fn resolve_write_model_path(
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+    confine_root: Option<&std::path::Path>,
+    input: &str,
+) -> Result<PathBuf, String> {
+    let process = process_confine_root();
+    let effective = confine_root.or(process.as_ref().map(|p| p.as_path()));
+    match effective {
+        Some(root) => resolve_model_path_confined(cwd, display_cwd, root, input),
+        None => Ok(resolve_model_path(cwd, display_cwd, input)),
     }
 }
 
@@ -2333,6 +2399,39 @@ mod tests {
         // Relative inside-root path succeeds.
         let ok = super::resolve_model_path_confined(root, None, root, "src/a.rs").unwrap();
         assert!(super::path_is_under_confine_root(&ok, root));
+    }
+
+    #[test]
+    fn resolve_write_model_path_confines_when_root_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let ok = super::resolve_write_model_path(root, None, Some(root), "a/b.rs").unwrap();
+        assert!(super::path_is_under_confine_root(&ok, root));
+        let outside = if cfg!(windows) {
+            r"C:\Windows\System32\drivers\etc\hosts"
+        } else {
+            "/etc/hosts"
+        };
+        assert!(
+            super::resolve_write_model_path(root, None, Some(root), outside).is_err(),
+            "outside absolute must fail when confined"
+        );
+        // Without confine root, absolute is accepted (unconfined default).
+        let bare = super::resolve_write_model_path(root, None, None, outside).unwrap();
+        assert_eq!(bare, std::path::PathBuf::from(outside));
+    }
+
+    #[test]
+    fn enforce_allowed_write_paths_rejects_dotdot_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        // Path under cwd that normalizes outside allowlist prefix via ..
+        let target = cwd.join("docs").join("..").join("secret.txt");
+        let err = super::enforce_allowed_write_paths(cwd, &target, &["docs".into()]).unwrap_err();
+        assert_eq!(err.path, "secret.txt");
+        // Clean under-prefix path is ok.
+        let ok_path = cwd.join("docs").join("a.md");
+        super::enforce_allowed_write_paths(cwd, &ok_path, &["docs".into()]).unwrap();
     }
 
     /// WP-H4 regression: table-driven confine escapes that previously wrote

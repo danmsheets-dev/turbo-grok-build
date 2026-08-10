@@ -910,6 +910,13 @@ pub struct PagerArgs {
     /// want questions and can answer them.
     #[arg(long = "allow-interactive-questions")]
     pub allow_interactive_questions: bool,
+    /// JSON answers file for headless `--allow-interactive-questions`.
+    ///
+    /// Object map of question text → label (or label array), or an ordered
+    /// array of answers. Env `GROK_ASK_ANSWERS_JSON` is an alternate source
+    /// when this flag is omitted. Without either, first-option defaults apply.
+    #[arg(long = "ask-answers-file", value_name = "PATH")]
+    pub ask_answers_file: Option<std::path::PathBuf>,
     /// Session storage mode: local or writeback.
     #[arg(long = "storage-mode", value_name = "MODE", hide = true)]
     pub storage_mode: Option<String>,

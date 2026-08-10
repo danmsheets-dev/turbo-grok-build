@@ -174,6 +174,126 @@ fn parse_prompt_json(json_str: &str) -> anyhow::Result<Vec<acp::ContentBlock>> {
     Ok(blocks)
 }
 
+/// Harness-supplied answers for headless `ask_user_question`.
+///
+/// Accepts either:
+/// - a JSON object mapping question text → string or string array labels
+/// - a JSON array of answers in question order (string or string array each)
+///
+/// Sources (first wins): `--ask-answers-file`, then env `GROK_ASK_ANSWERS_JSON`.
+/// When no table is loaded, `--allow-interactive-questions` falls back to the
+/// first option of each question (deterministic default).
+#[derive(Debug, Clone, Default)]
+pub struct HeadlessAskAnswers {
+    /// Exact question-text → selected labels.
+    by_question: std::collections::HashMap<String, Vec<String>>,
+    /// Ordered answers for questions 0..n-1.
+    ordered: Vec<Vec<String>>,
+}
+
+impl HeadlessAskAnswers {
+    /// Parse harness JSON (object or array forms).
+    pub fn parse_json(raw: &str) -> Result<Self> {
+        let v: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| anyhow::anyhow!("invalid ask-answers JSON: {e}"))?;
+        Self::from_value(v)
+    }
+
+    fn from_value(v: serde_json::Value) -> Result<Self> {
+        match v {
+            serde_json::Value::Object(map) => {
+                // Support wrapper { "answers": {..}, "ordered": [...] }
+                if map.contains_key("answers") || map.contains_key("ordered") {
+                    let mut out = Self::default();
+                    if let Some(ans) = map.get("answers") {
+                        let nested = Self::from_value(ans.clone())?;
+                        out.by_question = nested.by_question;
+                    }
+                    if let Some(ord) = map.get("ordered") {
+                        let nested = Self::from_value(ord.clone())?;
+                        out.ordered = nested.ordered;
+                    }
+                    return Ok(out);
+                }
+                let mut by_question = std::collections::HashMap::new();
+                for (k, val) in map {
+                    by_question.insert(k, labels_from_value(&val)?);
+                }
+                Ok(Self {
+                    by_question,
+                    ordered: Vec::new(),
+                })
+            }
+            serde_json::Value::Array(items) => {
+                let mut ordered = Vec::with_capacity(items.len());
+                for item in items {
+                    ordered.push(labels_from_value(&item)?);
+                }
+                Ok(Self {
+                    by_question: std::collections::HashMap::new(),
+                    ordered,
+                })
+            }
+            other => anyhow::bail!(
+                "ask-answers JSON must be an object or array, got {}",
+                other
+            ),
+        }
+    }
+
+    /// Resolve labels for one question (by exact text, then by index).
+    pub fn resolve(&self, question: &str, index: usize) -> Option<Vec<String>> {
+        if let Some(labels) = self.by_question.get(question) {
+            return Some(labels.clone());
+        }
+        self.ordered.get(index).cloned()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_question.is_empty() && self.ordered.is_empty()
+    }
+}
+
+fn labels_from_value(v: &serde_json::Value) -> Result<Vec<String>> {
+    match v {
+        serde_json::Value::String(s) => Ok(vec![s.clone()]),
+        serde_json::Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                match item {
+                    serde_json::Value::String(s) => out.push(s.clone()),
+                    other => anyhow::bail!(
+                        "ask-answers array entries must be strings, got {other}"
+                    ),
+                }
+            }
+            Ok(out)
+        }
+        other => anyhow::bail!(
+            "ask-answers value must be a string or string array, got {other}"
+        ),
+    }
+}
+
+/// Load headless ask answers from CLI file and/or env.
+pub fn load_headless_ask_answers(
+    file: Option<&Path>,
+) -> Result<Option<HeadlessAskAnswers>> {
+    if let Some(path) = file {
+        let raw = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("failed to read --ask-answers-file {}: {e}", path.display())
+        })?;
+        return Ok(Some(HeadlessAskAnswers::parse_json(&raw)?));
+    }
+    if let Ok(raw) = std::env::var("GROK_ASK_ANSWERS_JSON") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(HeadlessAskAnswers::parse_json(trimmed)?));
+        }
+    }
+    Ok(None)
+}
+
 #[derive(Debug, Clone)]
 pub struct HeadlessOptions {
     pub session_id: Option<String>,
@@ -229,6 +349,10 @@ pub struct HeadlessOptions {
     /// clause and of the question-ending auto-continue recovery (HYPER-1).
     /// Rare: only for harnesses that genuinely want the model to ask.
     pub allow_interactive_questions: bool,
+    /// Optional path to a JSON answers file for headless
+    /// `--allow-interactive-questions` (see [`HeadlessAskAnswers`]).
+    /// Env `GROK_ASK_ANSWERS_JSON` is an alternate inline source.
+    pub ask_answers_file: Option<PathBuf>,
     /// How much of each tool's raw input/output to stream
     /// (`none` | `truncated` | `full`). Default truncated (~2 KB).
     pub stream_tool_io: StreamToolIo,
@@ -867,6 +991,10 @@ impl HeadlessEmitter {
         turns: Option<u32>,
         duration_ms: Option<u64>,
         tokens_used: Option<u64>,
+        isolation: Option<&str>,
+        isolation_fallback: bool,
+        worktree_path: Option<&str>,
+        worktree_state: Option<&str>,
     ) {
         self.subagents.note_finished(status);
         if !matches!(self.format, OutputFormat::StreamingJson) {
@@ -901,6 +1029,18 @@ impl HeadlessEmitter {
         }
         if let Some(v) = tokens_used {
             ev["tokensUsed"] = serde_json::json!(v);
+        }
+        if let Some(v) = isolation {
+            ev["isolation"] = serde_json::Value::String(v.to_string());
+        }
+        if isolation_fallback {
+            ev["isolationFallback"] = serde_json::json!(true);
+        }
+        if let Some(v) = worktree_path {
+            ev["worktreePath"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = worktree_state {
+            ev["worktreeState"] = serde_json::Value::String(v.to_string());
         }
         println!("{ev}");
     }
@@ -1483,6 +1623,7 @@ async fn open_session(
     cwd: &Path,
     session_id_flag: Option<&str>,
     restore_code: Option<bool>,
+    allow_interactive_questions: bool,
 ) -> anyhow::Result<OpenedSession> {
     // Pager opens sessions before the agent resolves per-vendor compat;
     // default (all-on) preserves existing behavior — the agent applies
@@ -1497,6 +1638,11 @@ async fn open_session(
                 .meta({
                     let mut m = acp::Meta::new();
                     m.insert("noReplay".into(), serde_json::Value::Bool(true));
+                    // Shell gates ask_user_question from session meta, not Initialize.
+                    m.insert(
+                        "askUserQuestion".into(),
+                        serde_json::Value::Bool(allow_interactive_questions),
+                    );
                     if let Some(true) = restore_code {
                         m.insert("x.ai/restore_code".into(), serde_json::Value::Bool(true));
                     }
@@ -1514,8 +1660,13 @@ async fn open_session(
         anyhow::bail!("Session does not exist");
     }
 
+    // Session meta (not only Initialize) gates ask_user_question in the shell.
+    let session_meta =
+        serde_json::json!({ "askUserQuestion": allow_interactive_questions });
     let new_resp: acp::NewSessionResponse = acp_send(
-        acp::NewSessionRequest::new(cwd.to_path_buf()).mcp_servers(mcp_servers),
+        acp::NewSessionRequest::new(cwd.to_path_buf())
+            .mcp_servers(mcp_servers)
+            .meta(session_meta.as_object().cloned()),
         acp_tx,
     )
     .await?;
@@ -1529,6 +1680,7 @@ async fn open_session_with_id(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_id: &str,
+    allow_interactive_questions: bool,
 ) -> anyhow::Result<OpenedSession> {
     let cwd_str = cwd.to_string_lossy();
     crate::app::session_startup::ensure_session_id_available(session_id, &cwd_str)?;
@@ -1538,9 +1690,12 @@ async fn open_session_with_id(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
             .meta(
-                serde_json::json!({ "sessionId": session_id })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "askUserQuestion": allow_interactive_questions,
+                })
+                .as_object()
+                .cloned(),
             ),
         acp_tx,
     )
@@ -1558,6 +1713,7 @@ async fn fork_then_open(
     parent_cwd: Option<&Path>,
     new_id: Option<&str>,
     restore_code: Option<bool>,
+    allow_interactive_questions: bool,
 ) -> anyhow::Result<OpenedSession> {
     use crate::app::session_startup::{
         effective_fork_new_cwd, ensure_session_id_available, fork_response_error,
@@ -1585,7 +1741,16 @@ async fn fork_then_open(
     }
     let child = fork_response_new_session_id(resp.0.get())
         .ok_or_else(|| anyhow::anyhow!("fork response missing newSessionId"))?;
-    match open_session(acp_tx, &write_cwd, Some(&child), restore_code).await {
+    match open_session(
+        acp_tx,
+        &write_cwd,
+        Some(&child),
+        restore_code,
+        // Honor CLI --allow-interactive-questions on forked sessions (C6).
+        allow_interactive_questions,
+    )
+    .await
+    {
         Ok(opened) => Ok(opened),
         Err(e) => Err(anyhow::anyhow!(
             "fork succeeded as {child} but load failed: {e}"
@@ -1771,6 +1936,16 @@ pub async fn run_single_turn(
     );
     // Arm process-wide confine_violation NDJSON emission for streaming-json.
     emitter.enable_confine_violation_emit();
+
+    // Harness answers only when interactive questions are opted in (C5).
+    // A poisoned GROK_ASK_ANSWERS_JSON / missing answers file must not abort
+    // ordinary headless runs that never enable ask_user_question.
+    let ask_answers_table = if options.allow_interactive_questions {
+        load_headless_ask_answers(options.ask_answers_file.as_deref())?
+    } else {
+        None
+    };
+    let ask_answers = ask_answers_table.as_ref();
 
     // Load config and spawn agent
     let t_spawn = Instant::now();
@@ -1962,11 +2137,24 @@ pub async fn run_single_turn(
     );
     let (session_cwd, original_cwd_for_start, opened) = match materialized {
         MaterializedStartup::NewAuto => {
-            let opened = open_session(&acp_tx, &cwd, None, None).await;
+            let opened = open_session(
+                &acp_tx,
+                &cwd,
+                None,
+                None,
+                options.allow_interactive_questions,
+            )
+            .await;
             (cwd.clone(), None, opened)
         }
         MaterializedStartup::NewWithId { session_id } => {
-            let opened = open_session_with_id(&acp_tx, &cwd, &session_id).await;
+            let opened = open_session_with_id(
+                &acp_tx,
+                &cwd,
+                &session_id,
+                options.allow_interactive_questions,
+            )
+            .await;
             (cwd.clone(), None, opened)
         }
         MaterializedStartup::Resume {
@@ -1979,8 +2167,14 @@ pub async fn run_single_turn(
                 .unwrap_or(cwd.as_path())
                 .to_path_buf();
             let orig = original_cwd.clone();
-            let opened =
-                open_session(&acp_tx, &load_cwd, Some(session_id.as_str()), restore_code).await;
+            let opened = open_session(
+                &acp_tx,
+                &load_cwd,
+                Some(session_id.as_str()),
+                restore_code,
+                options.allow_interactive_questions,
+            )
+            .await;
             (load_cwd, orig, opened)
         }
         MaterializedStartup::Fork {
@@ -2000,6 +2194,7 @@ pub async fn run_single_turn(
                 parent_cwd.as_deref(),
                 new_session_id.as_deref(),
                 restore_code,
+                options.allow_interactive_questions,
             )
             .await;
             (load_cwd, parent_cwd.clone(), opened)
@@ -2249,6 +2444,8 @@ pub async fn run_single_turn(
                         options.output_format,
                         &mut pending_bg,
                         &mut completed_before_bg,
+                        options.allow_interactive_questions,
+                        ask_answers,
                     );
                 }
                 if pending_bg.is_empty() {
@@ -2306,6 +2503,8 @@ pub async fn run_single_turn(
                         options.output_format,
                         &mut pending_bg,
                         &mut completed_before_bg,
+                        options.allow_interactive_questions,
+                        ask_answers,
                     );
                 }
                 res = &mut prompt_fut, if this_result.is_none() => {
@@ -2323,6 +2522,8 @@ pub async fn run_single_turn(
                             options.output_format,
                             &mut pending_bg,
                             &mut completed_before_bg,
+                            options.allow_interactive_questions,
+                            ask_answers,
                         )
                         .await;
                         break;
@@ -2351,6 +2552,8 @@ pub async fn run_single_turn(
                 options.output_format,
                 &mut pending_bg,
                 &mut completed_before_bg,
+                options.allow_interactive_questions,
+                ask_answers,
             );
         }
 
@@ -2646,6 +2849,10 @@ fn emit_subagent_lifecycle(emitter: &mut HeadlessEmitter, event: &ExtEvent) {
             turns,
             duration_ms,
             tokens_used,
+            isolation,
+            isolation_fallback,
+            worktree_path,
+            worktree_state,
         } => {
             emitter.on_subagent_finished(
                 subagent_id,
@@ -2658,6 +2865,10 @@ fn emit_subagent_lifecycle(emitter: &mut HeadlessEmitter, event: &ExtEvent) {
                 *turns,
                 *duration_ms,
                 *tokens_used,
+                isolation.as_deref(),
+                *isolation_fallback,
+                worktree_path.as_deref(),
+                worktree_state.as_deref(),
             );
         }
         _ => {}
@@ -2678,6 +2889,8 @@ async fn drain_acp_with_grace(
     output_format: OutputFormat,
     pending_bg: &mut HashSet<String>,
     completed_before_bg: &mut HashSet<String>,
+    allow_interactive_questions: bool,
+    ask_answers: Option<&HeadlessAskAnswers>,
 ) {
     let deadline = Instant::now() + grace;
     loop {
@@ -2692,6 +2905,8 @@ async fn drain_acp_with_grace(
                 output_format,
                 pending_bg,
                 completed_before_bg,
+                allow_interactive_questions,
+                ask_answers,
             );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -2712,6 +2927,8 @@ async fn drain_acp_with_grace(
                     output_format,
                     pending_bg,
                     completed_before_bg,
+                    allow_interactive_questions,
+                    ask_answers,
                 );
             }
             _ = tokio::time::sleep(remaining) => {
@@ -2737,6 +2954,8 @@ fn handle_headless_acp_message(
     output_format: OutputFormat,
     pending_bg: &mut HashSet<String>,
     completed_before_bg: &mut HashSet<String>,
+    allow_interactive_questions: bool,
+    ask_answers: Option<&HeadlessAskAnswers>,
 ) {
     match msg {
         AcpClientMessageBox::SessionNotification(boxed) => {
@@ -2835,7 +3054,7 @@ fn handle_headless_acp_message(
             emit_subagent_lifecycle(emitter, &event);
         }
         AcpClientMessageBox::ExtMethod(ext) => {
-            handle_headless_ext_method(ext, emitter);
+            handle_headless_ext_method(ext, emitter, allow_interactive_questions, ask_answers);
         }
         AcpClientMessageBox::WaitForTerminalExit(args) => {
             args.response_tx
@@ -2849,26 +3068,96 @@ fn handle_headless_acp_message(
 }
 
 /// Headless reverse-requests that must not block for 30 minutes.
+///
+/// When `allow_interactive_questions` is false (default), `ask_user_question`
+/// is cancelled immediately so the model cannot hang waiting for a TUI.
+/// When true (`--allow-interactive-questions`), the tool is re-enabled and
+/// answered from:
+/// 1. `--ask-answers-file` / `GROK_ASK_ANSWERS_JSON` harness table
+/// 2. else first-option defaults (deterministic)
+///
+/// This matches the init meta that re-advertises the tool.
 fn handle_headless_ext_method(
     ext: xai_acp_lib::AcpArgsBox<acp::ExtRequest>,
     emitter: &mut HeadlessEmitter,
+    allow_interactive_questions: bool,
+    ask_answers: Option<&HeadlessAskAnswers>,
 ) {
     let method = ext.request.method.as_ref();
     if method == "x.ai/ask_user_question" {
+        use indexmap::IndexMap;
         use xai_grok_tools::implementations::grok_build::ask_user_question::{
             AskUserQuestionExtRequest, AskUserQuestionExtResponse,
         };
-        let tool_call_id = serde_json::from_str::<AskUserQuestionExtRequest>(
-            ext.request.params.get(),
-        )
-        .ok()
-        .map(|r| r.tool_call_id);
-        emitter.on_question_suppressed(
-            tool_call_id.as_deref(),
-            "headless: ask_user_question is disabled; no interactive user",
-        );
-        let cancelled = AskUserQuestionExtResponse::Cancelled;
-        match serde_json::value::to_raw_value(&cancelled) {
+        let parsed =
+            serde_json::from_str::<AskUserQuestionExtRequest>(ext.request.params.get()).ok();
+        let tool_call_id = parsed.as_ref().map(|r| r.tool_call_id.clone());
+        if !allow_interactive_questions {
+            emitter.on_question_suppressed(
+                tool_call_id.as_deref(),
+                "headless: ask_user_question is disabled; no interactive user",
+            );
+            let cancelled = AskUserQuestionExtResponse::Cancelled;
+            match serde_json::value::to_raw_value(&cancelled) {
+                Ok(raw) => {
+                    let _ = ext.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
+                }
+                Err(e) => {
+                    let _ = ext
+                        .response_tx
+                        .send(Err(acp::Error::new(-32603, format!("serialize: {e}"))));
+                }
+            }
+            return;
+        }
+        // Opt-in path: harness answers first, then first-option defaults.
+        let response = if let Some(req) = parsed {
+            let mut answers: IndexMap<String, Vec<String>> = IndexMap::new();
+            let mut used_harness = false;
+            let mut used_defaults = false;
+            for (idx, q) in req.questions.iter().enumerate() {
+                let labels = if let Some(labels) =
+                    ask_answers.and_then(|table| table.resolve(&q.question, idx))
+                {
+                    used_harness = true;
+                    labels
+                } else {
+                    used_defaults = true;
+                    let label = q
+                        .options
+                        .first()
+                        .map(|o| o.label.clone())
+                        .unwrap_or_else(|| "Other".to_string());
+                    vec![label]
+                };
+                answers.insert(q.question.clone(), labels);
+            }
+            if used_harness {
+                emitter.on_warning(
+                    "ask_user_question_harness",
+                    "headless: --allow-interactive-questions applied harness answers \
+                     (--ask-answers-file / GROK_ASK_ANSWERS_JSON)",
+                );
+            }
+            if used_defaults {
+                emitter.on_warning(
+                    "ask_user_question_defaults",
+                    "headless: --allow-interactive-questions applied first-option defaults \
+                     (provide --ask-answers-file or GROK_ASK_ANSWERS_JSON for custom answers)",
+                );
+            }
+            AskUserQuestionExtResponse::Accepted {
+                answers,
+                annotations: None,
+            }
+        } else {
+            emitter.on_question_suppressed(
+                tool_call_id.as_deref(),
+                "headless: ask_user_question params failed to parse",
+            );
+            AskUserQuestionExtResponse::Cancelled
+        };
+        match serde_json::value::to_raw_value(&response) {
             Ok(raw) => {
                 let _ = ext.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
             }
@@ -2924,6 +3213,11 @@ enum ExtEvent {
         turns: Option<u32>,
         duration_ms: Option<u64>,
         tokens_used: Option<u64>,
+        /// Effective isolation: `worktree` | `none` | `shared_fallback`.
+        isolation: Option<String>,
+        isolation_fallback: bool,
+        worktree_path: Option<String>,
+        worktree_state: Option<String>,
     },
     /// Monitor emitted a line (or ended streaming). Does not complete the task;
     /// completion still arrives via `TaskCompleted`.
@@ -3058,6 +3352,10 @@ fn handle_ext_notification(
                 turns,
                 duration_ms,
                 tokens_used,
+                isolation,
+                isolation_fallback,
+                worktree_path,
+                worktree_state,
                 ..
             } => {
                 return ExtEvent::SubagentFinished {
@@ -3071,6 +3369,10 @@ fn handle_ext_notification(
                     turns: Some(turns),
                     duration_ms: Some(duration_ms),
                     tokens_used: Some(tokens_used),
+                    isolation,
+                    isolation_fallback,
+                    worktree_path,
+                    worktree_state,
                 };
             }
             ShellUpdate::AutoCompactStarted { percentage, .. } => {
@@ -3217,6 +3519,14 @@ fn handle_ext_notification(
             duration_ms: Option<u64>,
             #[serde(default)]
             tokens_used: Option<u64>,
+            #[serde(default)]
+            isolation: Option<String>,
+            #[serde(default)]
+            isolation_fallback: bool,
+            #[serde(default)]
+            worktree_path: Option<String>,
+            #[serde(default)]
+            worktree_state: Option<String>,
         },
         #[serde(other)]
         Other,
@@ -3317,6 +3627,10 @@ fn handle_ext_notification(
             turns,
             duration_ms,
             tokens_used,
+            isolation,
+            isolation_fallback,
+            worktree_path,
+            worktree_state,
         } => {
             return ExtEvent::SubagentFinished {
                 subagent_id,
@@ -3329,6 +3643,10 @@ fn handle_ext_notification(
                 turns,
                 duration_ms,
                 tokens_used,
+                isolation,
+                isolation_fallback,
+                worktree_path,
+                worktree_state,
             };
         }
         XaiUpdateLite::Other => {}
@@ -3384,6 +3702,10 @@ mod tests {
                 turns: None,
                 duration_ms: None,
                 tokens_used: None,
+                isolation: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
             },
             &mut pending,
             &mut completed,
@@ -3885,6 +4207,83 @@ mod tests {
             handle_ext_notification(&notif, OutputFormat::Plain),
             ExtEvent::None
         ));
+    }
+
+    // ── Headless ask-answers harness (C11) ───────────────────────────────
+
+    #[test]
+    fn headless_ask_answers_map_and_ordered() {
+        let map = HeadlessAskAnswers::parse_json(
+            r#"{"Which approach?": "A", "Deploy?": ["Yes", "No"]}"#,
+        )
+        .expect("map form");
+        assert_eq!(
+            map.resolve("Which approach?", 0).as_deref(),
+            Some(&["A".to_string()][..])
+        );
+        assert_eq!(
+            map.resolve("Deploy?", 1).as_deref(),
+            Some(&["Yes".to_string(), "No".to_string()][..])
+        );
+        assert!(map.resolve("Unknown?", 0).is_none());
+
+        let ordered =
+            HeadlessAskAnswers::parse_json(r#"["first", ["a", "b"]]"#).expect("array form");
+        assert_eq!(
+            ordered.resolve("anything", 0).as_deref(),
+            Some(&["first".to_string()][..])
+        );
+        assert_eq!(
+            ordered.resolve("anything", 1).as_deref(),
+            Some(&["a".to_string(), "b".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn headless_ask_answers_wrapper_object() {
+        let table = HeadlessAskAnswers::parse_json(
+            r#"{"answers": {"Q1?": "yes"}, "ordered": ["fallback"]}"#,
+        )
+        .expect("wrapper");
+        assert_eq!(
+            table.resolve("Q1?", 0).as_deref(),
+            Some(&["yes".to_string()][..])
+        );
+        // ordered used when question not in map
+        assert_eq!(
+            table.resolve("other?", 0).as_deref(),
+            Some(&["fallback".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn handle_ext_notification_surfaces_isolation_on_subagent_finished() {
+        let finished = make_ext_notif(
+            "x.ai/session_notification",
+            serde_json::json!({
+                "sessionUpdate": "subagent_finished",
+                "subagent_id": "sub-iso",
+                "child_session_id": "c",
+                "status": "completed",
+                "tool_calls": 1,
+                "turns": 1,
+                "duration_ms": 10,
+                "tokens_used": 1,
+                "isolation": "shared_fallback",
+                "isolation_fallback": true
+            }),
+        );
+        match handle_ext_notification(&finished, OutputFormat::Plain) {
+            ExtEvent::SubagentFinished {
+                isolation,
+                isolation_fallback,
+                ..
+            } => {
+                assert_eq!(isolation.as_deref(), Some("shared_fallback"));
+                assert!(isolation_fallback);
+            }
+            other => panic!("expected SubagentFinished, got {other:?}"),
+        }
     }
 
     // ── HYPER-1: question shape + auto-continue bound ────────────────────

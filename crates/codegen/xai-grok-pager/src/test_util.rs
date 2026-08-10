@@ -2,6 +2,8 @@
 //!
 //! Compiled only in `#[cfg(test)]` builds. Import via `crate::test_util`.
 
+use std::path::{Path, PathBuf};
+
 /// Pin this crate's unit-test binary to the modern (non-legacy) glyph set.
 ///
 /// The glyph a view paints is chosen at runtime by

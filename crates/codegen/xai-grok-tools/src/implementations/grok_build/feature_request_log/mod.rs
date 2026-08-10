@@ -152,6 +152,20 @@ Operators review with `turbo features list`, `turbo features export`, `turbo fea
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::tool_metadata::ToolMetadata;
+
+    #[test]
+    fn tool_name_is_registered_constant() {
+        assert_eq!(FEATURE_REQUEST_LOG_TOOL_NAME, "feature_request_log");
+        let t = FeatureRequestLogTool;
+        assert!(t.description_template().contains("feature_request_log"));
+        assert!(t.description_template().contains("Turbo"));
+    }
+}
+
 impl xai_tool_runtime::Tool for FeatureRequestLogTool {
     type Args = FeatureRequestLogInput;
     type Output = FeatureRequestLogOutput;

@@ -1442,8 +1442,12 @@ impl ModelsManager {
         self.inner.catalog.read().allowlist_excludes_all
     }
 
-    /// Re-pick the default when the current model is gone or unselectable;
-    /// auth visibility never evicts an explicit user pick.
+    /// Re-pick the default when the current model is gone or unselectable.
+    ///
+    /// First-party auth-visibility (OAuth-only vs API-key) never evicts an
+    /// explicit user pick — the user may switch auth modes and keep the model.
+    /// Managed platform entries without credentials are completely unusable,
+    /// so those are always reselected even after an explicit pick.
     fn reselect_current_model_if_missing(&self, config: &config::Config) {
         let current = self.inner.current_model_id.read().clone();
         let user_selected = self.inner.user_selected_model.load(Ordering::Relaxed);
@@ -1453,9 +1457,15 @@ impl ModelsManager {
             match models.get(current.0.as_ref()) {
                 None => true,
                 Some(entry) => {
-                    // Prefer ModelEntry::visible_for_auth (platform credential gate).
-                    !entry.info.user_selectable
-                        || (!user_selected && !entry.visible_for_auth(self.is_session_auth()))
+                    if !entry.info.user_selectable {
+                        true
+                    } else if !entry.visible_for_auth(self.is_session_auth()) {
+                        // Unusable under current auth/credentials.
+                        // Keep first-party user picks; always evict locked platforms.
+                        !user_selected || entry.is_managed_platform_model()
+                    } else {
+                        false
+                    }
                 }
             }
         };

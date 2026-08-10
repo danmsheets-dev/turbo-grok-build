@@ -194,7 +194,7 @@ mod tests {
             })),
         );
         let acp_cmd = AcpSlashCommand::from(&cmd);
-        assert!(!acp_cmd.meta_malformed);
+        // Unknown scope is Foreign/pass-through, not Malformed skill meta.
         assert!(!acp_cmd.is_skill());
 
         let models = crate::acp::model_state::ModelState::default();

@@ -94,7 +94,13 @@ pub(crate) fn finalize_killed_subagent(
             tokens_used: 0,
             output: None,
             will_wake: false,
-        },
+                isolation: None,
+                isolation_effective: None,
+                isolation_requested: None,
+                isolation_fallback: false,
+                worktree_path: None,
+                worktree_state: None,
+            },
         meta: None,
     };
     let Ok(params) = serde_json::value::to_raw_value(&payload) else {

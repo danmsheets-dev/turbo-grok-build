@@ -284,7 +284,7 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
                 println!("config file:  {}", fr_config_file_path().display());
                 println!("env override: {FR_DIR_ENV}");
                 println!(
-                    "enabled:      {} (set {FR_DIR_ENV}=0 / GROK_FEATURE_REQUEST_LOG=0 to disable)",
+                    "enabled:      {} (set GROK_FEATURE_REQUEST_LOG=0 to disable)",
                     xai_grok_developer_log::fr_is_enabled()
                 );
             }

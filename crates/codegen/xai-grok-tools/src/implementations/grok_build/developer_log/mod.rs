@@ -142,9 +142,9 @@ impl crate::types::tool_metadata::ToolMetadata for DeveloperLogTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"REQUIRED for Hyper product issues: file a structured incident into the Auto Developer Log for maintainers.
+        r#"REQUIRED for Turbo product issues: file a structured incident into the Auto Developer Log for maintainers.
 
-**Always call this tool** when Hyper product behavior blocks you or surprises supervisors — worktrees deleted/hard to find, land/diff pollution, provider deser failures, isolation fallback, stalls, MCP failures, missing features, docs gaps. Do not rely on chat alone for product bugs.
+**Always call this tool** when Turbo product behavior blocks you or surprises supervisors — worktrees deleted/hard to find, land/diff pollution, provider deser failures, isolation fallback, stalls, MCP failures, missing features, docs gaps. Do not rely on chat alone for product bugs.
 
 Rules:
 - Prefer a stable `error_class` (worktree_tombstone, work_lost_risk, subagent_stall, protocol_deser, provider_400, feature_gap, docs_gap, land_conflict, isolation_fallback, mcp_connect, unknown, …).
@@ -163,6 +163,23 @@ Operators review with `turbo issues list`, `turbo issues export`, `turbo issues 
     fn is_read_only(&self) -> bool {
         // Writes only under ~/.grok/developer-log; not the user workspace.
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::tool_metadata::ToolMetadata;
+
+    #[test]
+    fn tool_name_and_description_are_turbo_branded() {
+        assert_eq!(DEVELOPER_LOG_TOOL_NAME, "developer_log");
+        let t = DeveloperLogTool;
+        assert!(
+            t.description_template().contains("Turbo"),
+            "description must brand Turbo, not Hyper only"
+        );
+        assert!(!t.description_template().contains("Hyper product"));
     }
 }
 

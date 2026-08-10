@@ -111,17 +111,27 @@ fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
         "Auto must be selectable when the gate is on"
     );
 
-    // A non-gated key is never filtered.
+    // Theme choices may still be filtered by terminal truecolor capability
+    // (`theme_choice_unavailable`), but the auto-mode gate must not change the
+    // list — that gate only applies to permission_mode's "auto".
     let theme = reg.find("theme").expect("theme registered");
     if let SettingKind::Enum {
         choices: theme_choices,
         ..
     } = &theme.kind
     {
+        let off = effective_enum_choices("theme", theme_choices, &gated_off);
+        let on = effective_enum_choices("theme", theme_choices, &gated_on);
         assert_eq!(
-            effective_enum_choices("theme", theme_choices, &gated_off).len(),
-            theme_choices.len(),
-            "non-permission_mode keys are never filtered"
+            off.len(),
+            on.len(),
+            "auto_mode_gate must not filter theme choices (got {} vs {})",
+            off.len(),
+            on.len()
+        );
+        assert!(
+            !off.is_empty(),
+            "at least one theme choice must remain available"
         );
     }
 }

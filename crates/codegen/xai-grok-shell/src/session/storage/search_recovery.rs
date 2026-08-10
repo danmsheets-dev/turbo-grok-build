@@ -152,6 +152,20 @@ pub(super) fn heal_unusable(
         tracing::warn!(error = %e, "failed to recreate session search index after quarantine");
     }
 
+    // Windows cannot rename a SQLite file while another connection in this
+    // process still holds it. `recreate` then reopens the same bytes, so wipe
+    // cache tables in place so epoch-bump consumers reopening the path see an
+    // empty index (Unix rename already left a fresh file).
+    if quarantine.is_none() && recreated.is_ok() {
+        if let Err(e) = wipe_cache_contents_in_place(&effective) {
+            tracing::warn!(
+                error = %e,
+                path = %effective.display(),
+                "failed to wipe session search cache in place after failed quarantine"
+            );
+        }
+    }
+
     if quarantine.is_none() && recreated.is_err() {
         tracing::warn!(
             db_path = %effective.display(),
@@ -171,6 +185,21 @@ pub(super) fn heal_unusable(
         error = %cause,
         "session search index unusable; quarantined and recreated empty cache"
     );
+}
+
+/// Best-effort empty of a still-present session-search DB (Windows heal path
+/// when quarantine rename fails under an open connection).
+fn wipe_cache_contents_in_place(db_path: &Path) -> Result<(), rusqlite::Error> {
+    let conn = rusqlite::Connection::open(db_path)?;
+    // Tables may be missing if the file was never fully initialized; ignore
+    // per-statement failures so a partial wipe still clears what it can.
+    let _ = conn.execute_batch(
+        "BEGIN;
+         DELETE FROM session_docs;
+         DELETE FROM meta;
+         COMMIT;",
+    );
+    Ok(())
 }
 
 #[cfg(test)]
