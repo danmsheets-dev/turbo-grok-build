@@ -163,6 +163,7 @@ impl MvpAgent {
             agent_ref: agent_ref.clone(),
         };
         let limit_sink: coordinator::SubagentLimitSink = std::sync::Arc::new(log_limit_notice);
+        let max_concurrent = self.cfg.borrow().subagents_max_concurrent;
         let config = coordinator::CoordinatorConfig {
             foreground_budget:
                 xai_grok_tools::implementations::grok_build::task::backend::env_duration_or(
@@ -170,9 +171,11 @@ impl MvpAgent {
                     std::time::Duration::from_secs(600),
                 ),
             limits: xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits {
-                max_concurrent: self.cfg.borrow().subagents_max_concurrent,
+                max_concurrent,
                 behavior: self.cfg.borrow().subagents_limit_behavior,
             },
+            // Keep dual fields aligned (admission uses `limits`; legacy field kept for callers).
+            max_concurrent,
             limit_sink: Some(limit_sink),
             buffer_completions: true,
             buffered_completion_output_cap: None,

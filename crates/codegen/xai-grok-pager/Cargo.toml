@@ -57,6 +57,8 @@ derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 shlex = { workspace = true }
+# Directory tree sizing (`fs_size`) for disk / usage surfaces.
+walkdir = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
 rand = { workspace = true }

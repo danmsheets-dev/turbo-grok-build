@@ -2249,12 +2249,11 @@ fn spawn_subagent_budget_monitor(
             };
             if let Some(trigger) = hard {
                 state.store(trigger.code(), std::sync::atomic::Ordering::Release);
-                let _ = cmd_tx.send(SessionCommand::Cancel {
+                let _ = cmd_tx.send(SessionCommand::Cancel(crate::session::CancelOptions {
                     cancel_subagents: true,
                     kill_background_tasks: true,
-                    rewind_if_pristine: false,
-                    trigger: Some(format!("subagent_{}", trigger.termination_reason())),
-                });
+                    ..Default::default()
+                }));
                 cancel_token.cancel();
                 break;
             }

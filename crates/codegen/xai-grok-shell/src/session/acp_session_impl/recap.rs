@@ -401,6 +401,12 @@ impl SessionActor {
         .await;
     }
 
+    /// Invalidate in-flight recap (real user prompt at queue time / turn start).
+    pub(crate) fn cancel_pending_recap_for_new_prompt(&self) {
+        self.recap_epoch.set(self.recap_epoch.get().wrapping_add(1));
+    }
+
+    /// Whether `epoch` is stale because a newer prompt started.
     pub(crate) fn recap_was_cancelled(&self, epoch: u64) -> bool {
         self.recap_epoch.get() != epoch
     }

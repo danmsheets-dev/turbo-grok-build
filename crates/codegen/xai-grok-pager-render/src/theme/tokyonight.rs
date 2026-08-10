@@ -53,7 +53,7 @@ pub struct Theme {
     pub bg_light: Color,
     pub bg_dark: Color,
     pub bg_highlight: Color,
-    pub bg_hover: Color, // Mouse hover row in dropdowns — between bg_highlight and bg_visual
+    pub bg_hover: Color, // Mouse hover row in dropdowns â€” between bg_highlight and bg_visual
     pub bg_terminal: Color, // For terminal output blocks (currently unused, using bg_dark instead)
 
     // Accent colors (for vertical lines)
@@ -71,12 +71,12 @@ pub struct Theme {
     pub text_primary: Color,
     pub text_secondary: Color,
 
-    // Gray scale (dim → medium → bright)
+    // Gray scale (dim â†’ medium â†’ bright)
     // Every theme defines these three; they provide a consistent hierarchy
     // for secondary/meta text across all themes.
-    pub gray_dim: Color,    // Dimmest — meta punctuation (`$`, `(+N/-M)`, etc.)
-    pub gray: Color,        // Medium — muted text, comments, collapsed content
-    pub gray_bright: Color, // Brightest — tool accents, secondary labels
+    pub gray_dim: Color,    // Dimmest â€” meta punctuation (`$`, `(+N/-M)`, etc.)
+    pub gray: Color,        // Medium â€” muted text, comments, collapsed content
+    pub gray_bright: Color, // Brightest â€” tool accents, secondary labels
 
     // Semantic colors
     pub command: Color, // Yellow for shell commands
@@ -92,6 +92,9 @@ pub struct Theme {
 
     // Context-window overhead category (context info block)
     pub accent_verify: Color, // Violet accent, distinct from plan gold
+
+    // Feedback mode (/feedback report box)
+    pub accent_feedback: Color, // Teal/green accent for feedback mode
 
     // Remember mode
     pub accent_remember: Color, // Green accent for # remember mode
@@ -125,7 +128,7 @@ pub struct Theme {
     pub paste_fg: Color,
     pub paste_dim: Color,
 
-    // Markdown rendering colors — used by md_style.rs for headings, code
+    // Markdown rendering colors â€” used by md_style.rs for headings, code
     // blocks, inline code, links, etc.  These default to the corresponding
     // top-level theme colors but can be overridden per-theme to customise
     // markdown appearance independently.
@@ -185,15 +188,16 @@ impl Theme {
 
             fuzzy_accent: BLUE,
 
-            accent_plan: rgb(230, 180, 50), // #E6B432 — golden
+            accent_plan: rgb(230, 180, 50), // #E6B432 â€” golden
 
             accent_verify: MAGENTA, // #bb9af7: violet (distinct from plan)
+            accent_feedback: GREEN1, // #73daca — warm teal/green
 
-            accent_remember: Color::Rgb(139, 195, 74), // #8BC34A — Material Design light green
+            accent_remember: Color::Rgb(139, 195, 74), // #8BC34A â€” Material Design light green
 
-            selection_border: rgb(58, 72, 115), // #3A4873 — muted tokyonight blue
-            prompt_border: rgb(60, 75, 120),    // #323E64 — dimmer prompt chrome
-            prompt_border_active: rgb(75, 92, 140), // #4B5C8C — brighter when focused
+            selection_border: rgb(58, 72, 115), // #3A4873 â€” muted tokyonight blue
+            prompt_border: rgb(60, 75, 120),    // #323E64 â€” dimmer prompt chrome
+            prompt_border_active: rgb(75, 92, 140), // #4B5C8C â€” brighter when focused
             hover_border: rgb(55, 58, 80),
 
             accent_model: TEAL,
@@ -208,7 +212,7 @@ impl Theme {
             diff_equal_fg: COMMENT,
             diff_gutter_fg: COMMENT,
 
-            bg_visual: rgb(40, 52, 87), // #283457 — blue-tinted selection bg
+            bg_visual: rgb(40, 52, 87), // #283457 â€” blue-tinted selection bg
 
             paste_bg: BG_STORM_DARK,
             paste_fg: FG_DARK,
@@ -243,11 +247,11 @@ impl Theme {
         Style::new().fg(color)
     }
 
-    /// Get a style with muted text (gray — medium).
+    /// Get a style with muted text (gray â€” medium).
     ///
     /// When `gray` is [`Color::Reset`] (terminal-native / minimal palette),
     /// de-emphasize with [`Modifier::DIM`] instead of painting ANSI bright
-    /// black — dim scales the terminal's own default fg, so contrast stays
+    /// black â€” dim scales the terminal's own default fg, so contrast stays
     /// polarity-safe. RGB themes keep an explicit gray foreground.
     pub const fn muted(&self) -> Style {
         match self.gray {
@@ -263,9 +267,9 @@ impl Theme {
             .add_modifier(ratatui::style::Modifier::UNDERLINED)
     }
 
-    /// Get a style with dim text (gray_dim — dimmest).
+    /// Get a style with dim text (gray_dim â€” dimmest).
     ///
-    /// Same Reset→DIM rule as [`Self::muted`] for the terminal-native palette.
+    /// Same Resetâ†’DIM rule as [`Self::muted`] for the terminal-native palette.
     pub const fn dim(&self) -> Style {
         match self.gray_dim {
             Color::Reset => Style::new().add_modifier(Modifier::DIM),
@@ -306,7 +310,7 @@ pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
     // Time-based oscillation
     let t = tick as f32 * speed;
 
-    // sin²(t + phase) gives smooth 0-1 oscillation
+    // sinÂ²(t + phase) gives smooth 0-1 oscillation
     let sin_val = (t + phase).sin();
     sin_val * sin_val
 }
@@ -320,9 +324,9 @@ pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
 /// # Arguments
 /// - `tick`: Frame counter (increments each render tick, ~30fps)
 /// - `speed`: Pulse speed (radians per tick). The returned value uses
-///   `sin²`, which has period π, so the visible bright→dim→bright cycle
-///   is `π / (speed * fps)`. At 30fps, `speed = 0.08` ≈ 1.3s per cycle;
-///   for a 2.5s cycle pass `speed ≈ 0.042`.
+///   `sinÂ²`, which has period Ï€, so the visible brightâ†’dimâ†’bright cycle
+///   is `Ï€ / (speed * fps)`. At 30fps, `speed = 0.08` â‰ˆ 1.3s per cycle;
+///   for a 2.5s cycle pass `speed â‰ˆ 0.042`.
 ///
 /// # Returns
 /// Brightness value in [0.0, 1.0].

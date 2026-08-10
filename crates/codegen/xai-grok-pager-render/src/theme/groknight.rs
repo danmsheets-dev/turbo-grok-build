@@ -1,4 +1,4 @@
-//! GrokNight theme — neutral gray base with TokyoNight accent colors.
+//! GrokNight theme â€” neutral gray base with TokyoNight accent colors.
 //!
 //! The canonical palette is defined in RGB (`Color::Rgb`). At startup the
 //! theme is run through [`Theme::quantized`] which downgrades every color
@@ -13,33 +13,33 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-// GrokNight palette — neutral gray base + TokyoNight accent colors.
+// GrokNight palette â€” neutral gray base + TokyoNight accent colors.
 //
 // Backgrounds and text use a custom grayscale ramp anchored at:
-//   • bg  = #141414 (20)
-//   • fg  = #f3f3f3 (243)
+//   â€¢ bg  = #141414 (20)
+//   â€¢ fg  = #f3f3f3 (243)
 //
 // Accent colors are the original TokyoNight Night hex values.
 #[allow(dead_code)]
 mod palette {
     use super::*;
 
-    // ── Backgrounds ─────────────────────────────────────────────────────
-    pub const BG: Color = rgb(10, 10, 10); //  #0a0a0a — Night (terminal bg)
-    pub const BG_DARK: Color = rgb(12, 12, 12); //  #0c0c0c — darkest
-    pub const BG_STORM_DARK: Color = rgb(17, 17, 17); //  #111111 — dark bg
-    pub const BG_STORM: Color = rgb(20, 20, 20); //  #141414 — main bg
-    pub const BG_HIGHLIGHT: Color = rgb(36, 36, 36); //  #242424 — highlight bg
+    // â”€â”€ Backgrounds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub const BG: Color = rgb(10, 10, 10); //  #0a0a0a â€” Night (terminal bg)
+    pub const BG_DARK: Color = rgb(12, 12, 12); //  #0c0c0c â€” darkest
+    pub const BG_STORM_DARK: Color = rgb(17, 17, 17); //  #111111 â€” dark bg
+    pub const BG_STORM: Color = rgb(20, 20, 20); //  #141414 â€” main bg
+    pub const BG_HIGHLIGHT: Color = rgb(36, 36, 36); //  #242424 â€” highlight bg
 
-    // ── Text / grays ────────────────────────────────────────────────────
-    pub const FG: Color = rgb(225, 225, 225); // #e1e1e1 — primary text
-    pub const FG_DARK: Color = rgb(200, 200, 200); // #c8c8c8 — secondary text
-    pub const FG_GUTTER: Color = rgb(65, 65, 65); //  #414141 — dim
-    pub const COMMENT: Color = rgb(108, 108, 108); //  #6c6c6c — muted
-    pub const DARK3: Color = rgb(90, 90, 90); //  #5a5a5a — medium gray
-    pub const DARK5: Color = rgb(120, 120, 120); // #787878 — bright gray
+    // â”€â”€ Text / grays â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub const FG: Color = rgb(225, 225, 225); // #e1e1e1 â€” primary text
+    pub const FG_DARK: Color = rgb(200, 200, 200); // #c8c8c8 â€” secondary text
+    pub const FG_GUTTER: Color = rgb(65, 65, 65); //  #414141 â€” dim
+    pub const COMMENT: Color = rgb(108, 108, 108); //  #6c6c6c â€” muted
+    pub const DARK3: Color = rgb(90, 90, 90); //  #5a5a5a â€” medium gray
+    pub const DARK5: Color = rgb(120, 120, 120); // #787878 â€” bright gray
 
-    // ── Accent colors (TokyoNight Night) ─────────────────────────────────
+    // â”€â”€ Accent colors (TokyoNight Night) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     pub const BLUE: Color = rgb(122, 162, 247); // #7aa2f7
     pub const BLUE0: Color = rgb(61, 89, 161); // #3d59a1
     pub const BLUE1: Color = rgb(58, 149, 171); // #3A95AB
@@ -54,13 +54,13 @@ mod palette {
     pub const TEAL: Color = rgb(26, 188, 156); // #1abc9c
     pub const YELLOW: Color = rgb(224, 175, 104); // #e0af68
 
-    pub const RED_DARK: Color = rgb(66, 14, 20); // #420e14 — quantizes to 256-color red, not gray
-    pub const GREEN_DARK: Color = rgb(6, 56, 6); // #063806 — quantizes to 256-color green, not gray
+    pub const RED_DARK: Color = rgb(66, 14, 20); // #420e14 â€” quantizes to 256-color red, not gray
+    pub const GREEN_DARK: Color = rgb(6, 56, 6); // #063806 â€” quantizes to 256-color green, not gray
 }
 use palette::*;
 
 impl Theme {
-    /// GrokNight theme — neutral gray base with TokyoNight accents.
+    /// GrokNight theme â€” neutral gray base with TokyoNight accents.
     ///
     /// Colors are defined in RGB. Call [`Theme::quantized`] to downgrade
     /// them to the terminal's supported color level before rendering.
@@ -86,7 +86,7 @@ impl Theme {
             text_primary: FG,
             text_secondary: FG_DARK,
 
-            gray_dim: rgb(88, 88, 88), // #585858 — slightly brighter than FG_GUTTER
+            gray_dim: rgb(88, 88, 88), // #585858 â€” slightly brighter than FG_GUTTER
             gray: COMMENT,
             gray_bright: DARK5,
 
@@ -97,15 +97,16 @@ impl Theme {
 
             fuzzy_accent: BLUE,
 
-            accent_plan: rgb(255, 219, 141), // #FFDB8D — golden
+            accent_plan: rgb(255, 219, 141), // #FFDB8D â€” golden
 
-            accent_verify: rgb(187, 154, 247), // #bb9af7 — violet
+            accent_verify: rgb(187, 154, 247), // #bb9af7 â€” violet
+            accent_feedback: Color::Rgb(115, 218, 202), // teal/green feedback
 
-            accent_remember: Color::Rgb(139, 195, 74), // #8BC34A — Material Design light green
+            accent_remember: Color::Rgb(139, 195, 74), // #8BC34A â€” Material Design light green
 
             selection_border: rgb(60, 60, 65),
-            prompt_border: rgb(50, 50, 55), // #323237 — dimmer prompt chrome
-            prompt_border_active: rgb(80, 80, 88), // #505058 — brighter when focused
+            prompt_border: rgb(50, 50, 55), // #323237 â€” dimmer prompt chrome
+            prompt_border_active: rgb(80, 80, 88), // #505058 â€” brighter when focused
             hover_border: rgb(30, 30, 34),
 
             accent_model: TEAL,

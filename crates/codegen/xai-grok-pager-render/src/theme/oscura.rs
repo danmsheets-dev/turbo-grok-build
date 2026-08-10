@@ -40,9 +40,9 @@ mod palette {
     pub const AMBER: Color = rgb(241, 189, 0); // #F1BD00  oklch(0.82 0.18 90)
 
     // -- purple accent ramp (the "purple hints") ------------------------------
-    pub const PURPLE: Color = rgb(155, 126, 206); // #9B7ECE — signature purple
-    pub const PURPLE_DIM: Color = rgb(110, 90, 154); // #6E5A9A — muted purple
-    pub const PURPLE_BRIGHT: Color = rgb(196, 167, 231); // #C4A7E7 — vivid lavender
+    pub const PURPLE: Color = rgb(155, 126, 206); // #9B7ECE â€” signature purple
+    pub const PURPLE_DIM: Color = rgb(110, 90, 154); // #6E5A9A â€” muted purple
+    pub const PURPLE_BRIGHT: Color = rgb(196, 167, 231); // #C4A7E7 â€” vivid lavender
 
     // -- cyan (for running indicators, links) ---------------------------------
     pub const CYAN: Color = rgb(125, 207, 223); // #7DCFDF
@@ -91,8 +91,9 @@ impl Theme {
             accent_plan: GOLD,
 
             accent_verify: PURPLE,
+            accent_feedback: Color::Rgb(115, 218, 202), // teal/green feedback
 
-            accent_remember: rgb(139, 195, 74), // #8BC34A — Material Design light green
+            accent_remember: rgb(139, 195, 74), // #8BC34A â€” Material Design light green
 
             selection_border: HIGHLIGHT_HIGH,
             hover_border: HIGHLIGHT_MED,
@@ -101,9 +102,9 @@ impl Theme {
 
             accent_model: CYAN,
 
-            // Thumb must sit clearly above the track: `ELEVATED` (Σrgb 55)
-            // was *darker* than the `HIGHLIGHT_LOW` track (Σrgb 62), which
-            // made the scrollbar invisible — and follow mode blends the
+            // Thumb must sit clearly above the track: `ELEVATED` (Î£rgb 55)
+            // was *darker* than the `HIGHLIGHT_LOW` track (Î£rgb 62), which
+            // made the scrollbar invisible â€” and follow mode blends the
             // thumb 40% toward the track, shrinking the delta further.
             // `HIGHLIGHT_HIGH` matches the weight of the theme's visible
             // chrome (selection border) and Rose Pine's thumb brightness.

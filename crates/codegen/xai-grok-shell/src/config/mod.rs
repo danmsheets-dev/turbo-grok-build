@@ -323,6 +323,8 @@ impl Default for SubagentsConfig {
             enabled: default_subagents_enabled(),
             max_depth: None,
             max_concurrent: None,
+            limit_behavior: None,
+            workflow_max_concurrent: None,
             models: std::collections::HashMap::new(),
             effort: std::collections::HashMap::new(),
             toggle: std::collections::HashMap::new(),

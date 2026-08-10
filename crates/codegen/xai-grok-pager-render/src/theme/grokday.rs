@@ -1,4 +1,4 @@
-//! GrokDay theme — neutral gray base (light) with deepened accent colors.
+//! GrokDay theme â€” neutral gray base (light) with deepened accent colors.
 //!
 //! Light counterpart to GrokNight. Backgrounds and text use a neutral
 //! grayscale ramp (no blue/warm tint). Accent colors are the same hue
@@ -16,22 +16,22 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
 mod palette {
     use super::*;
 
-    // ── Backgrounds (neutral light grays) ────────────────────────────────
-    pub const BG: Color = rgb(245, 245, 245); // #f5f5f5 — brightest (terminal bg)
+    // â”€â”€ Backgrounds (neutral light grays) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub const BG: Color = rgb(245, 245, 245); // #f5f5f5 â€” brightest (terminal bg)
     pub const BG_DARK: Color = rgb(240, 240, 240); // #f0f0f0
     pub const BG_STORM_DARK: Color = rgb(234, 234, 234); // #eaeaea
-    pub const BG_STORM: Color = rgb(238, 238, 238); // #eeeeee — main bg
-    pub const BG_HIGHLIGHT: Color = rgb(222, 222, 222); // #dedede — highlight bg
+    pub const BG_STORM: Color = rgb(238, 238, 238); // #eeeeee â€” main bg
+    pub const BG_HIGHLIGHT: Color = rgb(222, 222, 222); // #dedede â€” highlight bg
 
-    // ── Text / grays (neutral dark) ──────────────────────────────────────
-    pub const FG: Color = rgb(38, 38, 38); // #262626 — primary text
-    pub const FG_DARK: Color = rgb(68, 68, 68); // #444444 — secondary text
-    pub const FG_GUTTER: Color = rgb(178, 178, 178); // #b2b2b2 — dim
-    pub const COMMENT: Color = rgb(118, 118, 118); // #767676 — muted
-    pub const DARK3: Color = rgb(142, 142, 142); // #8e8e8e — medium gray
-    pub const DARK5: Color = rgb(98, 98, 98); // #626262 — bright gray
+    // â”€â”€ Text / grays (neutral dark) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub const FG: Color = rgb(38, 38, 38); // #262626 â€” primary text
+    pub const FG_DARK: Color = rgb(68, 68, 68); // #444444 â€” secondary text
+    pub const FG_GUTTER: Color = rgb(178, 178, 178); // #b2b2b2 â€” dim
+    pub const COMMENT: Color = rgb(118, 118, 118); // #767676 â€” muted
+    pub const DARK3: Color = rgb(142, 142, 142); // #8e8e8e â€” medium gray
+    pub const DARK5: Color = rgb(98, 98, 98); // #626262 â€” bright gray
 
-    // ── Accent colors (deepened for light-background contrast) ───────────
+    // â”€â”€ Accent colors (deepened for light-background contrast) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     pub const BLUE: Color = rgb(47, 100, 210); // #2F64D2
     pub const BLUE0: Color = rgb(40, 68, 138); // #28448A
     pub const BLUE1: Color = rgb(15, 135, 162); // #0F87A2
@@ -46,8 +46,8 @@ mod palette {
     pub const TEAL: Color = rgb(10, 142, 112); // #0A8E70
     pub const YELLOW: Color = rgb(162, 118, 18); // #A27612
 
-    pub const RED_LIGHT: Color = rgb(245, 218, 222); // #F5DADE — diff delete bg
-    pub const GREEN_LIGHT: Color = rgb(218, 242, 220); // #DAF2DC — diff insert bg
+    pub const RED_LIGHT: Color = rgb(245, 218, 222); // #F5DADE â€” diff delete bg
+    pub const GREEN_LIGHT: Color = rgb(218, 242, 220); // #DAF2DC â€” diff insert bg
 }
 use palette::*;
 
@@ -74,7 +74,7 @@ impl Theme {
             text_primary: FG,
             text_secondary: FG_DARK,
 
-            gray_dim: rgb(165, 165, 165), // #a5a5a5 — slightly darker than FG_GUTTER
+            gray_dim: rgb(165, 165, 165), // #a5a5a5 â€” slightly darker than FG_GUTTER
             gray: COMMENT,
             gray_bright: DARK5,
 
@@ -85,15 +85,16 @@ impl Theme {
 
             fuzzy_accent: BLUE,
 
-            accent_plan: rgb(168, 120, 10), // #A8780A — deep golden
+            accent_plan: rgb(168, 120, 10), // #A8780A â€” deep golden
 
             accent_verify: rgb(120, 80, 160), // deep violet (readable on light bg)
+            accent_feedback: Color::Rgb(115, 218, 202), // teal/green feedback
 
-            accent_remember: rgb(76, 175, 80), // #4CAF50 — Material Design green (readable on light bg)
+            accent_remember: rgb(76, 175, 80), // #4CAF50 â€” Material Design green (readable on light bg)
 
             selection_border: rgb(185, 185, 190),
-            prompt_border: rgb(200, 200, 205), // #C8C8CD — dimmer prompt chrome
-            prompt_border_active: rgb(165, 165, 175), // #A5A5AF — darker (more apparent) when focused
+            prompt_border: rgb(200, 200, 205), // #C8C8CD â€” dimmer prompt chrome
+            prompt_border_active: rgb(165, 165, 175), // #A5A5AF â€” darker (more apparent) when focused
             hover_border: rgb(212, 212, 216),
 
             accent_model: TEAL,

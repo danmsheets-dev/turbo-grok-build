@@ -6,8 +6,8 @@
 //! is not reliable either: OS appearance and OSC 11 both disagree with the
 //! actual canvas in edge cases and can change mid-session. Terminal
 //! profiles, however, tune their **default** fg/bg to be legible against
-//! their own background — this is how `git` and `ls` stay readable on any
-//! terminal — so a palette built from `Reset` (body) + sparse named ANSI-16
+//! their own background â€” this is how `git` and `ls` stay readable on any
+//! terminal â€” so a palette built from `Reset` (body) + sparse named ANSI-16
 //! accents is polarity-safe without detection.
 //!
 //! ## Grays / secondary text
@@ -16,9 +16,9 @@
 //! Many dark profiles deliberately set that slot very dark for subtle
 //! chrome, which washes out tool stdout and the prompt info bar. Instead:
 //!
-//! - **Primary content** (`text_primary`, `gray_bright`, …) → `Color::Reset`
+//! - **Primary content** (`text_primary`, `gray_bright`, â€¦) â†’ `Color::Reset`
 //!   (terminal default foreground).
-//! - **Secondary chrome** (`gray`, `gray_dim`, `text_secondary`) → also
+//! - **Secondary chrome** (`gray`, `gray_dim`, `text_secondary`) â†’ also
 //!   `Color::Reset`; [`Theme::muted`] / [`Theme::dim`] apply `Modifier::DIM`
 //!   so de-emphasis tracks the terminal's own fg (polarity-safe), unlike
 //!   hard-coding bright black.
@@ -72,6 +72,7 @@ impl Theme {
 
             accent_plan: Color::Yellow,
             accent_verify: Color::Magenta,
+            accent_feedback: Color::Cyan,
             accent_remember: Color::Green,
 
             selection_border: MUTED,
@@ -273,7 +274,7 @@ mod tests {
             dim.add_modifier.contains(Modifier::DIM),
             "dim should DIM the terminal default fg: {dim:?}"
         );
-        // No explicit DarkGray paint — dim tracks the host palette.
+        // No explicit DarkGray paint â€” dim tracks the host palette.
         assert!(
             muted.fg.is_none() || muted.fg == Some(Color::Reset),
             "muted must not set a hard gray: {muted:?}"

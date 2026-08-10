@@ -249,7 +249,7 @@ fn render_image_overlay_inner(
             }
             lines.push(Line::from(format!(
                 "Size: {}",
-                format_bytes(image.byte_len)
+                format_bytes(image.byte_len as u64)
             )));
             lines.push(Line::from("Preview unavailable"));
             let paragraph = Paragraph::new(lines)

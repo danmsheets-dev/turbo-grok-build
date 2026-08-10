@@ -2059,8 +2059,12 @@ fn spawn_permission_manager_with_pin(
                                 hit.rule,
                             );
                             let decision = Decision::PolicyDeny(reason);
-                            emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
-                            let _ = respond_to.send(decision);
+                            let event =
+                                emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                            let _ = respond_to.send(PermissionResolution {
+                                decision,
+                                event: Some(event),
+                            });
                             continue;
                         }
                     }

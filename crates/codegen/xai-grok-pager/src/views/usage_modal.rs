@@ -235,25 +235,25 @@ pub fn render_usage_modal(
 
     let mut shortcuts: Vec<Shortcut> = vec![
         Shortcut {
-            label: "Tab switch",
+            label: "Tab switch".into(),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2191}/\u{2193} scroll",
+            label: "\u{2191}/\u{2193} scroll".into(),
             clickable: false,
             id: 0,
         },
     ];
     if state.ctx.session_id.is_some() {
         shortcuts.push(Shortcut {
-            label: "c copy session ID",
+            label: "c copy session ID".into(),
             clickable: true,
             id: COPY_SESSION_ID_SHORTCUT,
         });
     }
     shortcuts.push(Shortcut {
-        label: "Esc close",
+        label: "Esc close".into(),
         clickable: false,
         id: 0,
     });

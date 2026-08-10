@@ -1711,6 +1711,11 @@ fn headless_materialize_ctx(
         } else {
             crate::app::session_startup::TitleResolution::Allowed
         },
+        // Headless does not restore remote codebases unless the CLI opts in
+        // (wired at the call site when `--restore-code` is supported here).
+        restore_code: false,
+        // Keep stdout as JSON/NDJSON; restore progress goes to stderr.
+        restore_progress_on_stdout: false,
     }
 }
 
