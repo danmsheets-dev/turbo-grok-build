@@ -698,7 +698,6 @@ impl SchedulerActor {
         }
 
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let cancel_token = CancellationToken::new();
         let request = SubagentRequest {
             id: subagent_id.clone(),
             prompt: framed_prompt,
@@ -724,7 +723,9 @@ impl SchedulerActor {
             fork_context: false,
             owner: SubagentOwner::Task,
             allowed_paths: None,
-            cancel_token: cancel_token.clone(),
+            // A child of the actor's token, so shutdown cancels a fire the
+            // coordinator still has queued at the concurrent limit.
+            cancel_token: self.cancel_token.child_token(),
         };
 
         if events

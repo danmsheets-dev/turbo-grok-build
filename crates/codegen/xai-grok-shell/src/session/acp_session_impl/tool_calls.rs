@@ -637,7 +637,7 @@ impl SessionActor {
             .in_current_span(),
         );
         let _drainer_guard = crate::util::AbortOnDrop(drainer);
-        while let Some((idx, mut result, mut duration_ms)) = dispatch_rx.recv().await {
+        while let Some((idx, result, duration_ms)) = dispatch_rx.recv().await {
             let prepared = approved_slots[idx]
                 .take()
                 .expect("dispatch index should match an approved slot exactly once");
@@ -658,42 +658,6 @@ impl SessionActor {
                 duration_ms,
             );
             let mut post_tool_use_result: Option<serde_json::Value> = None;
-            if let Some((server, _)) =
-                crate::session::mcp_servers::parse_mcp_tool_name(&prepared.tool_name)
-                && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-            {
-                let auth_rejected = match &result {
-                    Err(err) => xai_grok_mcp::servers::is_auth_rejection_message(&err.to_string()),
-                    Ok(tool_result) => {
-                        tool_result.output.is_error()
-                            && xai_grok_mcp::servers::is_auth_rejection_message(
-                                &tool_result.prompt_text,
-                            )
-                    }
-                };
-                if auth_rejected && self.reactive_managed_reauth(&server).await.is_ok() {
-                    let retry_start = std::time::Instant::now();
-                    let retry_span = tool_execution_span(
-                        &tracing::Span::current(),
-                        &self.session_info.id.0,
-                        &prepared,
-                        &tool_call_id,
-                        true,
-                    );
-                    let retry_span_for_record = retry_span.clone();
-                    result = dispatch_tool(&self.workspace_ops, &prepared, &self.session_info.id.0)
-                        .instrument(retry_span)
-                        .await;
-                    duration_ms =
-                        duration_ms.saturating_add(retry_start.elapsed().as_millis() as u64);
-                    record_tool_span_outcome(retry_span_for_record, &result);
-                    self.events.tool_started(
-                        prepared.tool_name.clone(),
-                        tool_call_id.clone(),
-                        duration_ms,
-                    );
-                }
-            }
             let tool_result_size_bytes = match &result {
                 Ok(tool_result) => tool_result.prompt_text.len() as i64,
                 Err(_) => 0,
@@ -709,10 +673,11 @@ impl SessionActor {
                         .clone()
                         .or_else(|| prepared.dispatch_target_name.clone())
                         .unwrap_or_else(|| prepared.tool_name.clone());
+                    let drained = DrainedToolSuccess::new(tool_result);
                     post_tool_use_result = self
                         .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUse)
                         .then(|| {
-                            serde_json::to_value(&tool_result.output)
+                            serde_json::to_value(drained.output())
                                 .unwrap_or(serde_json::Value::Null)
                         });
                     let followups = self
@@ -721,7 +686,7 @@ impl SessionActor {
                             &prepared.call_id,
                             &prepared.tool_name,
                             &effective_tool_name,
-                            tool_result,
+                            drained,
                             prepared.concatenated_json_count,
                             &prepared.model_id,
                             &prepared.parsed_args,
@@ -946,14 +911,8 @@ impl SessionActor {
         }
         let mcp_parts = parse_mcp_tool_name(&call.function.name);
         let is_mcp_tool = mcp_parts.is_some();
-        if let Some((ref server, _)) = mcp_parts
-            && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-        {
-            let _span = tracing::info_span!("tool.refresh_managed_mcp").entered();
-            self.refresh_managed_mcp_if_stale().await;
-        }
         if is_mcp_tool && !self.mcp_state.lock().await.is_initialized() {
-            match self.mcp_strategy {
+            match self.mcp_strategy.get() {
                 McpInitStrategy::Blocking => {
                     let _span = tracing::info_span!("tool.wait_mcp_init").entered();
                     self.wait_for_mcp_initialized().await;
@@ -1300,7 +1259,7 @@ impl SessionActor {
                 display_cwd,
                 confine_root,
             });
-            let decision = {
+            let resolution = {
                 let _pending_guard =
                     crate::session::pending_interaction::PendingInteractionGuard::new(
                         self.pending_interactions.clone(),
@@ -1310,7 +1269,7 @@ impl SessionActor {
                         crate::session::pending_interaction::PendingKind::Permission,
                     );
                 self.permissions
-                    .request_with_path_context(
+                    .request_with_path_context_resolved(
                         access_kind.clone(),
                         tool_call_update,
                         path_context,
@@ -1320,6 +1279,8 @@ impl SessionActor {
                     )
                     .await
             };
+            let manager_event = resolution.event;
+            let decision = resolution.decision;
             self.events.permission_resolved(
                 &call.function.name,
                 match &decision {
@@ -1338,53 +1299,33 @@ impl SessionActor {
                 },
                 perm_start,
             );
-            let wait_ms = perm_start.elapsed().as_millis() as u64;
-            let (decision_outcome, _reject_reason) = match &decision {
-                Decision::Allow | Decision::Ask => {
-                    (xai_grok_telemetry::events::PermissionOutcome::Allow, None)
-                }
-                Decision::Reject(reason) | Decision::PolicyDeny(reason) => (
-                    xai_grok_telemetry::events::PermissionOutcome::Deny,
-                    Some(reason.to_string()),
-                ),
-                Decision::Cancelled => (
-                    xai_grok_telemetry::events::PermissionOutcome::Cancelled,
-                    None,
-                ),
-                Decision::FollowupMessage(_) => (
-                    xai_grok_telemetry::events::PermissionOutcome::Followup,
-                    None,
-                ),
-            };
+            let shell_wait_ms = perm_start.elapsed().as_millis() as u64;
+            let decision_outcome = crate::session::telemetry::permission_outcome(&decision);
+            let resolved = crate::session::telemetry::resolved_decision_telemetry(
+                manager_event.as_ref(),
+                &decision,
+                perm_mode,
+                shell_wait_ms,
+                self.permissions.is_yolo_mode(),
+            );
             tracing::info_span!(
                 "tool.decision",
                 tool_name = %call.function.name,
                 tool_use_id = %call.id,
                 decision = decision_outcome.as_str(),
-                source = crate::session::telemetry::permission_decision_source(
-                    &decision,
-                    self.permissions.is_yolo_mode(),
-                ),
-                wait_ms = wait_ms as i64,
+                source = resolved.source.as_deref().unwrap_or(""),
+                wait_ms = resolved.wait_ms as i64,
             )
             .in_scope(|| {});
             xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::PermissionDecisionPayload {
-                    tool_name: call.function.name.clone(),
-                    access_kind: telemetry_access_kind,
-                    decision: decision_outcome,
-                    wait_ms,
-                    permission_mode: perm_mode,
-                    source: Some(
-                        crate::session::telemetry::permission_decision_source(
-                            &decision,
-                            self.permissions.is_yolo_mode(),
-                        )
-                        .to_owned(),
-                    ),
-                    subagent_session_id: subagent_session_id.clone(),
-                    subagent_type: None,
-                },
+                crate::session::telemetry::permission_decision_payload(
+                    call.function.name.clone(),
+                    telemetry_access_kind,
+                    &decision,
+                    subagent_session_id.clone(),
+                    manager_event.as_ref(),
+                    resolved,
+                ),
             );
             match decision {
                 Decision::PolicyDeny(ref reason) | Decision::Reject(ref reason) => {
@@ -1796,24 +1737,14 @@ impl SessionActor {
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         let (respond_to, _rx) = oneshot::channel();
-        self.queue_input(
-            prompt_blocks,
-            prompt_id,
-            mode,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            false,
-            None,
-            None,
-            respond_to,
-            None,
-            None,
-        )
-        .await;
+        let _ = self
+            .queue_input(QueueInputRequest::new(
+                prompt_blocks,
+                prompt_id,
+                mode,
+                respond_to,
+            ))
+            .await;
         SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
     }
     /// Refine the initial (minimal) ToolCall that was registered during
@@ -2412,12 +2343,13 @@ impl SessionActor {
         call_id: &str,
         requested_tool_name: &str,
         effective_tool_name: &str,
-        result: ToolRunResult,
+        drained: DrainedToolSuccess,
         concatenated_json_count: usize,
         model_id: &str,
         tool_parsed_args: &serde_json::Value,
     ) -> Result<Vec<ConversationItem>, acp::Error> {
         use crate::session::acp_conversion::{acp_plan_update, acp_tool_update, maybe_rewrite};
+        let (mut result, mut tool_layer_images) = drained.into_parts();
         let consumed_ids =
             xai_grok_tools::reminders::task_completion::consumed_completion_ids(&result.output);
         if !consumed_ids.is_empty() {
@@ -2446,6 +2378,7 @@ impl SessionActor {
             let state = self.mcp_state.lock().await;
             state.mcp_tool_meta.get(effective_tool_name).cloned()
         };
+        tool_layer_images.extend(drain_tool_layer_extracted_images(&mut result.output));
         if let Some(mut tool_update) =
             acp_tool_update(&result.output, call_id, path_rewriter.as_ref(), tool_meta)
         {
@@ -2527,13 +2460,12 @@ impl SessionActor {
             }
         };
         let mut extracted_images = extraction.images;
-        let prompt_text = extraction.text;
-        if !self.is_cursor_harness()
-            && let ToolsToolOutput::ReadFile(ReadFileOutput::FileContent(ref fc)) = result.output
-        {
-            extracted_images.extend(fc.extracted_images.iter().cloned());
-        }
-        let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), prompt_text);
+        split_tool_layer_for_harness(
+            self.is_cursor_harness(),
+            &mut extracted_images,
+            tool_layer_images,
+        );
+        let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), extraction.text);
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
                 result.output

@@ -284,6 +284,10 @@ pub const AMBIENT_TICK_INTERVAL: Duration = Duration::from_millis(3000);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
 const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(2);
+fn reconnect_success_hides_mismatch(current: Option<&str>, incoming: &str) -> bool {
+    current.is_some_and(crate::acp::is_version_mismatch_banner)
+        && (incoming.starts_with("Reconnected.") || incoming.starts_with("Session restored."))
+}
 /// Which prompt box in-flight voice dictation appends its finalized text to.
 /// Captured when recording **starts** so a trailing STT final still lands where
 /// the user was dictating, even if they navigate away — or toggle a dashboard
@@ -366,7 +370,8 @@ impl VoiceState {
         matches!(self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. } if *hold)
     }
 }
-/// Entry in the session picker list on the welcome screen.
+/// Entry from the session list wire: welcome/resume pickers and non-leader
+/// dashboard roster fallback (`session_picker_entry_to_roster`).
 #[derive(Debug, Clone)]
 pub struct SessionPickerEntry {
     pub id: String,
@@ -386,6 +391,9 @@ pub struct SessionPickerEntry {
     pub repo_name: String,
     /// Human-readable worktree label (if the session was created in a named worktree).
     pub worktree_label: Option<String>,
+    /// Per-turn secondary line (`lastTurnSummary` on the session/list wire).
+    /// Used for non-leader roster rows today; reserved for picker display later.
+    pub last_turn_summary: Option<String>,
     /// Lazy-loaded detail for the expanded card view.
     pub card_detail: Option<CardDetail>,
 }
@@ -606,6 +614,8 @@ pub struct ScreenModeRelaunch {
 }
 /// Root view component — owns all application state.
 pub struct AppView {
+    /// Taken by whichever path reaches a usable session (or interactive idle) first.
+    pub pending_startup: Option<xai_grok_telemetry::startup::PendingStartup>,
     /// Which view is currently active.
     pub active_view: ActiveView,
     /// View to return to after a mid-session login flow completes or is
@@ -1053,6 +1063,11 @@ pub struct AppView {
     pub fork_worktree_mode: WorktreeMode,
     /// Restore code state on resume (`--restore-code`).
     pub restore_code: Option<bool>,
+    /// One-shot session id: matching `LoadSession` / worktree resume injects
+    /// `restore_code: false`, then this clears. Used after conversation-only
+    /// remote restore (and remote worktree without `--restore-code`) so agent
+    /// `[cli] restore_code` cannot checkout in-place. Not sticky.
+    pub suppress_code_restore_once: Option<String>,
     /// Startup resume target that missed local id/title resolution and was
     /// deferred to the worktree resume handler (set from materialization).
     /// Worktree failure messages append the no-match hint only for this
@@ -1256,6 +1271,19 @@ fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bo
     chrono::Utc::now() >= next
 }
 impl AppView {
+    /// Finishes startup if this view still holds the obligation; does nothing after.
+    pub(crate) fn finish_startup(&mut self, outcome: xai_grok_telemetry::startup::StartupOutcome) {
+        xai_grok_telemetry::startup::PendingStartup::finish_held(
+            &mut self.pending_startup,
+            outcome,
+        );
+    }
+    /// Releases the obligation without recording; does nothing after finish.
+    pub(crate) fn abandon_startup(&mut self) {
+        if let Some(pending) = self.pending_startup.take() {
+            pending.abandon();
+        }
+    }
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
     }
@@ -1430,6 +1458,7 @@ impl AppView {
         welcome_prompt.adopt_slash_mru(slash_mru.clone());
         welcome_prompt.adopt_command_tags(command_tags.clone());
         Self {
+            pending_startup: None,
             active_view: ActiveView::Welcome,
             auth_return_view: None,
             agents: IndexMap::new(),
@@ -1562,6 +1591,7 @@ impl AppView {
             new_session_worktree_mode: WorktreeMode::Never,
             fork_worktree_mode: WorktreeMode::Ask,
             restore_code: None,
+            suppress_code_restore_once: None,
             resume_local_miss: None,
             agent_override: None,
             bootstrap_acp_commands,
@@ -2125,6 +2155,12 @@ impl AppView {
     /// error slot. From an agent view the existing per-agent toast machinery
     /// fires. On welcome, an overlay above the prompt for
     /// [`WELCOME_TOAST_DURATION`].
+    ///
+    /// Reconnect success copy is skipped when a leader version-mismatch toast
+    /// is already showing: registration (and thus the mismatch notif) finishes
+    /// during reconnect, and the later "Reconnected." / "Session restored…"
+    /// line would hide a still-true skew. Restore-failed and connection-failed
+    /// toasts still replace it.
     pub fn show_toast(&mut self, msg: &str) {
         match self.active_view {
             ActiveView::Agent(id) => {
@@ -2132,18 +2168,39 @@ impl AppView {
                     if let Some(child_sid) = agent.active_subagent.clone()
                         && let Some(child) = agent.subagent_views.get_mut(&child_sid)
                     {
+                        if reconnect_success_hides_mismatch(
+                            child.toast.as_ref().map(|(m, _)| m.as_str()),
+                            msg,
+                        ) {
+                            return;
+                        }
                         child.show_toast(msg);
                     } else {
+                        if reconnect_success_hides_mismatch(
+                            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+                            msg,
+                        ) {
+                            return;
+                        }
                         agent.show_toast(msg);
                     }
                 }
             }
             ActiveView::AgentDashboard => {
                 if let Some(d) = self.dashboard.as_mut() {
+                    if reconnect_success_hides_mismatch(d.error_toast.as_deref(), msg) {
+                        return;
+                    }
                     d.error_toast = Some(crate::glyphs::sanitize_toast_message(msg).into_owned());
                 }
             }
             ActiveView::Welcome => {
+                if reconnect_success_hides_mismatch(
+                    self.welcome_toast.as_ref().map(|(m, _)| m.as_str()),
+                    msg,
+                ) {
+                    return;
+                }
                 self.welcome_toast = Some((
                     crate::glyphs::sanitize_toast_message(msg).into_owned(),
                     std::time::Instant::now() + WELCOME_TOAST_DURATION,
@@ -2547,7 +2604,9 @@ impl AppView {
             ) && matches!(
                 self.active_view,
                 ActiveView::Agent(id) if self.agents.get(&id).is_some_and(|a| {
-                    a.session.state.is_turn_running() || a.session.state.is_cancelling()
+                    a.session.state.is_turn_running()
+                        || a.session.state.is_cancelling()
+                        || a.wake_turn_active()
                 })
             );
             if !stale_idle_arm_while_busy && !pending.expired() && pending.shortcut.matches(key) {
@@ -2738,10 +2797,9 @@ impl AppView {
                                 return InputOutcome::Action(Action::DashboardOverlayNext);
                             }
                             Some(crate::actions::ActionId::DashboardOverlayStop) => {
-                                if self.agents.get(&id).is_some_and(|a| {
-                                    a.session.state.is_turn_running()
-                                        || a.session.state.is_compact_running()
-                                }) {
+                                if let Some(agent) = self.agents.get_mut(&id)
+                                    && agent.arm_dashboard_stop()
+                                {
                                     return InputOutcome::Action(Action::CancelTurn);
                                 }
                                 self.pending_action = Some(PendingAction::with_ttl(
@@ -2794,6 +2852,7 @@ impl AppView {
                                 a.no_esc_consumer_pending()
                                     && !a.session.state.is_turn_running()
                                     && !a.session.state.is_cancelling()
+                                    && !a.wake_turn_active()
                             })
                         {
                             return InputOutcome::Action(Action::DashboardOverlayExit);
@@ -4932,6 +4991,7 @@ impl AppView {
                             } else {
                                 None
                             };
+                        let overlay_can_cycle = position.is_some_and(|(_, n)| n > 1);
                         let (agent_area, header) = if overlay_active {
                             let theme = crate::theme::Theme::current();
                             let title = agents
@@ -5030,6 +5090,7 @@ impl AppView {
                                 },
                                 &self.bundle_state,
                                 overlay_active,
+                                overlay_can_cycle,
                                 link_spans,
                                 AppRenderParams {
                                     voice_available,
@@ -5151,6 +5212,7 @@ impl AppView {
                                                     crate::app::agent_view::BannerSlotParams::none(
                                                     ),
                                                     bundle_state,
+                                                    false,
                                                     false,
                                                     link_spans,
                                                     AppRenderParams {
@@ -5908,6 +5970,13 @@ impl AppView {
         {
             return TickDemand::Fast;
         }
+        if self
+            .agents
+            .values()
+            .any(|a| a.pending_cancel_resend.is_some())
+        {
+            return TickDemand::Fast;
+        }
         if self.deferred_notification.is_some() {
             return TickDemand::Fast;
         }
@@ -5947,6 +6016,7 @@ impl AppView {
                     || agent.acp_synced_generation != agent.session.available_commands_generation
                     || (!game_open && agent.scrollback.needs_animation())
                     || (!game_open && !agent.session.state.is_idle())
+                    || agent.wake_turn_active()
                     || agent.session.loading_replay
                     || agent
                         .mcp_init_progress
@@ -6240,6 +6310,7 @@ pub(crate) mod tests {
     pub(crate) fn test_app() -> AppView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AppView {
+            pending_startup: None,
             active_view: ActiveView::Welcome,
             auth_return_view: None,
             agents: indexmap::IndexMap::new(),
@@ -6307,6 +6378,7 @@ pub(crate) mod tests {
             new_session_worktree_mode: WorktreeMode::Never,
             fork_worktree_mode: WorktreeMode::Ask,
             restore_code: None,
+            suppress_code_restore_once: None,
             resume_local_miss: None,
             agent_override: None,
             bootstrap_acp_commands: Vec::new(),
@@ -6956,6 +7028,21 @@ pub(crate) mod tests {
             "closing the search stops the animation ticks"
         );
     }
+    #[test]
+    fn tick_demand_fast_while_wake_turn_streams() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .note_streaming_wake_turn("p-wake");
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "wake chrome spinner must tick while the pane stays Idle"
+        );
+    }
     /// The welcome screen shimmer only advances ~12fps, so a resting welcome
     /// screen must demand Slow ticks — not a 30fps loop; the deep-search
     /// spinner upgrades it to Fast while loading.
@@ -7011,6 +7098,7 @@ pub(crate) mod tests {
             branch: None,
             repo_name: "r".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         };
         if let Some(crate::views::modal::ActiveModal::SessionPicker { entries, .. }) =
@@ -7719,6 +7807,54 @@ pub(crate) mod tests {
             !app.needs_animation(),
             "a cleared reconcile marker must stop requesting ticks"
         );
+    }
+    #[test]
+    fn needs_animation_gates_pending_cancel_resend() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        app.active_view = ActiveView::AgentDashboard;
+        assert!(!app.needs_animation());
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.running_wake_turn = Some(super::super::agent_view::RunningWakeTurn {
+                prompt_id: "task-completed-bg1".into(),
+                cancel_sent: true,
+            });
+            agent.pending_cancel_resend = Some(super::super::agent_view::PendingCancelResend {
+                prompt_id: Some("task-completed-bg1".into()),
+                sent_at: std::time::Instant::now(),
+                attempts: 1,
+                confirmed: false,
+                cancel_subagents: true,
+                trigger: crate::app::actions::CancelTrigger::Mouse,
+            });
+        }
+        assert!(
+            app.needs_animation(),
+            "an armed cancel resend on a wake-cancelling pane must request ticks"
+        );
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.running_wake_turn = None;
+            agent.session.state = super::super::agent::AgentState::TurnCancelling;
+        }
+        assert!(
+            app.needs_animation(),
+            "an armed cancel resend on a cancelling pane must request ticks"
+        );
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = super::super::agent::AgentState::Idle;
+        }
+        assert!(
+            app.needs_animation(),
+            "a stale resend record must keep ticking until reconcile drops it"
+        );
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.pending_cancel_resend = None;
+        }
+        assert!(!app.needs_animation());
     }
     #[test]
     fn needs_animation_gates_subagent_image_viewer_loading() {
@@ -8484,6 +8620,7 @@ pub(crate) mod tests {
             branch: None,
             repo_name: "tmp-repo".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }
     }
@@ -9163,6 +9300,31 @@ pub(crate) mod tests {
         );
     }
     #[test]
+    fn esc_cancels_running_wake_turn_while_pane_is_idle() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.vim_mode = false;
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "Esc during a wake turn must cancel, got {outcome:?}"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "must not arm idle clear/rewind"
+        );
+        assert_eq!(
+            app.agents[&id].cancel_trigger_hint,
+            Some(crate::app::actions::CancelTrigger::Esc)
+        );
+    }
+    #[test]
     fn esc_from_prompt_pane_running_turn_with_draft_cancels_preserving_draft() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
@@ -9601,6 +9763,37 @@ pub(crate) mod tests {
         );
     }
     #[test]
+    fn stale_idle_clear_arm_never_fires_on_wake_turn() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.active_pane = crate::views::agent::ActivePane::Prompt;
+            agent.prompt.textarea.set_text("draft to clear");
+            agent.vim_mode = true;
+        }
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(matches!(
+            app.pending_action.as_ref().expect("arm clear").action,
+            Action::ClearPrompt
+        ));
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .note_streaming_wake_turn("p-wake");
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Esc on a wake turn must swallow, not fire the stale clear arm, got {outcome:?}",
+        );
+        assert!(app.agents[&id].cancel_trigger_hint.is_none());
+        assert!(
+            app.pending_action.is_none(),
+            "the stale arm must be dropped"
+        );
+    }
+    #[test]
     fn esc_consumed_by_policy_disarms_esc_d_combo() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
@@ -9825,10 +10018,8 @@ pub(crate) mod tests {
             );
         }
     }
-    /// A latent Bash/Remember/Feedback composer mode blocks the scrollback
-    /// rewind arm — a rewind restore must not drop conversation text into a
-    /// still-armed `!` composer. The Esc must swallow WITHOUT exiting the
-    /// mode: mode exit stays a prompt-pane (step 0e) affordance.
+    /// A latent Bash/Remember composer mode blocks the scrollback rewind arm: a rewind restore must not drop conversation text into a still-armed
+    /// `!` composer. The Esc must swallow WITHOUT exiting the mode: mode exit stays a prompt-pane (step 0e) affordance.
     #[test]
     fn idle_scrollback_pane_esc_in_bash_mode_does_not_arm_rewind() {
         let mut app = test_app_with_agent();
@@ -10450,6 +10641,7 @@ pub(crate) mod tests {
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
             false,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -10495,6 +10687,7 @@ pub(crate) mod tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -10545,6 +10738,7 @@ pub(crate) mod tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -11407,6 +11601,28 @@ pub(crate) mod tests {
             Some(crate::app::actions::CancelTrigger::Esc)
         );
     }
+    #[test]
+    fn overlay_esc_wake_turn_scrollback_does_not_backout() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        app.active_view = ActiveView::Agent(id);
+        app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+        if let Some(d) = app.dashboard.as_mut() {
+            d.attached_agent = Some(id);
+        }
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.active_pane = crate::app::agent_view::AgentPane::Scrollback;
+        agent.vim_mode = true;
+        agent.note_streaming_wake_turn("p-wake");
+        assert!(agent.session.state.is_idle());
+        assert!(agent.wake_turn_active());
+        assert!(agent.is_bare_scrollback() && agent.no_input_overlay_pending());
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "vim-mode wake Esc must swallow, not detach, got {outcome:?}",
+        );
+    }
     /// Overlay + TurnCancelling: Esc retries cancel (does not detach).
     #[test]
     fn overlay_esc_cancelling_scrollback_retries_cancel_not_backout() {
@@ -11454,8 +11670,7 @@ pub(crate) mod tests {
         let pending = app.pending_action.as_ref().expect("clear arm");
         assert_eq!(pending.label.as_deref(), Some("clear"));
     }
-    /// A Bash/Remember/Feedback empty prompt keeps Esc as its mode-exit even in
-    /// an overlay — the back-out is gated to `PromptInputMode::Normal`, so the
+    /// A Bash/Remember empty prompt keeps Esc as its mode-exit even in an overlay: the back-out is gated to `PromptInputMode::Normal`, so the
     /// special-mode Esc is not stolen as a dashboard back-out.
     #[test]
     fn overlay_esc_in_bash_mode_exits_mode_not_backout() {
@@ -12589,6 +12804,7 @@ pub(crate) mod tests {
             branch: None,
             repo_name: "r".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         };
         let f_key = Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));

@@ -129,6 +129,7 @@ pub async fn list_available_models(agent_config: &AgentConfig, args: &ModelsArgs
     }
     println!();
 
+    // Registry-backed default (no agent shell spawn — see file header).
     println!("Default model: {default_model}");
     println!();
     println!("Available models:");

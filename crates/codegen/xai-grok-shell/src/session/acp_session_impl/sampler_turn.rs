@@ -110,7 +110,7 @@ where
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
         let mcp_wait_start = std::time::Instant::now();
-        match self.mcp_strategy {
+        match self.mcp_strategy.get() {
             McpInitStrategy::Blocking => {
                 if !self.mcp_state.lock().await.is_initialized() {
                     tracing::info!(
@@ -994,7 +994,7 @@ impl SessionActor {
                 "status_code": status_code,
                 "reauthable": reauthable,
                 "auth_mode": auth.as_ref().map(|a| format!("{:?}", a.auth_mode)),
-                "key_prefix": auth.as_ref().map(|a| crate::auth::token_suffix(&a.key).to_owned()),
+                "key_prefix": auth.as_ref().map(|a| xai_grok_auth::bearer_suffix(&a.key).to_owned()),
                 "expires_at": auth
                     .as_ref()
                     .and_then(|a| a.expires_at.map(|e| e.to_rfc3339())),
@@ -1519,7 +1519,7 @@ impl SessionActor {
                 "{detailed_message}\n\n\
                  You are using a deprecated authentication method (WebLogin).\n\
                  This auth method is no longer supported and will cause errors.\n\n\
-                 To fix: run `grok logout` then `grok login` to re-authenticate with OAuth2.\n\n\
+                 To fix: run `grok update`, then `grok logout`, then `grok login` to re-authenticate with OAuth2.\n\n\
                  Version: {client_version}"
             );
             self.log_terminal_failure("legacy_auth", error.status_code, &msg);

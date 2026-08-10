@@ -338,14 +338,13 @@ fn extract_session_id(json: &serde_json::Value) -> Option<String> {
                 .map(|s| s.to_string())
         })
 }
-/// Whether a payload is a `session/load` request. Used to start buffering live
-/// broadcasts to the loading client until its replay completes (the
-/// live-before-replay race, see `load_live_buffer`). Only `session/load`
-/// triggers this — `session/new` creators receive everything live correctly.
-fn is_session_load_request(json: &serde_json::Value) -> bool {
+/// Whether a payload attaches an existing session (`session/load` or
+/// `session/resume`): both need live-broadcast buffering until the response
+/// (see `load_live_buffer`) and the pending-modal replay keyed on it.
+fn is_session_attach_request(json: &serde_json::Value) -> bool {
     json.get("method")
         .and_then(|m| m.as_str())
-        .is_some_and(|m| m == "session/load")
+        .is_some_and(|m| m == "session/load" || m == "session/resume")
 }
 /// Extract the leader unicast target `ClientId` from a notification's
 /// `params._meta["x.ai/leaderClientId"]`.
@@ -657,9 +656,11 @@ fn backfill_child_routes(
         }
     }
 }
-/// Inject client capabilities into a session/new request, **in place**.
+/// Inject the requesting client's context into a `session/new`, `session/load`,
+/// or `session/resume` request, **in place**. The agent's own state names
+/// whichever client initialized last, which in leader mode is the wrong client.
 ///
-/// If the payload is a session/new request:
+/// For a session/new request:
 /// - If the client has yolo_mode enabled, injects `yoloMode: true` into the request's `_meta` object.
 /// - If the client has default_model set and the request doesn't already have a modelId,
 ///   injects `modelId` into the request's `_meta` object.
@@ -667,7 +668,7 @@ fn backfill_child_routes(
 ///   (used for scoping `yolo_mode_changed` broadcasts in leader mode).
 ///
 /// Returns `true` when `json` was mutated.
-fn inject_capabilities_into_session_new(
+fn inject_session_request_context(
     json: &mut serde_json::Value,
     capabilities: &ClientCapabilities,
     client_type: &str,
@@ -688,7 +689,8 @@ fn inject_capabilities_into_session_new(
     let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let is_session_new = method == AGENT_METHOD_NAMES.session_new;
     let is_session_load = method == AGENT_METHOD_NAMES.session_load;
-    if !is_session_new && !is_session_load {
+    let is_session_resume = method == AGENT_METHOD_NAMES.session_resume;
+    if !is_session_new && !is_session_load && !is_session_resume {
         return false;
     }
     let mut mutated = false;
@@ -1920,7 +1922,7 @@ pub async fn run_leader_server(
                                 }
                             }
                         }
-                        payload_mutated |= inject_capabilities_into_session_new(
+                        payload_mutated |= inject_session_request_context(
                             json,
                             &client.capabilities,
                             &client.client_type,
@@ -1934,7 +1936,7 @@ pub async fn run_leader_server(
                     let rewritten = json.as_mut().and_then(|j| rewrite_request_id(j, id));
                     payload_mutated |= rewritten.is_some();
                     if let Some(json) = json.as_ref()
-                        && is_session_load_request(json)
+                        && is_session_attach_request(json)
                         && let Some(load_sid) = extract_session_id(json)
                         && let Some((ns_id, _)) = rewritten.as_ref()
                     {
@@ -2729,7 +2731,7 @@ mod tests {
         let cancel_for_actor = cancel.clone();
         let actor = tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if matches!(cmd, crate::session::SessionCommand::Shutdown) {
+                if matches!(cmd, crate::session::SessionCommand::Shutdown(_)) {
                     assert!(
                         !cancel_for_actor.is_cancelled(),
                         "flush must run before the leader cancels"
@@ -3416,17 +3418,20 @@ mod tests {
         assert_eq!(json["method"], "test");
     }
     #[test]
-    fn is_session_load_request_detects_only_load() {
-        assert!(is_session_load_request(&pv(
+    fn is_session_attach_request_detects_load_and_resume() {
+        assert!(is_session_attach_request(&pv(
             r#"{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#
         )));
-        assert!(!is_session_load_request(&pv(
+        assert!(is_session_attach_request(&pv(
+            r#"{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"sessionId":"s1","cwd":"/tmp"}}"#
+        )));
+        assert!(!is_session_attach_request(&pv(
             r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#
         )));
-        assert!(!is_session_load_request(&pv(
+        assert!(!is_session_attach_request(&pv(
             r#"{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s1"}}"#
         )));
-        assert!(!is_session_load_request(&pv(
+        assert!(!is_session_attach_request(&pv(
             r#"{"jsonrpc":"2.0","id":1,"result":{}}"#
         )));
     }
@@ -3530,7 +3535,7 @@ mod tests {
         let mut req = pv(
             r#"{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-x","cwd":"/tmp"}}"#,
         );
-        assert!(is_session_load_request(&req));
+        assert!(is_session_attach_request(&req));
         assert_eq!(extract_session_id(&req).as_deref(), Some("sess-x"));
         let client = ClientId(3);
         let (stored_ns_id, _orig) = rewrite_request_id(&mut req, client).unwrap();
@@ -3740,7 +3745,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3763,7 +3768,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3785,7 +3790,27 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
+            &mut json,
+            &caps,
+            "grok-tui",
+            ClientId(1)
+        ));
+        assert_eq!(json["params"]["_meta"]["autoMode"], true);
+    }
+    #[test]
+    fn inject_capabilities_adds_auto_mode_to_session_resume() {
+        let payload = format!(
+            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1"}}}}"#,
+            AGENT_METHOD_NAMES.session_resume
+        );
+        let caps = ClientCapabilities {
+            auto_mode: true,
+            yolo_mode: false,
+            ..Default::default()
+        };
+        let mut json = pv(&payload);
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "grok-tui",
@@ -3806,7 +3831,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3826,7 +3851,7 @@ mod tests {
             default_model: None,
             ..Default::default()
         };
-        assert!(!inject_capabilities_into_session_new(
+        assert!(!inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3847,7 +3872,7 @@ mod tests {
         };
         let mut json = pv(&payload);
         let before = json.clone();
-        assert!(!inject_capabilities_into_session_new(
+        assert!(!inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3867,7 +3892,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3888,7 +3913,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3909,7 +3934,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -3930,7 +3955,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "", ClientId(1));
+        inject_session_request_context(&mut json, &caps, "", ClientId(1));
         assert_eq!(json["params"]["_meta"]["modelId"], "custom-model");
     }
     #[test]
@@ -4227,7 +4252,7 @@ mod tests {
         };
         let mut json = pv(&payload);
         let before = json.clone();
-        assert!(!inject_capabilities_into_session_new(
+        assert!(!inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -4247,7 +4272,7 @@ mod tests {
             ..Default::default()
         };
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -4269,7 +4294,7 @@ mod tests {
         };
         let mut json = pv(&payload);
         let before = json.clone();
-        assert!(!inject_capabilities_into_session_new(
+        assert!(!inject_session_request_context(
             &mut json,
             &caps,
             "",
@@ -4285,7 +4310,7 @@ mod tests {
         );
         let caps = ClientCapabilities::default();
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "grok-code-extension",
@@ -4304,7 +4329,7 @@ mod tests {
         );
         let caps = ClientCapabilities::default();
         let mut json = pv(&payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "grok-tui", ClientId(1));
+        inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(1));
         assert_eq!(json["params"]["_meta"]["clientIdentifier"], "custom-client");
     }
     #[test]
@@ -4315,7 +4340,7 @@ mod tests {
         );
         let caps = ClientCapabilities::default();
         let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
+        assert!(inject_session_request_context(
             &mut json,
             &caps,
             "grok-code-extension",
@@ -4336,7 +4361,7 @@ mod tests {
         );
         let caps = ClientCapabilities::default();
         let mut json = pv(&payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "grok-tui", ClientId(42));
+        inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(42));
         assert_eq!(
             json["params"]["_meta"]["x.ai/leaderClientId"].as_u64(),
             Some(42)
@@ -4350,7 +4375,7 @@ mod tests {
         );
         let caps = ClientCapabilities::default();
         let mut json = pv(&payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "grok-tui", ClientId(42));
+        inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(42));
         assert_eq!(
             json["params"]["_meta"]["x.ai/leaderClientId"].as_u64(),
             Some(7)
@@ -6446,7 +6471,7 @@ mod tests {
         };
         let payload = r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"cwd":"/repo","_meta":{}}}"#;
         let mut json = pv(payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "grok-web", ClientId(1));
+        inject_session_request_context(&mut json, &caps, "grok-web", ClientId(1));
         assert_eq!(
             json["params"]["_meta"]["codeNavEnabled"],
             serde_json::json!(true),
@@ -6467,7 +6492,7 @@ mod tests {
         };
         let payload = r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"cwd":"/repo","_meta":{"clientIdentifier":"grok-tui"}}}"#;
         let mut json = pv(payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "grok-tui", ClientId(1));
+        inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(1));
         assert_eq!(
             json["params"]["_meta"]["codeNavEnabled"],
             serde_json::json!(false),
@@ -6487,7 +6512,7 @@ mod tests {
         };
         let payload = r#"{"jsonrpc":"2.0","method":"session/load","id":2,"params":{"sessionId":"abc","cwd":"/repo","_meta":{}}}"#;
         let mut json = pv(payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "grok-web", ClientId(1));
+        inject_session_request_context(&mut json, &caps, "grok-web", ClientId(1));
         assert_eq!(
             json["params"]["_meta"]["codeNavEnabled"],
             serde_json::json!(true),
@@ -6509,9 +6534,9 @@ mod tests {
         };
         let session_new = r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"cwd":"/repo","_meta":{}}}"#;
         let mut web_json = pv(session_new);
-        inject_capabilities_into_session_new(&mut web_json, &web_caps, "grok-web", ClientId(1));
+        inject_session_request_context(&mut web_json, &web_caps, "grok-web", ClientId(1));
         let mut tui_json = pv(session_new);
-        inject_capabilities_into_session_new(&mut tui_json, &tui_caps, "grok-tui", ClientId(2));
+        inject_session_request_context(&mut tui_json, &tui_caps, "grok-tui", ClientId(2));
         assert_eq!(
             web_json["params"]["_meta"]["codeNavEnabled"],
             serde_json::json!(true)
@@ -6537,9 +6562,9 @@ mod tests {
         };
         let session_new = r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"cwd":"/repo","_meta":{}}}"#;
         let mut web_json = pv(session_new);
-        inject_capabilities_into_session_new(&mut web_json, &web_caps, "grok-web", ClientId(1));
+        inject_session_request_context(&mut web_json, &web_caps, "grok-web", ClientId(1));
         let mut tui_json = pv(session_new);
-        inject_capabilities_into_session_new(&mut tui_json, &tui_caps, "grok-tui", ClientId(2));
+        inject_session_request_context(&mut tui_json, &tui_caps, "grok-tui", ClientId(2));
         assert_eq!(
             web_json["params"]["_meta"]["clientTerminal"],
             serde_json::json!(true)
@@ -6575,7 +6600,7 @@ mod tests {
         };
         let session_load = r#"{"jsonrpc":"2.0","method":"session/load","id":2,"params":{"sessionId":"sess-1","_meta":{}}}"#;
         let mut json = pv(session_load);
-        inject_capabilities_into_session_new(&mut json, &caps, "grok-web", ClientId(1));
+        inject_session_request_context(&mut json, &caps, "grok-web", ClientId(1));
         assert_eq!(
             json["params"]["_meta"]["clientTerminal"],
             serde_json::json!(true)
