@@ -190,12 +190,14 @@ Rules of thumb for agents:
 - Composition root binary: **`xai-grok-pager-bin`** → `turbo`
 - Config/auth/sessions: **`~/.grok`** (shared with official `grok` if installed)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md) · current RC line: see `VERSION`
+- Upstream remote: **`upstream`** → `xai-org/grok-build` (official core; fetch-only)
 - Hyper compare remote: **`community`** → `DaviRain-Su/hyper-grok-build` (fetch-only)
-- Last sync: **RC15 / `0.2.119-r1`** (current release: RC2 / `0.2.119-r2`) — xAI upstream `e5478eff1` merged in full;
-  Turbo/Hyper fork point `c260695cc`. Some Hyper fixes live only inside its merge
-  commits, so survey with `git show --cc`, not `git log --no-merges`.
-- Toolchain is pinned to **Rust 1.93.0**; `RUST_MIN_STACK` is set in
-  `.cargo/config.toml` because the 0.2.119 turn future overflows the default
+- Last sync: **1.0.0-rc.1** — xAI Grok Build **1.0.0** (`75e73f3d6`, `SOURCE_REV`
+  `a61c32b12…`) merged on branch `sync/1.0.0-rc1` (shared base `e5478eff1` /
+  0.2.119). Turbo/Hyper fork point `c260695cc` remains for Hyper-only archaeology
+  (`git show --cc`).
+- Toolchain is pinned to **Rust 1.94.0**; `RUST_MIN_STACK` is set in
+  `.cargo/config.toml` because large turn futures overflow the default
   2 MiB Rust thread stack under `cargo test`.
 
 ## When fixing isolation / subagents

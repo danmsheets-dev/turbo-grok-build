@@ -1,12 +1,12 @@
 [package]
 name = "xai-grok-pager"
-version = "0.2.119-r3"
+version = "1.0.0-rc.1"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
 
 [dependencies]
-# TTY safety — detach subprocesses from the controlling terminal
+# TTY safety â€” detach subprocesses from the controlling terminal
 dunce = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-grok-version = { workspace = true }
@@ -83,7 +83,7 @@ nucleo = { workspace = true }
 
 # Internationalization: translations are embedded at compile time from
 # `locales/*.yml`; `sys-locale` detects the OS language for `language = "auto"`.
-# Direct (non-workspace) deps on purpose — the workspace root Cargo.toml is
+# Direct (non-workspace) deps on purpose â€” the workspace root Cargo.toml is
 # generated from the monorepo and must stay untouched.
 rust-i18n = "4"
 sys-locale = "0.3"
@@ -195,7 +195,7 @@ xai-grok-pager-pty-harness = { path = "../xai-grok-pager-pty-harness" }
 xai-grok-test-support = { workspace = true, features = [] }
 # Ring CryptoProvider install for the in-process leader-cluster tests. Explicit
 # spec mirroring the shell's, NOT `workspace = true`: the workspace pin enables
-# aws-lc-rs, under which `rustls::crypto::ring` does not exist. Dev-only — the
+# aws-lc-rs, under which `rustls::crypto::ring` does not exist. Dev-only â€” the
 # production lib deliberately dropped rustls (moved to xai-grok-pager-bin).
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
@@ -260,24 +260,24 @@ path = "tests/pty_e2e_persistence.rs"
 name = "pty_e2e_clipboard"
 path = "tests/pty_e2e_clipboard.rs"
 
-# Leader-mode PTY e2e — split from ordinary PTY families so multi-process
+# Leader-mode PTY e2e â€” split from ordinary PTY families so multi-process
 # cluster bring-up never contends with their bounded pools.
 [[test]]
 name = "leader_pty_e2e"
 path = "tests/leader_pty_e2e/mod.rs"
 
-# Settings modal regression tests — keyboard/mouse dispatch + registry
+# Settings modal regression tests â€” keyboard/mouse dispatch + registry
 # contracts. Not gated by `--ignored`; runs on every `cargo test`.
 [[test]]
 name = "settings_e2e"
 path = "tests/settings_e2e.rs"
 
-# Declarative scripted TUI scenarios — opt-in because they spawn the real pager.
+# Declarative scripted TUI scenarios â€” opt-in because they spawn the real pager.
 [[test]]
 name = "scripted_scenarios"
 path = "tests/scripted_scenarios.rs"
 
-# Permission Auto mode PTY e2e (Shift+Tab → Auto banner via PtyHarness).
+# Permission Auto mode PTY e2e (Shift+Tab â†’ Auto banner via PtyHarness).
 [[test]]
 name = "pty_auto_mode"
 path = "tests/pty_auto_mode.rs"
@@ -328,11 +328,11 @@ jemalloc = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
 # Community Turbo branding (CLI name for completions / help strings). Empty
-# feature — gated with `cfg!(feature = "community-build")` in this crate.
+# feature â€” gated with `cfg!(feature = "community-build")` in this crate.
 # Forwarded from `xai-grok-pager-bin` when that binary is a Turbo Grok Build.
 community-build = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
-# `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
+# `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds â€” used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
 test-support = ["xai-grok-pager-render/test-support"]
 # Codex Live (`/live`): real-time bidirectional voice sessions against the

@@ -3,7 +3,8 @@
 All notable changes to **Turbo Grok Build** (`turbo` binary).
 
 Format: [Keep a Changelog](https://keepachangelog.com/).  
-Wire versions: [`VERSION`](./VERSION) (`0.2.119-rN` community RC line).
+Wire versions: [`VERSION`](./VERSION) (`1.0.0-rc.N` on Grok Build 1.0 core;
+older community line was `0.2.119-rN`).
 
 English-only product surface (UI and public docs) as of RC14.
 
@@ -13,7 +14,9 @@ English-only product surface (UI and public docs) as of RC14.
 
 Turbo Grok Build evolved from the Hyper community fork of
 [xAI Grok Build](https://github.com/xai-org/grok-build). Multi-agent work
-accelerated at r6; product rebrand to **Turbo** at r10.
+accelerated at r6; product rebrand to **Turbo** at r10. From **1.0.0-rc.1**
+onward, official Grok Build is the permanent upstream core remote
+(`upstream` → `xai-org/grok-build`).
 
 | RC | Wire | Theme |
 |----|------|--------|
@@ -28,10 +31,46 @@ accelerated at r6; product rebrand to **Turbo** at r10.
 | r14 | `0.2.114-r14` | **web_fetch**, **workflow routing**, English-only |
 | r15 | `0.2.119-r1` | Upstream 0.2.119 sync, security + Windows correctness |
 | r2 | `0.2.119-r2` | Game Mode overhaul, disk gates, tools list |
-| **r3** | **`0.2.119-r3`** | **Full Disk Clean** (taxonomy, multi-path, prune, telemetry) |
+| r3 | `0.2.119-r3` | Full Disk Clean (taxonomy, multi-path, prune, telemetry) |
+| **1.0 rc1** | **`1.0.0-rc.1`** | **Grok Build 1.0.0 core + Turbo product layer** |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
+
+---
+
+## [1.0.0-rc.1] - 2026-08-09
+
+**Turbo Grok Build 1.0 RC1.** Merges official **xAI Grok Build 1.0.0**
+(`75e73f3d6`, monorepo `SOURCE_REV` `a61c32b12…`) as the shared core while
+preserving Turbo’s product overlay (`turbo` binary, disk clean, Game Mode,
+workflows/deep-audit, ADL/FRL, isolation/land, English-only, multi-provider).
+
+### Upstream core (adopted)
+- Product ladder **0.2.120 → 0.2.121 → 1.0.0** (dashboard turn summaries,
+  extensions modal, `/feedback` report box, SSH/tmux auto theme, table reflow,
+  permission full-script + Ctrl-F, MCP image fixes, queue/cancel hardening,
+  remote resume defaults, session fork memory, and related stability work).
+- Rust toolchain pin **1.94.0**.
+- Auth `bearer_fragment`, computer-hub connection work, tool-types task model
+  updates, workspace restore hang fixes.
+
+### Preserved (Turbo product layer)
+- CLI **`turbo`**, `community-build`, install/update under `~/.turbo`.
+- Disk clean / multi-path free-space gates / `turbo disk|issues|features|tree|tools`.
+- Game Mode, workflows + stock deep-audit/deep-research/continuous-improve,
+  Auto Developer Log + Feature Request Log, workspace tree inject, boot card.
+- Headless **streaming-json schemaVersion 2** (subagent lifecycle, confine,
+  tool_denied) — upstream reducer subtree not reintroduced.
+- Windows correctness: line-ending CI, process-tree, `RUST_MIN_STACK`, CRT notes.
+
+### Changed
+- Wire version **`1.0.0-rc.1`** (semver pre-release on the 1.0.0 core).
+- Tracking branch for this sync: `sync/1.0.0-rc1` (merge base `e5478eff1`).
+
+### Notes
+- Full package-scoped compile/test campaign is part of this RC; treat as
+  integration candidate until Round A–D gates are green on Windows.
 
 ---
 
