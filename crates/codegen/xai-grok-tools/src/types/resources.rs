@@ -610,6 +610,14 @@ pub fn resolve_model_path(
             return cwd.join(suffix);
         }
     }
+    // Rooted model path that did not match display_cwd (or display was unset):
+    // keep the model spelling. On Unix, `cwd.join("/abs")` would replace with
+    // `/abs`; on Windows a leading `/` is only RootDir (not `is_absolute`), so
+    // join invents a drive-relative path like `H:\wrong\...`. That breaks
+    // not-found messages, confine checks, and skill-path suggestions.
+    if path_is_rooted(input_path) {
+        return input_path.to_path_buf();
+    }
     cwd.join(input_path)
 }
 
@@ -1076,6 +1084,26 @@ pub fn sanitize_model_path_arg(input: &str) -> &str {
 /// Return the display path (for model-facing output) or fall back to cwd.
 pub fn display_cwd_or_cwd(cwd: &std::path::Path, display_cwd: Option<&std::path::Path>) -> PathBuf {
     display_cwd.unwrap_or(cwd).to_path_buf()
+}
+
+/// Model-facing path for tool error messages and UI.
+///
+/// Relative model inputs are joined onto `display_base` (display cwd or real
+/// cwd). **Rooted** model spellings (`/foo`, `C:\foo`, …) are returned as the
+/// model wrote them — never via `display_base.join(input)`.
+///
+/// On Windows, `Path::join` treats a leading `/` as root-relative to the
+/// *current drive*, rewriting `/wrong/root/x` into `H:\wrong\root\x` when the
+/// base is under `H:`. That mutates the path the model asked about and breaks
+/// not-found messaging / skill hints. Preserve the model spelling instead.
+pub fn model_display_path(display_base: &std::path::Path, model_input: &str) -> PathBuf {
+    let input = sanitize_model_path_arg(model_input);
+    let expanded = shellexpand::tilde(input);
+    let input_path = std::path::Path::new(expanded.as_ref());
+    if path_is_rooted(input_path) {
+        return std::path::PathBuf::from(expanded.as_ref());
+    }
+    display_base.join(input_path)
 }
 /// Newtype wrapper for `Arc<dyn xai_tool_runtime::ToolDispatch>` so it can
 /// be stored in `ToolCallContext::extensions`. Used by `use_tool` and the
@@ -1852,6 +1880,34 @@ mod tests {
         assert_eq!(
             result,
             std::path::PathBuf::from("/worktree/abc/src/main.rs")
+        );
+    }
+    #[test]
+    fn resolve_model_path_posix_absolute_without_display_keeps_spelling() {
+        // Windows must not rewrite `/etc/hosts` into `H:\etc\hosts` when no
+        // DisplayCwd is set (join treats leading `/` as current-drive root).
+        let cwd = std::path::Path::new(if cfg!(windows) {
+            r"H:\worktree\abc"
+        } else {
+            "/worktree/abc"
+        });
+        let result = super::resolve_model_path(cwd, None, "/etc/hosts");
+        assert_eq!(result, std::path::PathBuf::from("/etc/hosts"));
+    }
+    #[test]
+    fn model_display_path_preserves_rooted_model_spelling() {
+        let base = std::path::Path::new(if cfg!(windows) {
+            r"H:\tmp\session"
+        } else {
+            "/tmp/session"
+        });
+        assert_eq!(
+            super::model_display_path(base, "/wrong/root/SKILL.md"),
+            std::path::PathBuf::from("/wrong/root/SKILL.md")
+        );
+        assert_eq!(
+            super::model_display_path(base, "relative/file.rs"),
+            base.join("relative/file.rs")
         );
     }
     #[test]

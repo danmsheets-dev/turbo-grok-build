@@ -3018,7 +3018,18 @@ mod tests {
         // Fast-exiting command that emits its full output in one burst —
         // exercises the "drained after the last periodic chunk" path that the
         // bug missed. ASCII so lossy UTF-8 conversion is exact.
-        let cmd = "printf 'tail-bytes-after-final-tick\\n'";
+        // Portable across the product shell: PowerShell on Windows rejects
+        // bare `printf` (exit 1, empty stream) the same way `drip_cmd` documents.
+        let cmd = {
+            #[cfg(windows)]
+            {
+                "Write-Output 'tail-bytes-after-final-tick'"
+            }
+            #[cfg(not(windows))]
+            {
+                "printf 'tail-bytes-after-final-tick\\n'"
+            }
+        };
         let mut stream = xai_tool_runtime::Tool::execute(
             &tool,
             test_ctx(resources.into_shared()),

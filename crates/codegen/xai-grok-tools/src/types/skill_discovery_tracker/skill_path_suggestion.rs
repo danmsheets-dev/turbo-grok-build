@@ -47,7 +47,12 @@ impl SkillManager {
             .chain(&self.discovered_skills)
         {
             let skill_path = Path::new(&skill.path);
-            if !skill_path.is_absolute() {
+            // Accept both OS-native absolute paths and POSIX absolute forms
+            // (`/home/...`). On Windows, `Path::is_absolute` requires a drive
+            // prefix, so a leading-`/` skill registry path (tests, Git Bash
+            // homes, cross-host session dumps) was silently skipped and
+            // suggestions always returned `None`.
+            if !is_absolute_skill_path(skill_path) {
                 continue;
             }
             let canonical = canonical_path(&skill.path);
@@ -79,7 +84,7 @@ impl SkillManager {
             let display_path = match display_mapping {
                 Some((real, display)) => skill_path
                     .strip_prefix(real)
-                    .map(|relative| Path::new(display).join(relative))
+                    .map(|relative| join_model_display_path(display, relative))
                     .unwrap_or_else(|_| skill_path.to_path_buf()),
                 None => skill_path.to_path_buf(),
             };
@@ -89,6 +94,43 @@ impl SkillManager {
             });
         }
         suggestion
+    }
+}
+
+/// Whether `path` is absolute for skill-registry purposes.
+///
+/// [`Path::is_absolute`] on Windows requires a drive/UNC prefix, so a path
+/// string starting with `/` (POSIX absolute, common in skill paths and tests)
+/// is rejected. Treat a leading `/` as absolute on every platform so lookup
+/// stays host-agnostic for string-stored skill paths.
+fn is_absolute_skill_path(path: &Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    path.to_str().is_some_and(|s| s.starts_with('/'))
+}
+
+/// Join a display-cwd prefix with a relative skill path for model-facing text.
+///
+/// Uses the separator style of `display` (forward slashes for POSIX display
+/// roots) so Windows `Path::join` does not inject `\` into
+/// `/display/project/.grok/skills/...` spellings.
+fn join_model_display_path(display: &str, relative: &Path) -> PathBuf {
+    let use_forward = display.contains('/') || !display.contains('\\');
+    let sep = if use_forward { "/" } else { "\\" };
+    let rel: String = relative
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(sep);
+    let base = display.trim_end_matches(['/', '\\']);
+    if rel.is_empty() {
+        PathBuf::from(base)
+    } else {
+        PathBuf::from(format!("{base}{sep}{rel}"))
     }
 }
 

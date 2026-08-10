@@ -374,7 +374,7 @@ pub(crate) async fn run_read_file(
             let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
             return Ok(ReadFileOutput::FileReadError(format!(
                 "Error: {} is ignored by .gitignore and cannot be read.",
-                display_dcwd.join(&input.path).display()
+                crate::types::resources::model_display_path(&display_dcwd, &input.path).display()
             )));
         }
     }
@@ -388,7 +388,9 @@ pub(crate) async fn run_read_file(
                 ));
             }
             let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
-            let display_path = display_dcwd.join(&input.path);
+            // Preserve rooted model spellings (do not Windows-join onto the drive).
+            let display_path =
+                crate::types::resources::model_display_path(&display_dcwd, &input.path);
             // `ErrorKind::IsADirectory` is only produced from POSIX `EISDIR`.
             // Windows fails the open with `ERROR_ACCESS_DENIED`, which maps to
             // `PermissionDenied`, so reading a directory told the model

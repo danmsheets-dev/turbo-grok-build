@@ -3993,16 +3993,27 @@ mod tests {
     // passes the size cap, independent of its timeout.
     #[tokio::test]
     async fn test_output_size_guard_kills_runaway() {
-        // Serialize flag-asserting tests; opt into the guards for this one.
-        // Tiny cap so `yes` trips it within a tick or two.
+        // Tiny cap so a continuous writer trips it within a tick or two.
         let backend = LocalTerminalBackend::new_with_output_cap(2_000);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output_file = tmp.path().join("size-guard.out");
 
-        let output_file =
-            std::env::temp_dir().join(format!("terminal-test-size-{}.out", std::process::id()));
+        // Product shell is PowerShell on Windows — bare `yes` is not a command
+        // there and exits 1 with no flood, so the size guard never fires.
+        let flood = {
+            #[cfg(windows)]
+            {
+                "while ($true) { [Console]::Out.Write(('x' * 4096)) }".to_string()
+            }
+            #[cfg(not(windows))]
+            {
+                "yes".to_string()
+            }
+        };
 
         let request = TerminalRunRequest {
-            command: "yes".to_string(), // floods stdout forever
-            working_directory: PathBuf::from("/tmp"),
+            command: flood,
+            working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
             // Long timeout: the SIZE guard, not the timeout, must fire.
             timeout: Duration::from_secs(30),
@@ -4027,8 +4038,6 @@ mod tests {
             result.signal
         );
         assert!(!result.timed_out, "size kill is not a timeout");
-
-        let _ = tokio::fs::remove_file(&output_file).await;
     }
 
     #[tokio::test]
@@ -4325,8 +4334,26 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let output_file = tmp.path().join("output.log");
 
+        // Emit well past the cap via the product shell. Unix `head -c … /dev/zero`
+        // is not available under Windows PowerShell (command fails immediately,
+        // size guard never arms).
+        let command = {
+            #[cfg(windows)]
+            {
+                // 5_000_000 'x' bytes as 500×10KB chunks.
+                let chunks = output_amount / 10_000;
+                format!(
+                    "$c = 'x' * 10000; 1..{chunks} | ForEach-Object {{ [Console]::Out.Write($c) }}"
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                format!("head -c {output_amount} /dev/zero | tr '\\0' 'x'")
+            }
+        };
+
         let request = TerminalRunRequest {
-            command: format!("head -c {output_amount} /dev/zero | tr '\\0' 'x'"),
+            command,
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
@@ -4361,8 +4388,20 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let output_file = tmp.path().join("output.log");
 
+        // ~200 KB of ASCII via the product shell (not Unix-only `head`/`tr`).
+        let command = {
+            #[cfg(windows)]
+            {
+                "[Console]::Out.Write(('x' * 200000))".to_string()
+            }
+            #[cfg(not(windows))]
+            {
+                "head -c 200000 /dev/zero | tr '\\0' 'x'".to_string()
+            }
+        };
+
         let request = TerminalRunRequest {
-            command: "head -c 200000 /dev/zero | tr '\\0' 'x'".to_string(),
+            command,
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
             timeout: Duration::from_secs(10),
