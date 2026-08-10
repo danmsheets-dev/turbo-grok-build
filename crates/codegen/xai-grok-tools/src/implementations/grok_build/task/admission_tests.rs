@@ -19,6 +19,7 @@ fn request(parent_session_id: &str) -> SubagentRequest {
         await_to_completion: true,
         fork_context: false,
         owner: SubagentOwner::Task,
+        allowed_paths: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     }
 }
