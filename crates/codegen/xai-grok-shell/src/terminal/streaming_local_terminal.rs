@@ -1243,6 +1243,19 @@ mod tests {
         }
     }
 
+    /// Portable one-line echo for shell-snippet `create_terminal` calls
+    /// (`args` empty → product shell).
+    fn echo_cmd(text: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!("Write-Output '{text}'")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("echo {text}")
+        }
+    }
+
     /// A shell that spawns two long-running children and waits on them, so a
     /// kill has a whole process tree to reap rather than a single leaf.
     fn sleep_tree_cmd(secs: u64) -> String {
@@ -1375,10 +1388,12 @@ mod tests {
             .run_until(async {
                 let session_id = format!("ext-create-{}", std::process::id());
 
+                // Empty args → product shell snippet (`shell_command_argv`), not a
+                // bare `echo` binary (which does not exist on Windows PATH).
                 let id = create_terminal(
                     &session_id,
-                    "echo",
-                    &["hello".to_string()],
+                    &echo_cmd("hello"),
+                    &[],
                     HashMap::new(),
                     None,
                     None,
@@ -1405,10 +1420,11 @@ mod tests {
             .run_until(async {
                 let session_id = format!("ext-release-{}", std::process::id());
 
+                // Shell snippet (empty args): bare `sleep` is not on Windows PATH.
                 let id = create_terminal(
                     &session_id,
-                    "sleep",
-                    &["30".to_string()],
+                    &sleep_cmd(30),
+                    &[],
                     HashMap::new(),
                     None,
                     None,
@@ -1435,8 +1451,8 @@ mod tests {
                 // Create two terminals: one normal, one we'll background.
                 let normal_id = create_terminal(
                     &session_id,
-                    "sleep",
-                    &["30".to_string()],
+                    &sleep_cmd(30),
+                    &[],
                     HashMap::new(),
                     None,
                     None,
@@ -1446,8 +1462,8 @@ mod tests {
 
                 let bg_id = create_terminal(
                     &session_id,
-                    "sleep",
-                    &["30".to_string()],
+                    &sleep_cmd(30),
+                    &[],
                     HashMap::new(),
                     None,
                     None,
@@ -1585,11 +1601,11 @@ mod tests {
                 let session_a = format!("kill-all-a-{}", std::process::id());
                 let session_b = format!("kill-all-b-{}", std::process::id());
 
-                // Create a terminal in session B.
+                // Create a terminal in session B (shell snippet for Windows PATH).
                 let id_b = create_terminal(
                     &session_b,
-                    "sleep",
-                    &["30".to_string()],
+                    &sleep_cmd(30),
+                    &[],
                     HashMap::new(),
                     None,
                     None,

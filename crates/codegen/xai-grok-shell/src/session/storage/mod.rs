@@ -2011,6 +2011,16 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Replay helpers live in `replay` after the 1.0.0 extract; re-export for
+    // the legacy tests still hosted in this module.
+    use super::replay::{
+        collect_unfinished_subagents, for_each_replay_update_in_file,
+        line_is_available_commands_update,
+    };
+    use crate::session::wire_tags::AVAILABLE_COMMANDS_UPDATE;
+
+    /// First `"update":` key in an ACP envelope — used by ACU ordering pins.
+    const UPDATE_KEY: &str = r#""update":"#;
 
     // â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -3149,7 +3159,7 @@ mod tests {
             r#"{"echo":{"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}"#,
         );
         // The discriminant prefix IS present (in _meta) â€” pre-filter would match...
-        assert!(line.contains(&*AVAILABLE_COMMANDS_UPDATE_PREFIX));
+        assert!(line.contains(&*AVAILABLE_COMMANDS_UPDATE));
         // ...but the structural params.update is a tool_call, so NOT an ACU.
         assert!(!line_is_available_commands_update(&line));
 

@@ -1,8 +1,9 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use crate::sampling::fork_filter_chat;
 use crate::session::info::Info;
 use crate::session::persistence::default_model_id;
-use crate::session::storage::SessionUpdate;
+use crate::session::storage::{CopySessionOptions, SessionUpdate};
 use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use tempfile::TempDir;
@@ -1411,7 +1412,7 @@ fn fork_filter_removes_synthetic_user_messages() {
             }),
             ConversationItem::assistant("response"),
         ];
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert!(
             !items.iter().any(|i| match i {
                 ConversationItem::User(u) => u.synthetic_reason.is_some(),
@@ -1429,7 +1430,7 @@ fn fork_filter_truncates_at_complete_turn() {
             ConversationItem::user("q2"),
             // No assistant response â€” incomplete turn
         ];
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(items.len(), 3, "should truncate after last complete turn");
     assert!(matches!(items[2], ConversationItem::Assistant(_)));
 }
@@ -1441,7 +1442,7 @@ fn fork_filter_handles_consecutive_user_messages() {
             ConversationItem::user("actual user query"),
             ConversationItem::assistant("response to query"),
         ];
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(
             items.len(),
             4,
@@ -1466,7 +1467,7 @@ fn fork_filter_consecutive_users_with_tool_calls() {
         ConversationItem::user("follow-up"),
     ];
 
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(
             items.len(),
             5,
@@ -1485,7 +1486,7 @@ fn fork_filter_preserves_complete_tool_turn() {
         "output"),
     ];
 
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(items.len(), 3, "complete tool turn should be preserved");
 }
 #[test]
@@ -1500,7 +1501,7 @@ fn fork_filter_strips_incomplete_tool_turn() {
         None, reasoning_effort : None, }),
     ];
 
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(
             items.len(),
             2,
@@ -1665,7 +1666,7 @@ async fn fork_inherits_sandbox_profile() {
 #[test]
 fn fork_filter_empty_input_produces_empty() {
     let mut items: Vec<ConversationItem> = vec![];
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert!(items.is_empty());
 }
 #[test]
@@ -1679,7 +1680,7 @@ fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
             )),
             ConversationItem::assistant("a"),
         ];
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(
             items.len(),
             4,
@@ -1702,7 +1703,7 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
         ConversationItem::assistant("final text"),
     ];
 
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(
             items.len(),
             7,
@@ -1733,7 +1734,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
         ConversationItem::assistant("final"),
     ];
 
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(
             items.len(),
             9,
@@ -1756,7 +1757,7 @@ fn fork_filter_drops_trailing_incomplete_goal_turn_after_reasoning() {
             ConversationItem::assistant("a"),
             ConversationItem::user("/goal do the thing"),
         ];
-    super::fork_filter_chat(&mut items);
+    fork_filter_chat(&mut items);
     assert_eq!(
             items.len(),
             4,

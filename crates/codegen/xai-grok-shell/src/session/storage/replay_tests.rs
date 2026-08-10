@@ -691,6 +691,8 @@ fn collect_pairs_a_reconcile_emitted_finish_with_its_spawn() {
             child_session_id: "ca".into(),
             status: "cancelled".into(),
             error: Some("interrupted by process restart".into()),
+            termination_reason: None,
+            usage: None,
             tool_calls: 0,
             turns: 0,
             duration_ms: 0,
