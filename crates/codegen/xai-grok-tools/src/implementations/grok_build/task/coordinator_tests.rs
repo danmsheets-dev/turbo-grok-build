@@ -215,7 +215,12 @@ async fn spawn_queues_when_at_concurrency_limit() {
     let mut h = harness_with_config(
         true, // wait_before_start — hold children until start signal
         CoordinatorConfig {
+            // Admission uses `limits`; keep dual field in sync for Turbo callers.
             max_concurrent: 1,
+            limits: SubagentLimits {
+                max_concurrent: 1,
+                behavior: LimitBehavior::Queue,
+            },
             foreground_budget: std::time::Duration::from_secs(60),
             ..CoordinatorConfig::default()
         },
