@@ -447,6 +447,9 @@ pub struct SubagentResult {
     /// `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`). Harnesses must treat the run
     /// as **not** isolated when this is true.
     pub isolation_fallback: bool,
+    /// Worktree seed mode: `clean` (HEAD-only) or `dirty` (parent WIP).
+    /// Absent when isolation=none or seed unknown.
+    pub worktree_seed: Option<String>,
     /// Set when a blocking subagent exceeded its await budget and was
     /// auto-backgrounded: the child is still running (result via auto-wake /
     /// `get_command_or_subagent_output`), so the tool returns a `task_id` notice
@@ -482,6 +485,7 @@ impl Default for SubagentResult {
             baseline_ref: None,
             diffstat: None,
             isolation_fallback: false,
+            worktree_seed: None,
             backgrounded: false,
             error_class: None,
         }

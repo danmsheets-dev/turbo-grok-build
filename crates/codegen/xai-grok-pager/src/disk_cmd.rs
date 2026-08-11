@@ -146,6 +146,39 @@ pub enum DiskCommand {
         #[arg(long, default_value_t = 120)]
         active_build_grace_secs: u64,
     },
+    /// Closed-loop reclaim: check free space → clean only when low → re-check.
+    ///
+    /// Exit 0 when free space meets the min gate after (optional) reclaim.
+    /// Exit 1 when still under threshold. Requires `--safe` for any deletion.
+    Recover {
+        /// Workspace root (default: cwd)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Only print plan; do not delete
+        #[arg(long)]
+        dry_run: bool,
+        /// Required safety latch for any deletion
+        #[arg(long)]
+        safe: bool,
+        /// Override min free GiB (else env / default 40)
+        #[arg(long)]
+        min_free_gb: Option<u64>,
+        /// Categories to reclaim when low (default: debug + worktrees + tree-store)
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        include: Vec<CleanCategory>,
+        /// Required when `cargo-home` is included
+        #[arg(long = "i-accept-redownload")]
+        i_accept_redownload: bool,
+        /// Worktree age threshold in hours (default 24; `0` = all non-live)
+        #[arg(long, default_value_t = 24)]
+        worktree_hours: u64,
+        /// Tree-store age threshold in days (default 14)
+        #[arg(long, default_value_t = 14)]
+        tree_days: u64,
+        /// Emit JSON report (free_before / free_after / ok / actions)
+        #[arg(long)]
+        json: bool,
+    },
     /// Unified prune for worktrees, tree store, and session subagent metadata
     Prune {
         /// Prune aged non-live subagent worktrees under ~/.grok/worktrees
@@ -221,6 +254,33 @@ pub fn run(args: DiskArgs) -> Result<()> {
                 categories: cats,
                 json,
                 active_build_grace_secs,
+            })
+        }
+        DiskCommand::Recover {
+            root,
+            dry_run,
+            safe,
+            min_free_gb,
+            include,
+            i_accept_redownload,
+            worktree_hours,
+            tree_days,
+            json,
+        } => {
+            if !safe {
+                bail!(
+                    "refusing recover without --safe (try: turbo disk recover --safe --dry-run)"
+                );
+            }
+            let cats = resolve_categories(&include, i_accept_redownload)?;
+            recover(RecoverOpts {
+                root,
+                dry_run,
+                min_free_gb,
+                categories: cats,
+                worktree_hours,
+                tree_days,
+                json,
             })
         }
         DiskCommand::Prune {
@@ -761,6 +821,119 @@ fn report(root: Option<PathBuf>, json: bool) -> Result<()> {
         println!(
             "NOTE: target/debug is large ({}) — agents should avoid full-workspace debug rebuilds.",
             fmt_bytes(cats.get("debug").copied().unwrap_or(0))
+        );
+    }
+    Ok(())
+}
+
+struct RecoverOpts {
+    root: Option<PathBuf>,
+    dry_run: bool,
+    min_free_gb: Option<u64>,
+    categories: BTreeSet<CleanCategory>,
+    worktree_hours: u64,
+    tree_days: u64,
+    json: bool,
+}
+
+/// Closed-loop: assess → clean --if-low-space → re-assess. Exit 1 if still low.
+fn recover(opts: RecoverOpts) -> Result<()> {
+    let root = opts
+        .root
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = dunce::canonicalize(&root).unwrap_or(root);
+    let min = opts
+        .min_free_gb
+        .map(|gb| gb.saturating_mul(1024 * 1024 * 1024))
+        .unwrap_or_else(configured_min_free_bytes);
+
+    let before = path_spaces(&root, min);
+    let before_ok = min == 0 || before.iter().all(|s| matches!(s.ok, Some(true)));
+
+    if before_ok {
+        if opts.json {
+            let v = serde_json::json!({
+                "root": root.display().to_string(),
+                "min_free_bytes": min,
+                "ok": true,
+                "cleaned": false,
+                "dry_run": opts.dry_run,
+                "paths_before": before,
+                "paths_after": before,
+                "message": "free space already meets min gate; no clean needed",
+            });
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else {
+            println!(
+                "turbo disk recover: already OK (min={})",
+                if min == 0 {
+                    "disabled".into()
+                } else {
+                    fmt_bytes(min)
+                }
+            );
+        }
+        return Ok(());
+    }
+
+    if !opts.json {
+        println!(
+            "turbo disk recover: free space under gate — running clean --safe --if-low-space{}",
+            if opts.dry_run { " (dry-run)" } else { "" }
+        );
+    }
+
+    // Reclaim only failing volumes / safe categories (if_low_space filter).
+    clean(CleanOpts {
+        root: Some(root.clone()),
+        dry_run: opts.dry_run,
+        worktree_hours: opts.worktree_hours,
+        tree_days: opts.tree_days,
+        if_low_space: true,
+        min_free_gb: opts.min_free_gb,
+        categories: opts.categories,
+        json: false, // recover owns JSON envelope
+        active_build_grace_secs: 120,
+    })?;
+
+    let after = path_spaces(&root, min);
+    let after_ok = min == 0 || after.iter().all(|s| matches!(s.ok, Some(true)));
+
+    if opts.json {
+        let v = serde_json::json!({
+            "root": root.display().to_string(),
+            "min_free_bytes": min,
+            "ok": after_ok,
+            "cleaned": true,
+            "dry_run": opts.dry_run,
+            "paths_before": before,
+            "paths_after": after,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        println!(
+            "turbo disk recover: after clean → {}",
+            if after_ok { "OK" } else { "STILL LOW" }
+        );
+        for s in &after {
+            let free_s = s
+                .free_bytes
+                .map(fmt_bytes)
+                .unwrap_or_else(|| "unknown".into());
+            let st = match s.ok {
+                Some(true) => "OK",
+                Some(false) => "FAIL",
+                None => "unknown",
+            };
+            println!("  [{}] {} free={} → {st}", s.role, s.path, free_s);
+        }
+    }
+
+    if !after_ok {
+        bail!(
+            "disk recover: free space still under threshold after clean (min={})",
+            fmt_bytes(min)
         );
     }
     Ok(())

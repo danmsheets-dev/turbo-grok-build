@@ -4200,20 +4200,20 @@ allow = ["Bash(evil *)"]
     }
 
     #[test]
-    fn notebook_tools_warn_and_skip_like_enter_worktree() {
-        for rule in [
-            "NotebookEdit",
-            "NotebookEdit(*)",
-            "NotebookRead",
-            "NotebookRead(*)",
-            "EnterWorktree(*)",
-        ] {
-            let err = parse_permission_rule(rule, RuleAction::Deny).unwrap_err();
-            assert!(
-                matches!(err, RuleParseError::UnsupportedToolPrefix { .. }),
-                "{rule}: {err:?}"
-            );
+    fn notebook_tools_map_to_edit_and_read_compat_aliases() {
+        // rc2: Claude-compat Notebook*/MultiEdit aliases no longer hard-fail
+        // headless starts; they map into the Edit/Read tool filters.
+        for rule in ["NotebookEdit", "NotebookEdit(*)", "MultiEdit(src/**)"] {
+            let parsed = parse_permission_rule(rule, RuleAction::Deny).unwrap();
+            assert_eq!(parsed.tool, ToolFilter::Edit, "{rule}");
         }
+        for rule in ["NotebookRead", "NotebookRead(*)"] {
+            let parsed = parse_permission_rule(rule, RuleAction::Deny).unwrap();
+            assert_eq!(parsed.tool, ToolFilter::Read, "{rule}");
+        }
+        // EnterWorktree remains unsupported.
+        let err = parse_permission_rule("EnterWorktree(*)", RuleAction::Deny).unwrap_err();
+        assert!(matches!(err, RuleParseError::UnsupportedToolPrefix { .. }));
 
         let perms = ParsedPermissions {
             deny: vec![
@@ -4225,9 +4225,12 @@ allow = ["Bash(evil *)"]
             ..Default::default()
         };
         let (cfg, warnings) = perms.into_permission_config();
-        assert_eq!(cfg.rules.len(), 1, "rules: {:?}", cfg.rules);
-        assert_eq!(cfg.rules[0].tool, ToolFilter::Bash);
-        assert_eq!(warnings.len(), 3, "warnings: {warnings:?}");
+        // NotebookEdit + NotebookRead keep; EnterWorktree is dropped with a warning.
+        assert_eq!(cfg.rules.len(), 3, "rules: {:?}", cfg.rules);
+        assert!(cfg.rules.iter().any(|r| r.tool == ToolFilter::Edit));
+        assert!(cfg.rules.iter().any(|r| r.tool == ToolFilter::Read));
+        assert!(cfg.rules.iter().any(|r| r.tool == ToolFilter::Bash));
+        assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

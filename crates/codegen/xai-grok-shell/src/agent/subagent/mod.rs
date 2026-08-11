@@ -1473,6 +1473,36 @@ fn resolve_child_cwd(
         .or_else(|| override_cwd.filter(|s| !s.is_empty()).map(PathBuf::from))
         .unwrap_or_else(|| parent_cwd.to_path_buf())
 }
+
+/// True when `path` looks like a product subagent worktree
+/// (`…/.grok/worktrees/…/subagent-…` or temp `grok-subagent-worktrees/…`).
+///
+/// Used as a fail-closed honesty check when isolation=worktree was requested
+/// and isolation_fallback is false — child CWD must not silently be the parent.
+pub(crate) fn path_looks_like_subagent_worktree(path: &Path) -> bool {
+    let s = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let has_subagent = s.contains("/subagent-");
+    let under_product = s.contains("/.grok/worktrees/");
+    let under_temp = s.contains("grok-subagent-worktrees");
+    has_subagent && (under_product || under_temp)
+}
+
+/// Parse `GROK_SUBAGENT_WORKTREE_SEED` into a wire label + fast-worktree mode.
+///
+/// Default / unknown / `clean|head|head-only` → clean (HEAD-only, no parent WIP).
+/// `dirty|preserve|…` → dirty (preserve parent working tree).
+pub(crate) fn parse_worktree_seed_mode(
+    raw: &str,
+) -> (&'static str, xai_fast_worktree::WorkingTreeMode) {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dirty" | "preserve" | "preserve-working-tree" | "working-tree" => (
+            "dirty",
+            xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree,
+        ),
+        // default (empty) and clean|head|head-only → CleanAll
+        _ => ("clean", xai_fast_worktree::WorkingTreeMode::CleanAll),
+    }
+}
 /// The cwd a resumed child inherits from its source subagent, or `None` when
 /// there is nothing to inherit (the caller then falls back to the parent cwd).
 ///
@@ -2373,6 +2403,90 @@ impl Drop for FreshWorktreeGuard {
 /// isolation=worktree cannot be provided. See R6-10 / WP-C3.
 pub(crate) const ENV_SUBAGENT_ALLOW_SHARED_FALLBACK: &str =
     "GROK_SUBAGENT_ALLOW_SHARED_FALLBACK";
+
+/// Post-subagent disk reclaim policy (`GROK_POST_SUBAGENT_DISK_CLEAN`).
+///
+/// - unset / `if-low-space` / `1` / `true` → run `disk clean --safe --if-low-space`
+///   best-effort after dispose (debounced 5 minutes)
+/// - `off` / `0` / `false` / `no` → disabled
+pub(crate) const ENV_POST_SUBAGENT_DISK_CLEAN: &str = "GROK_POST_SUBAGENT_DISK_CLEAN";
+
+/// Debounce window for automatic post-subagent disk clean (seconds).
+const POST_SUBAGENT_DISK_CLEAN_DEBOUNCE_SECS: u64 = 5 * 60;
+
+/// Whether post-subagent disk clean is enabled (default: if-low-space on).
+pub(crate) fn post_subagent_disk_clean_enabled() -> bool {
+    match std::env::var(ENV_POST_SUBAGENT_DISK_CLEAN) {
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            !matches!(t.as_str(), "0" | "false" | "no" | "off" | "disabled")
+        }
+        // Default on: densify waves reclaim when under gate without human nudge.
+        Err(_) => true,
+    }
+}
+
+/// Best-effort: after a subagent disposes, reclaim caches only when free space
+/// is under the gate. Never blocks the completion path; failures are logged.
+///
+/// Invokes the current process binary as `… disk clean --safe --if-low-space`
+/// (same as agents should call from AGENTS.md). Debounced via a stamp file
+/// under GROK_HOME so densify waves do not thrash disk.
+pub(crate) fn maybe_post_subagent_disk_clean() {
+    if !post_subagent_disk_clean_enabled() {
+        return;
+    }
+    // Debounce: skip if we cleaned recently.
+    let stamp = match xai_fast_worktree::resolve_grok_home() {
+        Ok(h) => h.join(".last-post-subagent-disk-clean"),
+        Err(_) => std::env::temp_dir().join("grok-last-post-subagent-disk-clean"),
+    };
+    if let Ok(md) = std::fs::metadata(&stamp) {
+        if let Ok(modified) = md.modified() {
+            if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
+                if age.as_secs() < POST_SUBAGENT_DISK_CLEAN_DEBOUNCE_SECS {
+                    tracing::debug!(
+                        age_secs = age.as_secs(),
+                        "post-subagent disk clean debounced"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "post-subagent disk clean: current_exe failed");
+            return;
+        }
+    };
+    // Touch stamp before spawn so concurrent dispose paths do not pile on.
+    let _ = std::fs::write(&stamp, b"1");
+    tracing::info!(
+        exe = %exe.display(),
+        "post-subagent disk clean: spawning disk clean --safe --if-low-space"
+    );
+    // Detached best-effort; do not wait (dispose must stay fast).
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["disk", "clean", "--safe", "--if-low-space"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_child) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "post-subagent disk clean spawn failed");
+        }
+    }
+}
 
 /// Whether the operator opted into shared-workspace fallback when isolation
 /// cannot be provided. Default is **false** (fail closed).
@@ -3304,6 +3418,11 @@ pub(crate) struct SubagentMeta {
     /// When non-empty, land/diff tools refuse or filter paths outside these prefixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_paths: Option<Vec<String>>,
+    /// Worktree seed mode at spawn: `clean` (HEAD-only) or `dirty` (parent WIP).
+    /// Default clean omits parent uncommitted files — supervisors must not
+    /// expect WIP under clean seed (see `GROK_SUBAGENT_WORKTREE_SEED`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_seed: Option<String>,
     /// Effective model ID used by the child session. Persisted for
     /// durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]

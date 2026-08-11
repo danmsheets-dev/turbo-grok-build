@@ -548,7 +548,14 @@ pub fn enforce_allowed_write_paths(
         let Some(p) = normalize_rel_allowlist_path(prefix) else {
             return false;
         };
-        norm == p || norm.starts_with(&(p + "/"))
+        // Windows: case-fold prefix match (NTFS); same rule as land path_is_allowed.
+        if cfg!(windows) {
+            let norm_l = norm.to_ascii_lowercase();
+            let p_l = p.to_ascii_lowercase();
+            norm_l == p_l || norm_l.starts_with(&(p_l + "/"))
+        } else {
+            norm == p || norm.starts_with(&(p + "/"))
+        }
     });
     if allowed_ok {
         return Ok(());

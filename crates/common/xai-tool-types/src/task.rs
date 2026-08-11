@@ -366,6 +366,10 @@ pub struct SubagentCompletedOutput {
     /// (`timeout`, `stall`, `serialize`, `provider_400`, `cancelled`, `budget`, `unknown`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_class: Option<String>,
+    /// Worktree seed: `clean` (HEAD-only; parent uncommitted files absent) or
+    /// `dirty` (parent WIP preserved). See `GROK_SUBAGENT_WORKTREE_SEED`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_seed: Option<String>,
 }
 
 impl SubagentCompletedOutput {
@@ -452,6 +456,16 @@ impl SubagentCompletedOutput {
                     text.push_str(&format!("- … +{} more\n", paths.len() - 15));
                 }
                 text.push_str("</changed_paths>");
+            }
+        }
+        if let Some(ref seed) = self.worktree_seed {
+            text.push_str(&format!("\n\n<worktree_seed>{seed}</worktree_seed>"));
+            if seed == "clean" {
+                text.push_str(
+                    "\nParent uncommitted/untracked files were NOT copied into the \
+                     worktree (clean seed). To review/continue WIP, set \
+                     GROK_SUBAGENT_WORKTREE_SEED=dirty or commit parent changes first.",
+                );
             }
         }
         text
@@ -1770,6 +1784,7 @@ mod tests {
             changed_paths: Some(vec!["src/lib.rs".into()]),
             baseline_ref: Some("refs/grok/subagent-baselines/sa-1".into()),
             error_class: None,
+                worktree_seed: None,
         };
         let text = output.to_model_text();
         assert!(text.contains("<worktree_state>cleaned</worktree_state>"));

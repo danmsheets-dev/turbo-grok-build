@@ -729,6 +729,11 @@ pub fn effective_allowed_paths(meta: &SubagentMetaView) -> Option<Vec<String>> {
 ///
 /// Prefix `"crates/foo"` matches `crates/foo`, `crates/foo/bar.rs`, but not
 /// `crates/foobar`. Empty / missing allowlist is unrestricted (always true).
+///
+/// On Windows (NTFS case-insensitive by default), segment matching is
+/// case-insensitive so `assets/Mini Games/x` matches allowlist
+/// `assets/mini games/` — otherwise land/diff treat git's real casing as
+/// outside the allowlist and report an empty agent-only diff.
 pub fn path_is_allowed(path: &str, allowed: &[String]) -> bool {
     if allowed.is_empty() {
         return true;
@@ -737,11 +742,28 @@ pub fn path_is_allowed(path: &str, allowed: &[String]) -> bool {
         return false;
     };
     for pref in allowed {
-        if norm == *pref || norm.starts_with(&format!("{pref}/")) {
+        let Some(p) = normalize_allowlist_path(pref) else {
+            continue;
+        };
+        if path_matches_allowlist_prefix(&norm, &p) {
             return true;
         }
     }
     false
+}
+
+/// Prefix match with optional case-fold (Windows).
+///
+/// Uses segment-aware prefix: `pref` matches `pref` exactly or `pref/` + rest.
+/// Never treats `crates/foo` as a prefix of `crates/foobar`.
+pub fn path_matches_allowlist_prefix(path: &str, prefix: &str) -> bool {
+    if cfg!(windows) {
+        let path_l = path.to_ascii_lowercase();
+        let pref_l = prefix.to_ascii_lowercase();
+        path_l == pref_l || path_l.starts_with(&(pref_l + "/"))
+    } else {
+        path == prefix || path.starts_with(&format!("{prefix}/"))
+    }
 }
 
 /// Partition paths into (allowed, denied) under the given allowlist.
@@ -888,6 +910,23 @@ mod allowlist_tests {
         assert!(path_is_allowed("crates/foo", &allowed));
         assert!(!path_is_allowed("crates/foobar/x.rs", &allowed));
         assert!(!path_is_allowed("docs/a.md", &allowed));
+    }
+
+    #[test]
+    fn path_is_allowed_case_insensitive_on_windows() {
+        let allowed = vec!["assets/mini games".to_string()];
+        let hit = path_is_allowed("assets/Mini Games/medusa.glb", &allowed);
+        if cfg!(windows) {
+            assert!(
+                hit,
+                "Windows allowlist must match case-mismatched path segments"
+            );
+        } else {
+            // Unix is case-sensitive by default (core.ignorecase not plumbed here).
+            assert!(!hit);
+        }
+        // Boundary: still not a partial-name match.
+        assert!(!path_is_allowed("assets/mini gamesextra/x", &allowed));
     }
 
     #[test]

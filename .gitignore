@@ -14,3 +14,7 @@ build-*.log
 # Local restore/worktree debris
 .grok-restore/
 
+
+# Prebuilt Windows ship binaries (attach to GitHub Releases; too large for git/LFS on public forks)
+releases/windows/*.exe
+

@@ -241,7 +241,8 @@ pub fn global_process_scope() -> &'static ProcessScope {
 /// Object with `KILL_ON_JOB_CLOSE` so a harness can kill the entire tree by
 /// closing the job handle (not by guessing PIDs).
 ///
-/// - Env: `TURBO_JOB_OBJECT=1` (legacy: `HYPER_JOB_OBJECT=1`) (or `true` / `yes`)
+/// - Env (any one): `TURBO_JOB_OBJECT=1`, `GROK_JOB_OBJECT=1`, or legacy
+///   `HYPER_JOB_OBJECT=1` (also `true` / `yes`)
 /// - CLI: `--job-object` (see pager CLI)
 ///
 /// Interactive users leave this off — nested jobs or an already-jobbed parent
@@ -250,8 +251,9 @@ pub fn global_process_scope() -> &'static ProcessScope {
 ///
 /// On non-Windows this is a no-op.
 pub fn enter_self_job_object_if_requested(force: bool) {
-    let env_on = std::env::var("TURBO_JOB_OBJECT")
-        .or_else(|_| std::env::var("HYPER_JOB_OBJECT"))
+    let env_on = ["TURBO_JOB_OBJECT", "GROK_JOB_OBJECT", "HYPER_JOB_OBJECT"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok())
         .map(|v| {
             let t = v.trim();
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")

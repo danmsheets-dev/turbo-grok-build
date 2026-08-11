@@ -1847,6 +1847,39 @@ fn version_text(channel_label: &str) -> String {
 fn write_version(writer: &mut impl std::io::Write, channel_label: &str) -> std::io::Result<()> {
     writer.write_all(version_text(channel_label).as_bytes())
 }
+
+/// Machine-readable identity for harnesses (Grok Build plugin, CI).
+/// Distinguishes Turbo Grok Build from Vercel Turborepo and advertises
+/// headless/permission capabilities (rc2 polish).
+fn version_json_payload() -> serde_json::Value {
+    let community = cfg!(feature = "community-build");
+    let binary = if community { "turbo" } else { "grok" };
+    let product = if community {
+        "turbo-grok-build"
+    } else {
+        "grok-build"
+    };
+    serde_json::json!({
+        "currentVersion": env!("VERSION_WITH_COMMIT"),
+        "channel": xai_grok_update::channel_name().unwrap_or("unknown"),
+        // Stable harness identity fields (rc2+).
+        "product": product,
+        "binary": binary,
+        "cliFamily": "grok-build",
+        "agentCompatible": true,
+        "features": {
+            "headless": true,
+            "outputFormatStreamingJson": true,
+            "outputFormatJson": true,
+            "jsonSchema": true,
+            "confine": true,
+            "jobObject": cfg!(windows),
+            "promptFile": true,
+            "alwaysApprove": true,
+        },
+        "permissionToolPrefixes": xai_grok_workspace::permission::rules::supported_permission_tool_prefixes(),
+    })
+}
 fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
     if !args.version {
         return false;
@@ -2107,11 +2140,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         match command {
             Command::Version { json } => {
                 if json {
-                    let payload = serde_json::json!({
-                        "currentVersion": env!("VERSION_WITH_COMMIT"),
-                        "channel": xai_grok_update::channel_name().unwrap_or("unknown"),
-                    });
-                    println!("{}", serde_json::to_string(&payload)?);
+                    println!("{}", serde_json::to_string(&version_json_payload())?);
                 } else {
                     write_version(
                         &mut std::io::stdout().lock(),
@@ -2912,6 +2941,32 @@ mod tests {
             assert!(output.starts_with(product), "{output:?}");
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
+        }
+    }
+
+    #[test]
+    fn version_json_payload_advertises_agent_identity() {
+        let payload = version_json_payload();
+        assert_eq!(payload["cliFamily"], "grok-build");
+        assert_eq!(payload["agentCompatible"], true);
+        assert!(payload["currentVersion"].as_str().unwrap().contains("1.0.0"));
+        assert_eq!(payload["features"]["confine"], true);
+        assert_eq!(payload["features"]["headless"], true);
+        let prefixes = payload["permissionToolPrefixes"].as_array().unwrap();
+        assert!(
+            prefixes.iter().any(|p| p.as_str() == Some("NotebookEdit")),
+            "rc2 must advertise NotebookEdit as a compat alias: {prefixes:?}"
+        );
+        assert!(
+            prefixes.iter().any(|p| p.as_str() == Some("Edit")),
+            "{prefixes:?}"
+        );
+        if cfg!(feature = "community-build") {
+            assert_eq!(payload["binary"], "turbo");
+            assert_eq!(payload["product"], "turbo-grok-build");
+        } else {
+            assert_eq!(payload["binary"], "grok");
+            assert_eq!(payload["product"], "grok-build");
         }
     }
     #[test]

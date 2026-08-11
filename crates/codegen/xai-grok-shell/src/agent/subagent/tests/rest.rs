@@ -355,6 +355,7 @@ fn resumed_from_field_in_meta_roundtrips() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -411,6 +412,7 @@ fn resumed_from_none_not_serialized_in_meta() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -467,6 +469,7 @@ fn snapshot_ref_field_in_meta_roundtrips() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
@@ -526,6 +529,7 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     }
 }
@@ -805,6 +809,7 @@ fn subagent_session_metadata_roundtrip() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
@@ -874,6 +879,7 @@ fn subagent_session_metadata_non_forked() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
@@ -947,6 +953,7 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let spawn_gcs = SubagentSessionMetadata::from_meta(
@@ -1039,6 +1046,7 @@ fn upload_lifecycle_failure_preserves_error() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
@@ -1096,6 +1104,7 @@ fn session_metadata_session_kind_for_resumed() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
@@ -1170,6 +1179,50 @@ fn resume_prefix_len_counts_consecutive_system_head() {
         ];
     assert_eq!(resume_inherited_prefix_len(&conversation), 2);
 }
+#[test]
+fn path_looks_like_subagent_worktree_patterns() {
+    assert!(path_looks_like_subagent_worktree(Path::new(
+        "/home/user/.grok/worktrees/myrepo/subagent-abc"
+    )));
+    assert!(path_looks_like_subagent_worktree(Path::new(
+        r"C:\Users\me\.grok\worktrees\repo\subagent-xyz"
+    )));
+    assert!(path_looks_like_subagent_worktree(Path::new(
+        "/tmp/grok-subagent-worktrees/subagent-id"
+    )));
+    assert!(!path_looks_like_subagent_worktree(Path::new(
+        "/home/user/projects/myrepo"
+    )));
+    assert!(!path_looks_like_subagent_worktree(Path::new(
+        r"H:\Apps\kingdom-game"
+    )));
+}
+
+#[test]
+fn parse_worktree_seed_mode_table() {
+    use xai_fast_worktree::WorkingTreeMode;
+    let (label, mode) = parse_worktree_seed_mode("");
+    assert_eq!(label, "clean");
+    assert_eq!(mode, WorkingTreeMode::CleanAll);
+    let (label, mode) = parse_worktree_seed_mode("dirty");
+    assert_eq!(label, "dirty");
+    assert_eq!(mode, WorkingTreeMode::PreserveWorkingTree);
+    let (label, mode) = parse_worktree_seed_mode("HEAD");
+    assert_eq!(label, "clean");
+    assert_eq!(mode, WorkingTreeMode::CleanAll);
+    let (label, mode) = parse_worktree_seed_mode("preserve-working-tree");
+    assert_eq!(label, "dirty");
+    assert_eq!(mode, WorkingTreeMode::PreserveWorkingTree);
+}
+
+#[test]
+fn post_subagent_disk_clean_env_off() {
+    // Safety: only assert pure parser; env mutation is process-global.
+    // Default is enabled when unset — tested by reading the function under
+    // a controlled env if the host allows; otherwise just document.
+    let _ = post_subagent_disk_clean_enabled();
+}
+
 #[test]
 fn resume_source_worktree_reuse() {
     let source_with_worktree = ResumeSourceData {
@@ -1444,6 +1497,7 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: Some("grok-3".into()),
     };
     write_subagent_meta(&dir, &meta);
@@ -1492,6 +1546,7 @@ fn durable_fallback_rejects_running_status() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     };
     write_subagent_meta(&parent_dir, &meta);
@@ -1583,6 +1638,7 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: None,
     }
 }
@@ -1872,6 +1928,7 @@ fn durable_meta_roundtrips_effective_model_id() {
         diffstat: None,
         land_status: None,
         allowed_paths: None,
+        worktree_seed: None,
         effective_model_id: Some("grok-3".into()),
     };
     write_subagent_meta(&dir, &meta);

@@ -360,6 +360,9 @@ pub(crate) async fn run_shell_child(
         effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None;
     let allow_shared_fallback = isolation_shared_fallback_allowed();
     let mut isolation_fallback = false;
+    // Seed mode for honesty tags (clean = HEAD-only; dirty = parent WIP).
+    // Set on fresh worktree create; resume inherits source meta when present.
+    let mut worktree_seed: Option<&'static str> = None;
     // Spawn-time worktree baseline ref (agent-only diffs). Set after create.
     let mut spawn_baseline_ref: Option<String> = None;
     let worktree_path = if let Some(ref source) = resume_source {
@@ -610,18 +613,10 @@ pub(crate) async fn run_shell_child(
         // RC9: default clean-slate seed (HEAD only) so land/diff are agent-only.
         // Opt into dirty parent copy: GROK_SUBAGENT_WORKTREE_SEED=dirty|preserve.
         // Explicit clean: clean|head|head-only (same as default).
-        let working_tree_mode = match std::env::var("GROK_SUBAGENT_WORKTREE_SEED")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "dirty" | "preserve" | "preserve-working-tree" | "working-tree" => {
-                xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree
-            }
-            // default (empty) and clean|head|head-only → CleanAll
-            _ => xai_fast_worktree::WorkingTreeMode::CleanAll,
-        };
+        let (seed_label, working_tree_mode) = parse_worktree_seed_mode(
+            &std::env::var("GROK_SUBAGENT_WORKTREE_SEED").unwrap_or_default(),
+        );
+        worktree_seed = Some(seed_label);
         let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
         let create_result = if skip_worktree_create {
             None
@@ -857,6 +852,24 @@ pub(crate) async fn run_shell_child(
         other => other,
     };
 
+    // Defense in depth: isolation=worktree with no path must not start unless
+    // the operator opted into shared fallback (already set isolation_fallback).
+    if isolation_requested && worktree_path.is_none() && !allow_shared_fallback {
+        let msg = "isolation=worktree requested but no worktree path is available \
+             (create/rehydrate failed earlier without a user-visible error). \
+             Refusing shared-workspace start. Re-spawn, free disk, or set \
+             GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1 only if shared parent writes are acceptable."
+            .to_string();
+        tracing::error!(
+            subagent_id = %request.id,
+            "isolation_requested without worktree_path; fail-closed"
+        );
+        return child_run_output(failure_result(&request, &msg), completion_data, None);
+    }
+    if isolation_requested && worktree_path.is_none() && allow_shared_fallback {
+        isolation_fallback = true;
+    }
+
     // RC11: resume Reuse/Rehydrate never hit the fresh-create baseline path above.
     // Capture a FRESH baseline for THIS child id at resume start so dispose
     // export / diff / land stay agent-only (not dirty-parent bulk FOOTGUN).
@@ -1081,9 +1094,29 @@ pub(crate) async fn run_shell_child(
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
     let override_cwd = select_override_cwd(resume_source.as_ref(), request.cwd.as_deref());
-    let effective_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd)
-        .to_string_lossy()
-        .into_owned();
+    let effective_cwd_path =
+        resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
+    // Honesty: when isolation claims worktree (no fallback), child CWD must look
+    // like a product worktree — never the bare parent repo.
+    if isolation_requested && !isolation_fallback {
+        if !path_looks_like_subagent_worktree(&effective_cwd_path) {
+            let msg = format!(
+                "isolation=worktree claimed but resolved child CWD is not a subagent worktree \
+                 (`{}`). Refusing start to avoid shared parent writes. \
+                 Re-spawn isolation=worktree, or use isolation=none explicitly when shared \
+                 parent writes are intended (e.g. Blender MCP absolute export paths).",
+                effective_cwd_path.display()
+            );
+            tracing::error!(
+                subagent_id = %request.id,
+                child_cwd = %effective_cwd_path.display(),
+                worktree = ?worktree_path.as_ref().map(|p| p.display().to_string()),
+                "Child CWD failed subagent-worktree pattern; fail-closed"
+            );
+            return child_run_output(failure_result(&request, &msg), completion_data, None);
+        }
+    }
+    let effective_cwd = effective_cwd_path.to_string_lossy().into_owned();
     let child_session_info = SessionInfo {
         id: child_session_id.clone(),
         cwd: effective_cwd,
@@ -1213,6 +1246,17 @@ pub(crate) async fn run_shell_child(
                 })
             }
         },
+        worktree_seed: worktree_seed.map(|s| s.to_string()).or_else(|| {
+            // Resume: inherit source seed from durable meta when present.
+            resume_source.as_ref().and_then(|src| {
+                durable_subagent_meta(
+                    &src.subagent_id,
+                    &ctx.parent_session_id,
+                    &ctx.parent_cwd,
+                )
+                .and_then(|m| m.worktree_seed)
+            })
+        }),
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
     // C2: non-empty allowed_paths that all fail normalization must not start unrestricted.
@@ -1982,6 +2026,7 @@ pub(crate) async fn run_shell_child(
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
                 isolation_fallback,
+                worktree_seed: worktree_seed.map(|s| s.to_string()),
                 ..Default::default()
             }
         }
@@ -2049,6 +2094,7 @@ pub(crate) async fn run_shell_child(
                         changed_paths: None,
                         baseline_ref: None,
                         isolation_fallback,
+                        worktree_seed: worktree_seed.map(|s| s.to_string()),
                         backgrounded: false,
                         error_class: None,
                     }
@@ -2088,6 +2134,7 @@ pub(crate) async fn run_shell_child(
                     changed_paths: None,
                     baseline_ref: None,
                     isolation_fallback,
+                    worktree_seed: worktree_seed.map(|s| s.to_string()),
                     backgrounded: false,
                     error_class: None,
                 },
@@ -2139,6 +2186,7 @@ pub(crate) async fn run_shell_child(
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
                         isolation_fallback,
+                        worktree_seed: worktree_seed.map(|s| s.to_string()),
                         ..Default::default()
                     }
                 }
@@ -2161,6 +2209,7 @@ pub(crate) async fn run_shell_child(
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
                         isolation_fallback,
+                        worktree_seed: worktree_seed.map(|s| s.to_string()),
                         ..Default::default()
                     }
                 }
@@ -2183,6 +2232,7 @@ pub(crate) async fn run_shell_child(
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
                         isolation_fallback,
+                        worktree_seed: worktree_seed.map(|s| s.to_string()),
                         ..Default::default()
                     }
                 }
@@ -2675,6 +2725,9 @@ pub(crate) async fn run_shell_child(
                                 soft_preserve,
                                 "snapshotted subagent worktree; kept on disk for review"
                             );
+                            // Best-effort free-space reclaim after densify dispose
+                            // (debounced; never blocks completion).
+                            maybe_post_subagent_disk_clean();
                             // Evict oldest soft-preserved peers so densify waves
                             // stay within keep-N without waiting for the next spawn.
                             if soft_preserve {
@@ -2702,6 +2755,7 @@ pub(crate) async fn run_shell_child(
                                         worktree_path = %wt_path.display(),
                                         "snapshotted and removed subagent worktree"
                                     );
+                                    maybe_post_subagent_disk_clean();
                                 }
                                 Err(e) => {
                                     result.worktree_state = Some("preserved".to_string());

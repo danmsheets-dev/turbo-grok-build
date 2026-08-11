@@ -290,10 +290,13 @@ fn capture_tree(args: crate::tree_cmd::TreeArgs) -> anyhow::Result<String> {
             max_age_days,
             keep_newest,
             dry_run,
+            execute,
         } => {
-            if dry_run {
+            // Default dry-run unless --execute (parity with subagent/disk prune).
+            let dry = dry_run || !execute;
+            if dry {
                 return Ok(format!(
-                    "prune dry-run: would drop indexes older than {max_age_days} day(s) (keep_newest={keep_newest})"
+                    "prune dry-run: would drop indexes older than {max_age_days} day(s) (keep_newest={keep_newest}). Re-run with --execute to delete."
                 ));
             }
             let max_age =

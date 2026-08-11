@@ -443,7 +443,8 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - On complete: snapshot; live tree soft-preserved by default (GROK_SUBAGENT_SOFT_PRESERVE=0 deletes)
 - Keep-N: GROK_SUBAGENT_KEEP_N (default 3; 0=age-only) · free gate: GROK_MIN_FREE_GB (default 40)
 - Keep disk always: retain_worktree=true
-- Seed default clean (HEAD); dirty: GROK_SUBAGENT_WORKTREE_SEED=dirty. Tool FS + shell operand confine = worktree
+- Seed default clean (HEAD only — parent uncommitted WIP absent); dirty: GROK_SUBAGENT_WORKTREE_SEED=dirty. Completion tag `<worktree_seed>clean|dirty</worktree_seed>`. Tool FS + shell operand confine = worktree
+- DisplayCwd may show parent for path remap; real tool CWD is worktree when isolation=worktree — trust worktree_path / tool CWD, not DisplayCwd alone
 
 ## Land / recovery (no shell copy)
 - Prefer diff_subagent → land_subagent (or CLI: {bin} subagent diff|land|open|discard)

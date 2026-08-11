@@ -1048,6 +1048,7 @@ async fn subagent_completed_drops_matching_pending_input() {
                 changed_paths: None,
                 baseline_ref: None,
                 error_class: None,
+                worktree_seed: None,
             });
             let consumed = consumed_completion_ids(&output);
             assert_eq!(consumed, vec!["sub-target"]);

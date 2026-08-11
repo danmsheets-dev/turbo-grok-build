@@ -76,7 +76,7 @@ pub(crate) struct DefaultModeEffects {
 /// Errors from parsing a permission rule string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleParseError {
-    /// Tool prefix is recognized but not supported (e.g., "EnterWorktree", "NotebookEdit", "NotebookRead").
+    /// Tool prefix is recognized but not supported (e.g., "EnterWorktree").
     UnsupportedToolPrefix { prefix: String },
     /// Tool prefix is unrecognized.
     UnknownToolPrefix { prefix: String },
@@ -110,8 +110,8 @@ impl std::error::Error for RuleParseError {}
 ///
 /// Supported tool prefixes:
 ///   - `Bash(...)` -> `ToolFilter::Bash`
-///   - `Read(...)` -> `ToolFilter::Read`
-///   - `Edit(...)` / `Write(...)` -> `ToolFilter::Edit`
+///   - `Read(...)` / `NotebookRead(...)` -> `ToolFilter::Read`
+///   - `Edit(...)` / `Write(...)` / `NotebookEdit(...)` / `MultiEdit(...)` -> `ToolFilter::Edit`
 ///   - `MCPTool(...)` -> `ToolFilter::Mcp`
 ///   - `Grep(...)` / `Glob(...)` -> `ToolFilter::Grep`
 ///   - `WebFetch(...)` -> `ToolFilter::WebFetch`
@@ -123,9 +123,12 @@ impl std::error::Error for RuleParseError {}
 ///
 /// Explicitly unsupported (returns `Err`; the rule is skipped):
 ///   - `EnterWorktree(...)`
-///   - `NotebookEdit` / `NotebookEdit(...)`
-///   - `NotebookRead` / `NotebookRead(...)`
 ///   - Any unrecognized tool prefix
+///
+/// Claude-compat aliases (rc2 harness polish):
+///   - `NotebookEdit` / `MultiEdit` map to Edit (same tool family as search_replace)
+///   - `NotebookRead` maps to Read
+///   These used to hard-fail headless starts from older Grok Build plugins.
 ///
 /// Pattern semantics:
 ///   - Supports `*` as prefix/suffix/middle wildcard
@@ -143,8 +146,8 @@ impl std::error::Error for RuleParseError {}
 ///   - `Ok`: `"Read(**/src/**)"` → `{ Allow, Read, "**/src/**" }`
 ///   - `Ok`: `"Edit(src/**/*.rs)"` → `{ Allow, Edit, "src/**/*.rs" }`
 ///   - `Ok`: `"Bash"` → `{ Allow, Bash, None }` (bare tool name)
+///   - `Ok`: `"NotebookEdit(**)"` → `{ Deny/Allow, Edit, "**" }` (compat alias)
 ///   - `Err`: `"EnterWorktree(*)"` → `UnsupportedToolPrefix`
-///   - `Err`: `"NotebookEdit"` / `"NotebookRead"` → `UnsupportedToolPrefix`
 pub fn parse_permission_rule(
     rule: &str,
     action: RuleAction,
@@ -175,11 +178,7 @@ pub fn parse_permission_rule(
 
         let tool = match tool_name_to_filter(prefix_trimmed) {
             Some(f) => f,
-            None if matches!(
-                prefix_trimmed,
-                "EnterWorktree" | "NotebookEdit" | "NotebookRead"
-            ) =>
-            {
+            None if prefix_trimmed == "EnterWorktree" => {
                 return Err(RuleParseError::UnsupportedToolPrefix {
                     prefix: prefix_trimmed.to_string(),
                 });
@@ -213,7 +212,7 @@ pub fn parse_permission_rule(
             pattern_mode,
         })
     } else {
-        if matches!(rule, "EnterWorktree" | "NotebookEdit" | "NotebookRead") {
+        if rule == "EnterWorktree" {
             return Err(RuleParseError::UnsupportedToolPrefix {
                 prefix: rule.to_string(),
             });
@@ -249,14 +248,36 @@ pub fn parse_permission_rule(
 pub(crate) fn tool_name_to_filter(name: &str) -> Option<ToolFilter> {
     match name {
         "Bash" => Some(ToolFilter::Bash),
-        "Read" => Some(ToolFilter::Read),
-        "Edit" | "Write" => Some(ToolFilter::Edit),
+        // NotebookRead is a Claude-compat alias for the Read tool family.
+        "Read" | "NotebookRead" => Some(ToolFilter::Read),
+        // Write / NotebookEdit / MultiEdit are Claude-compat aliases for Edit.
+        "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => Some(ToolFilter::Edit),
         "MCPTool" => Some(ToolFilter::Mcp),
         "Grep" | "Glob" => Some(ToolFilter::Grep),
         "WebFetch" => Some(ToolFilter::WebFetch),
         "WebSearch" => Some(ToolFilter::WebSearch),
         _ => None,
     }
+}
+
+/// Stable list of Claude-compat / native tool prefixes accepted on `--deny` /
+/// `--allow` (for harnesses and `turbo version --json`).
+pub fn supported_permission_tool_prefixes() -> &'static [&'static str] {
+    &[
+        "Any",
+        "Bash",
+        "Edit",
+        "Write",
+        "MultiEdit",
+        "NotebookEdit",
+        "Read",
+        "NotebookRead",
+        "Grep",
+        "Glob",
+        "MCPTool",
+        "WebFetch",
+        "WebSearch",
+    ]
 }
 
 /// True if the byte at `pos` is NOT preceded by an odd number of backslashes.

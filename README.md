@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.119--r2%20RC2-blue" alt="RC2">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.2-blue" alt="1.0.0-rc.2">
   <img src="https://img.shields.io/badge/rust-1.93.0-orange?logo=rust" alt="Rust 1.93">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,9 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **RC2** · wire version **`0.2.119-r2`** (upstream base 0.2.119).
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.2`** (shipped
+Windows build also available as **`1.0.0-rc.1`** — see
+[Prebuilt Windows binary](#prebuilt-windows-binary)).
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
 
@@ -62,11 +64,38 @@ is a multi-agent development runtime** built on that foundation.
 | UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) |
 | Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
-### Highlights (RC2 — `0.2.119-r2`)
+### Prebuilt Windows binary
 
-**RC2** is a correctness release. It kills a Windows crash that could take the app
-down mid-session, overhauls Game Mode, and repairs a test suite that had not been
-able to run to completion. See [`CHANGELOG.md`](./CHANGELOG.md) for full detail.
+A production Windows build of **Turbo `1.0.0-rc.1`** is published as a **GitHub
+Release asset** (≈149 MB — not stored as a regular git blob; public-fork LFS
+uploads are blocked on GitHub):
+
+| Wire | Release | Asset name |
+| --- | --- | --- |
+| `1.0.0-rc.1` | [v1.0.0-rc.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.1) | `turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe` |
+
+```powershell
+# Download the asset from the release page, then:
+Copy-Item .\turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
+# or: set GROK_BINARY to the downloaded path for the Grok Build Claude plugin
+```
+
+Packaging notes: [`releases/windows/README.md`](./releases/windows/README.md).
+
+Wire source in this tree may be ahead of the prebuilt (`VERSION` → `1.0.0-rc.2`
+harness polish: `version --json` identity, Claude-compat deny aliases, job-object
+env aliases). Rebuild from source for the latest wire; use the prebuilt for a
+known-good **rc.1** install. Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
+
+### Highlights (1.0 line)
+
+**1.0.0-rc.1** merges official **xAI Grok Build 1.0.0** as the permanent upstream
+core while keeping Turbo’s product layer (worktrees, deep-audit, Game Mode,
+multi-provider, English-only). **1.0.0-rc.2** is harness polish for the Grok
+Build Claude plugin (identity card, permission aliases, job-object ergonomics).
+
+Earlier community highlights (Game Mode, disk clean, tools list) from the
+`0.2.119-rN` line remain in the product; see [`CHANGELOG.md`](./CHANGELOG.md).
 
 - **Windows voice crash fixed (release blocker)** — `cpal`'s process-global WASAPI
   device enumerator outlived the COM apartment that created it, so the **second**
@@ -89,7 +118,7 @@ able to run to completion. See [`CHANGELOG.md`](./CHANGELOG.md) for full detail.
   hand-written list
 - **`turbo tools list [--require …]`** — prove `spawn_subagent` (and peers) are
   registered after config resolve; no model turn. Honors `GROK_SUBAGENTS=0`
-- **`turbo disk report|check|clean --safe|prune`** — multi-path free-space gate,
+- **`turbo disk report|check|clean --safe|recover|prune`** — multi-path free-space gate,
   category reclaim (`--include debug-pdbs|release|release-dist-caches|…`),
   JSON `reclaimed_bytes`, unified prune (RC3 full Disk Clean)
 - **Keep-N + free gate defaults** — `GROK_SUBAGENT_KEEP_N=3` (age-only when `0`);
@@ -120,7 +149,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Soft-preserve + keep-N** | Live worktrees kept for review; `GROK_SUBAGENT_KEEP_N` (default 3; `0` = age-only) | RC9 / RC12 / RC2 |
 | **Free-space gate** | Pre-spawn + `turbo disk check` (`GROK_MIN_FREE_GB`, default 40) | RC12 / RC2 |
 | **`turbo tools list`** | Headless schema assert (`--require spawn_subagent`) without a model turn | RC2 |
-| **`turbo disk`** | Report / check / category clean / prune (multi-path free space) | RC15 / RC2 / **RC3** |
+| **`turbo disk`** | Report / check / category clean / recover / prune (multi-path free space) | RC15 / RC2 / **RC3** / **1.0-rc1** |
 | **FS confine (worktree)** | Write path + shell operand jail fail closed | RC12 |
 | **`/deepaudit`** | Parallel investigate → independent verify → verified report | RC8 |
 | **`/deep-research`** | Bounded research with claim cross-check | earlier + RC14 routing |
@@ -294,7 +323,10 @@ Optional:
 | `GROK_SUBAGENT_KEEP_N` | Max soft-preserved live trees (default **3**; `0` = age-only). Alias: `GROK_SUBAGENT_SOFT_PRESERVE_KEEP_N` |
 | `GROK_SUBAGENT_KEEP_MAX_AGE_SECS` | Age cutoff when `KEEP_N=0` (default 86400 = 24h) |
 | `GROK_MIN_FREE_GB` | Free-space floor before worktree create / `turbo disk check` (default **40**; `0` disables). Alias: `GROK_SUBAGENT_MIN_FREE_BYTES` |
-| `GROK_SUBAGENT_WORKTREE_SEED=clean` | HEAD-only sandbox (no parent dirty copy) |
+| `GROK_SUBAGENT_WORKTREE_SEED=clean` | HEAD-only sandbox (default; no parent dirty copy). Completion tag: `<worktree_seed>clean</worktree_seed>` |
+| `GROK_SUBAGENT_WORKTREE_SEED=dirty` | Copy parent WIP into the worktree (preserve working tree) |
+| `GROK_POST_SUBAGENT_DISK_CLEAN=off` | Disable auto `disk clean --safe --if-low-space` after subagent dispose (default: enabled, 5‑min debounce) |
+| `GROK_PREFER_GIT_BASH_FOR_SCRIPTS=0` | Windows: do not rewrite bare `bash` / `*.sh` to Git Bash |
 | `retain_worktree=true` on spawn | Keep path until land/discard |
 
 Headless schema assert (no model turn):
@@ -304,6 +336,8 @@ turbo tools list
 turbo tools list --require spawn_subagent --json
 turbo disk check            # exit 1 if free space under GROK_MIN_FREE_GB
 turbo disk report           # shows keep-N + min-free threshold status
+turbo disk recover --safe   # check → clean --if-low-space → re-check
+turbo tree prune --execute  # apply tree-store prune (default is dry-run)
 ```
 
 Details: [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md),

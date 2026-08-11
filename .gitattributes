@@ -6,7 +6,6 @@
 # Rule ordering matters: within this file the LAST matching pattern wins, so the
 # `* text=auto` catch-all below is deliberately first and every later section
 # narrows it.
-
 # ---------------------------------------------------------------------------
 # Catch-all
 # ---------------------------------------------------------------------------
@@ -16,7 +15,6 @@
 # with no detection — which would corrupt ~2.3 MB across the 9 binary assets
 # below. Verified with `git check-attr text eol diff`.
 * text=auto
-
 # ---------------------------------------------------------------------------
 # Binary assets — belt and braces
 # ---------------------------------------------------------------------------
@@ -42,7 +40,6 @@
 *.pdf   binary
 *.zip   binary
 *.gz    binary
-
 # ---------------------------------------------------------------------------
 # Shipped POSIX executables — must be LF
 # ---------------------------------------------------------------------------
@@ -51,12 +48,10 @@
 # platform the checkout happens on.
 *.sh text eol=lf
 *.py text eol=lf
-
 # Extensionless shebang files (`#!/usr/bin/env dotslash` and `#!/usr/bin/env
 # node`). Neither has an extension for a pattern to catch, so name them.
 bin/protoc                                      text eol=lf
 crates/codegen/xai-grok-pager/npm/grok/bin/grok text eol=lf
-
 # ---------------------------------------------------------------------------
 # Windows-native executables — CRLF
 # ---------------------------------------------------------------------------
@@ -68,7 +63,6 @@ crates/codegen/xai-grok-pager/npm/grok/bin/grok text eol=lf
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.cmd text eol=crlf
-
 # ---------------------------------------------------------------------------
 # Markdown — LF everywhere
 # ---------------------------------------------------------------------------
@@ -84,7 +78,6 @@ crates/codegen/xai-grok-pager/npm/grok/bin/grok text eol=lf
 # build. `eol=lf` makes the worktree bytes — and therefore the shipped bytes —
 # the same everywhere.
 *.md text eol=lf
-
 # ---------------------------------------------------------------------------
 # Other embedded text assets — LF everywhere
 # ---------------------------------------------------------------------------
@@ -108,9 +101,9 @@ crates/codegen/xai-grok-pager/npm/grok/bin/grok text eol=lf
 *.json    text eol=lf
 *.rhai    text eol=lf
 *.tmTheme text eol=lf
-
 # The i18n bundle is embedded too, just not by `include_str!`: `rust_i18n::i18n!`
 # (xai-grok-pager/src/lib.rs) compiles every file under `locales/` into the
 # binary. Pinned by path rather than by `*.yml`, because the other 48 tracked
 # YAML files in this repo are CI config that is never baked into an artifact.
 crates/codegen/xai-grok-pager/locales/*.yml text eol=lf
+releases/**/*.exe filter=lfs diff=lfs merge=lfs -text

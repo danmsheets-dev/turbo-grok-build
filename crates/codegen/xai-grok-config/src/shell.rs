@@ -320,9 +320,81 @@ pub struct ShellInvocation {
 }
 
 /// Build `(program, args, env)` for running `command` in the detected shell.
+///
+/// When the command's first token is bare `bash`/`bash.exe`, or looks like a
+/// POSIX project script (`*.sh`, `scripts/…`), route through Git Bash so agents
+/// never hit WSL's empty `System32\bash.exe` on Windows. Global default shell
+/// remains PowerShell for native `/flag` toolchains (MSBuild, cl, dotnet).
 #[cfg(not(unix))]
 pub fn shell_command_argv(command: &str) -> ShellInvocation {
+    if let Some(inv) = maybe_git_bash_invocation(command) {
+        return inv;
+    }
     invocation_for(detect_windows_shell(), command)
+}
+
+/// First whitespace-separated token (no quote parsing; good enough for agent
+/// one-liners like `bash tools/foo.sh` / `./scripts/bar.sh args`).
+#[cfg(not(unix))]
+fn first_command_token(command: &str) -> &str {
+    command
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c| c == '"' || c == '\'')
+}
+
+/// True when the command should run under Git Bash rather than the default
+/// PowerShell cascade (bare `bash`, or a `*.sh` / `scripts/` entrypoint).
+#[cfg(not(unix))]
+pub fn looks_like_posix_project_script(command: &str) -> bool {
+    let token = first_command_token(command);
+    if token.is_empty() {
+        return false;
+    }
+    let lower = token.to_ascii_lowercase();
+    let base = lower
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(lower.as_str());
+    if base == "bash" || base == "bash.exe" || base == "sh" || base == "sh.exe" {
+        return true;
+    }
+    if lower.ends_with(".sh") || lower.ends_with(".bash") {
+        return true;
+    }
+    // `scripts/foo` without extension is still common for repo helpers.
+    let norm = lower.replace('\\', "/");
+    norm.starts_with("./scripts/")
+        || norm.starts_with("scripts/")
+        || norm.contains("/scripts/")
+}
+
+/// Prefer Git Bash for bare `bash` / project scripts when installed.
+/// Returns `None` to fall through to the normal cascade.
+#[cfg(not(unix))]
+fn maybe_git_bash_invocation(command: &str) -> Option<ShellInvocation> {
+    // Opt-out: GROK_PREFER_GIT_BASH_FOR_SCRIPTS=0 keeps PowerShell wrapping
+    // even for bash/*.sh (rare; WSL may still break bare `bash`).
+    if let Ok(val) = std::env::var("GROK_PREFER_GIT_BASH_FOR_SCRIPTS") {
+        let off = matches!(
+            val.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        );
+        if off {
+            return None;
+        }
+    }
+    if !looks_like_posix_project_script(command) {
+        return None;
+    }
+    let path = find_git_bash()?;
+    tracing::info!(
+        shell = %path,
+        "Windows shell: routing bash/project script via Git Bash (not WSL)"
+    );
+    Some(invocation_for(&WindowsShell::GitBash(path), command))
 }
 
 /// Detect the shell for **auth / identity** command strings (`auth_provider_command`,
@@ -868,5 +940,42 @@ mod tests {
         // Cmd must not wrap (native exit already propagates).
         let inv = invocation_for(&WindowsShell::Cmd, "exit /b 7");
         assert_eq!(inv.args, vec!["/C".to_string(), "exit /b 7".to_string()]);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn looks_like_posix_detects_bash_and_scripts() {
+        assert!(looks_like_posix_project_script("bash tools/publish-build.sh 0.1.12"));
+        assert!(looks_like_posix_project_script("bash.exe -lc 'echo hi'"));
+        assert!(looks_like_posix_project_script("./scripts/check-line-endings.sh"));
+        assert!(looks_like_posix_project_script("scripts/foo.sh --flag"));
+        assert!(looks_like_posix_project_script(r"tools\run_tests.sh"));
+        assert!(!looks_like_posix_project_script("cargo test -p foo"));
+        assert!(!looks_like_posix_project_script("msbuild /t:Build"));
+        assert!(!looks_like_posix_project_script("pwsh -Command Get-ChildItem"));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn shell_command_argv_routes_bash_to_git_bash_when_present() {
+        // Skip when Git Bash is not installed on the test host.
+        let Some(git_bash) = find_git_bash() else {
+            return;
+        };
+        let inv = shell_command_argv("bash -c 'echo hi'");
+        assert_eq!(inv.program, git_bash);
+        assert!(
+            inv.args.iter().any(|a| a.contains("bash -c")),
+            "expected original command in -c arg, got {:?}",
+            inv.args
+        );
+        // Native toolchain commands must NOT be forced onto Git Bash.
+        let cargo = shell_command_argv("cargo test -p xai-grok-config");
+        assert_ne!(
+            cargo.program.to_ascii_lowercase(),
+            git_bash.to_ascii_lowercase(),
+            "cargo should stay on default PowerShell cascade, got {}",
+            cargo.program
+        );
     }
 }

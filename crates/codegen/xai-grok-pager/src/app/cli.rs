@@ -872,8 +872,9 @@ pub struct PagerArgs {
     pub confine: Option<PathBuf>,
     /// Put this Turbo process in a Windows Job Object (`KILL_ON_JOB_CLOSE`) so
     /// a harness can kill the whole process tree by closing the job handle.
-    /// Also enabled by env `HYPER_JOB_OBJECT=1`. Off by default so interactive
-    /// users are unaffected. No-op on non-Windows.
+    /// Also enabled by env `TURBO_JOB_OBJECT=1`, `GROK_JOB_OBJECT=1`, or
+    /// `HYPER_JOB_OBJECT=1`. Off by default so interactive users are unaffected.
+    /// No-op on non-Windows.
     #[arg(long = "job-object")]
     pub job_object: bool,
     /// Exit non-zero when a headless run finishes without any agent tool

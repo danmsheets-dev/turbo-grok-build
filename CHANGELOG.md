@@ -39,6 +39,42 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [1.0.0-rc.2] - 2026-08-11
+
+**Harness polish for Grok Build plugin / CI.** No interactive TUI redesign —
+focus is identity, permission-rule compatibility, and job-object ergonomics so
+delegates stop dying at launch against wrong `turbo` binaries or legacy deny
+prefixes.
+
+### Added
+- **`turbo version --json` identity card** — besides `currentVersion` /
+  `channel`, now emits:
+  - `product` (`turbo-grok-build` | `grok-build`)
+  - `binary` (`turbo` | `grok`)
+  - `cliFamily: "grok-build"`
+  - `agentCompatible: true`
+  - `features` (`headless`, `confine`, `jsonSchema`, `jobObject`, …)
+  - `permissionToolPrefixes` (stable list for harness filters)
+  Harnesses can distinguish Turbo Grok Build from Vercel Turborepo without
+  scraping `--help`.
+- **`GROK_JOB_OBJECT=1`** env alias (alongside `TURBO_JOB_OBJECT` /
+  `HYPER_JOB_OBJECT`) for Windows Job Object opt-in.
+
+### Changed
+- **Claude-compat deny prefixes** — `NotebookEdit` / `MultiEdit` → Edit,
+  `NotebookRead` → Read. Older Grok Build plugins that still emit
+  `--deny NotebookEdit(**)` no longer hard-abort headless starts with
+  `unsupported tool prefix`. `EnterWorktree` remains unsupported.
+- Wire version **`1.0.0-rc.2`**.
+
+### Harness notes
+- Prefer `turbo version --json` → `agentCompatible` / `cliFamily` for CLI
+  selection on PATH.
+- Isolated Windows delegates: pass `--job-object` or set `TURBO_JOB_OBJECT=1`
+  so stop can tear down the whole process tree via the job handle.
+
+---
+
 ## [1.0.0-rc.1] - 2026-08-09
 
 **Turbo Grok Build 1.0 RC1.** Merges official **xAI Grok Build 1.0.0**
@@ -67,6 +103,26 @@ workflows/deep-audit, ADL/FRL, isolation/land, English-only, multi-provider).
 ### Changed
 - Wire version **`1.0.0-rc.1`** (semver pre-release on the 1.0.0 core).
 - Tracking branch for this sync: `sync/1.0.0-rc1` (merge base `e5478eff1`).
+
+### Fixed (RC1 hardening pass)
+- **`turbo tree prune --execute`** — dry-run by default (parity with
+  `subagent prune` / `disk prune`); pass `--execute` to delete.
+- **Windows bare `bash` / `*.sh`** — agent terminals route through Git Bash when
+  installed (never WSL `System32\bash.exe`); PowerShell remains default for
+  native `/flag` toolchains. Opt out: `GROK_PREFER_GIT_BASH_FOR_SCRIPTS=0`.
+- **Land allowlist case-fold on Windows** — `assets/Mini Games` matches
+  allowlist `assets/mini games/` (NTFS); write-time and land share the rule.
+- **Worktree seed honesty** — `<worktree_seed>clean|dirty</worktree_seed>` on
+  completion; clean seed documents missing parent WIP.
+- **Isolation CWD assert** — isolation=worktree without a real subagent worktree
+  path fails closed (unless `GROK_SUBAGENT_ALLOW_SHARED_FALLBACK=1`).
+
+### Added (RC1 hardening pass)
+- **`turbo disk recover --safe`** — closed-loop check → clean `--if-low-space` →
+  re-check; exit 1 if still under the free-space gate.
+- **Post-subagent disk clean** — after dispose, best-effort
+  `disk clean --safe --if-low-space` (5‑minute debounce). Disable with
+  `GROK_POST_SUBAGENT_DISK_CLEAN=off`.
 
 ### Notes
 - Full package-scoped compile/test campaign is part of this RC; treat as

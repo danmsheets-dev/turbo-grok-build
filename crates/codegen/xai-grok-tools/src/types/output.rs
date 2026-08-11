@@ -2224,6 +2224,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
+                worktree_seed: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2272,6 +2273,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
+                worktree_seed: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2308,6 +2310,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
+                worktree_seed: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2344,6 +2347,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
+                worktree_seed: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-abc-123");
@@ -2629,6 +2633,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
+                worktree_seed: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-xyz");

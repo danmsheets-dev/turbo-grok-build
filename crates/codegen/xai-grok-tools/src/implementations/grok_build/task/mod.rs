@@ -665,6 +665,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 changed_paths: result.changed_paths,
                 baseline_ref: result.baseline_ref,
                 error_class: result.error_class,
+                worktree_seed: result.worktree_seed,
             }))
         } else {
             let class = result.error_class.clone().or_else(|| {

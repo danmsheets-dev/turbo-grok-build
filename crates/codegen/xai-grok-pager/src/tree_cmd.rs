@@ -67,6 +67,9 @@ pub enum TreeCommand {
         limit: usize,
     },
     /// Prune old durable indexes under the store root (disk hygiene)
+    ///
+    /// Default is dry-run (same mental model as `turbo subagent prune` /
+    /// `turbo disk prune`). Pass `--execute` to apply deletions.
     Prune {
         /// Delete workspace indexes older than this many days (default 30)
         #[arg(long, default_value_t = 30)]
@@ -75,8 +78,11 @@ pub enum TreeCommand {
         #[arg(long, default_value_t = 0)]
         keep_newest: usize,
         /// Print what would be removed without deleting
-        #[arg(long)]
+        #[arg(long, conflicts_with = "execute")]
         dry_run: bool,
+        /// Actually delete (default is dry-run unless this is set)
+        #[arg(long, conflicts_with = "dry_run")]
+        execute: bool,
     },
 }
 
@@ -124,7 +130,13 @@ pub fn run(args: TreeArgs) -> Result<()> {
             max_age_days,
             keep_newest,
             dry_run,
-        } => prune_cmd(&config, max_age_days, keep_newest, dry_run),
+            execute,
+        } => {
+            // Default dry-run: only delete when --execute is set (parity with
+            // `turbo subagent prune` / `turbo disk prune`).
+            let dry = dry_run || !execute;
+            prune_cmd(&config, max_age_days, keep_newest, dry)
+        }
     }
 }
 
@@ -359,7 +371,7 @@ fn prune_cmd(
         println!(
             "dry-run: would prune indexes older than {max_age_days} day(s) (keep_newest={keep_newest})"
         );
-        println!("(dry-run does not simulate exact candidates yet — run without --dry-run)");
+        println!("Dry-run only. Re-run with --execute to delete.");
         return Ok(());
     }
     let max_age = std::time::Duration::from_secs(max_age_days.saturating_mul(24 * 3600));
@@ -369,6 +381,52 @@ fn prune_cmd(
         report.removed_dirs, report.freed_bytes, report.remaining_dirs, report.remaining_bytes
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct TreeCli {
+        #[command(subcommand)]
+        command: TreeCommand,
+    }
+
+    #[test]
+    fn prune_accepts_execute_flag() {
+        let cli = TreeCli::try_parse_from(["tree", "prune", "--execute"]).expect("parse");
+        match cli.command {
+            TreeCommand::Prune {
+                execute,
+                dry_run,
+                ..
+            } => {
+                assert!(execute);
+                assert!(!dry_run);
+            }
+            other => panic!("expected Prune, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prune_default_is_not_execute() {
+        let cli = TreeCli::try_parse_from(["tree", "prune"]).expect("parse");
+        match cli.command {
+            TreeCommand::Prune { execute, dry_run, .. } => {
+                assert!(!execute);
+                assert!(!dry_run);
+            }
+            other => panic!("expected Prune, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prune_execute_conflicts_with_dry_run() {
+        let err = TreeCli::try_parse_from(["tree", "prune", "--execute", "--dry-run"]);
+        assert!(err.is_err());
+    }
 }
 
 fn build(root: &std::path::Path, config: &WorkspaceTreeConfig) -> Result<()> {
