@@ -97,6 +97,7 @@ impl AgentView {
             game_mode: crate::views::game_mode::GameModeState::new(),
             catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
+            browser_pane: crate::views::agent::BrowserPaneState::default(),
             shared_queue: Vec::new(),
             attached_as_viewer: false,
             self_originated_prompt_ids: VecDeque::new(),
@@ -1017,6 +1018,7 @@ impl AgentView {
             ActivePane::Prompt => ActivePaneSnapshot::Prompt,
             ActivePane::Tasks => ActivePaneSnapshot::Tasks,
             ActivePane::Catalog => ActivePaneSnapshot::Catalog,
+            ActivePane::Browser => ActivePaneSnapshot::Browser,
         };
         let outcome_snap = match outcome {
             InputOutcome::Changed | InputOutcome::ArmPending { .. } => OutcomeSnapshot::Changed,

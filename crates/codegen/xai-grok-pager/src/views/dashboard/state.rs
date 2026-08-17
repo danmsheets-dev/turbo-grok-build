@@ -4613,6 +4613,7 @@ fn dashboard_action_for_id(
         | ActionId::OpenPrevLink
         | ActionId::ToggleTodos
         | ActionId::ToggleTasks
+        | ActionId::ToggleBrowser
         | ActionId::ToggleGameMode
         | ActionId::EditPromptExternal
         | ActionId::ToggleQueue

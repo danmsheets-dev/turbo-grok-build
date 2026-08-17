@@ -1981,6 +1981,8 @@ mod tests {
             // The tasks pane kept its action but not Ctrl+G: present as
             // Ctrl+Shift+G outside minimal, absent in minimal.
             assert_eq!(row(ActionId::ToggleTasks).is_some(), !mode.is_minimal());
+            // Agent browser mirror is a side pane; same minimal omission.
+            assert_eq!(row(ActionId::ToggleBrowser).is_some(), !mode.is_minimal());
         }
     }
 

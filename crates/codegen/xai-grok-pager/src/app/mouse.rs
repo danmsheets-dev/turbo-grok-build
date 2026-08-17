@@ -724,6 +724,10 @@ impl AgentView {
                         );
                         InputOutcome::Changed
                     }
+                    Some(AgentPane::Browser) => {
+                        self.set_active_pane(AgentPane::Browser, false);
+                        InputOutcome::Changed
+                    }
                     Some(AgentPane::Scrollback) => {
                         self.set_active_pane(AgentPane::Scrollback, false);
                         if self.block_viewer.is_some() {
@@ -1050,7 +1054,8 @@ impl AgentView {
                         | AgentPane::Queue
                         | AgentPane::Prompt
                         | AgentPane::Tasks
-                        | AgentPane::Catalog => None,
+                        | AgentPane::Catalog
+                        | AgentPane::Browser => None,
                     })
                 };
                 let new_prompt_hover = hit == Some(AgentPane::Prompt)

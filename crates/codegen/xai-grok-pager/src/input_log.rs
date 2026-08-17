@@ -32,6 +32,7 @@ pub enum ActivePaneSnapshot {
     Queue,
     Tasks,
     Catalog,
+    Browser,
     Other,
 }
 /// Copy-friendly snapshot of the input outcome. No heap allocation.

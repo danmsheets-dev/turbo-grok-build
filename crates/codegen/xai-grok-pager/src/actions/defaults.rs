@@ -566,6 +566,21 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::ToggleBrowser,
+            label: "browser",
+            description: "Toggle agent browser pane",
+            default_key: key!('b', CONTROL | SHIFT),
+            alt_keys: vec![],
+            category: Category::Panels,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some("Ctrl+Shift+B"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Shows or hides the agent browser pane: a TUI mirror of the Agent WebView (URL and last snapshot).\nIt does not render HTML. Opening raises the existing WebView window if the host is running; closing the pane does not stop the host.\nCtrl+B still sends the running task to the background.",
+            ),
+        },
+        ActionDef {
             id: ActionId::ToggleQueue,
             label: "queue",
             description: "Toggle prompt queue",
@@ -1297,7 +1312,10 @@ pub(super) fn default_actions(
                 // leaking in — but the tasks pane is a side pane minimal
                 // cannot render, which is why minimal's SendToBackground
                 // help points at `/tasks` instead.
-                ActionId::OpenDashboard | ActionId::FocusScrollback | ActionId::ToggleTasks
+                ActionId::OpenDashboard
+                    | ActionId::FocusScrollback
+                    | ActionId::ToggleTasks
+                    | ActionId::ToggleBrowser
             )
         });
     }

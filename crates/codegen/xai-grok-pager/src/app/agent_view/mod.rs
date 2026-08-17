@@ -135,7 +135,9 @@ use crate::scrollback::text_selection::{
     TableSelectionGeometry,
 };
 use crate::theme::Theme;
-pub use crate::views::agent::{ActivePane, AgentViewLayout, InputMode, PaneAreas};
+pub use crate::views::agent::{
+    ActivePane, AgentViewLayout, BrowserPaneState, InputMode, PaneAreas,
+};
 use crate::views::block_viewer::BlockViewerPane;
 use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
@@ -784,6 +786,8 @@ pub struct AgentView {
     pub game_mode: crate::views::game_mode::GameModeState,
     pub catalog: SubagentCatalogPane,
     pub queue: QueuePane,
+    /// TUI mirror of the Agent WebView (URL + last snapshot). Not a renderer.
+    pub browser_pane: BrowserPaneState,
     /// Per-agent mirror of the server-authoritative shared prompt queue
     /// (`AppView::shared_prompt_queues[sid]`), kept in sync by
     /// `handle_queue_changed` and the immediate-send path. The queue
@@ -2149,6 +2153,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::OpenSettings => return None,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
+        | ActionId::ToggleBrowser
         | ActionId::ToggleGameMode
         | ActionId::EditPromptExternal
         | ActionId::ToggleQueue

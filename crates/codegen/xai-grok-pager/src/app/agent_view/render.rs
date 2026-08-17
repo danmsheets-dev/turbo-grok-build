@@ -1056,7 +1056,13 @@ impl AgentView {
             image_preview: true,
         };
         let compact = appearance.prompt.compact;
-        let inner_width = AgentViewLayout::inner_width(area, layout_cfg, compact);
+        let show_browser = self.browser_pane.visible && !self.game_mode.open;
+        let (layout_area, browser_rect) = if show_browser {
+            agent::split_browser_column(area)
+        } else {
+            (area, Rect::default())
+        };
+        let inner_width = AgentViewLayout::inner_width(layout_area, layout_cfg, compact);
         // Game Mode: strip top chrome (announcements, tips, privacy, ephemeral)
         // so only the office + composer remain.
         let banner_height = if self.game_mode.open {
@@ -1335,6 +1341,9 @@ impl AgentView {
         if self.active_pane == ActivePane::Queue && !self.queue.is_visible() {
             self.active_pane = ActivePane::Scrollback;
         }
+        if self.active_pane == ActivePane::Browser && !self.browser_pane.visible {
+            self.active_pane = ActivePane::Scrollback;
+        }
         let queue_height = self.queue.desired_height();
         let drain_blocked = self.drain_blocked();
         let watchers = self.watchers();
@@ -1389,7 +1398,7 @@ impl AgentView {
             crate::views::timeline::rail_width(
                 appearance.show_timeline,
                 self.is_subagent_view,
-                area.width,
+                layout_area.width,
                 self.scrollback.turn_count(),
             )
         };
@@ -1405,7 +1414,7 @@ impl AgentView {
             )
         };
         let mut layout = AgentViewLayout::compute(
-            area,
+            layout_area,
             layout_cfg,
             scrollbar_cfg,
             timeline_width,
@@ -1481,7 +1490,7 @@ impl AgentView {
                     self.timeline_hover = None;
                     self.timeline_hover_preview = None;
                     layout = AgentViewLayout::compute(
-                        area,
+                        layout_area,
                         layout_cfg,
                         scrollbar_cfg,
                         0,
@@ -1519,6 +1528,7 @@ impl AgentView {
             self.timeline_hover = None;
             self.timeline_hover_preview = None;
         }
+        layout.browser = browser_rect;
         agent::fill_background(buf, area, layout_cfg, compact, &theme);
         use crate::views::agent_status::AgentStatusBar;
         use crate::views::context_bar;
@@ -2173,6 +2183,18 @@ impl AgentView {
             self.hit_todo_close.set(close_rect);
         } else {
             self.hit_todo_close.clear();
+        }
+        if layout.browser.area() > 0 {
+            let browser_focused = self.active_pane == ActivePane::Browser && !overlay_focused;
+            agent::render_browser_pane(
+                buf,
+                layout.browser,
+                browser_focused,
+                self.browser_pane.host_running,
+                self.browser_pane.last_url.as_deref(),
+                &self.browser_pane.last_snapshot_lines,
+                &theme,
+            );
         }
         if queue_height > 0 {
             let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;

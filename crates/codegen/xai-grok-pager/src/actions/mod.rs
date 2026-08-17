@@ -92,6 +92,8 @@ pub enum ActionId {
     // Panes
     ToggleTodos,
     ToggleTasks,
+    /// Toggle the agent WebView mirror pane (Ctrl+Shift+B).
+    ToggleBrowser,
     /// Toggle Game Mode office view (Ctrl+G). Spectator room + composer.
     ToggleGameMode,
     ToggleQueue,
@@ -788,9 +790,16 @@ mod tests {
                 assert!(!registry.matches_id(ActionId::ToggleGameMode, &ctrl_g));
             } else {
                 assert!(registry.find(ActionId::ToggleTasks).is_some());
+                assert!(registry.find(ActionId::ToggleBrowser).is_some());
                 assert!(registry.find(ActionId::ToggleGameMode).is_some());
                 // Tasks moved off Ctrl+G → Ctrl+Shift+G
                 assert!(!registry.matches_id(ActionId::ToggleTasks, &ctrl_g));
+                let ctrl_shift_b = KeyEvent::new(
+                    KeyCode::Char('b'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                );
+                assert!(registry.matches_id(ActionId::ToggleBrowser, &ctrl_shift_b));
+                assert!(!registry.matches_id(ActionId::SendToBackground, &ctrl_shift_b));
             }
         }
     }
@@ -899,6 +908,7 @@ mod tests {
         ] {
             assert!(registry.find(ActionId::EditPromptExternal).is_some());
             assert!(registry.find(ActionId::ToggleTasks).is_none());
+            assert!(registry.find(ActionId::ToggleBrowser).is_none());
             assert!(registry.find(ActionId::OpenDashboard).is_none());
             assert!(registry.all().iter().all(|def| {
                 !matches!(

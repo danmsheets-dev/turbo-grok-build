@@ -23,7 +23,7 @@ use crate::views::shortcuts_bar::HintItem;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Widget};
 /// Which pane is currently active in the agent view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,6 +35,8 @@ pub enum ActivePane {
     Prompt,
     Tasks,
     Catalog,
+    /// TUI mirror of the Agent WebView (URL + last snapshot). Not a renderer.
+    Browser,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum InputMode {
@@ -51,6 +53,7 @@ pub struct PaneAreas {
     pub prompt: Rect,
     pub tasks: Rect,
     pub catalog: Rect,
+    pub browser: Rect,
 }
 impl PaneAreas {
     /// Determine which pane a screen position falls in, if any.
@@ -67,6 +70,9 @@ impl PaneAreas {
         }
         if self.queue.area() > 0 && self.queue.contains(pos) {
             return Some(ActivePane::Queue);
+        }
+        if self.browser.area() > 0 && self.browser.contains(pos) {
+            return Some(ActivePane::Browser);
         }
         if self.scrollback.contains(pos) {
             return Some(ActivePane::Scrollback);
@@ -134,6 +140,8 @@ pub struct AgentViewLayout {
     /// Columns reserved for the timeline rail (0 = rail hidden). Non-zero
     /// also means the scrollbar does not render this frame.
     pub timeline_width: u16,
+    /// Right-hand Agent Browser mirror (empty when the pane is closed).
+    pub browser: Rect,
 }
 impl AgentViewLayout {
     /// Compute layout from screen area, appearance config, prompt height,
@@ -401,6 +409,7 @@ impl AgentViewLayout {
             scrollbar_x,
             timeline_x,
             timeline_width,
+            browser: Rect::default(),
         }
     }
     /// Inner area width (for prompt height computation before full layout).
@@ -426,7 +435,100 @@ impl AgentViewLayout {
             prompt: self.prompt,
             tasks: self.tasks,
             catalog: self.catalog,
+            browser: self.browser,
         }
+    }
+}
+
+/// Split the agent screen into the main column and a right 40% browser mirror.
+pub fn split_browser_column(area: Rect) -> (Rect, Rect) {
+    let chunks = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+    (chunks[0], chunks[1])
+}
+
+/// TUI mirror of the agent WebView. Does not embed HTML or start the host.
+#[derive(Debug, Clone, Default)]
+pub struct BrowserPaneState {
+    /// Whether the right-hand mirror column is open.
+    pub visible: bool,
+    /// Last known page URL from a tool result (best-effort).
+    pub last_url: Option<String>,
+    /// Last snapshot lines (empty is OK for v1).
+    pub last_snapshot_lines: Vec<String>,
+    /// Named-pipe host was reachable the last time the pane opened.
+    pub host_running: bool,
+}
+
+/// Draw the Agent Browser mirror: title, URL, last snapshot lines.
+pub fn render_browser_pane(
+    buf: &mut Buffer,
+    area: Rect,
+    focused: bool,
+    host_running: bool,
+    last_url: Option<&str>,
+    snapshot_lines: &[String],
+    theme: &Theme,
+) {
+    if area.area() == 0 {
+        return;
+    }
+    let border = if focused {
+        theme.selection_border
+    } else {
+        theme.gray
+    };
+    let block = Block::default()
+        .title(" Agent Browser ")
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(border))
+        .style(Style::default().bg(theme.bg_base).fg(theme.text_primary));
+    let inner = block.inner(area);
+    Widget::render(block, area, buf);
+    if inner.area() == 0 {
+        return;
+    }
+    let url = if !host_running {
+        "host not running"
+    } else {
+        last_url.filter(|u| !u.is_empty()).unwrap_or("about:blank")
+    };
+    let url_line = Line::from(vec![
+        Span::styled("URL  ", Style::default().fg(theme.gray_bright)),
+        Span::styled(url, Style::default().fg(theme.text_primary)),
+    ]);
+    buf.set_line_safe(inner.x, inner.y, &url_line, inner.width);
+    let mut y = inner.y.saturating_add(1);
+    if y >= inner.y.saturating_add(inner.height) {
+        return;
+    }
+    if !host_running {
+        let msg = Line::from(Span::styled(
+            "Agent browser host is not running",
+            Style::default().fg(theme.warning),
+        ));
+        buf.set_line_safe(inner.x, y, &msg, inner.width);
+        return;
+    }
+    if snapshot_lines.is_empty() {
+        let empty = Line::from(Span::styled(
+            "(no snapshot yet)",
+            Style::default().fg(theme.gray),
+        ));
+        buf.set_line_safe(inner.x, y, &empty, inner.width);
+        return;
+    }
+    for line in snapshot_lines {
+        if y >= inner.y.saturating_add(inner.height) {
+            break;
+        }
+        let row = Line::from(Span::styled(
+            line.as_str(),
+            Style::default().fg(theme.text_primary),
+        ));
+        buf.set_line_safe(inner.x, y, &row, inner.width);
+        y = y.saturating_add(1);
     }
 }
 /// Fill the screen area with base background and outer padding.
@@ -1100,6 +1202,13 @@ pub fn build_hints(
             hints
         }
         ActivePane::Catalog => vec![],
+        ActivePane::Browser => {
+            if let Some(def) = registry.find(ActionId::ToggleBrowser) {
+                vec![def.hint()]
+            } else {
+                vec![]
+            }
+        }
         ActivePane::Scrollback if scrollback_search.is_some() => {
             let mut hints = Vec::new();
             if vim_mode {
@@ -2105,6 +2214,21 @@ mod tests {
             1,
             false,
         )
+    }
+    #[test]
+    fn browser_column_is_right_forty_percent() {
+        let area = Rect::new(0, 0, 100, 40);
+        let (main, browser) = split_browser_column(area);
+        assert_eq!(main.width, 60);
+        assert_eq!(browser.width, 40);
+        assert_eq!(browser.x, 60);
+        assert_eq!(main.height, area.height);
+        assert_eq!(browser.height, area.height);
+        let mut panes = PaneAreas::default();
+        panes.scrollback = main;
+        panes.browser = browser;
+        assert_eq!(panes.hit_test(80, 10), Some(ActivePane::Browser));
+        assert_eq!(panes.hit_test(10, 10), Some(ActivePane::Scrollback));
     }
     #[test]
     fn timeline_rail_replaces_the_scrollbar_column() {

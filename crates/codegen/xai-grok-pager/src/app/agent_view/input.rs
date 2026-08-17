@@ -1178,6 +1178,7 @@ impl AgentView {
                 AgentPane::Queue => self.handle_queue_key(key, registry),
                 AgentPane::Tasks => self.handle_bg_tasks_key(key, registry),
                 AgentPane::Catalog => self.handle_catalog_key(key, registry),
+                AgentPane::Browser => self.handle_browser_key(key, registry),
             },
             Event::Paste(text) => {
                 if self.active_pane == AgentPane::Scrollback
@@ -1219,7 +1220,7 @@ impl AgentView {
                         AgentPane::Tasks => self.tasks.handle_paste(text),
                         AgentPane::Catalog => self.catalog.handle_paste(text),
                         AgentPane::Queue => self.queue.handle_paste(text),
-                        AgentPane::Prompt | AgentPane::Scrollback => false,
+                        AgentPane::Prompt | AgentPane::Scrollback | AgentPane::Browser => false,
                     };
                     if consumed {
                         InputOutcome::Changed
@@ -1258,6 +1259,13 @@ impl AgentView {
             } else if self.active_pane == AgentPane::Tasks {
                 self.set_active_pane(AgentPane::Scrollback, false);
             }
+            return InputOutcome::Changed;
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && registry.matches_id(ActionId::ToggleBrowser, key)
+        {
+            self.toggle_browser_pane();
             return InputOutcome::Changed;
         }
         if let Event::Key(key) = ev
@@ -1834,6 +1842,31 @@ mod background_and_tasks_shortcut_tests {
                 .any(|hint| hint.label == "send to bg")
         );
         assert!(child.hit_bg_button.rect.is_none());
+    }
+    #[test]
+    fn ctrl_shift_b_toggles_browser_mirror_without_starting_host() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Scrollback, true);
+        let ev = Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        let first = agent.handle_input(&ev, &registry);
+        assert!(matches!(first, InputOutcome::Changed));
+        assert!(
+            agent.browser_pane.visible,
+            "Ctrl+Shift+B must open the pane"
+        );
+        assert_eq!(agent.active_pane, AgentPane::Browser);
+        assert!(
+            !agent.browser_pane.host_running,
+            "missing host must still open the pane"
+        );
+        let second = agent.handle_input(&ev, &registry);
+        assert!(matches!(second, InputOutcome::Changed));
+        assert!(!agent.browser_pane.visible, "second toggle must close");
+        assert_eq!(agent.active_pane, AgentPane::Scrollback);
     }
     #[test]
     fn ctrl_g_toggles_game_mode() {

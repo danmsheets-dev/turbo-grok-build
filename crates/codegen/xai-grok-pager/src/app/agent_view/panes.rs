@@ -492,6 +492,50 @@ impl AgentView {
             InputOutcome::Unchanged
         }
     }
+    /// Toggle the Agent Browser mirror pane. Opening raises the existing host
+    /// (if the pipe is up) and never starts a second sidecar. Closing does not
+    /// shut the host down.
+    pub(super) fn toggle_browser_pane(&mut self) {
+        if self.browser_pane.visible {
+            self.browser_pane.visible = false;
+            if self.active_pane == AgentPane::Browser {
+                self.set_active_pane(AgentPane::Scrollback, false);
+            }
+            return;
+        }
+        self.browser_pane.visible = true;
+        self.browser_pane.host_running = false;
+        if let Some(sid) = self.session.session_id.as_ref() {
+            let sid = sid.0.to_string();
+            let up = xai_grok_shell::session::agent_browser::pipe_connectable(&sid);
+            self.browser_pane.host_running = up;
+            if up {
+                fire_and_forget_browser_raise(sid);
+            }
+        }
+        self.set_active_pane(AgentPane::Browser, false);
+    }
+    /// Browser-mirror-focused key handling. Esc / toggle close the pane only.
+    pub(super) fn handle_browser_key(
+        &mut self,
+        key: &KeyEvent,
+        registry: &ActionRegistry,
+    ) -> InputOutcome {
+        if registry.matches_id(ActionId::ToggleBrowser, key) {
+            self.toggle_browser_pane();
+            return InputOutcome::Changed;
+        }
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            self.browser_pane.visible = false;
+            self.set_active_pane(AgentPane::Scrollback, false);
+            return InputOutcome::Changed;
+        }
+        if key!(Tab).matches(key) {
+            self.set_active_pane(AgentPane::Prompt, false);
+            return InputOutcome::Action(Action::FocusPrompt);
+        }
+        InputOutcome::Unchanged
+    }
     /// Handle a normalized scroll event at a screen position.
     ///
     /// Hit-tests against pane areas to decide what to scroll:
@@ -666,6 +710,7 @@ impl AgentView {
             ActivePane::Catalog => {
                 self.catalog.handle_scroll(lines, col, row);
             }
+            ActivePane::Browser => {}
             ActivePane::Prompt => {
                 if self.question_view.is_some() {
                     return;
@@ -686,6 +731,19 @@ impl AgentView {
         }
     }
 }
+
+/// Raise the existing Agent WebView window. Never spawns `browser-host`.
+fn fire_and_forget_browser_raise(session_id: String) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        let _ = xai_grok_browser::BrowserClient::new(session_id)
+            .raise()
+            .await;
+    });
+}
+
 #[cfg(test)]
 mod scroll_granularity_tests {
     use super::super::test_fixtures::make_agent;
