@@ -95,6 +95,11 @@ pub struct PromptContext {
     /// prompt (Full). `None` = base template only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_body: Option<String>,
+    /// When true, the base/subagent templates render `<browser_verification>`.
+    /// Wired from the finalized `browser_*` toolset — not a plan-agent-only
+    /// builtin flag. Does **not** suppress the AGENTS.md user reminder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_browser_verification: bool,
     /// Which base template to use for `Extend` mode.
     /// `TemplateOverride::None` = standard base/subagent template.
     /// `TemplateOverride::Codex` = apply-patch profile template (decrypted on demand).
@@ -199,6 +204,7 @@ impl Default for PromptContext {
             prompt_mode: PromptMode::Extend,
             audience: PromptAudience::default(),
             prompt_body: None,
+            include_browser_verification: false,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![],
@@ -274,6 +280,7 @@ impl PromptContext {
             "is_non_interactive": self.is_non_interactive,
             "system_prompt_label": self.system_prompt_label.as_str(),
             "model": self.model.as_deref().unwrap_or(""),
+            "include_browser_verification": self.include_browser_verification,
         })
     }
     /// Render the full system prompt via `ToolBridge`.
@@ -388,6 +395,7 @@ mod tests {
             prompt_mode: PromptMode::Extend,
             audience: PromptAudience::Primary,
             prompt_body: None,
+            include_browser_verification: false,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![],
@@ -508,6 +516,7 @@ mod tests {
         assert!(p.get("role_instructions").is_some());
         assert!(p.get("persona_instructions").is_some());
         assert_eq!(p["system_prompt_label"], DEFAULT_SYSTEM_PROMPT_LABEL);
+        assert_eq!(p["include_browser_verification"], false);
     }
     #[test]
     fn test_placeholders_system_prompt_label_override() {
@@ -658,6 +667,72 @@ mod tests {
         assert!(section.contains("<system-reminder>"));
         assert!(section.contains("XYZZY_AGENTS_MD_MARKER"));
     }
+    /// Turbo divergence from upstream: the browser-verification flag must
+    /// NOT suppress the AGENTS.md user reminder. Upstream moved those
+    /// rules into a first-user-message `<rules>` rewrite we have not
+    /// adopted; dropping the reminder here would silently lose project
+    /// instructions whenever `browser_*` tools are registered.
+    #[test]
+    fn agents_md_user_reminder_kept_when_browser_verification_flagged() {
+        let mut ctx = test_context();
+        ctx.include_browser_verification = true;
+        ctx.agents_md_files = vec![AgentConfigFile {
+            file_name: "AGENTS.md".to_string(),
+            file_path: "/repo/AGENTS.md".to_string(),
+            content: "# XYZZY_AGENTS_MD_MARKER".to_string(),
+        }];
+        let section = ctx
+            .agents_md_user_reminder()
+            .expect("browser verification must not drop AGENTS.md");
+        assert!(section.contains("XYZZY_AGENTS_MD_MARKER"));
+    }
+    #[test]
+    fn standard_primary_template_renders_browser_verification_only_when_flagged() {
+        let renderer = TemplateRenderer::new(Default::default(), Default::default());
+        let mut ctx = test_context();
+        ctx.include_browser_verification = true;
+        let on = ctx.render_with_renderer(&renderer).unwrap();
+        ctx.include_browser_verification = false;
+        let off = ctx.render_with_renderer(&renderer).unwrap();
+        assert!(
+            on.contains("<browser_verification>"),
+            "flagged standard template must render browser verification"
+        );
+        assert!(on.contains("</browser_verification>"));
+        assert!(
+            on.contains("MUST verify your work in the browser"),
+            "verification policy must be present when flagged"
+        );
+        assert!(!off.contains("<browser_verification>"));
+        assert!(
+            on.contains("<action_safety>"),
+            "browser verification must not drop Turbo action_safety"
+        );
+        assert!(on.contains("<work_policy>"));
+        assert!(off.contains("<action_safety>"));
+        assert!(off.contains("<work_policy>"));
+    }
+    #[test]
+    fn full_mode_does_not_append_browser_verification() {
+        let renderer = TemplateRenderer::new(Default::default(), Default::default());
+        let ctx = PromptContext {
+            prompt_mode: PromptMode::Full,
+            prompt_body: Some("base".into()),
+            include_browser_verification: true,
+            ..test_context()
+        };
+        let rendered = ctx
+            .render_with_renderer(&renderer)
+            .expect("full-mode render");
+        assert!(
+            rendered.starts_with("base"),
+            "full mode must start from the prompt body"
+        );
+        assert!(
+            !rendered.contains("<browser_verification>"),
+            "full mode uses the prompt body as-is; the gated block lives in the Extend templates"
+        );
+    }
     #[test]
     fn personas_user_reminder_always_none() {
         let mut ctx = test_context();
@@ -674,6 +749,7 @@ mod tests {
             prompt_mode: PromptMode::Extend,
             audience: PromptAudience::Subagent,
             prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
+            include_browser_verification: false,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![
@@ -875,6 +951,7 @@ mod tests {
             memory_enabled => true,
             role_instructions => "",
             persona_instructions => "",
+            include_browser_verification => false,
             tools => minijinja::context! {
                 by_kind => minijinja::context! {
                     read => "hashline_read",
@@ -971,6 +1048,18 @@ mod tests {
         );
     }
     #[test]
+    fn child_rendered_prompt_includes_work_policy() {
+        let rendered = render_subagent_template(base_template_ctx());
+        assert!(
+            rendered.contains("<work_policy>"),
+            "subagent template must include work_policy"
+        );
+        assert!(
+            !rendered.contains("<browser_verification>"),
+            "browser_verification stays off unless the child toolset has browser_*"
+        );
+    }
+    #[test]
     fn child_rendered_prompt_has_hashline_guidance() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
@@ -1038,7 +1127,7 @@ mod tests {
     fn child_rendered_template_is_compact() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.len() < 3700,
+            rendered.len() < 4500,
             "rendered child template too large: {} chars",
             rendered.len()
         );
@@ -1076,8 +1165,8 @@ mod tests {
     fn rendered_prompt_size_general_purpose() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.len() < 3700,
-            "general-purpose rendered prompt: {} chars (ceiling 3700)",
+            rendered.len() < 4500,
+            "general-purpose rendered prompt: {} chars (ceiling 4500)",
             rendered.len()
         );
     }
@@ -1103,8 +1192,8 @@ mod tests {
         };
         let rendered = render_subagent_template(ctx);
         assert!(
-            rendered.len() < 2800,
-            "read-only rendered prompt: {} chars (ceiling 2800)",
+            rendered.len() < 3600,
+            "read-only rendered prompt: {} chars (ceiling 3600)",
             rendered.len()
         );
         let full = render_subagent_template(base_template_ctx());

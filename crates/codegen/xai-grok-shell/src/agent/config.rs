@@ -8417,6 +8417,41 @@ reasoning_effort = "low"
         assert_eq!(sampling_config.api_key, Some("fallback-key".to_string()));
     }
     #[test]
+    fn default_models_json_includes_grok_4_6_with_xhigh() {
+        let endpoints = EndpointsConfig::default();
+        let models = default_model_entries(&endpoints);
+        let grok46 = models
+            .get("grok-4.6")
+            .expect("compiled catalog must include grok-4.6");
+        assert!(grok46.info().supports_reasoning_effort);
+        assert!(grok46.info().supports_backend_search);
+        let efforts: Vec<&str> = grok46
+            .info()
+            .reasoning_efforts
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert!(
+            efforts.contains(&"xhigh"),
+            "grok-4.6 must advertise xhigh: {efforts:?}"
+        );
+        assert_eq!(
+            grok46.info().reasoning_effort,
+            Some(ReasoningEffort::High),
+            "default effort stays high; xhigh is opt-in"
+        );
+        let grok45 = models
+            .get("grok-4.5")
+            .expect("compiled catalog must keep grok-4.5 selectable");
+        assert!(!grok45.info().supports_backend_search);
+        assert!(!grok45
+            .info()
+            .reasoning_efforts
+            .iter()
+            .any(|o| o.value.as_str() == "xhigh"));
+        assert_eq!(crate::models::default_model(), "grok-4.6");
+    }
+    #[test]
     fn default_models_dual_endpoint_routing() {
         let endpoints = EndpointsConfig::default();
         for (model_id, entry) in default_model_entries(&endpoints) {

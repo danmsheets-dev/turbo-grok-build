@@ -76,7 +76,7 @@ pub async fn list_available_models(agent_config: &AgentConfig, args: &ModelsArgs
         .clone()
         .or_else(|| agent_config.models.default.clone())
         .or_else(|| models.keys().next().cloned())
-        .unwrap_or_else(|| "grok-4.5".to_string());
+        .unwrap_or_else(|| xai_grok_shell::models::default_model().to_string());
 
     if args.json {
         let mut entries = Vec::with_capacity(models.len());

@@ -1056,6 +1056,14 @@ impl AgentBuilder {
         }
         // After all tool gates (subagents off / empty catalog / empty allowlist).
         let spawn_tool_present = tool_config.tools.iter().any(|tc| tc.id == task_tool_id);
+        // Toolset-gated (not plan-builtin-only): official Grok Build only
+        // enables this for grok-build-plan. Turbo first-class `browser_*`
+        // tools live on default-toolset sessions, so the prompt block must
+        // follow the finalized tool list.
+        let include_browser_verification = tool_config
+            .tools
+            .iter()
+            .any(|tc| crate::config::tool_id_is_browser(&tc.id));
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();
         let tool_bridge = ToolBridge::finalize_builder(
@@ -1194,6 +1202,7 @@ impl AgentBuilder {
             prompt_mode: definition.prompt_mode.clone(),
             audience: self.prompt_audience,
             prompt_body: definition.prompt_body.clone(),
+            include_browser_verification,
             system_prompt: definition.system_prompt.clone(),
             agents_md_files,
             persona_summaries: self.persona_summaries,
@@ -1701,6 +1710,50 @@ mod tests {
         .build()
         .await
         .expect("agent should build for every pager-reachable flag combination")
+    }
+    #[tokio::test]
+    async fn browser_verification_flag_follows_finalized_browser_tools() {
+        use crate::config::AgentDefinition;
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::implementations::grok_build::BrowserNavigateTool;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        use xai_grok_tools::registry::types::ToolConfig;
+
+        let stock = build_pager_agent(AgentDefinition::default_grok_build(), true, true).await;
+        assert!(
+            !stock.prompt_context().include_browser_verification,
+            "stock grok-build toolset has no browser_* until session inject"
+        );
+        assert!(!stock.system_prompt().contains("<browser_verification>"));
+        assert!(
+            stock.system_prompt().contains("<action_safety>"),
+            "stock prompt must keep Turbo action_safety"
+        );
+        assert!(stock.system_prompt().contains("<work_policy>"));
+
+        let mut with_browser = AgentDefinition::default_grok_build();
+        with_browser
+            .tool_config
+            .tools
+            .push(ToolConfig::from(&BrowserNavigateTool));
+        let flagged = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(with_browser)
+        .build()
+        .await
+        .expect("agent with browser_* should build");
+        assert!(flagged.prompt_context().include_browser_verification);
+        assert!(flagged.system_prompt().contains("<browser_verification>"));
+        assert!(flagged.system_prompt().contains("<action_safety>"));
+
+        let explore = build_pager_agent(AgentDefinition::explore(), false, false).await;
+        assert!(
+            !explore.prompt_context().include_browser_verification,
+            "curated explore toolset must not pick up browser verification"
+        );
     }
     #[tokio::test]
     async fn pager_flag_combinations_satisfy_tool_invariants() {

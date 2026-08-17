@@ -282,6 +282,11 @@ pub fn render_subagent_system_prompt(
         prompt_mode: definition.prompt_mode.clone(),
         audience: PromptAudience::Subagent,
         prompt_body: definition.prompt_body.clone(),
+        include_browser_verification: definition
+            .tool_config
+            .tools
+            .iter()
+            .any(|tc| xai_grok_agent::config::tool_id_is_browser(&tc.id)),
         system_prompt: definition.system_prompt.clone(),
         role_instructions: runtime.role_prompt.clone(),
         persona_instructions: runtime.persona_instructions.clone(),

@@ -102,3 +102,23 @@ pub fn default_session_summary_model() -> &'static str {
         .as_deref()
         .unwrap_or(&DEFAULTS.default)
 }
+
+/// Compiled-in catalog slugs (order matches `default_models.json`).
+pub fn default_catalog_model_ids() -> impl Iterator<Item = &'static str> {
+    DEFAULTS.models.iter().map(|m| m.model.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_in_default_is_grok_4_6_and_keeps_4_5() {
+        assert_eq!(default_model(), "grok-4.6");
+        assert_eq!(default_web_search_model(), "grok-4.6");
+        assert_eq!(default_image_description_model(), "grok-4.6");
+        assert_eq!(default_session_summary_model(), "grok-4.6");
+        let ids: Vec<&str> = default_catalog_model_ids().collect();
+        assert_eq!(ids, vec!["grok-4.6", "grok-4.5"]);
+    }
+}

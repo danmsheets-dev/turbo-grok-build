@@ -521,7 +521,7 @@ pub struct SessionInfoData {
 
 /// Whether this model slug supports showing checkpoint identity (resolved model ID, fingerprint).
 pub(crate) fn is_coding_model_slug(model: &str) -> bool {
-    matches!(model, "grok-build" | "grok-4.5")
+    model == "grok-build" || model.starts_with("grok-4.")
 }
 
 /// Display gate for the model fingerprint: server/catalog opt-in OR the built-in coding-slug default.
@@ -656,6 +656,7 @@ mod tests {
         // Coding slugs always show, even without the catalog flag.
         assert!(should_show_model_fingerprint(false, "grok-build"));
         assert!(should_show_model_fingerprint(false, "grok-4.5"));
+        assert!(should_show_model_fingerprint(false, "grok-4.6"));
         // Non-coding slug without the flag stays hidden.
         assert!(!should_show_model_fingerprint(false, "some-other"));
     }

@@ -126,6 +126,7 @@ mod tests {
             "memory_enabled": false,
             "is_non_interactive": false,
             "system_prompt_label": crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL,
+            "include_browser_verification": false,
         })
     }
 
@@ -369,6 +370,54 @@ mod tests {
         assert!(
             prompt.contains("user_query"),
             "Must reference user_query tag"
+        );
+        assert!(
+            prompt.contains("<action_safety>"),
+            "Turbo action_safety must stay in the primary prompt"
+        );
+        assert!(
+            prompt.contains("<work_policy>"),
+            "official work_policy must be merged into the primary prompt"
+        );
+        assert!(
+            !prompt.contains("<browser_verification>"),
+            "browser_verification must stay gated off by default"
+        );
+    }
+
+    #[test]
+    fn test_base_template_browser_verification_gated() {
+        let r = default_renderer();
+        let mut p = default_placeholders();
+        p["include_browser_verification"] = serde_json::json!(true);
+        let on = render_base(&r, &p);
+        p["include_browser_verification"] = serde_json::json!(false);
+        let off = render_base(&r, &p);
+        assert!(on.contains("<browser_verification>"));
+        assert!(on.contains("MUST verify your work in the browser"));
+        assert!(!off.contains("<browser_verification>"));
+        let start = on
+            .find("\n\n<browser_verification>")
+            .expect("flagged template starts the gated block after a blank line");
+        let end = on
+            .find("</browser_verification>")
+            .map(|i| i + "</browser_verification>".len())
+            .expect("flagged template closes the gated block");
+        let mut stripped = String::new();
+        stripped.push_str(&on[..start]);
+        stripped.push_str(&on[end..]);
+        assert_eq!(stripped, off, "gating must be additive only");
+        assert!(on.contains("<action_safety>"));
+        assert!(off.contains("<action_safety>"));
+    }
+
+    #[test]
+    fn test_subagent_template_contains_work_policy() {
+        let prompt = render_subagent(&default_renderer(), &default_placeholders());
+        assert!(prompt.contains("<work_policy>"));
+        assert!(
+            !prompt.contains("<browser_verification>"),
+            "subagent browser_verification must stay gated off by default"
         );
     }
 

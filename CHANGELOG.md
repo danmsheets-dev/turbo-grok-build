@@ -42,6 +42,8 @@ Older release notes (r1–r13 detail) are archived under
 ## [Unreleased]
 
 ### Added
+- **Grok 4.6 default catalog** — compiled-in `default` / `web_search` / `image_description` / `session_summary` now `grok-4.6` (advertises `xhigh` reasoning effort; hosted backend search on). `grok-4.5` remains selectable. Config / env / CLI overrides still win. Resolved-checkpoint display (`requested (resolved)`) now treats all `grok-4.*` slugs as coding models, not only `grok-4.5`.
+- **Prompt `work_policy` + `browser_verification`** — official completion discipline merged into the primary and subagent templates without dropping Turbo `<action_safety>`. The `<browser_verification>` block renders only when the finalized toolset includes `browser_*` tools (not plan-builtin-only). AGENTS.md user reminders are not suppressed.
 - **Agent WebView** (`browser_*` tools + `turbo browser-host`) — product-owned WebView2 window on `~/.grok/agent-browser`. Ctrl+Shift+B mirrors URL/snapshot in the TUI. Not chrome-devtools MCP.
 
 ## [1.0.0-rc.2] - 2026-08-11

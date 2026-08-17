@@ -1410,6 +1410,10 @@ fn default_true() -> bool {
 pub(crate) fn short_tool_name(id: &str) -> &str {
     id.rsplit(':').next().unwrap_or(id)
 }
+/// Whether a tool id (full `Namespace:name` or short name) is a `browser_*` tool.
+pub fn tool_id_is_browser(id: &str) -> bool {
+    short_tool_name(id).starts_with("browser_")
+}
 /// Whether an allow/deny `entry` refers to tool `id` (by full id or short name).
 pub(crate) fn tool_id_eq(entry: &str, id: &str) -> bool {
     entry == id || entry == short_tool_name(id)
@@ -1873,6 +1877,15 @@ impl AgentDefinition {
 mod tests {
     use super::*;
     /// Native presets only.
+    #[test]
+    fn tool_id_is_browser_matches_short_and_namespaced_ids() {
+        assert!(tool_id_is_browser("browser_navigate"));
+        assert!(tool_id_is_browser("GrokBuild:browser_snapshot"));
+        assert!(tool_id_is_browser("browser_click"));
+        assert!(!tool_id_is_browser("web_search"));
+        assert!(!tool_id_is_browser("GrokBuild:web_fetch"));
+        assert!(!tool_id_is_browser("browser"));
+    }
     #[test]
     fn toolset_for_preset_resolves_known_names() {
         for name in [

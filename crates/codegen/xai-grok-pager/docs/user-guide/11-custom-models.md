@@ -54,7 +54,7 @@ Set a persistent default in `~/.grok/config.toml`:
 
 ```toml
 [models]
-default = "grok-4.5"
+default = "grok-4.6"
 ```
 
 ---

@@ -17284,6 +17284,7 @@ dependencies = [
  "xai-grok-env",
  "xai-grok-hooks",
  "xai-grok-mcp",
+ "xai-grok-models",
  "xai-grok-paths",
  "xai-grok-sandbox",
  "xai-grok-telemetry",
