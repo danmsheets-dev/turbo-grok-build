@@ -1,24 +1,32 @@
-//! WebView2 environment, controller, navigate, and CDP screenshot.
+//! WebView2 environment, controller, navigate, CDP, and page-control scripts.
 
 use std::path::Path;
 use std::sync::mpsc;
 
+use serde_json::Value;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, GetAvailableCoreWebView2BrowserVersionString,
     ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment,
 };
 use webview2_com::{
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    NavigationCompletedEventHandler, take_pwstr,
+    ExecuteScriptCompletedHandler, NavigationCompletedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{E_POINTER, HWND};
 use windows::Win32::UI::WindowsAndMessaging::PostQuitMessage;
 use windows::core::{BOOL, PCWSTR, PWSTR};
 
+use super::ax::{
+    compact_ax_tree, interpret_uid_action, parse_ax_nodes_json, parse_eval_cdp, snapshot_cap,
+    turbo_ax_js_injected,
+};
 use super::window::{attach_controller, client_rect};
 use super::{HostError, next_screenshot_path, screenshot_dir};
-use crate::protocol::{NavigateResult, ScreenshotResult, TabInfo, TabsResult};
+use crate::protocol::{
+    AxNode, NavigateResult, ScreenshotResult, SnapshotResult, TabInfo, TabsResult, check_fill,
+};
 
 /// Fail closed if the Evergreen WebView2 Runtime is not present.
 pub fn ensure_runtime_installed() -> Result<(), HostError> {
@@ -64,6 +72,7 @@ impl AgentWebView {
             .map_err(|e| HostError::Failed(format!("CoreWebView2: {e}")))?;
 
         apply_settings(&webview)?;
+        add_script_on_document_created(&webview, &turbo_ax_js_injected())?;
         attach_controller(hwnd, controller.clone());
 
         let mut host = Self {
@@ -127,7 +136,117 @@ impl AgentWebView {
         if !success {
             return Err(format!("navigation failed: {url}"));
         }
+        // Re-tag after NavigationCompleted (document-created script may
+        // already have run; this covers about:blank and late inject).
+        let _ = self.inject_ax();
         self.location()
+    }
+
+    /// Compact AX snapshot from the tagged-DOM collector (CDP fallback).
+    pub fn snapshot(&mut self, verbose: bool) -> Result<SnapshotResult, String> {
+        self.ensure_ax()?;
+        let cap = snapshot_cap(verbose);
+        let js = format!(
+            "(function(){{if(!window.__turboAx)return null;return window.__turboAx.collect({cap});}})()"
+        );
+        let raw = execute_script(&self.webview, &js)?;
+        let nodes = match parse_collector_or_retry(&self.webview, &raw, cap) {
+            Ok(nodes) => nodes,
+            Err(_) => self.snapshot_cdp_fallback(verbose)?,
+        };
+        let loc = self.location()?;
+        Ok(SnapshotResult {
+            url: loc.url,
+            title: loc.title,
+            nodes,
+        })
+    }
+
+    fn snapshot_cdp_fallback(&self, verbose: bool) -> Result<Vec<AxNode>, String> {
+        let _ = call_cdp(&self.webview, "Accessibility.enable", "{}");
+        let tree = call_cdp(&self.webview, "Accessibility.getFullAXTree", "{}")?;
+        compact_ax_tree(&tree, verbose)
+    }
+
+    /// Click `[data-turbo-uid=…]`. Missing node → `unknown_uid`.
+    pub fn click(&mut self, uid: &str) -> Result<(), String> {
+        self.ensure_ax()?;
+        let js = format!(
+            "(function(){{if(!window.__turboAx)return null;return window.__turboAx.click({uid});}})()",
+            uid = js_string(uid)
+        );
+        let raw = execute_script(&self.webview, &js)?;
+        let raw = retry_if_ax_missing(&self.webview, &raw, || {
+            execute_script(
+                &self.webview,
+                &format!(
+                    "(function(){{return window.__turboAx.click({uid});}})()",
+                    uid = js_string(uid)
+                ),
+            )
+        })?;
+        interpret_uid_action(uid, &raw)?;
+        Ok(())
+    }
+
+    /// Fill a tagged control. Policy is re-checked with the field name
+    /// **before** mutating the page.
+    pub fn fill(&mut self, uid: &str, value: &str) -> Result<(), String> {
+        self.ensure_ax()?;
+        let lookup = format!(
+            "(function(){{if(!window.__turboAx)return null;return window.__turboAx.lookup({uid});}})()",
+            uid = js_string(uid)
+        );
+        let raw = execute_script(&self.webview, &lookup)?;
+        let raw = retry_if_ax_missing(&self.webview, &raw, || {
+            execute_script(
+                &self.webview,
+                &format!(
+                    "(function(){{return window.__turboAx.lookup({uid});}})()",
+                    uid = js_string(uid)
+                ),
+            )
+        })?;
+        let probe = interpret_uid_action(uid, &raw)?;
+        let name = probe.get("name").and_then(Value::as_str);
+        check_fill(value, name).map_err(|e| e.to_string())?;
+        let fill_js = format!(
+            "(function(){{return window.__turboAx.fill({uid},{value});}})()",
+            uid = js_string(uid),
+            value = js_string(value)
+        );
+        let raw = execute_script(&self.webview, &fill_js)?;
+        interpret_uid_action(uid, &raw)?;
+        Ok(())
+    }
+
+    /// CDP `Runtime.evaluate` of a function expression; JSON only.
+    pub fn eval_function(&mut self, function: &str) -> Result<Value, String> {
+        let expression = format!("JSON.stringify(({function})())");
+        let params = serde_json::json!({
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": true,
+        })
+        .to_string();
+        let json = call_cdp(&self.webview, "Runtime.evaluate", &params)?;
+        parse_eval_cdp(&json)
+    }
+
+    fn inject_ax(&self) -> Result<(), String> {
+        let _ = execute_script(&self.webview, &turbo_ax_js_injected())?;
+        Ok(())
+    }
+
+    fn ensure_ax(&self) -> Result<(), String> {
+        let ready = execute_script(
+            &self.webview,
+            "!!(window.__turboAx&&window.__turboAx.collect)",
+        )?;
+        if ready.trim() != "true" {
+            self.inject_ax()?;
+        }
+        Ok(())
     }
 
     /// CDP `Page.captureScreenshot` → PNG file + IHDR size.
@@ -187,6 +306,91 @@ impl AgentWebView {
         let _ = self.hwnd;
         let _ = unsafe { self.controller.Close() };
     }
+}
+
+fn js_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+fn parse_collector_or_retry(
+    webview: &ICoreWebView2,
+    raw: &str,
+    cap: usize,
+) -> Result<Vec<AxNode>, String> {
+    let trimmed = raw.trim();
+    if trimmed == "null" || trimmed.is_empty() {
+        execute_script(webview, &turbo_ax_js_injected())?;
+        let raw = execute_script(
+            webview,
+            &format!(
+                "(function(){{if(!window.__turboAx)return [];return window.__turboAx.collect({cap});}})()"
+            ),
+        )?;
+        return parse_ax_nodes_json(&raw, cap);
+    }
+    parse_ax_nodes_json(trimmed, cap)
+}
+
+fn retry_if_ax_missing(
+    webview: &ICoreWebView2,
+    raw: &str,
+    retry: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed == "null" || trimmed.contains("no_ax") {
+        execute_script(webview, &turbo_ax_js_injected())?;
+        return retry();
+    }
+    Ok(raw.to_owned())
+}
+
+fn add_script_on_document_created(webview: &ICoreWebView2, js: &str) -> Result<(), HostError> {
+    let webview = webview.clone();
+    let js = js.to_owned();
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation(
+        Box::new(move |handler| {
+            let js = CoTaskMemPWSTR::from(js.as_str());
+            unsafe {
+                webview
+                    .AddScriptToExecuteOnDocumentCreated(*js.as_ref().as_pcwstr(), &handler)
+                    .map_err(webview2_com::Error::WindowsError)
+            }
+        }),
+        Box::new(|error_code, _id| error_code),
+    )
+    .map_err(|e| {
+        repost_quit_if_task_canceled(&e);
+        HostError::Failed(format!("AddScriptToExecuteOnDocumentCreated: {e}"))
+    })
+}
+
+fn execute_script(webview: &ICoreWebView2, js: &str) -> Result<String, String> {
+    let (tx, rx) = mpsc::channel();
+    let webview = webview.clone();
+    let js = js.to_owned();
+
+    ExecuteScriptCompletedHandler::wait_for_async_operation(
+        Box::new(move |handler| {
+            let js = CoTaskMemPWSTR::from(js.as_str());
+            unsafe {
+                webview
+                    .ExecuteScript(*js.as_ref().as_pcwstr(), &handler)
+                    .map_err(webview2_com::Error::WindowsError)
+            }
+        }),
+        Box::new(move |error_code, result| {
+            error_code?;
+            let _ = tx.send(result);
+            Ok(())
+        }),
+    )
+    .map_err(|e| {
+        repost_quit_if_task_canceled(&e);
+        format!("ExecuteScript: {e}")
+    })?;
+
+    rx.recv()
+        .map_err(|_| "ExecuteScript: channel closed".into())
 }
 
 fn apply_settings(webview: &ICoreWebView2) -> Result<(), HostError> {

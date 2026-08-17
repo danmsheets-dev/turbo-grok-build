@@ -12,15 +12,20 @@ use serde_json::Value;
 use crate::profile::{agent_browser_user_data_dir, pipe_name};
 use crate::protocol::{
     BrowserRequest, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
-    check_url,
+    check_fill, check_url,
 };
 
+mod ax;
 #[cfg(windows)]
 mod rpc;
 #[cfg(windows)]
 mod webview;
 #[cfg(windows)]
 mod window;
+
+pub use ax::{
+    SNAPSHOT_NODE_CAP, SNAPSHOT_NODE_CAP_VERBOSE, compact_ax_tree, resolve_uid, snapshot_cap,
+};
 
 /// JSON-RPC parse error.
 pub(crate) const RPC_PARSE_ERROR: i64 = -32700;
@@ -83,7 +88,7 @@ impl HostArgs {
     }
 }
 
-/// Decoded host operation (Task 4 surface).
+/// Decoded host operation (v1 single-tab + page control).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostCall {
     /// `browser.navigate`
@@ -99,6 +104,28 @@ pub(crate) enum HostCall {
     Raise,
     /// `browser.shutdown`
     Shutdown,
+    /// `browser.snapshot`
+    Snapshot {
+        /// Raise node cap from 200 to 800.
+        verbose: bool,
+    },
+    /// `browser.click`
+    Click {
+        /// `data-turbo-uid` (decimal).
+        uid: String,
+    },
+    /// `browser.fill`
+    Fill {
+        /// `data-turbo-uid` (decimal).
+        uid: String,
+        /// Policy-checked value.
+        value: String,
+    },
+    /// `browser.eval`
+    Eval {
+        /// Function expression; host wraps with `JSON.stringify`.
+        function: String,
+    },
 }
 
 /// Run the Agent WebView sidecar.
@@ -267,6 +294,50 @@ fn handle_ui_job(
             window::destroy(hwnd);
             encode_rpc_ok(id, Value::Object(serde_json::Map::new()))
         }
+        Ok((id, HostCall::Snapshot { verbose })) => match agent.snapshot(verbose) {
+            Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Click { uid })) => match agent.click(&uid) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Fill { uid, value })) => match agent.fill(&uid, &value) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Eval { function })) => match agent.eval_function(&function) {
+            Ok(value) => encode_rpc_ok(id, value),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
     }
 }
 
@@ -279,10 +350,11 @@ pub(crate) struct DecodedRpcError {
     pub error: JsonRpcError,
 }
 
-/// Decode one newline-delimited JSON-RPC request into a Task 4 host call.
+/// Decode one newline-delimited JSON-RPC request into a host call.
 ///
-/// Applies [`check_url`] on navigate (fail closed). Unknown / deferred
-/// methods become JSON-RPC errors (no HWND required).
+/// Applies [`check_url`] on navigate and [`check_fill`] on fill (fail
+/// closed). Invalid click/fill uids become `unknown_uid`. Multi-tab
+/// methods stay JSON-RPC errors (Task 6).
 pub(crate) fn decode_host_call(line: &str) -> Result<(JsonRpcId, HostCall), DecodedRpcError> {
     let req: JsonRpcRequest =
         serde_json::from_str(line.trim_end()).map_err(|e| DecodedRpcError {
@@ -336,17 +408,63 @@ pub(crate) fn decode_host_call(line: &str) -> Result<(JsonRpcId, HostCall), Deco
         BrowserRequest::Tabs {} => Ok((id, HostCall::Tabs)),
         BrowserRequest::Raise {} => Ok((id, HostCall::Raise)),
         BrowserRequest::Shutdown {} => Ok((id, HostCall::Shutdown)),
+        BrowserRequest::Snapshot { verbose } => Ok((id, HostCall::Snapshot { verbose })),
+        BrowserRequest::Click { uid } => {
+            if let Err(message) = ax::resolve_uid(&uid) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message,
+                        data: None,
+                    },
+                });
+            }
+            Ok((id, HostCall::Click { uid }))
+        }
+        BrowserRequest::Fill { uid, value } => {
+            if let Err(message) = ax::resolve_uid(&uid) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message,
+                        data: None,
+                    },
+                });
+            }
+            if let Err(err) = check_fill(&value, None) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message: err.to_string(),
+                        data: None,
+                    },
+                });
+            }
+            Ok((id, HostCall::Fill { uid, value }))
+        }
+        BrowserRequest::Eval { function } => {
+            if function.trim().is_empty() {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_INVALID_PARAMS,
+                        message: "eval function is empty".into(),
+                        data: None,
+                    },
+                });
+            }
+            Ok((id, HostCall::Eval { function }))
+        }
         BrowserRequest::NewTab { .. }
         | BrowserRequest::SelectTab { .. }
-        | BrowserRequest::CloseTab { .. }
-        | BrowserRequest::Snapshot { .. }
-        | BrowserRequest::Click { .. }
-        | BrowserRequest::Fill { .. }
-        | BrowserRequest::Eval { .. } => Err(DecodedRpcError {
+        | BrowserRequest::CloseTab { .. } => Err(DecodedRpcError {
             id: Some(id),
             error: JsonRpcError {
                 code: RPC_METHOD_NOT_FOUND,
-                message: format!("{} is not implemented in Task 4", req.method),
+                message: format!("{} is not implemented (single-tab v1)", req.method),
                 data: None,
             },
         }),
@@ -440,7 +558,10 @@ pub(crate) fn next_screenshot_path(dir: &Path, n: u32) -> Result<PathBuf, String
 mod tests {
     use super::*;
     use crate::client::encode_rpc_request;
-    use crate::protocol::{METHOD_NAVIGATE, METHOD_SCREENSHOT, METHOD_SNAPSHOT};
+    use crate::protocol::{
+        METHOD_CLICK, METHOD_EVAL, METHOD_FILL, METHOD_NAVIGATE, METHOD_NEW_TAB, METHOD_SCREENSHOT,
+        METHOD_SNAPSHOT,
+    };
 
     #[test]
     fn empty_pipe_and_profile_resolve_to_defaults() {
@@ -550,17 +671,102 @@ mod tests {
     }
 
     #[test]
-    fn decode_snapshot_is_not_implemented() {
-        let line = encode_rpc_request(
+    fn decode_snapshot_click_fill_eval() {
+        let snap = encode_rpc_request(
             JsonRpcId::Number(5),
             METHOD_SNAPSHOT,
-            serde_json::json!({ "verbose": false }),
+            serde_json::json!({ "verbose": true }),
+        )
+        .unwrap();
+        match decode_host_call(&snap).unwrap() {
+            (JsonRpcId::Number(5), HostCall::Snapshot { verbose: true }) => {}
+            other => panic!("{other:?}"),
+        }
+
+        let click = encode_rpc_request(
+            JsonRpcId::Number(6),
+            METHOD_CLICK,
+            serde_json::json!({ "uid": "1" }),
+        )
+        .unwrap();
+        match decode_host_call(&click).unwrap() {
+            (_, HostCall::Click { uid }) => assert_eq!(uid, "1"),
+            other => panic!("{other:?}"),
+        }
+
+        let fill = encode_rpc_request(
+            JsonRpcId::Number(7),
+            METHOD_FILL,
+            serde_json::json!({ "uid": "2", "value": "hello" }),
+        )
+        .unwrap();
+        match decode_host_call(&fill).unwrap() {
+            (_, HostCall::Fill { uid, value }) => {
+                assert_eq!(uid, "2");
+                assert_eq!(value, "hello");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let eval = encode_rpc_request(
+            JsonRpcId::Number(8),
+            METHOD_EVAL,
+            serde_json::json!({ "function": "() => 1" }),
+        )
+        .unwrap();
+        match decode_host_call(&eval).unwrap() {
+            (_, HostCall::Eval { function }) => assert_eq!(function, "() => 1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_fill_rejects_otp_before_host() {
+        let line = encode_rpc_request(
+            JsonRpcId::Number(9),
+            METHOD_FILL,
+            serde_json::json!({ "uid": "2", "value": "123456" }),
         )
         .unwrap();
         let err = decode_host_call(&line).unwrap_err();
+        assert_eq!(err.error.code, RPC_HOST_ERROR);
+        assert!(
+            err.error.message.contains("one-time password"),
+            "{}",
+            err.error.message
+        );
+    }
+
+    #[test]
+    fn decode_click_unknown_uid() {
+        let line = encode_rpc_request(
+            JsonRpcId::Number(10),
+            METHOD_CLICK,
+            serde_json::json!({ "uid": "nope" }),
+        )
+        .unwrap();
+        let err = decode_host_call(&line).unwrap_err();
+        assert_eq!(err.error.code, RPC_HOST_ERROR);
+        assert!(
+            err.error.message.contains("unknown_uid"),
+            "{}",
+            err.error.message
+        );
+    }
+
+    #[test]
+    fn decode_new_tab_still_unimplemented() {
+        let line = encode_rpc_request(JsonRpcId::Number(11), METHOD_NEW_TAB, serde_json::json!({}))
+            .unwrap();
+        let err = decode_host_call(&line).unwrap_err();
         assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND);
         assert!(
-            err.error.message.contains("not implemented in Task 4"),
+            err.error.message.contains("not implemented"),
+            "{}",
+            err.error.message
+        );
+        assert!(
+            !err.error.message.contains("Task 4"),
             "{}",
             err.error.message
         );
@@ -680,6 +886,20 @@ mod tests {
             shot.path
         );
         assert!(shot.width > 0 && shot.height > 0, "{shot:?}");
+
+        let snap = client.snapshot(false).await.expect("snapshot");
+        assert!(
+            snap.nodes
+                .iter()
+                .any(|n| n.role == "heading" || n.role == "link"),
+            "expected heading or link in snapshot: {snap:?}"
+        );
+
+        let title = client
+            .eval("() => document.title")
+            .await
+            .expect("eval title");
+        assert!(title.as_str().is_some(), "{title:?}");
 
         let _ = client.shutdown().await;
         let _ = done_rx.recv_timeout(Duration::from_secs(20));

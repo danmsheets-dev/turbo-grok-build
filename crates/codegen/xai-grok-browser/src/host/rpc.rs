@@ -202,7 +202,9 @@ mod tests {
     use super::*;
     use crate::client::encode_rpc_request;
     use crate::host::{HostCall, RPC_METHOD_NOT_FOUND};
-    use crate::protocol::{METHOD_EVAL, METHOD_NAVIGATE, METHOD_TABS};
+    use crate::protocol::{
+        METHOD_EVAL, METHOD_NAVIGATE, METHOD_NEW_TAB, METHOD_SNAPSHOT, METHOD_TABS,
+    };
 
     #[test]
     fn pipe_thread_decode_navigate_roundtrip() {
@@ -223,19 +225,38 @@ mod tests {
     }
 
     #[test]
-    fn pipe_thread_decode_tabs_and_eval() {
+    fn pipe_thread_decode_tabs_snapshot_and_eval() {
         let tabs =
             encode_rpc_request(JsonRpcId::Number(1), METHOD_TABS, serde_json::json!({})).unwrap();
         assert!(matches!(decode_host_call(&tabs).unwrap().1, HostCall::Tabs));
 
-        let eval = encode_rpc_request(
+        let snap = encode_rpc_request(
             JsonRpcId::Number(2),
+            METHOD_SNAPSHOT,
+            serde_json::json!({ "verbose": false }),
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_host_call(&snap).unwrap().1,
+            HostCall::Snapshot { verbose: false }
+        ));
+
+        let eval = encode_rpc_request(
+            JsonRpcId::Number(3),
             METHOD_EVAL,
             serde_json::json!({ "function": "() => 1" }),
         )
         .unwrap();
-        let err = decode_host_call(&eval).unwrap_err();
+        match decode_host_call(&eval).unwrap().1 {
+            HostCall::Eval { function } => assert_eq!(function, "() => 1"),
+            other => panic!("{other:?}"),
+        }
+
+        let new_tab =
+            encode_rpc_request(JsonRpcId::Number(4), METHOD_NEW_TAB, serde_json::json!({}))
+                .unwrap();
+        let err = decode_host_call(&new_tab).unwrap_err();
         assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND);
-        assert!(err.error.message.contains("not implemented in Task 4"));
+        assert!(err.error.message.contains("not implemented"));
     }
 }
