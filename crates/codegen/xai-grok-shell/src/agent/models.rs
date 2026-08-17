@@ -91,6 +91,39 @@ pub(crate) fn task_model_error_for_catalog(
     Some(format!("Unknown Task.model slug '{requested}'. {guidance}"))
 }
 
+/// Common slugs agents copy from session briefs / NVIDIA docs that are not
+/// the catalog key Turbo spawn accepts.
+///
+/// - Luna: `openai/gpt-5.6-luna` → `openai-codex/gpt-5.6-luna`
+/// - Lightning: `nvidia/nemotron-3.5-lightning-30b-a3b` →
+///   `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b`
+fn task_model_aliases(requested: &str) -> Vec<String> {
+    let requested = requested.trim();
+    let lower = requested.to_ascii_lowercase();
+    let mut out = Vec::new();
+
+    const LUNA: &[(&str, &str)] = &[
+        ("openai/gpt-5.6-luna", "openai-codex/gpt-5.6-luna"),
+        ("openai/gpt-5.6-luna-pro", "openai-codex/gpt-5.6-luna-pro"),
+        ("gpt-5.6-luna", "openai-codex/gpt-5.6-luna"),
+        ("gpt-5.6-luna-pro", "openai-codex/gpt-5.6-luna-pro"),
+    ];
+    for (from, to) in LUNA {
+        if lower == *from || lower.ends_with(&format!("/{from}")) {
+            out.push((*to).to_string());
+        }
+    }
+
+    if lower.contains("nemotron-3.5-lightning")
+        || lower.contains("nemotron-3-5-lightning")
+        || lower.contains("nemotron-3.5-lightning-30b")
+    {
+        out.push("nvidia/nvidia/nemotron-3.5-lightning-30b-a3b".into());
+        out.push("nvidia/nemotron-3.5-lightning-30b-a3b".into());
+    }
+    out
+}
+
 /// Resolve a Task.model slug against the catalog, including common provider
 /// prefix aliases agents copy from platform docs (`amazon-bedrock/…`, …).
 ///
@@ -130,6 +163,16 @@ pub(crate) fn find_task_model_entry<'a>(
                 .map(|(k, _)| k.as_str());
         }
         None
+    }
+
+    // Known remaps first so a non-selectable OpenRouter `openai/gpt-5.6-luna`
+    // row cannot shadow the spawnable ChatGPT Codex slug.
+    for alias in task_model_aliases(requested) {
+        if let Some(entry) = config::find_model_by_id(available, &alias) {
+            if let Some(key) = key_for(available, entry, Some(alias.as_str())) {
+                return Some((key, entry));
+            }
+        }
     }
 
     if let Some(entry) = config::find_model_by_id(available, requested) {

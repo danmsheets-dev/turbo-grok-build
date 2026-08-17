@@ -2188,6 +2188,16 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
                 out.push(m);
             }
         }
+        // NVIDIA Integrate rows that the Pi snapshot does not yet list
+        // (Nemotron 3.5 Lightning). Same request_compat as other NIM models.
+        for m in nvidia_offline_fallbacks() {
+            if let Some(idx) = existing.get(&m.catalog_key()) {
+                out[*idx] = m;
+            } else {
+                existing.insert(m.catalog_key(), out.len());
+                out.push(m);
+            }
+        }
         // Anthropic Claude (Pro/Max subscription OAuth) — hand-maintained.
         for m in anthropic_claude_offline_fallbacks() {
             if let Some(idx) = existing.get(&m.catalog_key()) {
@@ -2491,6 +2501,49 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
             "gpt-5.3-codex-spark",
             "GPT-5.3 Codex Spark (ChatGPT)",
             "Ultra-fast coding model (ChatGPT subscription)"
+        ),
+    ]
+}
+
+/// NVIDIA Integrate models missing from the imported Pi snapshot.
+///
+/// Catalog keys follow `{provider}/{model}` so
+/// `nvidia/nemotron-3.5-lightning-30b-a3b` becomes
+/// `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` (same as Ultra/Super/Nano).
+fn nvidia_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
+    const CTX_1M: u64 = 1_000_000;
+    const MAX_OUT: u32 = 65_536;
+    let mk = |model: &str, name: &str, desc: &str| BuiltinPlatformModel {
+        provider: PlatformId::Nvidia.provider_id(),
+        model: model.into(),
+        name: name.into(),
+        description: desc.into(),
+        context_window: CTX_1M,
+        supports_reasoning_effort: true,
+        supported_in_api: true,
+        catalog_available: true,
+        max_completion_tokens: Some(MAX_OUT),
+        api_backend: PlatformApiBackend::ChatCompletions,
+        base_url_override: None,
+        request_compat: fallback_request_compat(
+            PlatformId::Nvidia,
+            PlatformApiBackend::ChatCompletions,
+            model,
+        ),
+        route: fallback_route(PlatformId::Nvidia, PlatformApiBackend::ChatCompletions),
+    };
+    vec![
+        mk(
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "Nemotron 3.5 Lightning 30B A3B",
+            "Fast 30B/3B-active MoE on NVIDIA Integrate for specialized agentic tasks (1M ctx)",
+        ),
+        // Bare routing id so spawn_subagent(model=nvidia/nemotron-3.5-lightning-30b-a3b)
+        // and [subagents.models] pins both resolve.
+        mk(
+            "nemotron-3.5-lightning-30b-a3b",
+            "Nemotron 3.5 Lightning 30B A3B",
+            "Fast 30B/3B-active MoE on NVIDIA Integrate for specialized agentic tasks (1M ctx)",
         ),
     ]
 }
@@ -4214,6 +4267,32 @@ mod tests {
             panic!("llama is chat completions");
         };
         assert_eq!(llama_chat.max_parallel_tool_calls, Some(1));
+    }
+
+    #[test]
+    fn nvidia_lightning_is_in_builtin_catalog() {
+        let keys: std::collections::HashSet<_> = platform_builtin_models()
+            .iter()
+            .map(|m| m.catalog_key())
+            .collect();
+        assert!(
+            keys.contains("nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"),
+            "catalog convention slug missing: {keys:?}"
+        );
+        assert!(
+            keys.contains("nvidia/nemotron-3.5-lightning-30b-a3b"),
+            "short NVIDIA Integrate slug missing"
+        );
+        let lightning = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b")
+            .expect("lightning");
+        let RequestCompat::ChatCompletions(chat) = &lightning.request_compat else {
+            panic!("lightning is chat completions");
+        };
+        assert!(!chat.supports_prompt_cache_key);
+        assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
+        assert_eq!(lightning.context_window, 1_000_000);
     }
 
     #[test]
