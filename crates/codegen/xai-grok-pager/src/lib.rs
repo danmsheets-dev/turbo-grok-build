@@ -5,6 +5,7 @@
 pub mod acp;
 pub mod actions;
 pub mod app;
+pub mod browser_host_cmd;
 pub mod client_identity;
 pub mod codex;
 pub mod confine;

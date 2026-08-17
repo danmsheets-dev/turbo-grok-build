@@ -101,6 +101,7 @@ xai-grok-update = { path = "../xai-grok-update" }
 agent-client-protocol = { workspace = true }
 xai-acp-lib = { workspace = true }
 xai-file-utils = { path = "../xai-file-utils" }
+xai-grok-browser = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-developer-log = { workspace = true }
 # Voice dictation. `audio` (mic capture) is enabled on every target. On

@@ -1904,6 +1904,17 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     true
 }
 
+fn dispatch_browser_host_if_requested(args: &PagerArgs) -> bool {
+    let Some(Command::BrowserHost(host_args)) = &args.command else {
+        return false;
+    };
+    if let Err(error) = xai_grok_pager::browser_host_cmd::run(host_args.clone()) {
+        eprintln!("Error: {error}");
+        std::process::exit(error.exit_code());
+    }
+    true
+}
+
 fn run_bedrock_cli_login(profile: Option<&str>, chain: bool) -> anyhow::Result<()> {
     let home = xai_grok_config::grok_home();
     if let Some(profile) = profile.map(str::trim).filter(|p| !p.is_empty()) {
@@ -1958,7 +1969,10 @@ fn main() {
     // kill Turbo cleanly (see docs/windows-process-tree.md). Must run early —
     // children inherit the job automatically when breakaway is not requested.
     xai_tty_utils::enter_self_job_object_if_requested(args.job_object);
-    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+    if dispatch_version_if_requested(&args)
+        || dispatch_doctor_if_requested(&args)
+        || dispatch_browser_host_if_requested(&args)
+    {
         return;
     }
     if let Some(Command::Dashboard(dashboard_args)) = &args.command
@@ -2177,6 +2191,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Doctor(_) => {
                 unreachable!("doctor was consumed before runtime startup");
+            }
+            Command::BrowserHost(_) => {
+                unreachable!("browser-host was consumed before runtime startup");
             }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();

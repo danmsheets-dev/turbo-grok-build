@@ -31,6 +31,7 @@ xai-grok-workspace = { workspace = true }
 xai-grok-dashboard = { path = "../xai-grok-dashboard" }
 xai-crash-handler = { path = "../xai-crash-handler" }
 xai-acp-lib = { workspace = true }
+xai-grok-browser = { workspace = true }
 
 # Async runtime + misc.
 tokio = { workspace = true, features = [

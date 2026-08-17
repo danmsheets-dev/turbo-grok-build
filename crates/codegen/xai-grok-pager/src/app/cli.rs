@@ -230,6 +230,9 @@ See ~/.grok/README.md for more information.
     /// `GROK_WORKSPACE_COMMAND=1` to enable it locally for testing.
     #[command(hide = true)]
     Workspace(WorkspaceMgmtArgs),
+    /// Sidecar: Agent WebView2 window (do not run interactively).
+    #[command(name = "browser-host", hide = true)]
+    BrowserHost(crate::browser_host_cmd::BrowserHostArgs),
     /// Open the Agent Dashboard, or launch its local web observability UI.
     ///
     /// Bare `dashboard` opens the terminal-native multi-agent dashboard.
