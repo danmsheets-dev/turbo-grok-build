@@ -15986,6 +15986,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-browser"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "xai-grok-config",
+]
+
+[[package]]
 name = "xai-grok-compaction"
 version = "0.1.0"
 dependencies = [
