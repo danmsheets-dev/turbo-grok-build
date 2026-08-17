@@ -1,14 +1,18 @@
-//! Agent WebView protocol, profile paths, and JSON-RPC client.
+//! Agent WebView protocol, profile paths, JSON-RPC client, and in-process mock.
 //!
-//! Task 1 is protocol + policy only. The host (`turbo browser-host`) and
-//! named-pipe transport land in later tasks. This crate must stay free of
-//! WebView2 / Win32 dependencies.
+//! The host (`turbo browser-host`) and WebView2 bits land in later tasks.
+//! This crate must stay free of WebView2 / Win32 dependencies.
 
 pub mod client;
+pub mod mock;
 pub mod profile;
 pub mod protocol;
 
-pub use client::BrowserClient;
+pub use client::{
+    BrowserClient, BrowserClientError, BrowserTransport, NamedPipeTransport, decode_rpc_response,
+    encode_rpc_request,
+};
+pub use mock::{MockAction, MockBrowserHost};
 pub use profile::{agent_browser_user_data_dir, pipe_name};
 pub use protocol::{
     AxNode, BrowserEvent, BrowserMethod, BrowserRequest, EVAL_RESULT_MAX_BYTES, EvalPolicyError,
