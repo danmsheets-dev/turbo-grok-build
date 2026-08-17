@@ -98,6 +98,11 @@ pub enum McpCommand {
         /// Server name to check
         name: Option<String>,
     },
+    /// Respawn a live stdio server from current config.toml args
+    Restart {
+        /// Server name (e.g. chrome-devtools)
+        name: String,
+    },
 }
 
 // Everything `mcp add` accepts, before validation; `resolve_add` turns it
@@ -155,6 +160,7 @@ pub async fn run(mcp_args: McpArgs) -> Result<()> {
         McpCommand::Enable { name } => run_set_enabled(&name, true).await,
         McpCommand::Disable { name } => run_set_enabled(&name, false).await,
         McpCommand::Doctor { json, name } => run_doctor(json, name).await,
+        McpCommand::Restart { name } => run_restart(&name).await,
     }
 }
 
@@ -624,6 +630,44 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
             println!("File modified: {}", path.display());
         }
     }
+    Ok(())
+}
+
+/// Bounce a server off → on so a live TUI session re-merges from disk.
+/// After the merge fix (disk argv beats the session/new client snapshot),
+/// this is what actually applies a chrome-devtools `--autoConnect` retarget
+/// without starting a new chat.
+async fn run_restart(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("Server name cannot be empty.");
+    }
+    if is_gateway_cli_toggle_name(name) {
+        eprintln!(
+            "Gateway connectors (e.g. managed_gateway:…) cannot be restarted via CLI; use /mcps."
+        );
+        std::process::exit(1);
+    }
+    let cwd = current_dir_or_exit();
+    if !mcp_server_is_known(name, &cwd) {
+        eprintln!("No MCP server named '{name}'.");
+        let available = available_mcp_server_names(&cwd);
+        if !available.is_empty() {
+            eprintln!("Available servers: {}", available.join(", "));
+        }
+        std::process::exit(1);
+    }
+
+    let disabled = xai_grok_shell::util::config::disabled_mcp_server_names(&cwd).contains(name);
+    if !disabled {
+        let _ = xai_grok_shell::util::config::save_mcp_server_enabled_in(name, false, &cwd).await?;
+        // Let the TUI watcher observe the teardown before we re-enable.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let _ = xai_grok_shell::util::config::save_mcp_server_enabled_in(name, true, &cwd).await?;
+    println!(
+        "Restarted MCP server '{name}'. Live sessions re-read config.toml args (disk wins over the session/new snapshot)."
+    );
+    println!("If this chat still shows the old command line, press r in /mcps or start a new session on a build that includes the MCP merge fix.");
     Ok(())
 }
 
@@ -1210,6 +1254,15 @@ url = "https://mcp.example.test/sse"
                 command: McpCommand::Disable { name },
             })) => assert_eq!(name, "user-slack"),
             other => panic!("expected mcp disable, got {other:?}"),
+        }
+
+        let args = PagerArgs::try_parse_from(["grok", "mcp", "restart", "chrome-devtools"])
+            .expect("restart should parse");
+        match args.command {
+            Some(Command::Mcp(McpArgs {
+                command: McpCommand::Restart { name },
+            })) => assert_eq!(name, "chrome-devtools"),
+            other => panic!("expected mcp restart, got {other:?}"),
         }
     }
 

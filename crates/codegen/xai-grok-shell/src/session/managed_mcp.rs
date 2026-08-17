@@ -2,14 +2,16 @@
 //! servers. Managed connectors exist only via the gateway catalog
 //! (`GET /v1/mcp/tools/list`), not as injected `grok_com_*` HTTP servers.
 //!
-//! Merge layers are applied in order; later `insert()` beats earlier
-//! `or_insert()`:
+//! Merge layers are applied in order; first claim wins (`or_insert`):
 //!   - config.toml    — seeds the map; `enabled = false` blocks lower layers
 //!   - Plugins        — `or_insert` (won't override config.toml)
 //!   - ~/.claude.json — `or_insert` (imported user/local MCP servers)
 //!   - `.mcp.json`    — `or_insert` (team baseline)
-//!   - Client         — `insert` (wins except keys rejected by a disabled
-//!                      vendor `mcps` kill switch; see `admit_client_mcp_servers`)
+//!   - Client         — `or_insert` (session/new extras survive; must **not**
+//!                      override disk/plugin args). The TUI injects
+//!                      `load_mcp_servers()` as the client snapshot, so a
+//!                      client `insert` froze chrome-devtools argv across
+//!                      config.toml edits (inc_01a00c5b).
 //!
 //! The gateway catalog/call core lives in
 //! `xai_grok_shell_session_support::managed_mcp` and is re-exported here so
@@ -134,9 +136,10 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
             .collect();
 
     // Re-admit at merge so a caller that forgot ingress sanitization cannot
-    // spawn disabled-vendor client servers.
+    // spawn disabled-vendor client servers. `or_insert`: client-only
+    // bindings survive; disk/plugin argv stays the source of truth.
     for server in admit_client_mcp_servers(client_mcp_servers, cwd, compat) {
-        servers.insert(mcp_server_key(&server), server);
+        servers.entry(mcp_server_key(&server)).or_insert(server);
     }
 
     let disabled = crate::util::config::disabled_mcp_server_names(cwd);
@@ -702,6 +705,56 @@ args = ["ok"]
                 assert_eq!(args.as_slice(), &["ok"]);
             }
             other => panic!("expected toml stdio server, got {other:?}"),
+        }
+    }
+
+    /// TUI `session/new` injects `load_mcp_servers()` as the client snapshot.
+    /// A later config.toml argv edit must win on hot-reload — not the stale
+    /// client command line (inc_01a00c5b, chrome-devtools --userDataDir
+    /// vs --autoConnect).
+    #[test]
+    fn toml_stdio_args_beat_stale_client_snapshot() {
+        let cwd = empty_cwd();
+        std::fs::create_dir_all(cwd.path().join(".grok")).unwrap();
+        std::fs::write(
+            cwd.path().join(".grok").join("config.toml"),
+            r#"
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--allow-unrestricted-paths"]
+"#,
+        )
+        .unwrap();
+        git2::Repository::init(cwd.path()).unwrap();
+        crate::agent::folder_trust::record_for_test(cwd.path(), true);
+
+        let stale = acp::McpServer::Stdio(
+            acp::McpServerStdio::new("chrome-devtools".to_string(), "npx").args(vec![
+                "-y".to_string(),
+                "chrome-devtools-mcp@latest".to_string(),
+                "--userDataDir".to_string(),
+                r"C:\Users\dan_m\.grok\browser-profile".to_string(),
+                "--allow-unrestricted-paths".to_string(),
+            ]),
+        );
+        let compat = xai_grok_tools::types::compat::CompatConfig::default();
+        let merged = merge_managed_mcp_servers(vec![stale], cwd.path(), None, &compat);
+        let server = merged
+            .iter()
+            .find(|s| mcp_server_name(s) == "chrome-devtools")
+            .expect("chrome-devtools must remain");
+        match server {
+            acp::McpServer::Stdio(acp::McpServerStdio { args, .. }) => {
+                assert!(
+                    args.iter().any(|a| a == "--autoConnect"),
+                    "disk --autoConnect must beat stale client --userDataDir; got {args:?}"
+                );
+                assert!(
+                    !args.iter().any(|a| a == "--userDataDir"),
+                    "stale client --userDataDir must not survive; got {args:?}"
+                );
+            }
+            other => panic!("expected stdio chrome-devtools, got {other:?}"),
         }
     }
 

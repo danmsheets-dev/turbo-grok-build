@@ -2263,6 +2263,14 @@ impl SafeTokioChildProcess {
         self.child.as_ref()?.id()
     }
 
+    /// True when the child has already exited (pipe will close on handshake).
+    fn child_already_exited(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(c) => matches!(c.try_wait(), Ok(Some(_))),
+            None => true,
+        }
+    }
+
     /// SIGKILLs the whole process group (child + grandchildren). Synchronous, so
     /// it's safe from `Drop`; the leader still needs reaping afterwards.
     fn kill_process_group(&self) {
@@ -3570,9 +3578,25 @@ impl McpClient {
                 tokio::time::timeout(timeout, handler.serve(*process))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
+                    .map_err(|e| {
+                        let msg = e.to_string();
+                        if msg.contains("pipe is being closed")
+                            || msg.contains("os error 232")
+                            || msg.contains("EPIPE")
+                            || msg.contains("broken pipe")
+                        {
+                            McpError::ClientError(format!(
+                                "MCP server '{name}' handshake failed: {msg}. \
+                                 The stdio child exited before initialize (common with \
+                                 `docker run --rm -i` on Windows). Pin a local `uvx`/`python` \
+                                 command, or `turbo mcp restart {name}` after `docker pull`."
+                            ))
+                        } else {
+                            McpError::HandshakeFailed {
+                                server: name.to_string(),
+                                source: Box::new(e),
+                            }
+                        }
                     })
             }
             PendingTransport::Http(config) => {
@@ -4253,6 +4277,11 @@ fn plan_stdio_spawn(
     (OsString::from(command), args.to_vec())
 }
 
+fn spawn_args_look_like_docker(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a.eq_ignore_ascii_case("docker") || a.contains("docker"))
+}
+
 fn is_figma_mcp(server_name: &str, url: &str) -> bool {
     if server_name.eq_ignore_ascii_case("figma") {
         return true;
@@ -4350,49 +4379,79 @@ pub async fn start_mcp_server(
             let spawn_start = std::time::Instant::now();
             let _stdio_spawn_timer = xai_grok_telemetry::instrumentation::timer("mcp_stdio_spawn");
             let path_override = stdio_path_override(&env);
-            let (program, spawn_args) = plan_stdio_spawn(&command_str, &args, cfg!(windows), |c| {
-                if let Some(path) = path_override
-                    && let Ok(cwd) = std::env::current_dir()
-                {
-                    which::which_in(c, Some(path), cwd).ok()
-                } else {
-                    which::which(c).ok()
-                }
-            });
-            let mut cmd = Command::new(&program);
-            cmd.kill_on_drop(true).args(&spawn_args);
-            for env_variable in &env {
-                cmd.env(&env_variable.name, &env_variable.value);
-            }
-            // When process confinement is active, pin cwd + GROK_CONFINE so
-            // MCP servers inherit the same worktree boundary as the parent.
-            if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
-                cmd.current_dir(root.as_path());
-                xai_grok_tools::types::resources::pin_confine_env_on_tokio_command(&mut cmd);
-            }
-            xai_grok_tools::util::detach_command(&mut cmd);
 
-            let (transport, stderr_handle) = SafeTokioChildProcess::spawn(
-                cmd,
-                ctx.scope,
-                name.clone(),
-                ctx.event_writer.clone(),
-            )
-            .map_err(|e| {
-                tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::McpServerFailed {
-                        server_name: name.clone(),
-                        error_type: xai_grok_telemetry::events::McpErrorType::SpawnFailed,
-                        duration_ms: spawn_start.elapsed().as_millis() as u64,
-                        timeout_sec: startup_timeout,
-                    },
-                );
-                McpError::SpawnFailed {
-                    server: name.clone(),
-                    source: e,
+            let spawn_once = |scope: Option<&ProcessScope>| -> Result<
+                (SafeTokioChildProcess, Option<ChildStderr>),
+                McpError,
+            > {
+                let (program, spawn_args) =
+                    plan_stdio_spawn(&command_str, &args, cfg!(windows), |c| {
+                        if let Some(path) = path_override
+                            && let Ok(cwd) = std::env::current_dir()
+                        {
+                            which::which_in(c, Some(path), cwd).ok()
+                        } else {
+                            which::which(c).ok()
+                        }
+                    });
+                let mut cmd = Command::new(&program);
+                cmd.kill_on_drop(true).args(&spawn_args);
+                for env_variable in &env {
+                    cmd.env(&env_variable.name, &env_variable.value);
                 }
-            })?;
+                if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+                    cmd.current_dir(root.as_path());
+                    xai_grok_tools::types::resources::pin_confine_env_on_tokio_command(&mut cmd);
+                }
+                xai_grok_tools::util::detach_command(&mut cmd);
+                SafeTokioChildProcess::spawn(
+                    cmd,
+                    scope,
+                    name.clone(),
+                    ctx.event_writer.clone(),
+                )
+                .map_err(|e| {
+                    tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
+                    xai_grok_telemetry::session_ctx::log_event(
+                        xai_grok_telemetry::events::McpServerFailed {
+                            server_name: name.clone(),
+                            error_type: xai_grok_telemetry::events::McpErrorType::SpawnFailed,
+                            duration_ms: spawn_start.elapsed().as_millis() as u64,
+                            timeout_sec: startup_timeout,
+                        },
+                    );
+                    McpError::SpawnFailed {
+                        server: name.clone(),
+                        source: e,
+                    }
+                })
+            };
+
+            let (mut transport, stderr_handle) = spawn_once(ctx.scope)?;
+
+            // Docker + Windows named pipes: the container often exits before
+            // attach, so the first initialize hits OS error 232. Wait briefly
+            // and respawn once if the child is already dead.
+            let is_docker = command_str.eq_ignore_ascii_case("docker")
+                || spawn_args_look_like_docker(&args);
+            if is_docker {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            }
+            if transport.child_already_exited() {
+                tracing::warn!(
+                    server = %name,
+                    "MCP stdio child exited before handshake; respawning once"
+                );
+                drop(transport);
+                let (retry, stderr2) = spawn_once(ctx.scope)?;
+                transport = retry;
+                if is_docker {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                }
+                if let Some(stderr) = stderr2 {
+                    drain_mcp_stderr_to_log(&name, stderr);
+                }
+            }
 
             tracing::debug!("MCP server '{}' spawned: PID={:?}", name, transport.id());
 

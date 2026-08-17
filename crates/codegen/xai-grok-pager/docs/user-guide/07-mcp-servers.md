@@ -317,10 +317,43 @@ A partial list of MCP servers you can configure with the `url` or `command` form
 | PostgreSQL | stdio | `@modelcontextprotocol/server-postgres` |
 | SQLite | stdio | `@modelcontextprotocol/server-sqlite` |
 | Puppeteer | stdio | `@modelcontextprotocol/server-puppeteer` |
+| Chrome DevTools | stdio | `chrome-devtools-mcp` |
 
-See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) for the full list of community servers and the [MCP specification](https://modelcontextprotocol.io) for protocol details.
+### Chrome DevTools (Imagine web, X, LinkedIn)
 
----
+Pin chrome-devtools in `~/.grok/config.toml`. A TOML pin with this name
+replaces the Claude-plugin copy.
+
+**Attach to daily Chrome** (recommended). grok.com Google SSO is
+Cloudflare-blocked in a fresh automation profile. Use the Chrome you already
+logged into:
+
+```toml
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = [
+  "-y",
+  "chrome-devtools-mcp@latest",
+  "--autoConnect",
+  "--allow-unrestricted-paths",
+]
+enabled = true
+startup_timeout_sec = 90
+```
+
+1. Chrome 144+ → `chrome://inspect/#remote-debugging` → enable.
+2. Leave that Chrome running.
+3. After changing args: `turbo mcp restart chrome-devtools`, or `/mcps` then
+   `r`, or a new chat. Live sessions used to keep the old argv (the
+   session/new snapshot won); disk now wins.
+
+`--allow-unrestricted-paths` lets screenshots land in the session `images/`
+folder. Do not put passwords in tool calls. `turbo login` is the API session
+only. Skills: `/chrome-mcp`, `/imagine-web`.
+
+**Isolated profile** (`--userDataDir ~/.grok/browser-profile`) stays available
+when you do *not* want daily-Chrome tabs in the agent. Do not use it for
+Gmail SSO onto grok.com.
 
 ## Agent WebView vs chrome-devtools MCP
 
@@ -335,14 +368,33 @@ not render HTML. v1 is Windows-only (WebView2). Prefer this for pages that
 need JavaScript, a headed window, or a login UI. Use `web_fetch` for static
 docs. Never automate passwords or 2FA — the human signs in in the Agent window.
 
-**chrome-devtools MCP** is the user's Chrome. Pin it in `~/.grok/config.toml`
-as `[mcp_servers.chrome-devtools]` with `--autoConnect` (Chrome 144+ remote
-debugging at `chrome://inspect/#remote-debugging`). Use it **only** when the
-user explicitly wants **their** daily Chrome tabs or cookies. Discover tools
-with `search_tool` (`chrome-devtools`); do not invent names.
+**chrome-devtools MCP** is the user's Chrome (the pin above). Use it **only**
+when the user explicitly wants **their** daily Chrome tabs or cookies.
+Discover tools with `search_tool` (`chrome-devtools`); do not invent names.
 
 A dedicated MCP `--userDataDir` profile is a third, isolated Chrome — still
 MCP, still not Agent WebView. Prefer Agent WebView over that pin.
+
+### Godot docs (`godot-docs-mcp`)
+
+The Godot 4.7 class/tutorial corpus is usually launched as
+`docker run --rm -i godot-docs-mcp:4.7`. On Windows that wrapper often
+exits before initialize (OS error 232, pipe closed). Turbo now waits
+briefly after a docker spawn and respawns once if the child is already
+dead. If it still fails:
+
+```toml
+[mcp_servers.godot-docs-mcp]
+command = "docker"
+args = ["run", "--rm", "-i", "--init", "godot-docs-mcp:4.7"]
+enabled = true
+startup_timeout_sec = 90
+```
+
+Then `turbo mcp restart godot-docs-mcp`. Prefer a local `uv run python main.py`
+from a checkout that already has `index.db` if docker cannot stay up.
+
+See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) for the full list of community servers and the [MCP specification](https://modelcontextprotocol.io) for protocol details.
 
 ---
 
