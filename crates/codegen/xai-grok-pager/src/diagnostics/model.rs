@@ -64,8 +64,13 @@ pub(crate) const ORACLE_MODEL_SAME_AS_SESSION_ID: DiagnosticId =
 pub(crate) const ORACLE_MODEL_NOT_AGENT_READY_ID: DiagnosticId =
     DiagnosticId::new("agents", "oracle-model-not-agent-ready");
 /// web_fetch tool gate / policy summary for `/doctor`.
-pub(crate) const WEB_FETCH_STATUS_ID: DiagnosticId =
-    DiagnosticId::new("tools", "web-fetch-status");
+pub(crate) const WEB_FETCH_STATUS_ID: DiagnosticId = DiagnosticId::new("tools", "web-fetch-status");
+/// Evergreen WebView2 runtime presence for the Agent WebView host.
+pub(crate) const BROWSER_WEBVIEW2_RUNTIME_ID: DiagnosticId =
+    DiagnosticId::new("browser", "webview2-runtime");
+/// `$GROK_HOME/agent-browser` profile directory writability.
+pub(crate) const BROWSER_AGENT_PROFILE_ID: DiagnosticId =
+    DiagnosticId::new("browser", "agent-browser-profile");
 
 impl DiagnosticReport {
     pub fn issue_count(&self) -> usize {

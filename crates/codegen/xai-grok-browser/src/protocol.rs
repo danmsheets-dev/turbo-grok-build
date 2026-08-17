@@ -403,6 +403,9 @@ pub enum UrlPolicyError {
     /// Embedded userinfo can carry secrets.
     #[error("URLs with userinfo are not allowed")]
     UserinfoDenied,
+    /// Host is outside `GROK_BROWSER_ALLOW` (fail closed when the list is set).
+    #[error("URL host `{0}` is not on GROK_BROWSER_ALLOW")]
+    AllowlistDenied(String),
 }
 
 /// `browser.fill` policy failure (fail closed).
@@ -426,6 +429,12 @@ pub enum EvalPolicyError {
         len: usize,
     },
 }
+
+/// Optional comma-separated host allowlist (`example.com` allows `www.example.com`).
+///
+/// Unset or empty keeps the default scheme policy (https + local http + `about:blank`).
+/// Non-empty is fail-closed for `http:` / `https:` hosts outside the list.
+pub const GROK_BROWSER_ALLOW_ENV: &str = "GROK_BROWSER_ALLOW";
 
 /// Allow `https:`, local `http:`, and `about:blank`. Deny `file:` by default.
 pub fn check_url(url: &str) -> Result<(), UrlPolicyError> {
@@ -533,13 +542,111 @@ fn check_http_family(rest: &str, https: bool) -> Result<(), UrlPolicyError> {
         return Err(UrlPolicyError::Invalid);
     }
     let host = parse_http_host(authority)?;
-    if https {
+    if !https && !is_allowed_http_host(&host) {
+        return Err(UrlPolicyError::HostDenied(host));
+    }
+    check_host_allowlist(&host)
+}
+
+/// Parsed `GROK_BROWSER_ALLOW` entries (lowercase, trimmed). Empty = no extra filter.
+pub fn browser_allowlist() -> Vec<String> {
+    parse_browser_allow(&browser_allow_raw().unwrap_or_default())
+}
+
+fn browser_allow_raw() -> Option<String> {
+    #[cfg(test)]
+    {
+        let guard = test_allow_value().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(over) = guard.as_ref() {
+            return Some(over.clone());
+        }
+        // Lib tests ignore ambient env so they cannot leak across `--test-threads`.
+        return None;
+    }
+    #[cfg(not(test))]
+    match std::env::var(GROK_BROWSER_ALLOW_ENV) {
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+
+fn parse_browser_allow(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .filter_map(|part| {
+            let entry = normalize_allow_entry(part);
+            if entry.is_empty() { None } else { Some(entry) }
+        })
+        .collect()
+}
+
+fn normalize_allow_entry(raw: &str) -> String {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed.as_str());
+    let host_port = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    let host_port = host_port.strip_prefix("*.").unwrap_or(host_port);
+    let host = match host_port.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            h
+        }
+        _ => host_port,
+    };
+    host.trim_end_matches('.').to_owned()
+}
+
+fn check_host_allowlist(host: &str) -> Result<(), UrlPolicyError> {
+    let allow = browser_allowlist();
+    if allow.is_empty() {
         return Ok(());
     }
-    if is_allowed_http_host(&host) {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host_matches_allowlist(&host, &allow) {
         Ok(())
     } else {
-        Err(UrlPolicyError::HostDenied(host))
+        Err(UrlPolicyError::AllowlistDenied(host))
+    }
+}
+
+fn host_matches_allowlist(host: &str, allow: &[String]) -> bool {
+    allow.iter().any(|entry| {
+        host == entry
+            || host
+                .strip_suffix(entry.as_str())
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+#[cfg(test)]
+fn test_allow_value() -> &'static std::sync::Mutex<Option<String>> {
+    static VALUE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    &VALUE
+}
+
+#[cfg(test)]
+fn test_allow_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
+
+/// Install `GROK_BROWSER_ALLOW` for the duration of `f` (tests only).
+#[cfg(test)]
+pub(crate) fn with_browser_allow<R>(allow: &str, f: impl FnOnce() -> R) -> R {
+    let _lock = test_allow_lock().lock().unwrap_or_else(|e| e.into_inner());
+    {
+        *test_allow_value().lock().unwrap_or_else(|e| e.into_inner()) = Some(allow.to_owned());
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    {
+        *test_allow_value().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    match result {
+        Ok(r) => r,
+        Err(panic) => std::panic::resume_unwind(panic),
     }
 }
 
@@ -816,6 +923,45 @@ mod tests {
         ] {
             assert!(check_url(url).is_err(), "expected deny: {url}");
         }
+    }
+
+    #[test]
+    fn empty_allow_env_allows_https_example() {
+        assert!(check_url("https://example.com").is_ok());
+        assert!(browser_allowlist().is_empty());
+    }
+
+    #[test]
+    fn grok_browser_allow_is_fail_closed() {
+        with_browser_allow("example.com", || {
+            assert!(check_url("https://example.com/").is_ok());
+            assert!(check_url("https://www.example.com/path").is_ok());
+            assert_eq!(
+                check_url("https://evil.test/"),
+                Err(UrlPolicyError::AllowlistDenied("evil.test".into()))
+            );
+            // Public http is still denied by the local-http rule first.
+            assert!(matches!(
+                check_url("http://example.com/"),
+                Err(UrlPolicyError::HostDenied(_))
+            ));
+        });
+    }
+
+    #[test]
+    fn allowlist_matches_subdomains_not_suffix_spoofs() {
+        assert!(host_matches_allowlist(
+            "www.example.com",
+            &["example.com".into()]
+        ));
+        assert!(!host_matches_allowlist(
+            "evil-example.com",
+            &["example.com".into()]
+        ));
+        assert!(!host_matches_allowlist(
+            "example.com.evil.test",
+            &["example.com".into()]
+        ));
     }
 
     #[test]

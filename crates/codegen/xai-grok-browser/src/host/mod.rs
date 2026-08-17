@@ -75,6 +75,23 @@ impl HostError {
     }
 }
 
+/// Probe Evergreen WebView2 without creating a window.
+///
+/// Windows calls the runtime check. Other OS return [`HostError::WindowsOnly`].
+pub fn probe_webview2_runtime() -> Result<(), HostError> {
+    #[cfg(windows)]
+    {
+        webview::ensure_runtime_installed()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(HostError::WindowsOnly)
+    }
+}
+
+#[cfg(windows)]
+pub use webview::ensure_runtime_installed;
+
 impl HostArgs {
     /// Fill empty `pipe` / `user_data_dir` with product defaults.
     pub fn resolve_defaults(mut self) -> Self {

@@ -333,23 +333,37 @@ fn fake_oracle_probe(report: &mut DiagnosticReport, session_model: Option<&str>)
     });
 }
 
-/// The two live probes are part of the standalone contract — `grok doctor` has
-/// to report the voice fact and the oracle pin recommendation, neither of which
-/// any snapshot can carry. The fixture tests above deliberately call
-/// `compose_report`, so this is the one place that pins the probes still reach
-/// the report, and that they only *append* to the composed view.
+/// Stand-in for `apply_browser_probe`: appends one recommendation.
+fn fake_browser_probe(report: &mut DiagnosticReport) {
+    report.findings.push(DiagnosticFinding {
+        id: crate::diagnostics::BROWSER_WEBVIEW2_RUNTIME_ID,
+        disposition: FindingDisposition::Recommendation,
+        message: "fake browser finding".to_owned(),
+        remediation: None,
+        automatic_remediation: None,
+        note: None,
+    });
+}
+
+/// The live probes are part of the standalone contract — `grok doctor` has
+/// to report the voice fact, the oracle pin recommendation, and the Agent
+/// WebView runtime/profile checks, none of which any snapshot can carry. The
+/// fixture tests above deliberately call `compose_report`, so this is the one
+/// place that pins the probes still reach the report, and that they only
+/// *append* to the composed view.
 ///
 /// Hermetic: the probes are injected, so this asserts the plumbing without
-/// opening the test host's audio device or reading `~/.grok/config.toml`. What
-/// each real probe *decides* is covered by that probe's own tests; what is
-/// covered here is that whatever they decide lands after the composed findings
-/// and disturbs nothing before them.
+/// opening the test host's audio device, reading `~/.grok/config.toml`, or
+/// touching WebView2. What each real probe *decides* is covered by that
+/// probe's own tests; what is covered here is that whatever they decide lands
+/// after the composed findings and disturbs nothing before them.
 #[test]
 fn live_probes_transit_collect_report_with_and_only_append() {
     let terminal = TerminalContext::default();
     let probes = LiveProbes {
         voice: fake_voice_probe,
         oracle: fake_oracle_probe,
+        browser: fake_browser_probe,
     };
     let composed = compose_report(plain_standalone_snapshot(&terminal));
     let collected = collect_report_with_probes(plain_standalone_snapshot(&terminal), &probes);
@@ -365,7 +379,7 @@ fn live_probes_transit_collect_report_with_and_only_append() {
 
     assert_eq!(
         collected.findings.len(),
-        composed.findings.len() + 2,
+        composed.findings.len() + 3,
         "each probe contributes exactly its own finding, and nothing is dropped"
     );
     let (composed_through, appended) = collected.findings.split_at(composed.findings.len());
@@ -389,8 +403,9 @@ fn live_probes_transit_collect_report_with_and_only_append() {
         vec![
             crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID,
             crate::diagnostics::ORACLE_MODEL_UNPINNED_ID,
+            crate::diagnostics::BROWSER_WEBVIEW2_RUNTIME_ID,
         ],
-        "the probes must append in wiring order, voice then oracle"
+        "the probes must append in wiring order, voice then oracle then browser"
     );
 }
 

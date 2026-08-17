@@ -6,7 +6,7 @@
 //! The mock path never calls `ensure`.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use xai_grok_browser::{
     BrowserClient, BrowserClientError, MockAction, MockBrowserHost, NamedPipeTransport,
@@ -135,6 +135,8 @@ pub struct BrowserHandle {
     session_folder: Option<PathBuf>,
     inner: BrowserHandleInner,
     ensure: Option<BrowserEnsureFn>,
+    /// Shared across clones so snapshot → click on the next tool call sees names.
+    last_snapshot: Arc<Mutex<Option<SnapshotResult>>>,
 }
 
 impl BrowserHandle {
@@ -146,6 +148,7 @@ impl BrowserHandle {
             session_folder: None,
             inner: BrowserHandleInner::Mock(BrowserClient::mock(session_id)),
             ensure: None,
+            last_snapshot: snapshot_cache(),
         }
     }
 
@@ -171,6 +174,7 @@ impl BrowserHandle {
             session_folder,
             inner: BrowserHandleInner::Pipe(client),
             ensure,
+            last_snapshot: snapshot_cache(),
         }
     }
 
@@ -181,6 +185,7 @@ impl BrowserHandle {
             session_folder: None,
             inner: BrowserHandleInner::Unbound,
             ensure: None,
+            last_snapshot: snapshot_cache(),
         }
     }
 
@@ -207,8 +212,30 @@ impl BrowserHandle {
         self.mock_host().and_then(MockBrowserHost::last_action)
     }
 
+    fn cached_snapshot(&self) -> Option<SnapshotResult> {
+        match self.last_snapshot.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn store_snapshot(&self, snap: SnapshotResult) {
+        match self.last_snapshot.lock() {
+            Ok(mut guard) => *guard = Some(snap),
+            Err(poisoned) => *poisoned.into_inner() = Some(snap),
+        }
+    }
+
+    fn clear_snapshot(&self) {
+        match self.last_snapshot.lock() {
+            Ok(mut guard) => *guard = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+
     pub async fn navigate(&self, url: impl Into<String>) -> Result<NavigateResult, ToolError> {
         let url = url.into();
+        self.clear_snapshot();
         check_url_in_session(&url, self.session_folder.as_deref())
             .map_err(BrowserClientError::from)
             .map_err(map_browser_err)?;
@@ -222,15 +249,20 @@ impl BrowserHandle {
 
     pub async fn snapshot(&self, verbose: bool) -> Result<SnapshotResult, ToolError> {
         self.ensure_if_needed().await?;
-        match &self.inner {
+        let result = match &self.inner {
             BrowserHandleInner::Unbound => Err(missing_session_error()),
             BrowserHandleInner::Mock(c) => c.snapshot(verbose).await.map_err(map_browser_err),
             BrowserHandleInner::Pipe(c) => c.snapshot(verbose).await.map_err(map_browser_err),
+        };
+        if let Ok(ref snap) = result {
+            self.store_snapshot(snap.clone());
         }
+        result
     }
 
-    pub async fn click(&self, uid: impl Into<String>) -> Result<(), ToolError> {
+    pub async fn click(&self, uid: impl Into<String>, confirm: bool) -> Result<(), ToolError> {
         let uid = uid.into();
+        click::check_click_against_snapshot(self.cached_snapshot().as_ref(), &uid, confirm)?;
         self.ensure_if_needed().await?;
         match &self.inner {
             BrowserHandleInner::Unbound => Err(missing_session_error()),
@@ -310,6 +342,10 @@ impl BrowserHandle {
 }
 
 use xai_tool_runtime::ToolError;
+
+fn snapshot_cache() -> Arc<Mutex<Option<SnapshotResult>>> {
+    Arc::new(Mutex::new(None))
+}
 
 fn missing_session_error() -> ToolError {
     ToolError::custom("browser_session", MISSING_SESSION_ERROR)
@@ -425,7 +461,10 @@ mod tests {
         xai_tool_runtime::Tool::run(
             &BrowserClickTool,
             test_ctx_with_call_id(resources.clone(), "click"),
-            BrowserClickInput { uid: "1".into() },
+            BrowserClickInput {
+                uid: "1".into(),
+                confirm: false,
+            },
         )
         .await
         .expect("click uid 1");
@@ -538,6 +577,81 @@ mod tests {
         ] {
             assert!(builder.has_tool_id(id), "missing {id}");
         }
+    }
+
+    #[tokio::test]
+    async fn browser_click_search_does_not_need_confirm() {
+        let handle = BrowserHandle::mock("sess");
+        handle.navigate("https://example.com/").await.unwrap();
+        let snap = handle.snapshot(false).await.unwrap();
+        assert_eq!(snap.nodes[1].name, "Search");
+        handle
+            .click("2", false)
+            .await
+            .expect("Search is not a submit action");
+        assert_eq!(
+            handle.mock_last_action(),
+            Some(MockAction::Click { uid: "2".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_click_buy_now_requires_confirm() {
+        let handle = BrowserHandle::mock("sess");
+        handle.navigate("https://example.com/").await.unwrap();
+        handle
+            .mock_host()
+            .unwrap()
+            .insert_node(xai_grok_browser::AxNode {
+                uid: "3".into(),
+                role: "button".into(),
+                name: "Buy now".into(),
+                value: None,
+                focused: false,
+            });
+        handle.snapshot(false).await.unwrap();
+
+        let err = handle
+            .click("3", false)
+            .await
+            .expect_err("Buy now must require confirm");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("confirm") && (msg.contains("Buy") || msg.contains("submit")),
+            "{msg}"
+        );
+        assert_eq!(handle.mock_last_action(), None);
+
+        handle
+            .click("3", true)
+            .await
+            .expect("confirm=true allows Buy now");
+        assert_eq!(
+            handle.mock_last_action(),
+            Some(MockAction::Click { uid: "3".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_click_without_snapshot_fails_closed() {
+        let handle = BrowserHandle::mock("sess");
+        handle.navigate("https://example.com/").await.unwrap();
+        let err = handle
+            .click("1", false)
+            .await
+            .expect_err("click without snapshot must fail");
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(msg.contains("snapshot"), "{msg}");
+        assert_eq!(handle.mock_last_action(), None);
+    }
+
+    #[test]
+    fn browser_click_name_heuristic_matches_plan_regex() {
+        assert!(!click::click_name_needs_confirm("Search"));
+        assert!(!click::click_name_needs_confirm("More information"));
+        assert!(click::click_name_needs_confirm("Buy now"));
+        assert!(click::click_name_needs_confirm("SUBMIT"));
+        assert!(click::click_name_needs_confirm("Delete account"));
     }
 
     #[tokio::test]

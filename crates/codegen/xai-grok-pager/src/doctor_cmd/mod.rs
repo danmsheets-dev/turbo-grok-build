@@ -89,7 +89,7 @@ fn compose_report(
     crate::diagnostics::view(snapshot.into())
 }
 
-/// The two probes that read this machine rather than the snapshot.
+/// The live probes that read this machine rather than the snapshot.
 ///
 /// Behind a struct of function pointers purely so tests can substitute fakes:
 /// the property worth pinning is that the probes *transit* the composed report
@@ -100,17 +100,20 @@ struct LiveProbes {
     voice: fn(&mut DiagnosticReport, bool),
     /// Appends the oracle model-pin recommendations.
     oracle: fn(&mut DiagnosticReport, Option<&str>),
+    /// Appends Agent WebView runtime / profile recommendations.
+    browser: fn(&mut DiagnosticReport),
 }
 
 /// The probes production runs. The only place they are named.
 const LIVE_PROBES: LiveProbes = LiveProbes {
     voice: crate::diagnostics::apply_voice_probe,
     oracle: crate::diagnostics::apply_oracle_model_pin_probe,
+    browser: crate::diagnostics::apply_browser_probe,
 };
 
 /// [`compose_report`] plus the live host probes every production caller needs.
 ///
-/// Both probes only ever *append* to the composed report — they add a voice
+/// Live probes only ever *append* to the composed report — they add a voice
 /// fact and findings, never remove or reorder what the view produced.
 fn collect_report_with(
     snapshot: crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_>,
@@ -128,6 +131,7 @@ fn collect_report_with_probes(
     // No live session headless — the same-as-session arm needs a model id the
     // standalone report does not have.
     (probes.oracle)(&mut report, None);
+    (probes.browser)(&mut report);
     report
 }
 

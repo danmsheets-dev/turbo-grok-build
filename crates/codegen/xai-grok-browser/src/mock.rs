@@ -108,6 +108,11 @@ impl MockBrowserHost {
         self.lock().nodes.clone()
     }
 
+    /// Append an AX node (tests inject names like "Buy now").
+    pub fn insert_node(&self, node: AxNode) {
+        self.lock().nodes.push(node);
+    }
+
     fn lock(&self) -> MutexGuard<'_, MockState> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }

@@ -10,12 +10,14 @@ use crate::notifications::{NotificationCondition, NotificationMethod};
 use crate::terminal::{ByobuBackend, MultiplexerKind, TerminalContext, TerminalName};
 use crate::theme::color_support::ColorLevel;
 
+mod browser;
 mod doctor_format;
 mod fix;
 mod model;
 pub mod probes;
 mod view;
 
+pub use browser::apply_browser_probe;
 pub use doctor_format::format_doctor;
 #[cfg(test)]
 pub(crate) use fix::test_fix_plan;
@@ -32,11 +34,11 @@ pub(crate) use fix::{
 };
 pub(crate) use model::probe_requires_live_tui;
 pub(crate) use model::{
-    CLIPBOARD_DELIVERY_UNAVAILABLE_ID, CLIPBOARD_DELIVERY_UNVERIFIED_ID,
-    FOCUS_TRACKING_UNAVAILABLE_ID, ITERM2_CLIPBOARD_PERMISSION_ID, NEWLINE_FALLBACK_ID,
-    NOTIFICATION_PROTOCOL_FALLBACK_ID, ORACLE_MODEL_NOT_AGENT_READY_ID,
-    ORACLE_MODEL_SAME_AS_SESSION_ID, ORACLE_MODEL_UNPINNED_ID, SANDBOX_PROFILE_CONFLICT_ID,
-    VOICE_NO_INPUT_DEVICE_ID, VSCODE_SSH_NON_ASCII_ID,
+    BROWSER_WEBVIEW2_RUNTIME_ID, CLIPBOARD_DELIVERY_UNAVAILABLE_ID,
+    CLIPBOARD_DELIVERY_UNVERIFIED_ID, FOCUS_TRACKING_UNAVAILABLE_ID,
+    ITERM2_CLIPBOARD_PERMISSION_ID, NEWLINE_FALLBACK_ID, NOTIFICATION_PROTOCOL_FALLBACK_ID,
+    ORACLE_MODEL_NOT_AGENT_READY_ID, ORACLE_MODEL_SAME_AS_SESSION_ID, ORACLE_MODEL_UNPINNED_ID,
+    SANDBOX_PROFILE_CONFLICT_ID, VOICE_NO_INPUT_DEVICE_ID, VSCODE_SSH_NON_ASCII_ID,
 };
 pub use model::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
@@ -218,9 +220,7 @@ fn catalog_agent_ready(pin: &str) -> Option<bool> {
             || m.model.eq_ignore_ascii_case(pin)
             || format!("{}/{}", m.provider.as_str(), m.model).eq_ignore_ascii_case(pin)
     })?;
-    row.request_compat
-        .chat_completions()
-        .map(|c| c.agent_ready)
+    row.request_compat.chat_completions().map(|c| c.agent_ready)
 }
 
 /// Broad classification of a startup warning.
