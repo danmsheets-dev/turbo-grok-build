@@ -705,6 +705,13 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::SpawnManyTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
+        b.register::<grok_build::BrowserNavigateTool>();
+        b.register::<grok_build::BrowserSnapshotTool>();
+        b.register::<grok_build::BrowserClickTool>();
+        b.register::<grok_build::BrowserFillTool>();
+        b.register::<grok_build::BrowserEvalTool>();
+        b.register::<grok_build::BrowserScreenshotTool>();
+        b.register::<grok_build::BrowserTabsTool>();
         b.register::<grok_build::LspTool>();
         b.register::<grok_build::ImageGenTool>();
         b.register::<grok_build::ImageEditTool>();
@@ -1095,6 +1102,27 @@ impl ToolRegistryBuilder {
                 Err(e) => {
                     tracing::warn!("Failed to create WebFetchClient: {e}");
                 }
+            }
+        }
+        {
+            use crate::implementations::grok_build::browser::{
+                BrowserHandle, installed_browser_ensure,
+            };
+            let session_folder = resources
+                .get::<crate::types::resources::SessionFolder>()
+                .map(|folder| folder.0.clone());
+            if let Some(session_id) = ctx
+                .owner_session_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+            {
+                resources.insert(BrowserHandle::pipe_with_folder(
+                    session_id,
+                    session_folder,
+                    installed_browser_ensure(),
+                ));
+            } else {
+                resources.insert(BrowserHandle::unbound());
             }
         }
         let concise_ns = crate::types::tool::ToolNamespace::GrokBuildConcise.to_string();

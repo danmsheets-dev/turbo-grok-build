@@ -327,6 +327,7 @@ pub(crate) async fn spawn_session_actor(
             "max_turns must be greater than 0".to_string(),
         ));
     }
+    crate::session::agent_browser::install_browser_ensure_hook();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     tracing::info!(
         "Session '{}' created with {} MCP servers",

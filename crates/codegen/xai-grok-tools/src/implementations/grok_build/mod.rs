@@ -10,6 +10,7 @@
 //! `AvailableSkills`, `BashParams`) and registers every built-in tool.
 pub mod ask_user_question;
 pub mod bash;
+pub mod browser;
 pub mod developer_log;
 pub mod feature_request_log;
 #[path = "deploy_app_stub.rs"]
@@ -41,6 +42,12 @@ pub mod web_search;
 pub mod workflow;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
+pub use browser::{
+    BROWSER_CLICK_TOOL_NAME, BROWSER_EVAL_TOOL_NAME, BROWSER_FILL_TOOL_NAME,
+    BROWSER_NAVIGATE_TOOL_NAME, BROWSER_SCREENSHOT_TOOL_NAME, BROWSER_SNAPSHOT_TOOL_NAME,
+    BROWSER_TABS_TOOL_NAME, BrowserClickTool, BrowserEvalTool, BrowserFillTool, BrowserHandle,
+    BrowserNavigateTool, BrowserScreenshotTool, BrowserSnapshotTool, BrowserTabsTool,
+};
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
 pub use developer_log::{DEVELOPER_LOG_TOOL_NAME, DeveloperLogTool};
 pub use feature_request_log::{FEATURE_REQUEST_LOG_TOOL_NAME, FeatureRequestLogTool};

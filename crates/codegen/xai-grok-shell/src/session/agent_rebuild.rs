@@ -236,6 +236,10 @@ impl AgentRebuildSpec {
             parent_scheduler_handle,
         } = self.as_ref();
         let _ = mcp_state;
+        let mut definition = definition;
+        if definition.inject_default_tools {
+            crate::session::agent_browser::inject_browser_tools(&mut definition.tool_config);
+        }
         #[allow(unused_variables)]
         let is_cursor_template =
             crate::session::is_cursor_system_template(&definition.system_prompt);

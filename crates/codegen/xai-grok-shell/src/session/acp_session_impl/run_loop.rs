@@ -74,6 +74,7 @@ async fn fire_session_end_hooks(session: &SessionActor, reason: &str) {
         }
     }
     session.dispatch_session_end_stop(reason).await;
+    crate::session::agent_browser::shutdown_browser_host(&session.session_id_string()).await;
 }
 /// Cancel the feedback sync loop, drain/sync under exit budgets, persist
 /// background-task state, and drop scratch. Owns the single final signal sync
