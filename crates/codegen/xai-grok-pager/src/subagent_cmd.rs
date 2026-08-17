@@ -27,6 +27,10 @@ pub enum SubagentCommand {
         /// Restrict to a single session id
         #[arg(long)]
         session: Option<String>,
+        /// Include every session and discarded/cleaned agents (default: newest
+        /// session for this cwd, hide discarded+cleaned leftovers)
+        #[arg(long)]
+        all: bool,
         /// Emit JSON
         #[arg(long)]
         json: bool,
@@ -59,6 +63,11 @@ pub enum SubagentCommand {
         /// `merge` (default) or `overwrite`
         #[arg(long, default_value = "merge")]
         mode: String,
+        /// Union-merge landed JSON arrays of objects by this key (default `name`
+        /// for `assets/manifest/*.json`). Fail closed if a targeted file is not
+        /// a JSON array of objects or an object map.
+        #[arg(long = "json-union-by")]
+        json_union_by: Option<String>,
     },
     /// Remove a live worktree; keep snapshot ref unless --drop-snapshot
     Discard {
@@ -139,7 +148,11 @@ pub fn run(args: SubagentArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("current_dir")?;
     let cwd_str = cwd.to_string_lossy().into_owned();
     match args.command {
-        SubagentCommand::List { session, json } => cmd_list(&cwd_str, session.as_deref(), json),
+        SubagentCommand::List {
+            session,
+            all,
+            json,
+        } => cmd_list(&cwd_str, session.as_deref(), all, json),
         SubagentCommand::Open {
             id,
             session,
@@ -157,9 +170,14 @@ pub fn run(args: SubagentArgs) -> Result<()> {
             let r = resolve(&cwd_str, &id, session.as_deref())?;
             cmd_diff(&cwd, &r)
         }
-        SubagentCommand::Land { id, session, mode } => {
+        SubagentCommand::Land {
+            id,
+            session,
+            mode,
+            json_union_by,
+        } => {
             let r = resolve(&cwd_str, &id, session.as_deref())?;
-            cmd_land(&cwd, &r, &mode)
+            cmd_land(&cwd, &r, &mode, json_union_by.as_deref())
         }
         SubagentCommand::Discard {
             id,
@@ -245,20 +263,80 @@ fn resolve(cwd: &str, id: &str, session: Option<&str>) -> Result<Resolved> {
     }
 }
 
-fn list_entries(cwd: &str, session: Option<&str>) -> Result<Vec<ListedSubagent>> {
+fn newest_session_dir(root: &Path) -> Option<PathBuf> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let rd = fs::read_dir(root).ok()?;
+    for entry in rd.filter_map(|e| e.ok()) {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let path = entry.path();
+        let mtime = fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .or_else(|_| {
+                path.join("subagents")
+                    .metadata()
+                    .and_then(|m| m.modified())
+            })
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        match &best {
+            Some((t, _)) if *t >= mtime => {}
+            _ => best = Some((mtime, path)),
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn is_discarded_cleaned(e: &ListedSubagent) -> bool {
+    let land = e.land_status.as_deref().unwrap_or("");
+    let wt = e.worktree_state.as_deref().unwrap_or("");
+    land.eq_ignore_ascii_case("discarded")
+        && (wt.eq_ignore_ascii_case("cleaned")
+            || wt.eq_ignore_ascii_case("gone")
+            || wt.eq_ignore_ascii_case("deleted"))
+}
+
+fn display_status(e: &ListedSubagent) -> String {
+    let status = e.status.as_deref().unwrap_or("-");
+    if status.eq_ignore_ascii_case("running") && is_discarded_cleaned(e) {
+        return "stale".to_string();
+    }
+    if status.eq_ignore_ascii_case("running") {
+        if let Some(wt) = e.worktree_state.as_deref() {
+            if wt.eq_ignore_ascii_case("cleaned") || wt.eq_ignore_ascii_case("gone") {
+                return "stale".to_string();
+            }
+        }
+    }
+    status.to_string()
+}
+
+fn list_entries(cwd: &str, session: Option<&str>, all: bool) -> Result<Vec<ListedSubagent>> {
     let root = sessions_root_for_cwd(cwd);
     if !root.is_dir() {
         return Ok(Vec::new());
     }
-    let session_dirs: Vec<PathBuf> = if let Some(sid) = session {
+    let env_session = std::env::var("GROK_SESSION_ID")
+        .ok()
+        .or_else(|| std::env::var("TURBO_SESSION_ID").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let session_dirs: Vec<PathBuf> = if let Some(sid) = session
+        .map(str::to_string)
+        .or(env_session)
+    {
         vec![root.join(sid)]
-    } else {
+    } else if all {
         fs::read_dir(&root)
             .with_context(|| format!("read {}", root.display()))?
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .map(|e| e.path())
             .collect()
+    } else if let Some(newest) = newest_session_dir(&root) {
+        vec![newest]
+    } else {
+        Vec::new()
     };
 
     let mut out = Vec::new();
@@ -317,11 +395,17 @@ fn list_entries(cwd: &str, session: Option<&str>) -> Result<Vec<ListedSubagent>>
         }
     }
     out.sort_by(|a, b| a.session_id.cmp(&b.session_id).then(a.id.cmp(&b.id)));
+    if !all {
+        out.retain(|e| !is_discarded_cleaned(e));
+        for e in &mut out {
+            e.status = Some(display_status(e));
+        }
+    }
     Ok(out)
 }
 
-fn cmd_list(cwd: &str, session: Option<&str>, json: bool) -> Result<()> {
-    let entries = list_entries(cwd, session)?;
+fn cmd_list(cwd: &str, session: Option<&str>, all: bool, json: bool) -> Result<()> {
+    let entries = list_entries(cwd, session, all)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
@@ -332,6 +416,9 @@ fn cmd_list(cwd: &str, session: Option<&str>, json: bool) -> Result<()> {
             encode_cwd_dirname(cwd)
         );
         println!("Hint: run agents with isolation=worktree, then re-list.");
+        if !all {
+            println!("      Use `turbo subagent list --all` to include other sessions.");
+        }
         return Ok(());
     }
     println!(
@@ -483,6 +570,68 @@ fn path_in_allowlist(path: &str, allowed: &[String]) -> bool {
     path_is_allowed(path, &prefixes)
 }
 
+fn cli_is_harness_path(path: &str) -> bool {
+    xai_grok_tools::implementations::grok_build::subagent_worktree::is_harness_land_path(path)
+}
+
+fn backup_union_parents(
+    cwd: &Path,
+    paths: &[String],
+    json_union_by: Option<&str>,
+) -> Vec<(String, String)> {
+    use xai_grok_tools::implementations::grok_build::subagent_worktree::union_merge_key_for_path;
+    let mut out = Vec::new();
+    for p in paths {
+        if union_merge_key_for_path(p, json_union_by).is_none() {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(cwd.join(p)) {
+            out.push((p.clone(), text));
+        }
+    }
+    out
+}
+
+fn finish_cli_land(
+    cwd: &Path,
+    landed: &[String],
+    backups: &[(String, String)],
+    json_union_by: Option<&str>,
+) -> Result<()> {
+    use xai_grok_tools::implementations::grok_build::subagent_worktree::{
+        union_merge_json_by_key, union_merge_key_for_path,
+    };
+    for (path, parent_text) in backups {
+        let dest = cwd.join(path);
+        let child = fs::read_to_string(&dest).unwrap_or_default();
+        let Some(key) = union_merge_key_for_path(path, json_union_by) else {
+            continue;
+        };
+        match union_merge_json_by_key(parent_text, &child, &key) {
+            Some(merged) => {
+                fs::write(&dest, merged)
+                    .with_context(|| format!("write union-merged {path}"))?;
+            }
+            None => {
+                let _ = fs::write(&dest, parent_text);
+                anyhow::bail!(
+                    "land refused: `{path}` is not a JSON array of objects \
+                     (or object map) mergeable by `{key}`"
+                );
+            }
+        }
+    }
+    for p in landed {
+        if cli_is_harness_path(p) {
+            let dest = cwd.join(p);
+            if dest.is_file() {
+                let _ = fs::remove_file(dest);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse paths that are absolute, drive-rooted, or contain `..` (parity with
 /// tool `refuse_patch_paths_in_repo`).
 fn refuse_escape_paths(paths: &[String]) -> anyhow::Result<()> {
@@ -523,6 +672,7 @@ fn refuse_outside_allowlist(paths: &[String], allow: &[String]) -> anyhow::Resul
     let denied: Vec<&str> = paths
         .iter()
         .map(String::as_str)
+        .filter(|p| !cli_is_harness_path(p))
         .filter(|p| !path_in_allowlist(p, allow))
         .collect();
     if denied.is_empty() {
@@ -646,7 +796,7 @@ fn print_diff(source: &str, text: &str) {
     }
 }
 
-fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
+fn cmd_land(cwd: &Path, r: &Resolved, mode: &str, json_union_by: Option<&str>) -> Result<()> {
     let mode = mode.trim().to_ascii_lowercase();
     if mode != "merge" && mode != "overwrite" {
         bail!("mode must be `merge` or `overwrite`");
@@ -655,7 +805,7 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
     // Prefer agent-only snapshot land when baseline exists.
     if r.meta.baseline_ref.as_ref().is_some_and(|b| !b.is_empty()) {
         if let Some(ref snap) = r.meta.snapshot_ref {
-            return land_from_snapshot(cwd, snap, &mode, r);
+            return land_from_snapshot(cwd, snap, &mode, r, json_union_by);
         }
     }
     // Isolation worktree without baseline: refuse live-tree land (matches tool
@@ -664,7 +814,7 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
     if r.meta.worktree_path.is_some() && !has_baseline {
         if let Some(ref snap) = r.meta.snapshot_ref {
             // Snapshot path still applies its own size/baseline gates.
-            return land_from_snapshot(cwd, snap, &mode, r);
+            return land_from_snapshot(cwd, snap, &mode, r, json_union_by);
         }
         bail!(
             "land refused: isolation worktree for {} has no baseline_ref \
@@ -678,12 +828,12 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
     if let Some(ref wt) = r.meta.worktree_path {
         let wt = Path::new(wt);
         if wt.is_dir() {
-            return land_from_worktree(cwd, wt, &mode, r);
+            return land_from_worktree(cwd, wt, &mode, r, json_union_by);
         }
     }
     // 2) Snapshot ref
     if let Some(ref snap) = r.meta.snapshot_ref {
-        return land_from_snapshot(cwd, snap, &mode, r);
+        return land_from_snapshot(cwd, snap, &mode, r, json_union_by);
     }
     // 3) Patch
     let patch = r.meta.patch_path.as_deref().map(PathBuf::from).or_else(|| {
@@ -691,57 +841,77 @@ fn cmd_land(cwd: &Path, r: &Resolved, mode: &str) -> Result<()> {
         p.is_file().then_some(p)
     });
     if let Some(p) = patch {
-        return land_from_patch(cwd, &p, &mode, r);
+        return land_from_patch(cwd, &p, &mode, r, json_union_by);
     }
     bail!("nothing to land for {}", r.id);
 }
 
-fn land_from_worktree(cwd: &Path, wt: &Path, mode: &str, r: &Resolved) -> Result<()> {
+fn land_from_worktree(
+    cwd: &Path,
+    wt: &Path,
+    mode: &str,
+    r: &Resolved,
+    json_union_by: Option<&str>,
+) -> Result<()> {
     let pathspecs = allowlist_pathspecs(r);
-    let diff = if let Some(ref allow) = pathspecs {
-        // Fail closed when any changed path is outside allowed_paths (C8).
-        // Git enumeration failure under allowlist must refuse (tool parity).
-        let names = git(wt, &["diff", "--name-only", "HEAD"]).map_err(|e| {
-            anyhow::anyhow!(
-                "land refused: cannot enumerate worktree changes under allowed_paths for {}: {e}",
-                r.id
-            )
-        })?;
-        let all: Vec<String> = names
-            .lines()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        refuse_escape_paths(&all)?;
+    let names = git(wt, &["diff", "--name-only", "HEAD"]).map_err(|e| {
+        anyhow::anyhow!(
+            "land refused: cannot enumerate worktree changes for {}: {e}",
+            r.id
+        )
+    })?;
+    let all: Vec<String> = names
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    refuse_escape_paths(&all)?;
+    if let Some(ref allow) = pathspecs {
         refuse_outside_allowlist(&all, allow)?;
-        if all.is_empty() {
-            println!("No allowlisted tracked diff in live worktree for {}.", r.id);
-            update_land_status(&r.meta_path, "landed_empty")?;
-            return Ok(());
-        }
-        let mut args: Vec<&str> = vec!["diff", "--binary", "HEAD", "--"];
-        for p in &all {
-            args.push(p.as_str());
-        }
-        git(wt, &args)?
-    } else {
-        git(wt, &["diff", "--binary", "HEAD"])?
-    };
+    }
+    let payload: Vec<String> = all
+        .iter()
+        .filter(|p| !cli_is_harness_path(p))
+        .filter(|p| {
+            pathspecs
+                .as_ref()
+                .map(|allow| path_in_allowlist(p, allow))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if payload.is_empty() {
+        println!("No allowlisted tracked diff in live worktree for {}.", r.id);
+        update_land_status(&r.meta_path, "landed_empty")?;
+        return Ok(());
+    }
+    let mut args: Vec<&str> = vec!["diff", "--binary", "HEAD", "--"];
+    for p in &payload {
+        args.push(p.as_str());
+    }
+    let diff = git(wt, &args)?;
     if diff.trim().is_empty() {
-        // include untracked via apply of full tree is out of scope; try name-status
         println!("No tracked diff in live worktree (untracked files are not auto-landed).");
         update_land_status(&r.meta_path, "landed_empty")?;
         return Ok(());
     }
+    let backups = backup_union_parents(cwd, &payload, json_union_by);
     apply_diff_text(cwd, &diff, mode)?;
+    finish_cli_land(cwd, &payload, &backups, json_union_by)?;
     update_land_status(&r.meta_path, "landed")?;
     println!("Landed live worktree for {} (mode={mode}).", r.id);
-    print_landed_paths_from_diff(&diff);
+    print_landed_path_list(&payload);
     Ok(())
 }
 
-fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Result<()> {
+fn land_from_snapshot(
+    cwd: &Path,
+    snap: &str,
+    mode: &str,
+    r: &Resolved,
+    json_union_by: Option<&str>,
+) -> Result<()> {
     // Agent-only when baseline_ref is present. Without it, refuse bulk HEAD..snap
     // (inflates dirty parent / resume FOOTGUN) unless changed_paths is a small set.
     let base_opt = r
@@ -823,9 +993,23 @@ fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Resul
     if let Some(ref allow) = pathspecs {
         refuse_outside_allowlist(&all, allow)?;
     }
-    let landed_names = all;
+    let landed_names: Vec<String> = all
+        .into_iter()
+        .filter(|p| !cli_is_harness_path(p))
+        .filter(|p| {
+            pathspecs
+                .as_ref()
+                .map(|allow| path_in_allowlist(p, allow))
+                .unwrap_or(true)
+        })
+        .collect();
 
-    let diff = git_diff_range(cwd, base, snap, pathspecs.as_deref())?;
+    let apply_specs = if landed_names.is_empty() {
+        None
+    } else {
+        Some(landed_names.as_slice())
+    };
+    let diff = git_diff_range(cwd, base, snap, apply_specs)?;
     if diff.trim().is_empty() {
         println!(
             "Snapshot `{snap}` has no agent-only diff vs `{base}` (nothing to land; source={source_label})."
@@ -834,11 +1018,13 @@ fn land_from_snapshot(cwd: &Path, snap: &str, mode: &str, r: &Resolved) -> Resul
         return Ok(());
     }
 
+    let backups = backup_union_parents(cwd, &landed_names, json_union_by);
     if mode == "merge" {
         apply_diff_text(cwd, &diff, "merge")?;
     } else {
         apply_diff_text(cwd, &diff, "overwrite")?;
     }
+    finish_cli_land(cwd, &landed_names, &backups, json_union_by)?;
     update_land_status(&r.meta_path, "landed")?;
     println!(
         "Landed snapshot_ref `{snap}` for {} (mode={mode}, source={source_label}).",
@@ -900,7 +1086,13 @@ fn land_checkout_paths(cwd: &Path, snap: &str, paths: &[String], mode: &str) -> 
     Ok(())
 }
 
-fn land_from_patch(cwd: &Path, patch: &Path, mode: &str, r: &Resolved) -> Result<()> {
+fn land_from_patch(
+    cwd: &Path,
+    patch: &Path,
+    mode: &str,
+    r: &Resolved,
+    json_union_by: Option<&str>,
+) -> Result<()> {
     let text = fs::read_to_string(patch).with_context(|| format!("read {}", patch.display()))?;
     // Fail closed: absolute/`..` escape paths and allowlist violations (C6/C7).
     let paths = patch_changed_paths(&text);
@@ -908,7 +1100,14 @@ fn land_from_patch(cwd: &Path, patch: &Path, mode: &str, r: &Resolved) -> Result
     if let Some(ref allow) = allowlist_pathspecs(r) {
         refuse_outside_allowlist(&paths, allow)?;
     }
+    let payload: Vec<String> = paths
+        .iter()
+        .filter(|p| !cli_is_harness_path(p))
+        .cloned()
+        .collect();
+    let backups = backup_union_parents(cwd, &payload, json_union_by);
     apply_diff_text(cwd, &text, mode)?;
+    finish_cli_land(cwd, &paths, &backups, json_union_by)?;
     update_land_status(&r.meta_path, "landed")?;
     println!(
         "Landed patch {} for {} (mode={mode}).",
@@ -1117,7 +1316,7 @@ pub fn prune_session_meta(
     let cutoff = SystemTime::now()
         .checked_sub(max_age)
         .context("cutoff underflow")?;
-    let entries = list_entries(cwd, session)?;
+    let entries = list_entries(cwd, session, true)?;
     let mut candidates = Vec::new();
     for e in entries {
         // Never prune metadata for active/running agents (recovery still needed).

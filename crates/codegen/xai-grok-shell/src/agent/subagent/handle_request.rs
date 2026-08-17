@@ -1065,12 +1065,16 @@ pub(crate) async fn run_shell_child(
     // Wall-clock / tool / stall budget AFTER model resolve so NVIDIA platform
     // defaults (10 min timeout, 3 min stall) apply when spawn omits timeout_ms.
     // Order: explicit timeout_ms > agent-def timeout_secs > NVIDIA 600s > none.
-    let execution_budget = SubagentExecutionBudget::resolve_with_platform(
+    let execution_budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
         &definition,
         ctx.parent_max_turns,
         request.runtime_overrides.timeout_ms,
         request.runtime_overrides.stall_timeout_ms,
         Some(effective_model_id.0.as_ref()),
+        request
+            .allowed_paths
+            .as_ref()
+            .is_some_and(|p| !p.is_empty()),
     );
     append_execution_budget_prompt(&mut definition, execution_budget);
     if let Some(effort) = effective_runtime.reasoning_effort
@@ -1933,10 +1937,12 @@ pub(crate) async fn run_shell_child(
         cancel_token.clone(),
         goal_tick_cmd_tx(ctx.goal_enabled, ctx.parent_cmd_tx.as_ref()),
     );
+    // Wall-clock / first-progress start AFTER worktree create + child spawn
+    // so setup time is not charged against the child (inc_01a0025459).
     let budget_monitor = spawn_subagent_budget_monitor(
         execution_budget,
         &child_handle,
-        start,
+        std::time::Instant::now(),
         cancel_token.clone(),
     );
     let (before_copy_tx, before_copy_rx) = tokio::sync::oneshot::channel();

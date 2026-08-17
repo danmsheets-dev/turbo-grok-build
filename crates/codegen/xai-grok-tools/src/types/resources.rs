@@ -624,12 +624,33 @@ fn path_is_rooted(path: &std::path::Path) -> bool {
     )
 }
 
+/// True when `path` looks like an isolated product worktree checkout
+/// (`…/.grok/worktrees/…/subagent-…` or temp `grok-subagent-worktrees/…`).
+///
+/// Used to refuse DisplayCwd remaps that would fold an authorized worktree
+/// write onto a shared parent checkout (P0 isolation_fallback).
+pub fn path_looks_like_isolated_worktree(path: &std::path::Path) -> bool {
+    let s = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let has_subagent = s.contains("/subagent-");
+    let under_product = s.contains("/.grok/worktrees/");
+    let under_temp = s.contains("grok-subagent-worktrees");
+    has_subagent && (under_product || under_temp)
+}
+
 /// Resolve a model-provided path, rewriting absolute paths from conversation
 /// history when [`DisplayCwd`] is set.
 ///
 /// - If `display_cwd` is `None`, falls back to `cwd.join(input)`.
 /// - If `input` starts with the `display_cwd` prefix, strips it and joins
 ///   the suffix onto `cwd` (the real worktree path).
+/// - If `input` is already under `cwd`, it is kept (never remapped).
+/// - If `input` is an isolated worktree path (`…/.grok/worktrees/…/subagent-…`),
+///   it is kept even when `display_cwd` matches that prefix. The inverted
+///   DisplayCwd=worktree / Cwd=parent case used to fold those writes onto
+///   the shared parent checkout.
 /// - If `input` is absolute but doesn't match, returns it as-is
 ///   (**unconfined** default — see [`resolve_model_path_confined`] when a
 ///   confine root is active).
@@ -644,6 +665,16 @@ pub fn resolve_model_path(
     let input = sanitize_model_path_arg(input);
     let expanded = shellexpand::tilde(input);
     let input_path = std::path::Path::new(expanded.as_ref());
+    // Already under the real tool CWD (the worktree): never fold via DisplayCwd.
+    if path_is_rooted(input_path) && (input_path == cwd || input_path.starts_with(cwd)) {
+        return input_path.to_path_buf();
+    }
+    // Isolated worktree spelling must stay on that tree. An inverted
+    // DisplayCwd (worktree) + Cwd (parent) would otherwise strip the
+    // worktree prefix and join onto the parent — the P0 remap.
+    if path_is_rooted(input_path) && path_looks_like_isolated_worktree(input_path) {
+        return input_path.to_path_buf();
+    }
     if let Some(display) = display_cwd
         && path_is_rooted(input_path)
     {
@@ -2248,6 +2279,46 @@ mod tests {
             super::display_cwd_or_cwd(cwd, None),
             std::path::PathBuf::from("/worktree/abc"),
         );
+    }
+    /// Absolute path already under the real cwd must not be remapped via DisplayCwd.
+    #[test]
+    fn resolve_model_path_keeps_path_already_under_cwd() {
+        let cwd = std::path::Path::new("/home/user/.grok/worktrees/pirates/subagent-abc");
+        let display = std::path::Path::new("/home/user/Pirates");
+        let input = "/home/user/.grok/worktrees/pirates/subagent-abc/tools/blender/nav.py";
+        let result = super::resolve_model_path(cwd, Some(display), input);
+        assert_eq!(result, std::path::PathBuf::from(input));
+    }
+    /// Inverted DisplayCwd=worktree / Cwd=parent must not fold a worktree write
+    /// onto the shared parent checkout (P0 isolation_fallback).
+    #[test]
+    fn resolve_model_path_does_not_remap_worktree_onto_parent() {
+        let parent = std::path::Path::new("/home/user/Pirates");
+        let worktree = std::path::Path::new("/home/user/.grok/worktrees/pirates/subagent-abc");
+        let input = "/home/user/.grok/worktrees/pirates/subagent-abc/tools/blender/nav.py";
+        let result = super::resolve_model_path(parent, Some(worktree), input);
+        assert_eq!(
+            result,
+            std::path::PathBuf::from(input),
+            "worktree absolute must not become parent/tools/blender/nav.py"
+        );
+        assert!(
+            !result.starts_with(parent) || result.starts_with(worktree),
+            "resolved {} must stay on the worktree",
+            result.display()
+        );
+    }
+    #[test]
+    fn path_looks_like_isolated_worktree_detects_product_and_temp() {
+        assert!(super::path_looks_like_isolated_worktree(std::path::Path::new(
+            "/home/user/.grok/worktrees/pirates/subagent-abc/src/main.rs"
+        )));
+        assert!(super::path_looks_like_isolated_worktree(std::path::Path::new(
+            r"C:\Users\dan_m\.grok\worktrees\pirates\subagent-019ffc2f-9daa\tools\x.py"
+        )));
+        assert!(!super::path_looks_like_isolated_worktree(std::path::Path::new(
+            "/home/user/Pirates/tools/x.py"
+        )));
     }
     #[test]
     fn resolve_model_path_tilde_expands_to_home() {

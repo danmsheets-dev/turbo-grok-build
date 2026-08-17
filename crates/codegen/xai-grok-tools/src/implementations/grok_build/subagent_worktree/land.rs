@@ -11,9 +11,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    LandMode, LiveWorktreeApplyBackend, apply_file_content, effective_allowed_paths, git_capture,
-    git_capture_status, git_show_blob, parse_name_status, refuse_land_outside_allowlist,
-    resolve_subagent_work, to_apply_mode, update_meta_land_status,
+    LandMode, LiveWorktreeApplyBackend, apply_file_content_with_union, effective_allowed_paths,
+    filter_harness_land_paths, git_capture, git_capture_status, git_show_blob, parse_name_status,
+    refuse_land_outside_allowlist, resolve_subagent_work, to_apply_mode, update_meta_land_status,
 };
 use crate::implementations::grok_build::task::TaskTool;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -50,6 +50,15 @@ pub struct LandSubagentInput {
         description = "When true, land only paths missing on the parent tree (new files). Existing parent paths are skipped rather than merged/overwritten."
     )]
     pub only_missing: Option<bool>,
+
+    /// Union-merge JSON arrays of objects by this key (default when set: `name`).
+    /// `assets/manifest/*.json` always merges by `name`. Other `.json` files
+    /// merge only when this is set. Fail closed if the file is not mergeable.
+    #[serde(default)]
+    #[schemars(
+        description = "JSON union-merge key (e.g. `name`). Kit manifests under assets/manifest/ always merge by name. When set, every other landed `.json` file is union-merged by this key; fail closed if the shape is not an array of objects or an object map."
+    )]
+    pub json_union_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -127,7 +136,9 @@ Resolves `subagents/<subagent_id>/meta.json` and lands from (priority order):
 
 Use `diff_subagent` first to review. Do not land untrusted or unreviewed work.
 
-When the subagent was spawned with `allowed_paths`, land refuses (error) if any changed path falls outside those relative prefixes — fail closed like merge conflicts.
+When the subagent was spawned with `allowed_paths`, land refuses (error) if any changed path falls outside those relative prefixes — fail closed like merge conflicts. Harness markers (`.grok-subagent-live`, `.grok/`) are ignored by the allowlist and are never copied into the parent.
+
+`assets/manifest/*.json` is union-merged by `name` so parallel densify children do not wipe sibling rows. Pass `json_union_by` to apply the same merge to other landed `.json` files (fail closed if the shape is not an array of objects or an object map).
 
 **only_missing** (optional): when true, land only paths that do not already exist on the parent (new files). Skips updates to already-present parent paths — useful for stale refill snapshots."#
     }
@@ -189,6 +200,11 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
         let work = resolve_subagent_work(&ctx, &input.subagent_id).await?;
         let force = input.force.unwrap_or(false);
         let only_missing = input.only_missing.unwrap_or(false);
+        let json_union_by = input
+            .json_union_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let files_hint = work
             .meta
             .diffstat
@@ -210,7 +226,7 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
             && work.snapshot_ref.is_some();
         if prefer_snapshot {
             if let Some(ref snap) = work.snapshot_ref {
-                return land_snapshot_ref(&work, snap, mode, only_missing).await;
+                return land_snapshot_ref(&work, snap, mode, only_missing, json_union_by).await;
             }
         }
 
@@ -288,12 +304,13 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
                 }
             }
             // In-process mirror of apply_worktree Merge/Overwrite.
-            return land_live_worktree_inprocess(&work, wt, mode, only_missing).await;
+            return land_live_worktree_inprocess(&work, wt, mode, only_missing, json_union_by)
+                .await;
         }
 
         // 2) Snapshot ref
         if let Some(ref snap) = work.snapshot_ref {
-            return land_snapshot_ref(&work, snap, mode, only_missing).await;
+            return land_snapshot_ref(&work, snap, mode, only_missing, json_union_by).await;
         }
 
         // 3) Patch
@@ -414,6 +431,7 @@ async fn land_live_worktree_inprocess(
     wt: &std::path::Path,
     mode: LandMode,
     only_missing: bool,
+    json_union_by: Option<&str>,
 ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
     let parent = &work.parent_git_root;
     let parent_head = git_capture(parent, &["rev-parse", "HEAD"])
@@ -439,6 +457,7 @@ async fn land_live_worktree_inprocess(
     }
     paths.sort();
     paths.dedup();
+    paths = filter_harness_land_paths(&paths);
 
     if only_missing {
         paths.retain(|p| !parent.join(p).exists());
@@ -539,7 +558,7 @@ async fn land_live_worktree_inprocess(
 
     let mut landed = Vec::new();
     for (path, theirs) in plan {
-        apply_file_content(parent, &path, theirs.as_deref())
+        apply_file_content_with_union(parent, &path, theirs.as_deref(), json_union_by)
             .await
             .map_err(|e| xai_tool_runtime::ToolError::custom("land_write_failed", e))?;
         landed.push(path);
@@ -570,6 +589,7 @@ async fn land_snapshot_ref(
     snap: &str,
     mode: LandMode,
     only_missing: bool,
+    json_union_by: Option<&str>,
 ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
     let parent = &work.parent_git_root;
     git_capture(parent, &["rev-parse", "--verify", snap])
@@ -626,7 +646,7 @@ async fn land_snapshot_ref(
         .map_err(|e| {
             xai_tool_runtime::ToolError::custom("git_error", format!("diff name-status: {e}"))
         })?;
-    let mut paths = parse_name_status(&name_status);
+    let mut paths = filter_harness_land_paths(&parse_name_status(&name_status));
     if only_missing {
         paths.retain(|p| !parent.join(p).exists());
     }
@@ -702,7 +722,7 @@ async fn land_snapshot_ref(
 
     let mut landed = Vec::new();
     for (path, theirs) in plan {
-        apply_file_content(parent, &path, theirs.as_deref())
+        apply_file_content_with_union(parent, &path, theirs.as_deref(), json_union_by)
             .await
             .map_err(|e| {
                 xai_tool_runtime::ToolError::custom("land_write_failed", e)
@@ -840,7 +860,8 @@ async fn land_patch(
         });
     }
 
-    let files = patch_files;
+    let files = filter_harness_land_paths(&patch_files);
+    scrub_harness_from_parent(parent, &patch_files).await;
 
     update_meta_land_status(&work.meta_path, "landed").await;
     Ok(LandSubagentOutput {
@@ -861,6 +882,18 @@ async fn land_patch(
         files_landed: files,
         conflicts: vec![],
     })
+}
+
+async fn scrub_harness_from_parent(parent: &std::path::Path, paths: &[String]) {
+    for p in paths {
+        if !super::is_harness_land_path(p) {
+            continue;
+        }
+        let dest = parent.join(p);
+        if dest.is_file() {
+            let _ = tokio::fs::remove_file(&dest).await;
+        }
+    }
 }
 
 fn extract_conflict_hints(stderr: &str) -> Vec<String> {

@@ -378,6 +378,13 @@ pub(crate) fn analyse_shell_for_confine(cmd: &str) -> ConfineShellAnalysis {
                 }
             }
         }
+        // Windows densify: PowerShell `& "C:\Program Files\...\blender.exe"`
+        // (and cmd /c wrapping the same) is rejected by the bash grammar.
+        // Recover only when the invoked basename is a modelled engine —
+        // anything else stays fail-closed Unparseable.
+        if let Some(analysis) = try_analyse_windows_engine_invocation(trimmed) {
+            return analysis;
+        }
         return ConfineShellAnalysis::Unparseable;
     }
 
@@ -412,6 +419,13 @@ fn analyse_shell_tree(root: Node<'_>, src: &str) -> ConfineShellAnalysis {
             continue;
         };
         let program = normalize_program_name(raw);
+        // `cmd /c …` is a valid bash parse of an unmodelled program. Peel it
+        // so densify engines invoked that way still reach the Windows recovery.
+        if program == "cmd" {
+            if let Some(analysis) = try_analyse_windows_engine_invocation(src) {
+                return analysis;
+            }
+        }
         if !shell_program_is_modelled_for_confine(&program, &words) {
             return ConfineShellAnalysis::Unmodelled { program };
         }
@@ -457,7 +471,7 @@ fn shell_confine_operands_from_tree(root: Node<'_>, src: &str) -> Vec<String> {
             out.extend(git_write_path_operands(&words));
         }
         // Densify engines + PowerShell -File script paths (reads + export outs).
-        if densify_engine_is_modelled(&program) {
+        if densify_engine_is_modelled(&program) || configured_densify_engine_basename(&program) {
             out.extend(densify_engine_path_operands(&program, &words));
         }
         if matches!(program.as_str(), "powershell" | "pwsh") {
@@ -608,6 +622,98 @@ fn peel_powershell_expression(seg: &str) -> &str {
         }
     }
     s
+}
+
+/// Recover PowerShell / cmd invocations of densify engines that the bash
+/// grammar rejects. Only blender/godot family basenames qualify — any other
+/// program stays fail-closed.
+fn try_analyse_windows_engine_invocation(cmd: &str) -> Option<ConfineShellAnalysis> {
+    let mut words = tokenize_windows_cmdline(cmd);
+    if words.is_empty() {
+        return None;
+    }
+    if words[0] == "&" {
+        words.remove(0);
+    }
+    if words.is_empty() {
+        return None;
+    }
+    let first = normalize_program_name(&words[0]);
+    if matches!(first.as_str(), "cmd") {
+        let c_idx = words.iter().position(|w| w.eq_ignore_ascii_case("/c"))?;
+        let rest: Vec<String> = words.iter().skip(c_idx + 1).cloned().collect();
+        if rest.is_empty() {
+            return None;
+        }
+        if rest.len() == 1 {
+            return try_analyse_windows_engine_invocation(&rest[0]);
+        }
+        words = rest;
+    }
+    if words.is_empty() {
+        return None;
+    }
+    let program = normalize_program_name(&words[0]);
+    if !densify_engine_is_modelled(&program) && !configured_densify_engine_matches(&words[0]) {
+        return None;
+    }
+    Some(ConfineShellAnalysis::Modelled {
+        operands: densify_engine_path_operands(&program, &words),
+    })
+}
+
+/// Quote-aware Windows / PowerShell argv split. Backslash is a path separator,
+/// not an escape, except `\"` inside double quotes.
+fn tokenize_windows_cmdline(cmd: &str) -> Vec<String> {
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                let mut token = String::new();
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                        token.push('"');
+                        i += 2;
+                    } else {
+                        token.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                out.push(token);
+            }
+            b'\'' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                out.push(String::from_utf8_lossy(&bytes[start..i]).into_owned());
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                out.push(String::from_utf8_lossy(&bytes[start..i]).into_owned());
+            }
+        }
+    }
+    out
 }
 
 /// Whether we understand this program's write side-effects well enough to
@@ -763,7 +869,7 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
     }
     // Densify tools: headless Blender / Godot (CLI path operands checked; bpy /
     // GDScript-internal writes remain residual shell≠OS-jail risk).
-    if densify_engine_is_modelled(program) {
+    if densify_engine_is_modelled(program) || configured_densify_engine_basename(program) {
         return true;
     }
     // PowerShell / pwsh: only `-File`/`-f` script form is modelled (script path
@@ -811,6 +917,52 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
                 .unwrap_or(false);
     }
     false
+}
+
+/// Session-configured Blender/Godot (GROK_BLENDER / GROK_GODOT / …).
+///
+/// Matches a full invocation path or the configured basename so a renamed
+/// build (`D:\tools\my-blender.exe`) still qualifies when the session set it.
+fn configured_densify_engine_matches(raw_program: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "BLENDER_PATH",
+        "GROK_BLENDER",
+        "GROK_BLENDER_PATH",
+        "GODOT_PATH",
+        "GROK_GODOT",
+        "GROK_GODOT_PATH",
+    ];
+    let raw = raw_program.trim().trim_matches('"').trim_matches('\'');
+    if raw.is_empty() {
+        return false;
+    }
+    let raw_norm = raw.replace('/', "\\").to_ascii_lowercase();
+    for key in KEYS {
+        let Ok(val) = std::env::var(key) else {
+            continue;
+        };
+        let val = val.trim();
+        if val.is_empty() {
+            continue;
+        }
+        let val_norm = val.replace('/', "\\").to_ascii_lowercase();
+        if raw_norm == val_norm {
+            return true;
+        }
+        if let Some(base) = std::path::Path::new(val)
+            .file_name()
+            .and_then(|s| s.to_str())
+        {
+            if normalize_program_name(raw) == normalize_program_name(base) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn configured_densify_engine_basename(program: &str) -> bool {
+    configured_densify_engine_matches(program)
 }
 
 /// Blender / Godot console binaries used by densify / asset-kit subagents.
@@ -2301,6 +2453,10 @@ mod tests {
             // RC13 densify: Blender / Godot / PowerShell -File under confine.
             "blender --background --python tools/blender/build_merchant.py",
             r#""C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --background --python tools/blender/build_x.py"#,
+            // RC2: PowerShell call-operator + cmd /c — bash grammar cannot parse these.
+            r#"& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --background --python tools/blender/build_x.py"#,
+            r#"& 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe' --background --python tools/blender/build_x.py"#,
+            r#"cmd /c blender --background --python tools/blender/build_x.py"#,
             "godot --headless --path . --import",
             "powershell -File tools/verify_asset_kit.ps1",
             "pwsh -NoProfile -File tools/verify_asset_kit.ps1",
@@ -2310,6 +2466,58 @@ mod tests {
                 None,
                 "expected modelled for `{cmd}`"
             );
+        }
+    }
+
+    #[test]
+    fn powershell_call_operator_blender_is_modelled_not_unparseable() {
+        let cmd = r#"& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --background --python tools/blender/build_x.py"#;
+        match analyse_shell_for_confine(cmd) {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p.contains("build_x.py")),
+                    "python script operand missing: {operands:?}"
+                );
+                assert!(
+                    !operands.iter().any(|p| p.contains("Program Files")),
+                    "engine exe must not be a write operand: {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled PowerShell blender, got {other:?}"),
+        }
+        assert_eq!(shell_unmodelled_program_for_confine(cmd), None);
+        // Random Program Files exe stays fail-closed.
+        assert_eq!(
+            shell_unmodelled_program_for_confine(
+                r#"& "C:\Program Files\Evil\evil.exe" --write C:\Windows\x"#
+            ),
+            Some("unparseable".to_owned())
+        );
+    }
+
+    #[test]
+    fn configured_grok_blender_path_is_modelled() {
+        let prev = std::env::var_os("GROK_BLENDER");
+        unsafe {
+            std::env::set_var("GROK_BLENDER", r"D:\tools\my-blender.exe");
+        }
+        let cmd = r#"& "D:\tools\my-blender.exe" --background --python tools/blender/build_x.py"#;
+        match analyse_shell_for_confine(cmd) {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p.contains("build_x.py")),
+                    "python script operand missing: {operands:?}"
+                );
+                assert!(
+                    !operands.iter().any(|p| p.contains("my-blender")),
+                    "configured exe must not be a write operand: {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled configured blender, got {other:?}"),
+        }
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GROK_BLENDER", v) },
+            None => unsafe { std::env::remove_var("GROK_BLENDER") },
         }
     }
 

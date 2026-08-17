@@ -455,6 +455,9 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - FOOTGUNS: (1) dirty parent untracked without baseline inflates land (2) parent edits during children (3) trust isolation without tags (4) manual copy instead of land
 - Land refuses >50 files unless force=true; merge fail-closed
 - allowed_paths enforced at write time + land/diff (fail closed)
+- Land ignores harness markers (`.grok-subagent-live`, `.grok/`) and does not copy them
+- `assets/manifest/*.json` union-merges by name; `land --json-union-by=name` for other JSON
+- `turbo disk clean --safe` sweeps `%TEMP%/grok` plus aged TEMP-root `grok-*` leftovers
 
 ## Git
 - No force-push / reset --hard / amend published unless user asks

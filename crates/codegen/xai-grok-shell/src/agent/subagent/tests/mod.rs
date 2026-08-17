@@ -64,6 +64,22 @@ fn unbounded_agent_does_not_gain_runtime_limits() {
     let budget = SubagentExecutionBudget::resolve(& definition, None);
     assert!(budget.is_unbounded());
     assert!(budget.wire().is_none());
+    assert_eq!(budget.first_progress_timeout_ms, Some(60_000));
+}
+#[test]
+fn scoped_allowed_paths_uses_shorter_stall_and_first_progress() {
+    let definition = xai_grok_agent::config::AgentDefinition::general_purpose();
+    let budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
+        &definition,
+        None,
+        None,
+        None,
+        Some("grok-4.6"),
+        true,
+    );
+    assert_eq!(budget.stall_timeout_ms, Some(180_000));
+    assert_eq!(budget.first_progress_timeout_ms, Some(60_000));
+    assert!(budget.is_unbounded() || budget.stall_timeout_ms.is_some());
 }
 #[test]
 fn budget_trigger_codes_and_reasons_are_stable() {
@@ -73,6 +89,8 @@ fn budget_trigger_codes_and_reasons_are_stable() {
         SubagentBudgetTrigger::FinalizingTimeout,
         SubagentBudgetTrigger::MaxToolCalls,
         SubagentBudgetTrigger::Timeout,
+        SubagentBudgetTrigger::Stall,
+        SubagentBudgetTrigger::FirstProgress,
     ] {
         assert_eq!(SubagentBudgetTrigger::from_code(trigger.code()), Some(trigger));
         assert!(! trigger.termination_reason().is_empty());
@@ -2246,6 +2264,28 @@ fn resumed_tool_model_override_is_ignored() {
             .is_none(),
             "resume must preserve source-model pinning"
         );
+}
+#[test]
+fn luna_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = indexmap::IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-5.6-luna".to_string(),
+        test_model_entry("gpt-5.6-luna"),
+    );
+    assert!(
+        super::handle_request::task_model_override_error(
+            Some("openai/gpt-5.6-luna"),
+            ModelOverrideProvenance::Tool,
+            false,
+            &models,
+            false,
+        )
+        .is_none(),
+        "openai/gpt-5.6-luna must resolve to openai-codex/gpt-5.6-luna"
+    );
+    let (key, _) = crate::agent::models::find_task_model_entry(&models, "openai/gpt-5.6-luna")
+        .expect("alias must resolve");
+    assert_eq!(key, "openai-codex/gpt-5.6-luna");
 }
 #[test]
 fn harness_model_override_keeps_internal_fallback_behavior() {

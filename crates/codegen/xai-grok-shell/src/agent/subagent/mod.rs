@@ -1927,6 +1927,10 @@ struct SubagentExecutionBudget {
     finalize_grace_secs: Option<u64>,
     /// No tool/token/turn progress for this long → stall (milliseconds).
     stall_timeout_ms: Option<u64>,
+    /// No tokens or tool calls at all within this many milliseconds of the
+    /// child becoming runnable (worktree setup is excluded). Fail fast so a
+    /// stuck spawn does not burn the full wall-clock budget.
+    first_progress_timeout_ms: Option<u64>,
 }
 
 /// True when the resolved model slug looks like NVIDIA Integrate / Nemotron.
@@ -1990,6 +1994,24 @@ impl SubagentExecutionBudget {
         stall_timeout_ms: Option<u64>,
         model_id: Option<&str>,
     ) -> Self {
+        Self::resolve_with_platform_and_scope(
+            definition,
+            parent_max_turns,
+            timeout_ms_override,
+            stall_timeout_ms,
+            model_id,
+            false,
+        )
+    }
+
+    fn resolve_with_platform_and_scope(
+        definition: &xai_grok_agent::config::AgentDefinition,
+        parent_max_turns: Option<usize>,
+        timeout_ms_override: Option<u64>,
+        stall_timeout_ms: Option<u64>,
+        model_id: Option<&str>,
+        allowed_paths_scoped: bool,
+    ) -> Self {
         // explicit timeout_ms > AgentDefinition.timeout_secs > NVIDIA platform default
         let timeout_secs = match timeout_ms_override {
             Some(ms) if ms > 0 => Some(ms.div_ceil(1000).max(1)),
@@ -2008,10 +2030,11 @@ impl SubagentExecutionBudget {
                 .unwrap_or(30)
                 .min(timeout.saturating_sub(1).max(1))
         });
-        // Stall: explicit → NVIDIA multi-tool default 10 min (was 3 min; Super/Ultra
-        // streams can look idle between tool batches) → 10 min when any hard budget.
+        // Stall: explicit → scoped allowed_paths 3 min (finish after last tool
+        // so the parent can land) → NVIDIA / hard-budget 10 min.
         let stall_timeout_ms = match stall_timeout_ms {
             Some(ms) if ms > 0 => Some(ms),
+            _ if allowed_paths_scoped => Some(180_000),
             _ if model_is_nvidia_platform(model_id) => Some(600_000),
             _ if timeout_secs.is_some() || definition.max_tool_calls.is_some() => Some(600_000),
             _ => None,
@@ -2022,6 +2045,8 @@ impl SubagentExecutionBudget {
             timeout_secs,
             finalize_grace_secs,
             stall_timeout_ms,
+            // Always fail-fast if the child never emits a tool or token.
+            first_progress_timeout_ms: Some(60_000),
         }
     }
 
@@ -2110,6 +2135,7 @@ enum SubagentBudgetTrigger {
     MaxToolCalls,
     Timeout,
     Stall,
+    FirstProgress,
 }
 
 impl SubagentBudgetTrigger {
@@ -2121,6 +2147,7 @@ impl SubagentBudgetTrigger {
             Self::MaxToolCalls => 4,
             Self::Timeout => 5,
             Self::Stall => 6,
+            Self::FirstProgress => 7,
         }
     }
 
@@ -2132,6 +2159,7 @@ impl SubagentBudgetTrigger {
             4 => Some(Self::MaxToolCalls),
             5 => Some(Self::Timeout),
             6 => Some(Self::Stall),
+            7 => Some(Self::FirstProgress),
             _ => None,
         }
     }
@@ -2144,11 +2172,15 @@ impl SubagentBudgetTrigger {
             Self::MaxToolCalls => "max_tool_calls",
             Self::Timeout => "timeout",
             Self::Stall => "stall",
+            Self::FirstProgress => "first_progress_timeout",
         }
     }
 
     fn is_hard(self) -> bool {
-        matches!(self, Self::MaxToolCalls | Self::Timeout | Self::Stall)
+        matches!(
+            self,
+            Self::MaxToolCalls | Self::Timeout | Self::Stall | Self::FirstProgress
+        )
     }
 }
 
@@ -2180,6 +2212,11 @@ fn budget_exhausted_message(
         SubagentBudgetTrigger::Stall => format!(
             "subagent stalled (no tool/token/turn progress for {}ms)",
             budget.stall_timeout_ms.unwrap_or_default()
+        ),
+        SubagentBudgetTrigger::FirstProgress => format!(
+            "subagent made no tool calls or tokens within {}ms of becoming runnable \
+             (worktree setup is excluded from this clock; error_class=subagent_stall)",
+            budget.first_progress_timeout_ms.unwrap_or_default()
         ),
         _ => "subagent execution budget requested finalization".to_string(),
     }
@@ -2213,7 +2250,10 @@ fn budget_finalization_message(
         ),
         SubagentBudgetTrigger::MaxToolCalls
         | SubagentBudgetTrigger::Timeout
-        | SubagentBudgetTrigger::Stall => "the execution budget is exhausted".to_string(),
+        | SubagentBudgetTrigger::Stall
+        | SubagentBudgetTrigger::FirstProgress => {
+            "the execution budget is exhausted".to_string()
+        }
     };
     format!(
         "<system-reminder>\n{reason}. Stop investigating now. Do not call any more tools. Return the best answer supported by the evidence already collected, follow the required output headings, state unknowns honestly, and include exact verification steps for the working agent.\n</system-reminder>"
@@ -2230,7 +2270,7 @@ fn spawn_subagent_budget_monitor(
     started_at: std::time::Instant,
     cancel_token: CancellationToken,
 ) -> Option<SubagentBudgetMonitor> {
-    if budget.is_unbounded() {
+    if budget.is_unbounded() && budget.first_progress_timeout_ms.is_none() {
         return None;
     }
     let state = Arc::new(std::sync::atomic::AtomicU8::new(0));
@@ -2267,11 +2307,18 @@ fn spawn_subagent_budget_monitor(
                 last_progress = std::time::Instant::now();
             }
 
+            let no_progress_yet = last_sig == (0, 0, 0);
             let hard = if budget
                 .timeout_secs
                 .is_some_and(|limit| elapsed >= std::time::Duration::from_secs(limit))
             {
                 Some(SubagentBudgetTrigger::Timeout)
+            } else if no_progress_yet
+                && budget.first_progress_timeout_ms.is_some_and(|limit| {
+                    elapsed >= std::time::Duration::from_millis(limit)
+                })
+            {
+                Some(SubagentBudgetTrigger::FirstProgress)
             } else if budget
                 .max_tool_calls
                 .is_some_and(|limit| signals.tool_call_count >= limit)
@@ -2439,7 +2486,11 @@ pub(crate) fn maybe_post_subagent_disk_clean() {
     // Debounce: skip if we cleaned recently.
     let stamp = match xai_fast_worktree::resolve_grok_home() {
         Ok(h) => h.join(".last-post-subagent-disk-clean"),
-        Err(_) => std::env::temp_dir().join("grok-last-post-subagent-disk-clean"),
+        Err(_) => {
+            let dir = std::env::temp_dir().join("grok");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("last-post-subagent-disk-clean")
+        }
     };
     if let Ok(md) = std::fs::metadata(&stamp) {
         if let Ok(modified) = md.modified() {
@@ -2465,11 +2516,20 @@ pub(crate) fn maybe_post_subagent_disk_clean() {
     let _ = std::fs::write(&stamp, b"1");
     tracing::info!(
         exe = %exe.display(),
-        "post-subagent disk clean: spawning disk clean --safe --if-low-space"
+        "post-subagent disk clean: spawning disk clean --safe --if-low-space --include debug,worktrees,tree-store,temp-grok"
     );
     // Detached best-effort; do not wait (dispose must stay fast).
+    // temp-grok always runs (even when space is OK) so harness leftovers
+    // at TEMP root do not accumulate across densify waves.
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["disk", "clean", "--safe", "--if-low-space"]);
+    cmd.args([
+        "disk",
+        "clean",
+        "--safe",
+        "--if-low-space",
+        "--include",
+        "debug,worktrees,tree-store,temp-grok",
+    ]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -3569,7 +3629,41 @@ fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
         tracing::warn!(error = %e, "failed to write subagent meta");
         return false;
     }
+    persist_durable_subagent_artifacts(dir, meta);
     true
+}
+
+/// Copy meta.json + changes.patch to `~/.grok/subagent-artifacts/<id>/` so
+/// land/diff survive session prune and keep-N worktree deletion.
+fn persist_durable_subagent_artifacts(dir: &Path, meta: &SubagentMeta) {
+    let dest = xai_grok_config::grok_home()
+        .join("subagent-artifacts")
+        .join(&meta.subagent_id);
+    if let Err(e) = std::fs::create_dir_all(&dest) {
+        tracing::warn!(
+            error = %e,
+            dest = %dest.display(),
+            "durable subagent artifact dir create failed"
+        );
+        return;
+    }
+    let src_meta = dir.join("meta.json");
+    if src_meta.is_file()
+        && let Err(e) = std::fs::copy(&src_meta, dest.join("meta.json"))
+    {
+        tracing::warn!(error = %e, "durable meta.json copy failed");
+    }
+    let patch_src = meta
+        .patch_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| dir.join("changes.patch"));
+    if patch_src.is_file()
+        && let Err(e) = std::fs::copy(&patch_src, dest.join("changes.patch"))
+    {
+        tracing::warn!(error = %e, "durable changes.patch copy failed");
+    }
 }
 /// Borrowed output schema so persistence does not copy the text.
 #[derive(serde::Serialize)]

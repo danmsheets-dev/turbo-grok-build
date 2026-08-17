@@ -37,11 +37,26 @@ pub(crate) fn git_reset_hard_command(worktree_path: &Path, target: Option<&str>)
         .context("failed to run git reset")?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "git reset --hard {} failed: {}",
-            tgt,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Concurrent worktree add can briefly leave HEAD unreadable
+        // (`fatal: Could not parse object 'HEAD'`). Retry once against the
+        // same target; callers should pass a source SHA when they have one.
+        if tgt == "HEAD" && stderr.contains("Could not parse object") {
+            std::thread::sleep(std::time::Duration::from_millis(75));
+            let retry = git_command()
+                .current_dir(worktree_path)
+                .args(["reset", "--hard", "HEAD"])
+                .output()
+                .context("failed to retry git reset")?;
+            if retry.status.success() {
+                tracing::debug!(
+                    path = %worktree_path.display(),
+                    "git reset --hard HEAD succeeded on retry"
+                );
+                return Ok(());
+            }
+        }
+        anyhow::bail!("git reset --hard {} failed: {}", tgt, stderr);
     }
 
     tracing::debug!(path = %worktree_path.display(), target = %tgt, "git reset --hard");

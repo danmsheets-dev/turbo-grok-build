@@ -1058,14 +1058,14 @@ fn finalize_worktree(
             git::update_index_stats(dest, &clean)?;
         }
         WorkingTreeMode::CleanTracked => {
-            // `git reset --hard` rebuilds the index from HEAD with
-            // correct stat caches. No need to copy the index first —
-            // that would just be overwritten by reset.
-            git::git_reset_hard_command(dest, None)?;
+            // Prefer the source commit SHA so a briefly-unborn dest HEAD
+            // cannot fail with `Could not parse object 'HEAD'`.
+            let source_head = git::get_head_commit(source).ok();
+            git::git_reset_hard_command(dest, source_head.as_deref())?;
         }
         WorkingTreeMode::CleanAll => {
-            // Same as CleanTracked but also remove untracked files.
-            git::git_reset_hard_command(dest, None)?;
+            let source_head = git::get_head_commit(source).ok();
+            git::git_reset_hard_command(dest, source_head.as_deref())?;
             git::git_clean_fd(dest, false)?;
         }
     }
@@ -1293,16 +1293,14 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
             git::update_index_stats(&dest, &clean)?;
         }
         WorkingTreeMode::CleanTracked => {
-            // `git reset --hard` rebuilds the index from HEAD with correct
-            // stat caches. No need to update stats first — reset overwrites
-            // the entire index unconditionally.
             drop(file_metadata);
-            git::git_reset_hard_command(&dest, None)?;
+            let source_head = git::get_head_commit(&source_root).ok();
+            git::git_reset_hard_command(&dest, source_head.as_deref())?;
         }
         WorkingTreeMode::CleanAll => {
-            // Same as CleanTracked but also remove untracked files.
             drop(file_metadata);
-            git::git_reset_hard_command(&dest, None)?;
+            let source_head = git::get_head_commit(&source_root).ok();
+            git::git_reset_hard_command(&dest, source_head.as_deref())?;
             git::git_clean_fd(&dest, false)?;
         }
     }

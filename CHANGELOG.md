@@ -64,6 +64,37 @@ prefixes.
   scraping `--help`.
 - **`GROK_JOB_OBJECT=1`** env alias (alongside `TURBO_JOB_OBJECT` /
   `HYPER_JOB_OBJECT`) for Windows Job Object opt-in.
+- **`turbo subagent land --json-union-by=<key>`** — union-merge landed JSON
+  arrays of objects by that key (child wins). `assets/manifest/*.json` always
+  merges by `name` so parallel densify lands keep sibling rows. Fail closed
+  if a targeted file is not an array of objects or an object map.
+- **`land_subagent.json_union_by`** — same merge on the tool path.
+- **Imagine-web skill** — `bundled/skills/imagine-web` drives grok.com Imagine
+  through chrome-devtools MCP (snapshot → fill → save). Pair with a user MCP pin
+  (`turbo mcp add chrome-devtools`) using `~/.grok/browser-profile` and
+  `--allow-unrestricted-paths`. Login is human-in-the-loop; not the Imagine API.
+- **`turbo mcp restart <name>`** — disable then enable so a live session
+  re-merges from disk.
+- **`/chrome-mcp` skill** — chrome-devtools loop, `--autoConnect` daily Chrome,
+  Cloudflare SSO warning, draft-not-send on social sites.
+- **MCP merge: disk beats session snapshot** — TUI `session/new` injects
+  `load_mcp_servers()` as the client list; a client `insert` froze
+  chrome-devtools argv across `config.toml` edits. Client extras still
+  survive; TOML/plugin args win on the same name.
+- **Nemotron 3.5 Lightning** — spawnable catalog slugs
+  `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` and
+  `nvidia/nemotron-3.5-lightning-30b-a3b` (NVIDIA Integrate, 1M ctx,
+  same request_compat as Ultra/Super).
+- **Luna slug aliases** — `openai/gpt-5.6-luna` (and `-pro`) resolve to
+  `openai-codex/gpt-5.6-luna` so keep-N / densify spawn does not 400.
+- **`turbo disk` nested `target/` + plugin worktrees** — report/clean walk
+  child `Cargo.toml` / `CACHEDIR.TAG` trees, and `--include plugin-worktrees`
+  scans `GROK_BUILD_WORKTREE_ROOT` plus `H:\gb` / `H:\gb-work`. Live markers
+  and recent unlanded dirs are skipped.
+- **Keep-N land artifacts** — `meta.json` + `changes.patch` copied to
+  `~/.grok/subagent-artifacts/<id>/`. `land_subagent` / `diff_subagent` fall
+  back to that store, then `refs/grok/subagents/<id>`, when session meta is
+  gone.
 
 ### Changed
 - **Claude-compat deny prefixes** — `NotebookEdit` / `MultiEdit` → Edit,
@@ -72,11 +103,43 @@ prefixes.
   `unsupported tool prefix`. `EnterWorktree` remains unsupported.
 - Wire version **`1.0.0-rc.2`**.
 
+### Fixed (RC2 harness closeout)
+- **Absolute worktree writes remapped to parent (P0)** — isolated
+  `…/.grok/worktrees/…/subagent-…` paths are no longer DisplayCwd-folded
+  onto the shared checkout.
+- **Subagent 0-tool stalls** — first-progress timeout 60s after spawn
+  (worktree setup excluded); `allowed_paths` stall 3 min so scoped
+  children finish and the parent can land.
+- **godot-docs-mcp pipe closed** — docker stdio wait + one respawn;
+  handshake error names the Windows 232 / pin workaround.
+- **Windows densify confine** — PowerShell `& "C:\\Program Files\\…\\blender.exe"`
+  and `cmd /c` wrapping the same is now modelled (script/export operands only).
+  Random Program Files exes stay fail-closed `shell-unparseable`.
+  Session-configured `GROK_BLENDER` / `GROK_GODOT` paths (even renamed
+  basenames) are also modelled.
+- **Land + `allowed_paths`** — `.grok-subagent-live` and `.grok/` are harness
+  markers, not payload. Land no longer refuse-closes on them and does not
+  copy them into the parent.
+- **`turbo disk temp-grok`** — report and `--safe` clean now include aged
+  TEMP-root leftovers (`grok-*`, `nest-*`, `goal-*`, `kg_*`, empty `.tmp*`,
+  …) not just `%TEMP%/grok`. Official `grok/sessions` still age-prunes with
+  a fail-closed newest-mtime scan. Post-subagent `--if-low-space` still
+  sweeps `temp-grok` when space is OK.
+- **`turbo subagent list`** — default is the newest session for this cwd;
+  discarded+cleaned leftovers are hidden; `running` + cleaned is shown as
+  `stale`. Pass `--all` for the old dump.
+- **Worktree seed HEAD race** — reset prefers the source commit SHA and
+  retries once on `Could not parse object 'HEAD'`.
+
 ### Harness notes
 - Prefer `turbo version --json` → `agentCompatible` / `cliFamily` for CLI
   selection on PATH.
 - Isolated Windows delegates: pass `--job-object` or set `TURBO_JOB_OBJECT=1`
   so stop can tear down the whole process tree via the job handle.
+- Confined blender-artist / Godot workers may invoke the installed engine
+  binary even when it lives under Program Files; quote the path.
+- Plugin / cargo tests should nest temps under `%TEMP%/grok/{plugin-tests,tests}`
+  so `turbo disk clean --safe --include temp-grok` can reclaim leaks.
 
 ---
 

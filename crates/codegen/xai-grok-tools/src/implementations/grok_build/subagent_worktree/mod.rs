@@ -226,6 +226,40 @@ pub fn validate_subagent_id(id: &str) -> Result<(), xai_tool_runtime::ToolError>
     Ok(())
 }
 
+/// Session-independent land artifacts (`~/.grok/subagent-artifacts/<id>/`).
+///
+/// Keep-N / session prune can delete `sessions/<cwd>/<session>/subagents/<id>`
+/// while the parent still needs to land residual stems. Shell copies
+/// `meta.json` + `changes.patch` here on complete.
+pub fn durable_subagent_artifact_dir(subagent_id: &str) -> PathBuf {
+    crate::util::grok_home::grok_home()
+        .join("subagent-artifacts")
+        .join(subagent_id)
+}
+
+fn empty_meta_view(subagent_id: &str) -> SubagentMetaView {
+    SubagentMetaView {
+        subagent_id: subagent_id.trim().to_owned(),
+        parent_session_id: None,
+        status: None,
+        worktree_path: None,
+        snapshot_ref: None,
+        baseline_ref: None,
+        patch_path: None,
+        worktree_state: None,
+        child_cwd: None,
+        diffstat: None,
+        changed_paths: None,
+        allowed_paths: None,
+    }
+}
+
+async fn git_ref_exists(git_root: &Path, git_ref: &str) -> bool {
+    git_capture_status(git_root, &["rev-parse", "--verify", "--quiet", git_ref])
+        .await
+        .is_ok_and(|(ok, _, _)| ok)
+}
+
 /// Load and resolve subagent work artifacts for land/diff.
 pub async fn resolve_subagent_work(
     ctx: &xai_tool_runtime::ToolCallContext,
@@ -266,22 +300,53 @@ pub async fn resolve_subagent_work(
     // have had to alter, so the segment we join is exactly the id the caller
     // asked for. Trimming would reintroduce the "two ids, one directory"
     // collision the guard exists to prevent.
-    let subagent_dir = sessions_cwd_dir(&cwd_str)
+    let session_subagent_dir = sessions_cwd_dir(&cwd_str)
         .join(&session_id)
         .join("subagents")
         .join(subagent_id);
-    let meta_path = subagent_dir.join("meta.json");
+    let session_meta = session_subagent_dir.join("meta.json");
+    let durable_dir = durable_subagent_artifact_dir(subagent_id);
+    let durable_meta = durable_dir.join("meta.json");
 
-    if !meta_path.is_file() {
+    let (subagent_dir, meta_path) = if session_meta.is_file() {
+        (session_subagent_dir, session_meta)
+    } else if durable_meta.is_file() {
+        (durable_dir, durable_meta)
+    } else {
+        // Last resort: snapshot ref in the parent repo (keep-N / session prune
+        // can delete meta.json while refs/grok/subagents/<id> remains).
+        let parent_git_root = find_git_root(&parent_cwd).await.ok();
+        if let Some(root) = parent_git_root.as_ref() {
+            let snap = format!("refs/grok/subagents/{subagent_id}");
+            if git_ref_exists(root, &snap).await {
+                return Ok(ResolvedSubagentWork {
+                    subagent_id: subagent_id.trim().to_owned(),
+                    meta: SubagentMetaView {
+                        subagent_id: subagent_id.trim().to_owned(),
+                        snapshot_ref: Some(snap.clone()),
+                        ..empty_meta_view(subagent_id)
+                    },
+                    meta_path: session_meta,
+                    subagent_dir: session_subagent_dir,
+                    live_worktree: None,
+                    snapshot_ref: Some(snap),
+                    patch_path: None,
+                    parent_git_root: root.clone(),
+                    parent_cwd,
+                    session_id,
+                });
+            }
+        }
         return Err(xai_tool_runtime::ToolError::custom(
             "subagent_not_found",
             format!(
-                "no meta.json for subagent_id `{}` at {}",
+                "no meta.json for subagent_id `{}` at {} (also checked durable store {})",
                 subagent_id,
-                meta_path.display()
+                session_meta.display(),
+                durable_subagent_artifact_dir(subagent_id).display()
             ),
         ));
-    }
+    };
 
     let raw = tokio::fs::read_to_string(&meta_path).await.map_err(|e| {
         xai_tool_runtime::ToolError::custom(
@@ -488,11 +553,29 @@ pub async fn git_capture_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, Str
 ///
 /// Content is raw bytes so binary land is exact. Kit manifests still get
 /// text-side union merge when both sides are valid UTF-8 JSON.
+///
+/// Harness markers (`.grok-subagent-live`, `.grok/…`) are skipped — they are
+/// not payload and must never be copied into the parent working tree.
 pub async fn apply_file_content(
     root: &Path,
     rel: &str,
     content: Option<&[u8]>,
 ) -> Result<(), String> {
+    apply_file_content_with_union(root, rel, content, None).await
+}
+
+/// Like [`apply_file_content`], with an optional extra JSON union-merge key
+/// (`--json-union-by` / `json_union_by` on land). `assets/manifest/*.json`
+/// always union-merges by `name` (or `union_key` when set).
+pub async fn apply_file_content_with_union(
+    root: &Path,
+    rel: &str,
+    content: Option<&[u8]>,
+    union_key: Option<&str>,
+) -> Result<(), String> {
+    if is_harness_land_path(rel) {
+        return Ok(());
+    }
     let dest = root.join(rel);
     match content {
         Some(data) => {
@@ -501,21 +584,30 @@ pub async fn apply_file_content(
                     .await
                     .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
-            // Semantic union-merge for kit manifests (densify parallel land).
-            let data: Vec<u8> = if is_manifest_json_path(rel) {
+            let data: Vec<u8> = if let Some(key) = union_merge_key_for_path(rel, union_key) {
                 match (
                     std::str::from_utf8(data).ok(),
-                    tokio::fs::read(&dest).await.ok().and_then(|b| {
-                        String::from_utf8(b).ok()
-                    }),
+                    tokio::fs::read(&dest).await.ok().and_then(|b| String::from_utf8(b).ok()),
                 ) {
+                    (None, _) => {
+                        return Err(format!(
+                            "land refused: `{rel}` is marked for JSON union-merge \
+                             but the child blob is not valid UTF-8"
+                        ));
+                    }
                     (Some(child_text), Some(parent_text)) => {
-                        match union_merge_manifest_json(&parent_text, child_text) {
+                        match union_merge_json_by_key(&parent_text, child_text, &key) {
                             Some(merged) => merged.into_bytes(),
-                            None => data.to_vec(),
+                            None => {
+                                return Err(format!(
+                                    "land refused: `{rel}` is not a JSON array of objects \
+                                     (or object map) mergeable by `{key}`. \
+                                     Fix the file or land without json-union-by."
+                                ));
+                            }
                         }
                     }
-                    _ => data.to_vec(),
+                    (Some(_), None) => data.to_vec(),
                 }
             } else {
                 data.to_vec()
@@ -537,9 +629,54 @@ pub async fn apply_file_content(
 
 /// `assets/manifest/<kit>.json` (and nested under that tree).
 pub fn is_manifest_json_path(rel: &str) -> bool {
-    let n = rel.replace('\\', "/");
-    let n = n.trim_start_matches("./");
+    let n = normalize_rel_slashes(rel);
     n.starts_with("assets/manifest/") && n.ends_with(".json")
+}
+
+/// Harness files written by the isolation runtime — never payload.
+///
+/// Land must ignore these for `allowed_paths` and must not copy them into
+/// the parent working tree (densify children always create
+/// `.grok-subagent-live`).
+pub fn is_harness_land_path(rel: &str) -> bool {
+    let n = normalize_rel_slashes(rel);
+    n == ".grok-subagent-live"
+        || n == ".grok"
+        || n.starts_with(".grok/")
+        || n == ".grok-restore"
+        || n.starts_with(".grok-restore/")
+}
+
+fn normalize_rel_slashes(rel: &str) -> String {
+    let n = rel.replace('\\', "/");
+    n.trim_start_matches("./").to_owned()
+}
+
+/// Key to union-merge this path, if any.
+///
+/// - `assets/manifest/*.json` always merges (default key `name`).
+/// - When `extra_key` is set, every `.json` path in the land set merges by
+///   that key (`turbo subagent land --json-union-by=name`).
+pub fn union_merge_key_for_path(rel: &str, extra_key: Option<&str>) -> Option<String> {
+    if is_manifest_json_path(rel) {
+        return Some(extra_key.unwrap_or("name").to_owned());
+    }
+    if let Some(k) = extra_key {
+        let n = normalize_rel_slashes(rel);
+        if n.ends_with(".json") && !k.trim().is_empty() {
+            return Some(k.to_owned());
+        }
+    }
+    None
+}
+
+/// Drop harness markers from a land path list (payload only).
+pub fn filter_harness_land_paths(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|p| !is_harness_land_path(p))
+        .cloned()
+        .collect()
 }
 
 /// Name-keyed union merge for densify kit manifests.
@@ -549,17 +686,27 @@ pub fn is_manifest_json_path(rel: &str) -> bool {
 /// - JSON object map keyed by stem/name
 ///
 /// Child wins on key collision for the same name. Returns `None` when shapes
-/// don't match or parsing fails (caller falls back to overwrite).
+/// don't match or parsing fails (caller must fail closed — do not overwrite).
 pub fn union_merge_manifest_json(parent: &str, child: &str) -> Option<String> {
+    union_merge_json_by_key(parent, child, "name")
+}
+
+/// Union-merge JSON arrays of objects by `key` (default `name`), or shallow
+/// object maps. Child wins on collision. `None` = fail closed.
+pub fn union_merge_json_by_key(parent: &str, child: &str, key: &str) -> Option<String> {
     let parent_v: serde_json::Value = serde_json::from_str(parent).ok()?;
     let child_v: serde_json::Value = serde_json::from_str(child).ok()?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
     let merged = match (&parent_v, &child_v) {
         (serde_json::Value::Array(pa), serde_json::Value::Array(ca)) => {
             let mut by_name: indexmap::IndexMap<String, serde_json::Value> =
                 indexmap::IndexMap::new();
             let mut anonymous: Vec<serde_json::Value> = Vec::new();
             for item in pa.iter().chain(ca.iter()) {
-                match item.get("name").and_then(|n| n.as_str()) {
+                match item.get(key).and_then(|n| n.as_str()) {
                     Some(name) if !name.is_empty() => {
                         by_name.insert(name.to_owned(), item.clone());
                     }
@@ -803,7 +950,8 @@ pub fn refuse_land_outside_allowlist(
              (all entries were absolute or contained `..`). Re-spawn with a valid allowlist.",
         ));
     }
-    let (_ok, denied) = partition_by_allowlist(paths, &allowed);
+    let payload = filter_harness_land_paths(paths);
+    let (_ok, denied) = partition_by_allowlist(&payload, &allowed);
     if denied.is_empty() {
         return Ok(());
     }
@@ -868,6 +1016,52 @@ mod manifest_merge_tests {
         assert_eq!(v["a"], 1);
         assert_eq!(v["b"], 9);
         assert_eq!(v["c"], 3);
+    }
+
+    #[test]
+    fn union_merge_wrong_shape_is_none() {
+        assert!(union_merge_manifest_json("[1, 2]", r#"{"name":"x"}"#).is_none());
+        assert!(union_merge_json_by_key("not-json", "[]", "name").is_none());
+    }
+
+    #[test]
+    fn harness_paths_detected() {
+        assert!(is_harness_land_path(".grok-subagent-live"));
+        assert!(is_harness_land_path(".grok/meta.json"));
+        assert!(is_harness_land_path("./.grok/x"));
+        assert!(is_harness_land_path(".grok-restore/id/a.rs"));
+        assert!(!is_harness_land_path("assets/manifest/cliff.json"));
+        assert!(!is_harness_land_path("tools/blender/build.py"));
+    }
+
+    #[test]
+    fn refuse_allowlist_ignores_harness_marker() {
+        let meta = SubagentMetaView {
+            subagent_id: "s".into(),
+            parent_session_id: None,
+            status: None,
+            worktree_path: None,
+            snapshot_ref: None,
+            baseline_ref: None,
+            patch_path: None,
+            worktree_state: None,
+            child_cwd: None,
+            diffstat: None,
+            changed_paths: None,
+            allowed_paths: Some(vec!["assets/manifest/".into(), "tools/blender/".into()]),
+        };
+        let paths = vec![
+            "assets/manifest/cliff.json".into(),
+            ".grok-subagent-live".into(),
+            ".grok/notes.txt".into(),
+        ];
+        assert!(refuse_land_outside_allowlist(&meta, &paths).is_ok());
+        let bad = vec![
+            "assets/manifest/cliff.json".into(),
+            ".grok-subagent-live".into(),
+            "src/main.rs".into(),
+        ];
+        assert!(refuse_land_outside_allowlist(&meta, &bad).is_err());
     }
 }
 

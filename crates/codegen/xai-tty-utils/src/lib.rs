@@ -484,9 +484,9 @@ impl ProcessGroup {
             use std::mem::{size_of, zeroed};
             use windows::Win32::Foundation::CloseHandle;
             use windows::Win32::System::JobObjects::{
-                CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-                SetInformationJobObject,
+                CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JobObjectExtendedLimitInformation, SetInformationJobObject,
             };
             use windows::core::PCWSTR;
 
@@ -494,7 +494,12 @@ impl ProcessGroup {
                 .map_err(|e| io::Error::other(format!("CreateJobObjectW: {e}")))?;
 
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // KILL_ON_JOB_CLOSE reaps the tree when the plugin/stop closes
+            // turbo.exe. BREAKAWAY_OK lets Turbo enroll tool children in a
+            // per-command ProcessScope (CREATE_BREAKAWAY_FROM_JOB) so a
+            // timed-out Bash/Godot tool can be torn down mid-run.
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
 
             let result = unsafe {
                 SetInformationJobObject(

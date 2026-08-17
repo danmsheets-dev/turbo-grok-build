@@ -117,6 +117,7 @@ turbo disk clean --safe --include debug-pdbs,debug-incremental --dry-run
 turbo disk clean --safe --include release --dry-run
 turbo disk clean --safe --include release-dist-caches --dry-run   # keeps turbo.exe
 turbo disk clean --safe --include cargo-home --i-accept-redownload --dry-run
+turbo disk clean --safe --include plugin-worktrees --dry-run
 turbo disk prune --all --dry-run
 turbo disk prune --worktrees --execute
 ```
