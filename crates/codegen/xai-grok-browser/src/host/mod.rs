@@ -1,12 +1,37 @@
 //! Sidecar host entry (`turbo browser-host`).
 //!
-//! Task 3 resolves defaults and stubs the process. Task 4 replaces the
-//! Windows body with a WebView2 HWND. This module must stay free of
-//! WebView2 / Win32 dependencies.
+//! Windows builds own a WS_OVERLAPPEDWINDOW + WebView2 controller and serve
+//! newline-delimited JSON-RPC on the session named pipe. Non-Windows builds
+//! return [`HostError::WindowsOnly`] (CLI maps to exit 2).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use base64::Engine as _;
+use serde_json::Value;
 
 use crate::profile::{agent_browser_user_data_dir, pipe_name};
+use crate::protocol::{
+    BrowserRequest, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
+    check_url,
+};
+
+#[cfg(windows)]
+mod rpc;
+#[cfg(windows)]
+mod webview;
+#[cfg(windows)]
+mod window;
+
+/// JSON-RPC parse error.
+pub(crate) const RPC_PARSE_ERROR: i64 = -32700;
+/// JSON-RPC method not found / not implemented.
+pub(crate) const RPC_METHOD_NOT_FOUND: i64 = -32601;
+/// JSON-RPC invalid params.
+pub(crate) const RPC_INVALID_PARAMS: i64 = -32602;
+/// JSON-RPC internal error.
+pub(crate) const RPC_INTERNAL_ERROR: i64 = -32603;
+/// Application error (URL policy, navigation, screenshot I/O).
+pub(crate) const RPC_HOST_ERROR: i64 = -32000;
 
 /// Arguments for [`run`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,19 +44,28 @@ pub struct HostArgs {
     pub user_data_dir: PathBuf,
 }
 
-/// Host startup failure.
+/// Host startup / runtime failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HostError {
     /// Sidecar is not implemented outside Windows.
     #[error("turbo browser-host is Windows-only in v1")]
     WindowsOnly,
+    /// Evergreen WebView2 Runtime is not installed.
+    #[error(
+        "WebView2 runtime is not installed. Install the Evergreen WebView2 Runtime from https://developer.microsoft.com/microsoft-edge/webview2/"
+    )]
+    RuntimeMissing,
+    /// Win32 / COM / pipe / I/O failure while starting or running the host.
+    #[error("browser host failed: {0}")]
+    Failed(String),
 }
 
 impl HostError {
-    /// Process exit code for this error (`2` for Windows-only).
+    /// Process exit code for this error (`2` for Windows-only, else `1`).
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::WindowsOnly => 2,
+            Self::RuntimeMissing | Self::Failed(_) => 1,
         }
     }
 }
@@ -49,20 +83,34 @@ impl HostArgs {
     }
 }
 
-/// Run the Agent WebView sidecar (Windows stub in v1).
+/// Decoded host operation (Task 4 surface).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostCall {
+    /// `browser.navigate`
+    Navigate {
+        /// Policy-checked URL.
+        url: String,
+    },
+    /// `browser.screenshot`
+    Screenshot,
+    /// `browser.tabs` (single-tab v1).
+    Tabs,
+    /// `browser.raise`
+    Raise,
+    /// `browser.shutdown`
+    Shutdown,
+}
+
+/// Run the Agent WebView sidecar.
 ///
-/// Non-Windows builds return [`HostError::WindowsOnly`] (CLI maps to exit 2).
+/// On Windows this blocks on the Win32 message loop until the window is
+/// destroyed or `browser.shutdown` is received. Do not call this from a
+/// default unit test.
 pub fn run(args: HostArgs) -> Result<(), HostError> {
     let args = args.resolve_defaults();
     #[cfg(windows)]
     {
-        eprintln!(
-            "turbo browser-host: stub (session={} pipe={} user-data-dir={})",
-            args.session_id,
-            args.pipe,
-            args.user_data_dir.display()
-        );
-        Ok(())
+        run_windows(args)
     }
     #[cfg(not(windows))]
     {
@@ -72,9 +120,327 @@ pub fn run(args: HostArgs) -> Result<(), HostError> {
     }
 }
 
+#[cfg(windows)]
+fn run_windows(args: HostArgs) -> Result<(), HostError> {
+    use std::sync::mpsc;
+
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::HiDpi::{PROCESS_PER_MONITOR_DPI_AWARE, SetProcessDpiAwareness};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, PostQuitMessage, TranslateMessage, WM_APP, WM_QUIT,
+    };
+
+    eprintln!(
+        "turbo browser-host: session={} pipe={} user-data-dir={}",
+        args.session_id,
+        args.pipe,
+        args.user_data_dir.display()
+    );
+
+    // SAFETY: COM STA is required on the thread that owns the WebView2
+    // controller. This is the process main thread (sidecar argv).
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|e| HostError::Failed(format!("CoInitializeEx: {e}")))?;
+    }
+    struct ComGuard;
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            // SAFETY: paired with CoInitializeEx on this thread.
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+    let _com = ComGuard;
+
+    // Best-effort; already-aware processes return an error we ignore.
+    let _ = unsafe { SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) };
+
+    std::fs::create_dir_all(&args.user_data_dir).map_err(|e| {
+        HostError::Failed(format!(
+            "create user-data-dir {}: {e}",
+            args.user_data_dir.display()
+        ))
+    })?;
+
+    webview::ensure_runtime_installed()?;
+
+    let hwnd = window::create_frame_window()?;
+    let mut agent = webview::AgentWebView::create(hwnd, &args.user_data_dir, &args.session_id)?;
+    window::show(hwnd);
+
+    let ui_thread_id = unsafe { GetCurrentThreadId() };
+    let (cmd_tx, cmd_rx) = mpsc::channel::<rpc::UiJob>();
+    let pipe_thread = rpc::spawn_pipe_thread(args.pipe.clone(), ui_thread_id, cmd_tx)?;
+
+    let mut msg = MSG::default();
+    loop {
+        while let Ok(job) = cmd_rx.try_recv() {
+            let line = handle_ui_job(&mut agent, hwnd, job.call);
+            let _ = job.reply.send(line);
+            // Nested wait_with_pump may have consumed WM_QUIT; if the frame
+            // is gone, re-post so this loop still exits.
+            if !window::is_alive(hwnd) {
+                unsafe {
+                    PostQuitMessage(0);
+                }
+            }
+        }
+
+        // SAFETY: standard UI-thread GetMessageW pump. WM_APP is only a
+        // wake-up from the pipe thread (no window; do not dispatch).
+        let result = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
+        match result {
+            -1 => {
+                pipe_thread.shutdown();
+                return Err(HostError::Failed("GetMessageW failed".into()));
+            }
+            0 => break,
+            _ => {
+                if msg.message == WM_APP || msg.message == WM_QUIT {
+                    continue;
+                }
+                unsafe {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        }
+    }
+
+    pipe_thread.shutdown();
+    agent.close();
+    // If shutdown came from RPC, the window may still exist.
+    window::destroy(hwnd);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn handle_ui_job(
+    agent: &mut webview::AgentWebView,
+    hwnd: windows::Win32::Foundation::HWND,
+    call: Result<(JsonRpcId, HostCall), DecodedRpcError>,
+) -> String {
+    match call {
+        Err(err) => encode_rpc_error(err.id.unwrap_or(JsonRpcId::Number(0)), err.error),
+        Ok((id, HostCall::Navigate { url })) => match agent.navigate(&url) {
+            Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Screenshot)) => match agent.screenshot() {
+            Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Tabs)) => match agent.current_tab() {
+            Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Raise)) => {
+            window::raise(hwnd);
+            encode_rpc_ok(id, Value::Object(serde_json::Map::new()))
+        }
+        Ok((id, HostCall::Shutdown)) => {
+            window::destroy(hwnd);
+            encode_rpc_ok(id, Value::Object(serde_json::Map::new()))
+        }
+    }
+}
+
+/// Failed JSON-RPC decode (id may be missing on parse errors).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecodedRpcError {
+    /// Request id when the envelope parsed.
+    pub id: Option<JsonRpcId>,
+    /// JSON-RPC error object.
+    pub error: JsonRpcError,
+}
+
+/// Decode one newline-delimited JSON-RPC request into a Task 4 host call.
+///
+/// Applies [`check_url`] on navigate (fail closed). Unknown / deferred
+/// methods become JSON-RPC errors (no HWND required).
+pub(crate) fn decode_host_call(line: &str) -> Result<(JsonRpcId, HostCall), DecodedRpcError> {
+    let req: JsonRpcRequest =
+        serde_json::from_str(line.trim_end()).map_err(|e| DecodedRpcError {
+            id: None,
+            error: JsonRpcError {
+                code: RPC_PARSE_ERROR,
+                message: e.to_string(),
+                data: None,
+            },
+        })?;
+    let id = req.id.clone();
+    let request = match req.browser_request() {
+        Ok(request) => request,
+        Err(crate::protocol::ProtocolError::UnknownMethod(method)) => {
+            return Err(DecodedRpcError {
+                id: Some(id),
+                error: JsonRpcError {
+                    code: RPC_METHOD_NOT_FOUND,
+                    message: format!("unknown method: {method}"),
+                    data: None,
+                },
+            });
+        }
+        Err(crate::protocol::ProtocolError::InvalidParams(message)) => {
+            return Err(DecodedRpcError {
+                id: Some(id),
+                error: JsonRpcError {
+                    code: RPC_INVALID_PARAMS,
+                    message,
+                    data: None,
+                },
+            });
+        }
+    };
+
+    match request {
+        BrowserRequest::Navigate { url } => {
+            if let Err(err) = check_url(&url) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message: err.to_string(),
+                        data: None,
+                    },
+                });
+            }
+            Ok((id, HostCall::Navigate { url }))
+        }
+        BrowserRequest::Screenshot {} => Ok((id, HostCall::Screenshot)),
+        BrowserRequest::Tabs {} => Ok((id, HostCall::Tabs)),
+        BrowserRequest::Raise {} => Ok((id, HostCall::Raise)),
+        BrowserRequest::Shutdown {} => Ok((id, HostCall::Shutdown)),
+        BrowserRequest::NewTab { .. }
+        | BrowserRequest::SelectTab { .. }
+        | BrowserRequest::CloseTab { .. }
+        | BrowserRequest::Snapshot { .. }
+        | BrowserRequest::Click { .. }
+        | BrowserRequest::Fill { .. }
+        | BrowserRequest::Eval { .. } => Err(DecodedRpcError {
+            id: Some(id),
+            error: JsonRpcError {
+                code: RPC_METHOD_NOT_FOUND,
+                message: format!("{} is not implemented in Task 4", req.method),
+                data: None,
+            },
+        }),
+    }
+}
+
+pub(crate) fn encode_rpc_ok(id: JsonRpcId, result: Value) -> String {
+    encode_rpc_response(JsonRpcResponse {
+        jsonrpc: JsonRpcVersion,
+        id,
+        result: Some(result),
+        error: None,
+    })
+}
+
+pub(crate) fn encode_rpc_error(id: JsonRpcId, error: JsonRpcError) -> String {
+    encode_rpc_response(JsonRpcResponse {
+        jsonrpc: JsonRpcVersion,
+        id,
+        result: None,
+        error: Some(error),
+    })
+}
+
+fn encode_rpc_response(resp: JsonRpcResponse) -> String {
+    let mut line = serde_json::to_string(&resp).unwrap_or_else(|_| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":0,"error":{{"code":{RPC_INTERNAL_ERROR},"message":"encode failed"}}}}"#
+        )
+    });
+    line.push('\n');
+    line
+}
+
+/// Directory for `browser-<n>.png` files.
+pub(crate) fn screenshot_dir(session_id: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("TURBO_BROWSER_IMAGE_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    std::env::temp_dir()
+        .join("turbo-browser")
+        .join(session_id)
+        .join("images")
+}
+
+/// Decode CDP `Page.captureScreenshot` JSON (`{"data":"<base64>"}`) and PNG IHDR.
+pub(crate) fn decode_cdp_png(json: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    let value: Value =
+        serde_json::from_str(json).map_err(|e| format!("CDP screenshot JSON: {e}"))?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "CDP screenshot missing data field".to_owned())?;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| format!("CDP screenshot base64: {e}"))?;
+    let (width, height) = parse_png_ihdr(&png)?;
+    Ok((png, width, height))
+}
+
+/// Read width/height from a PNG IHDR chunk (no `image` crate).
+pub(crate) fn parse_png_ihdr(png: &[u8]) -> Result<(u32, u32), String> {
+    const SIG: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if png.len() < 24 {
+        return Err("PNG too short for IHDR".into());
+    }
+    if &png[0..8] != SIG {
+        return Err("not a PNG (bad signature)".into());
+    }
+    if &png[12..16] != b"IHDR" {
+        return Err("PNG missing IHDR chunk".into());
+    }
+    let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    if width == 0 || height == 0 {
+        return Err("PNG IHDR has zero dimension".into());
+    }
+    Ok((width, height))
+}
+
+/// Next `browser-<n>.png` path under `dir` (creates `dir`).
+pub(crate) fn next_screenshot_path(dir: &Path, n: u32) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create screenshot dir: {e}"))?;
+    Ok(dir.join(format!("browser-{n}.png")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::encode_rpc_request;
+    use crate::protocol::{METHOD_NAVIGATE, METHOD_SCREENSHOT, METHOD_SNAPSHOT};
 
     #[test]
     fn empty_pipe_and_profile_resolve_to_defaults() {
@@ -106,17 +472,14 @@ mod tests {
     #[test]
     fn windows_only_maps_to_exit_code_two() {
         assert_eq!(HostError::WindowsOnly.exit_code(), 2);
+        assert_eq!(HostError::RuntimeMissing.exit_code(), 1);
+        assert_eq!(HostError::Failed("x".into()).exit_code(), 1);
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_stub_returns_ok() {
-        run(HostArgs {
-            session_id: "stub-sess".into(),
-            pipe: String::new(),
-            user_data_dir: PathBuf::new(),
-        })
-        .expect("Windows stub must succeed");
+    fn runtime_missing_display_mentions_evergreen() {
+        let msg = HostError::RuntimeMissing.to_string();
+        assert!(msg.contains("Evergreen WebView2 Runtime"), "{msg}");
     }
 
     #[cfg(not(windows))]
@@ -130,5 +493,201 @@ mod tests {
         .expect_err("non-Windows host must refuse");
         assert_eq!(err, HostError::WindowsOnly);
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn decode_navigate_and_screenshot_requests() {
+        let nav_line = encode_rpc_request(
+            JsonRpcId::Number(1),
+            METHOD_NAVIGATE,
+            serde_json::json!({ "url": "https://example.com/" }),
+        )
+        .unwrap();
+        match decode_host_call(&nav_line).unwrap() {
+            (JsonRpcId::Number(1), HostCall::Navigate { url }) => {
+                assert_eq!(url, "https://example.com/");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let shot_line = encode_rpc_request(
+            JsonRpcId::Number(2),
+            METHOD_SCREENSHOT,
+            serde_json::json!({}),
+        )
+        .unwrap();
+        match decode_host_call(&shot_line).unwrap() {
+            (JsonRpcId::Number(2), HostCall::Screenshot) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_rejects_file_url_before_navigate() {
+        let line = encode_rpc_request(
+            JsonRpcId::Number(3),
+            METHOD_NAVIGATE,
+            serde_json::json!({ "url": "file:///C:/Windows/notepad.exe" }),
+        )
+        .unwrap();
+        let err = decode_host_call(&line).unwrap_err();
+        assert_eq!(err.error.code, RPC_HOST_ERROR);
+        assert!(err.error.message.contains("file:"), "{}", err.error.message);
+    }
+
+    #[test]
+    fn decode_rejects_javascript_and_data_urls() {
+        for url in ["javascript:alert(1)", "data:text/html,hi"] {
+            let line = encode_rpc_request(
+                JsonRpcId::Number(4),
+                METHOD_NAVIGATE,
+                serde_json::json!({ "url": url }),
+            )
+            .unwrap();
+            let err = decode_host_call(&line).unwrap_err();
+            assert_eq!(err.error.code, RPC_HOST_ERROR, "{url}");
+        }
+    }
+
+    #[test]
+    fn decode_snapshot_is_not_implemented() {
+        let line = encode_rpc_request(
+            JsonRpcId::Number(5),
+            METHOD_SNAPSHOT,
+            serde_json::json!({ "verbose": false }),
+        )
+        .unwrap();
+        let err = decode_host_call(&line).unwrap_err();
+        assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND);
+        assert!(
+            err.error.message.contains("not implemented in Task 4"),
+            "{}",
+            err.error.message
+        );
+    }
+
+    #[test]
+    fn parse_png_ihdr_reads_width_height() {
+        // 1×1 transparent PNG.
+        let png = {
+            const B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+            base64::engine::general_purpose::STANDARD
+                .decode(B64)
+                .unwrap()
+        };
+        assert_eq!(parse_png_ihdr(&png).unwrap(), (1, 1));
+        let json = serde_json::json!({
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        })
+        .to_string();
+        let (_, w, h) = decode_cdp_png(&json).unwrap();
+        assert_eq!((w, h), (1, 1));
+    }
+
+    #[test]
+    fn screenshot_dir_honors_env_override() {
+        let prev = std::env::var_os("TURBO_BROWSER_IMAGE_DIR");
+        // SAFETY: test process; we restore the env var after.
+        unsafe {
+            std::env::set_var("TURBO_BROWSER_IMAGE_DIR", "/tmp/custom-shots");
+        }
+        let dir = screenshot_dir("sess");
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TURBO_BROWSER_IMAGE_DIR", v) },
+            None => unsafe { std::env::remove_var("TURBO_BROWSER_IMAGE_DIR") },
+        }
+        assert_eq!(dir, PathBuf::from("/tmp/custom-shots"));
+    }
+
+    #[cfg(windows)]
+    #[ignore]
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_navigates_example_com() {
+        if std::env::var("TURBO_WEBVIEW_IT").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        use std::time::Duration;
+
+        use crate::client::BrowserClient;
+        use crate::profile::pipe_name;
+
+        let session_id = format!("it-webview-{}-{}", std::process::id(), {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        });
+        let pipe = pipe_name(&session_id);
+        let user_data_dir = std::env::temp_dir()
+            .join("turbo-browser-it")
+            .join(&session_id);
+        let image_dir = std::env::temp_dir()
+            .join("turbo-browser-it")
+            .join(format!("{session_id}-images"));
+        // SAFETY: isolated IT process env; restored below.
+        let prev_images = std::env::var_os("TURBO_BROWSER_IMAGE_DIR");
+        unsafe {
+            std::env::set_var("TURBO_BROWSER_IMAGE_DIR", &image_dir);
+        }
+
+        let host_args = HostArgs {
+            session_id: session_id.clone(),
+            pipe: pipe.clone(),
+            user_data_dir,
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let host_thread = std::thread::Builder::new()
+            .name("browser-host-it".into())
+            .spawn(move || {
+                let result = run(host_args);
+                let _ = done_tx.send(result);
+            })
+            .expect("spawn host thread");
+
+        let client = BrowserClient::new(session_id.clone());
+        let mut last_err = None;
+        let mut ready = false;
+        for _ in 0..80 {
+            match client.tabs().await {
+                Ok(_) => {
+                    ready = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+        assert!(ready, "host pipe never became ready: {last_err:?}");
+
+        let nav = client
+            .navigate("https://example.com/")
+            .await
+            .expect("navigate example.com");
+        assert!(
+            nav.url.contains("example.com"),
+            "unexpected url {}",
+            nav.url
+        );
+
+        let shot = client.screenshot().await.expect("screenshot");
+        assert!(
+            PathBuf::from(&shot.path).exists(),
+            "missing screenshot {}",
+            shot.path
+        );
+        assert!(shot.width > 0 && shot.height > 0, "{shot:?}");
+
+        let _ = client.shutdown().await;
+        let _ = done_rx.recv_timeout(Duration::from_secs(20));
+        let _ = host_thread.join();
+
+        match prev_images {
+            Some(v) => unsafe { std::env::set_var("TURBO_BROWSER_IMAGE_DIR", v) },
+            None => unsafe { std::env::remove_var("TURBO_BROWSER_IMAGE_DIR") },
+        }
     }
 }

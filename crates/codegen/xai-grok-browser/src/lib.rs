@@ -1,7 +1,7 @@
-//! Agent WebView protocol, profile paths, JSON-RPC client, mock, and host stub.
+//! Agent WebView protocol, profile paths, JSON-RPC client, mock, and host.
 //!
-//! `turbo browser-host` is the product-owned sidecar. This crate must stay
-//! free of WebView2 / Win32 dependencies (those land in a later task).
+//! `turbo browser-host` is the product-owned sidecar. WebView2 / Win32
+//! bindings are Windows-only (`host::{window,webview,rpc}`).
 
 pub mod client;
 pub mod host;
