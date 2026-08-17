@@ -39,6 +39,11 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Agent WebView** (`browser_*` tools + `turbo browser-host`) — product-owned WebView2 window on `~/.grok/agent-browser`. Ctrl+Shift+B mirrors URL/snapshot in the TUI. Not chrome-devtools MCP.
+
 ## [1.0.0-rc.2] - 2026-08-11
 
 **Harness polish for Grok Build plugin / CI.** No interactive TUI redesign —

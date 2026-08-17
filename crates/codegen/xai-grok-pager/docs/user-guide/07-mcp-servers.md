@@ -322,6 +322,30 @@ See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) f
 
 ---
 
+## Agent WebView vs chrome-devtools MCP
+
+Turbo has two real-browser surfaces. They are **not** interchangeable.
+
+**Agent WebView** is first-class product (`browser_navigate`, `browser_snapshot`,
+`browser_click`, `browser_fill`, `browser_eval`, `browser_screenshot`,
+`browser_tabs`). The sidecar is `turbo browser-host`. The profile is always
+`~/.grok/agent-browser`. It never attaches to daily Chrome. **Ctrl+Shift+B**
+mirrors the current URL and last accessibility snapshot in the TUI; it does
+not render HTML. v1 is Windows-only (WebView2). Prefer this for pages that
+need JavaScript, a headed window, or a login UI. Use `web_fetch` for static
+docs. Never automate passwords or 2FA — the human signs in in the Agent window.
+
+**chrome-devtools MCP** is the user's Chrome. Pin it in `~/.grok/config.toml`
+as `[mcp_servers.chrome-devtools]` with `--autoConnect` (Chrome 144+ remote
+debugging at `chrome://inspect/#remote-debugging`). Use it **only** when the
+user explicitly wants **their** daily Chrome tabs or cookies. Discover tools
+with `search_tool` (`chrome-devtools`); do not invent names.
+
+A dedicated MCP `--userDataDir` profile is a third, isolated Chrome — still
+MCP, still not Agent WebView. Prefer Agent WebView over that pin.
+
+---
+
 ## Subagents and MCP
 
 Subagents inherit the parent session’s connected MCP servers by default, including plugin-sourced agents. Use agent frontmatter `mcpInheritance` to restrict that set (`all`, `none`, `named`, or `except`). Details are in [Subagents — MCP inheritance](16-subagents.md#mcp-inheritance).
