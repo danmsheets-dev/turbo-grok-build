@@ -5,7 +5,8 @@
 //! same connection.
 
 use std::io;
-use std::sync::mpsc::{self, Sender};
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -21,7 +22,12 @@ pub struct UiJob {
     /// Decoded call, or a JSON-RPC error produced on the pipe thread.
     pub call: Result<(JsonRpcId, HostCall), DecodedRpcError>,
     /// Response line (including trailing `\n`).
-    pub reply: Sender<String>,
+    ///
+    /// A `tokio` oneshot, not `std::sync::mpsc`: awaiting it lets the accept
+    /// loop keep polling shutdown. Blocking here on a current-thread runtime
+    /// stalled the whole runtime whenever the UI thread was busy, so a wedged
+    /// page made the host unkillable.
+    pub reply: oneshot::Sender<String>,
 }
 
 /// Handle for the background pipe server.
@@ -55,8 +61,9 @@ pub fn spawn_pipe_thread(
     pipe: String,
     ui_thread_id: u32,
     cmd_tx: Sender<UiJob>,
+    session_folder: Option<PathBuf>,
 ) -> Result<PipeThread, HostError> {
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
     let join = std::thread::Builder::new()
@@ -77,7 +84,15 @@ pub fn spawn_pipe_thread(
                 match bind_first_instance(&pipe) {
                     Ok(first) => {
                         let _ = ready_tx.send(Ok(()));
-                        serve_loop(pipe, first, ui_thread_id, cmd_tx, shutdown_rx).await;
+                        serve_loop(
+                            pipe,
+                            first,
+                            ui_thread_id,
+                            cmd_tx,
+                            shutdown_rx,
+                            session_folder,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         let _ = ready_tx.send(Err(e));
@@ -105,21 +120,32 @@ fn bind_first_instance(pipe: &str) -> io::Result<NamedPipeServer> {
     ServerOptions::new().first_pipe_instance(true).create(pipe)
 }
 
+/// Spare listening instances kept alive alongside the one being served.
+///
+/// The client opens a fresh connection per request. With a single instance,
+/// every request raced the window between `connect()` returning and the next
+/// `create()`, and lost with `ERROR_PIPE_BUSY`.
+const SPARE_INSTANCES: usize = 4;
+
 async fn serve_loop(
     pipe: String,
     first: NamedPipeServer,
     ui_thread_id: u32,
     cmd_tx: Sender<UiJob>,
     mut shutdown: oneshot::Receiver<()>,
+    session_folder: Option<PathBuf>,
 ) {
-    let mut next = Some(first);
+    let folder = session_folder.as_deref();
+    let mut pool: Vec<NamedPipeServer> = vec![first];
     loop {
-        let server = match next.take() {
-            Some(s) => s,
-            None => match ServerOptions::new().create(&pipe) {
-                Ok(s) => s,
+        while pool.len() <= SPARE_INSTANCES {
+            match ServerOptions::new().create(&pipe) {
+                Ok(s) => pool.push(s),
                 Err(_) => break,
-            },
+            }
+        }
+        let Some(server) = pool.pop() else {
+            break;
         };
 
         tokio::select! {
@@ -127,10 +153,9 @@ async fn serve_loop(
             connected = server.connect() => {
                 match connected {
                     Ok(()) => {
-                        next = ServerOptions::new().create(&pipe).ok();
                         tokio::select! {
                             _ = &mut shutdown => break,
-                            _ = handle_connection(server, ui_thread_id, &cmd_tx) => {}
+                            _ = handle_connection(server, ui_thread_id, &cmd_tx, folder) => {}
                         }
                     }
                     Err(_) => {
@@ -147,7 +172,12 @@ async fn serve_loop(
     }
 }
 
-async fn handle_connection(server: NamedPipeServer, ui_thread_id: u32, cmd_tx: &Sender<UiJob>) {
+async fn handle_connection(
+    server: NamedPipeServer,
+    ui_thread_id: u32,
+    cmd_tx: &Sender<UiJob>,
+    session_folder: Option<&std::path::Path>,
+) {
     let mut reader = BufReader::new(server);
     let mut line = String::new();
     loop {
@@ -161,8 +191,8 @@ async fn handle_connection(server: NamedPipeServer, ui_thread_id: u32, cmd_tx: &
             continue;
         }
 
-        let call = decode_host_call(&line);
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let call = decode_host_call(&line, session_folder);
+        let (reply_tx, reply_rx) = oneshot::channel();
         if cmd_tx
             .send(UiJob {
                 call,
@@ -174,7 +204,7 @@ async fn handle_connection(server: NamedPipeServer, ui_thread_id: u32, cmd_tx: &
         }
         wake_ui_thread(ui_thread_id);
 
-        let response = match reply_rx.recv() {
+        let response = match reply_rx.await {
             Ok(line) => line,
             Err(_) => break,
         };
@@ -214,7 +244,7 @@ mod tests {
             serde_json::json!({ "url": "https://example.com/" }),
         )
         .unwrap();
-        let (id, call) = decode_host_call(&line).unwrap();
+        let (id, call) = decode_host_call(&line, None).unwrap();
         assert_eq!(id, JsonRpcId::Number(9));
         assert_eq!(
             call,
@@ -228,7 +258,10 @@ mod tests {
     fn pipe_thread_decode_tabs_snapshot_and_eval() {
         let tabs =
             encode_rpc_request(JsonRpcId::Number(1), METHOD_TABS, serde_json::json!({})).unwrap();
-        assert!(matches!(decode_host_call(&tabs).unwrap().1, HostCall::Tabs));
+        assert!(matches!(
+            decode_host_call(&tabs, None).unwrap().1,
+            HostCall::Tabs
+        ));
 
         let snap = encode_rpc_request(
             JsonRpcId::Number(2),
@@ -237,7 +270,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            decode_host_call(&snap).unwrap().1,
+            decode_host_call(&snap, None).unwrap().1,
             HostCall::Snapshot { verbose: false }
         ));
 
@@ -247,7 +280,7 @@ mod tests {
             serde_json::json!({ "function": "() => 1" }),
         )
         .unwrap();
-        match decode_host_call(&eval).unwrap().1 {
+        match decode_host_call(&eval, None).unwrap().1 {
             HostCall::Eval { function } => assert_eq!(function, "() => 1"),
             other => panic!("{other:?}"),
         }
@@ -255,7 +288,7 @@ mod tests {
         let new_tab =
             encode_rpc_request(JsonRpcId::Number(4), METHOD_NEW_TAB, serde_json::json!({}))
                 .unwrap();
-        let err = decode_host_call(&new_tab).unwrap_err();
+        let err = decode_host_call(&new_tab, None).unwrap_err();
         assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND);
         assert!(err.error.message.contains("not implemented"));
     }

@@ -4,8 +4,10 @@
 //! [`compact_ax_tree`] is a pure function over a CDP
 //! `Accessibility.getFullAXTree` dump (used in tests and as a fallback).
 //!
-//! Uids are 1-based decimal strings (`"1"`, `"2"`, …) in document / tree
-//! order over the same node set the tagger stamps as `data-turbo-uid`.
+//! Live uids are `<epoch>-<index>`: the epoch advances on every snapshot, so a
+//! uid from an earlier snapshot fails closed instead of resolving to whatever
+//! element now sits at that index. Fallback uids are `ax-<n>` — numbered over
+//! the AX tree rather than the tagged DOM, and deliberately not actionable.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -51,7 +53,19 @@ pub fn unknown_uid_message(uid: &str) -> String {
     format!("unknown_uid: {uid}")
 }
 
-/// Accept the injected uid scheme: non-empty decimal without leading zeros.
+/// Error text for a uid minted by an earlier snapshot.
+pub fn stale_uid_message(uid: &str) -> String {
+    format!(
+        "stale_uid: {uid} is from an earlier snapshot; the page has changed. \
+         Call browser_snapshot again and use a current uid."
+    )
+}
+
+/// Accept the injected uid scheme: `<epoch>-<index>`, both positive decimals.
+///
+/// The epoch is what makes a uid safe to act on. Positional uids alone shift
+/// under any re-render, so `click("5")` could land on a different element than
+/// the one the snapshot described.
 pub fn resolve_uid(uid: &str) -> Result<&str, String> {
     if is_turbo_uid(uid) {
         Ok(uid)
@@ -60,17 +74,25 @@ pub fn resolve_uid(uid: &str) -> Result<&str, String> {
     }
 }
 
+fn is_positive_decimal(part: &str) -> bool {
+    !part.is_empty() && !part.starts_with('0') && part.chars().all(|c| c.is_ascii_digit())
+}
+
 fn is_turbo_uid(uid: &str) -> bool {
-    !uid.is_empty() && !uid.starts_with('0') && uid.chars().all(|c| c.is_ascii_digit())
+    match uid.split_once('-') {
+        Some((epoch, index)) => is_positive_decimal(epoch) && is_positive_decimal(index),
+        None => false,
+    }
 }
 
 /// Compact a CDP `Accessibility.getFullAXTree` JSON dump into [`AxNode`]s.
 ///
 /// Skips `ignored` nodes and `RootWebArea` containers in the output, but
 /// still walks `childIds` of ignored wrappers (real CDP dumps nest heading
-/// / link / textbox nodes under them). Assigns sequential `"1"`… uids in
-/// tree order (childIds) over heading + interactive roles so they can match
-/// `data-turbo-uid` document order on simple pages.
+/// / link / textbox nodes under them). Assigns sequential `ax-1`… uids in
+/// tree order (childIds) over heading + interactive roles. These are **read
+/// only**: the AX tree and the tagged DOM are different node sets, so a uid
+/// from here would resolve to a different element than the one described.
 pub fn compact_ax_tree(json: &str, verbose: bool) -> Result<Vec<AxNode>, String> {
     let value: Value = serde_json::from_str(json).map_err(|e| format!("AX tree JSON: {e}"))?;
     let nodes_val = match &value {
@@ -150,7 +172,10 @@ fn maybe_push_compact(node: &CdpAxNode, verbose: bool, cap: usize, out: &mut Vec
         if v.is_empty() { None } else { Some(v) }
     };
     out.push(AxNode {
-        uid: (out.len() + 1).to_string(),
+        // Deliberately NOT a `<epoch>-<index>` uid: these are numbered over the
+        // AX tree, not over the tagged DOM, so `[data-turbo-uid="N"]` would
+        // resolve to an unrelated element. `resolve_uid` rejects this shape.
+        uid: format!("ax-{}", out.len() + 1),
         role,
         name,
         value,
@@ -248,10 +273,34 @@ struct CdpAxProperty {
     value: Option<CdpAxValue>,
 }
 
-/// Parse the injected collector's JSON array into [`AxNode`]s (capped).
-pub(crate) fn parse_ax_nodes_json(json: &str, cap: usize) -> Result<Vec<AxNode>, String> {
+/// Unwrap a CDP `Runtime.evaluate` (`returnByValue`) reply into its value.
+///
+/// Used for isolated-world calls, where the collector returns a real object
+/// rather than the `JSON.stringify` string `browser.eval` produces.
+pub(crate) fn parse_world_result(json: &str) -> Result<Value, String> {
+    let v: Value = serde_json::from_str(json).map_err(|e| format!("world eval JSON: {e}"))?;
+    if let Some(exc) = v.get("exceptionDetails") {
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(Value::as_str)
+            .or_else(|| exc.get("text").and_then(Value::as_str))
+            .unwrap_or("evaluation failed");
+        return Err(format!("world eval exception: {msg}"));
+    }
+    let result = v
+        .get("result")
+        .ok_or_else(|| "world eval missing result".to_owned())?;
+    Ok(result.get("value").cloned().unwrap_or(Value::Null))
+}
+
+/// Parse the collector's `{ epoch, nodes: [...] }` payload into [`AxNode`]s.
+pub(crate) fn parse_collected_nodes(value: &Value, cap: usize) -> Result<Vec<AxNode>, String> {
+    let nodes = value
+        .get("nodes")
+        .ok_or_else(|| "snapshot payload has no nodes".to_owned())?;
     let nodes: Vec<CollectedNode> =
-        serde_json::from_str(json.trim()).map_err(|e| format!("snapshot JSON: {e}"))?;
+        serde_json::from_value(nodes.clone()).map_err(|e| format!("snapshot JSON: {e}"))?;
     Ok(nodes
         .into_iter()
         .filter(|n| resolve_uid(&n.uid).is_ok())
@@ -279,24 +328,23 @@ struct CollectedNode {
     focused: bool,
 }
 
-/// Interpret a click/fill/lookup script result (`{ok, error, …}`).
-pub(crate) fn interpret_uid_action(uid: &str, json: &str) -> Result<Value, String> {
-    let trimmed = json.trim();
-    if trimmed.is_empty() || trimmed == "null" {
-        return Err("ax script returned null".into());
+/// Interpret a click/fill/lookup collector result (`{ok, error, …}`).
+pub(crate) fn interpret_uid_action(uid: &str, value: &Value) -> Result<Value, String> {
+    if value.is_null() {
+        return Err("ax collector returned null".into());
     }
-    let v: Value = serde_json::from_str(trimmed).map_err(|e| format!("ax script JSON: {e}"))?;
-    if v.get("ok").and_then(Value::as_bool) == Some(true) {
-        return Ok(v);
+    if value.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(value.clone());
     }
-    let err = v
+    let err = value
         .get("error")
         .and_then(Value::as_str)
         .unwrap_or("action failed");
-    if err.contains("unknown_uid") {
-        return Err(unknown_uid_message(uid));
+    match err {
+        e if e.contains("stale_uid") => Err(stale_uid_message(uid)),
+        e if e.contains("unknown_uid") => Err(unknown_uid_message(uid)),
+        other => Err(other.to_owned()),
     }
-    Err(err.to_owned())
 }
 
 /// Decode CDP `Runtime.evaluate` JSON (JSON.stringify wrap + `returnByValue`).
@@ -351,18 +399,18 @@ mod tests {
         assert_eq!(nodes.len(), 3);
         // Heading is a child of the ignored generic wrapper; walking
         // ignored `childIds` is what assigns it uid "1".
-        assert_eq!(nodes[0].uid, "1");
+        assert_eq!(nodes[0].uid, "ax-1");
         assert_eq!(nodes[0].role, "heading");
         assert_eq!(nodes[0].name, "Example Domain");
         assert!(!nodes[0].focused);
         assert!(
-            nodes.iter().any(|n| n.uid == "1" && n.role == "heading"),
+            nodes.iter().any(|n| n.uid == "ax-1" && n.role == "heading"),
             "descendant of ignored wrapper must still get a uid"
         );
-        assert_eq!(nodes[1].uid, "2");
+        assert_eq!(nodes[1].uid, "ax-2");
         assert_eq!(nodes[1].role, "link");
         assert_eq!(nodes[1].name, "More information...");
-        assert_eq!(nodes[2].uid, "3");
+        assert_eq!(nodes[2].uid, "ax-3");
         assert_eq!(nodes[2].role, "textbox");
         assert_eq!(nodes[2].name, "Search");
         assert_eq!(nodes[2].value.as_deref(), Some("query"));
@@ -381,8 +429,8 @@ mod tests {
         assert!(nodes[1].name.contains("illustrative"));
         assert_eq!(nodes[2].role, "link");
         assert_eq!(nodes[3].role, "textbox");
-        assert_eq!(nodes[1].uid, "2");
-        assert_eq!(nodes[2].uid, "3");
+        assert_eq!(nodes[1].uid, "ax-2");
+        assert_eq!(nodes[2].uid, "ax-3");
     }
 
     #[test]
@@ -390,18 +438,26 @@ mod tests {
         let json = synthetic_links(250);
         let compact = compact_ax_tree(&json, false).unwrap();
         assert_eq!(compact.len(), SNAPSHOT_NODE_CAP);
-        assert_eq!(compact[0].uid, "1");
-        assert_eq!(compact[199].uid, "200");
+        assert_eq!(compact[0].uid, "ax-1");
+        assert_eq!(compact[199].uid, "ax-200");
         let verbose = compact_ax_tree(&json, true).unwrap();
         assert_eq!(verbose.len(), 250);
         assert!(verbose.len() <= SNAPSHOT_NODE_CAP_VERBOSE);
     }
 
     #[test]
-    fn resolve_uid_accepts_decimal_scheme() {
-        assert_eq!(resolve_uid("1").unwrap(), "1");
-        assert_eq!(resolve_uid("42").unwrap(), "42");
-        for bad in ["", "0", "01", "1a", "-1", "uid-1", " 1"] {
+    fn resolve_uid_rejects_injection_shapes() {
+        for bad in [
+            "0",
+            "01",
+            "1a",
+            "-1",
+            "uid-1",
+            " 1",
+            r#"1"] , [x"#,
+            "1-1 or 1",
+            "*",
+        ] {
             let err = resolve_uid(bad).unwrap_err();
             assert!(err.contains("unknown_uid"), "{bad}: {err}");
         }
@@ -409,10 +465,71 @@ mod tests {
 
     #[test]
     fn interpret_unknown_uid_action() {
-        let err = interpret_uid_action("99", r#"{"ok":false,"error":"unknown_uid"}"#).unwrap_err();
+        let err = interpret_uid_action(
+            "9-9",
+            &serde_json::json!({"ok":false,"error":"unknown_uid"}),
+        )
+        .unwrap_err();
         assert!(err.contains("unknown_uid"));
-        assert!(err.contains("99"));
-        assert!(interpret_uid_action("1", r#"{"ok":true}"#).is_ok());
+        assert!(err.contains("9-9"));
+        assert!(interpret_uid_action("1-1", &serde_json::json!({"ok":true})).is_ok());
+    }
+
+    #[test]
+    fn stale_uid_tells_the_caller_to_snapshot_again() {
+        let err = interpret_uid_action("1-5", &serde_json::json!({"ok":false,"error":"stale_uid"}))
+            .unwrap_err();
+        assert!(err.contains("stale_uid"), "{err}");
+        assert!(err.contains("browser_snapshot"), "{err}");
+    }
+
+    #[test]
+    fn uid_scheme_requires_an_epoch() {
+        for good in ["1-1", "3-42", "12-7"] {
+            assert_eq!(resolve_uid(good).unwrap(), good);
+        }
+        // Bare positional uids are exactly what shifted under a re-render.
+        for bad in [
+            "", "1", "42", "0-1", "1-0", "1-", "-1", "a-1", "1-b", "ax-1", "1-1-1",
+        ] {
+            assert!(resolve_uid(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn fallback_uids_are_not_actionable() {
+        let nodes = compact_ax_tree(AX_EXAMPLE, false).expect("compact fixture");
+        for node in &nodes {
+            assert!(
+                resolve_uid(&node.uid).is_err(),
+                "AX-tree uid {:?} must not resolve against data-turbo-uid",
+                node.uid
+            );
+        }
+    }
+
+    #[test]
+    fn parse_world_result_unwraps_and_reports_exceptions() {
+        let value =
+            parse_world_result(r#"{"result":{"type":"object","value":{"ok":true,"epoch":3}}}"#)
+                .unwrap();
+        assert_eq!(value["epoch"], 3);
+        let err = parse_world_result(r#"{"exceptionDetails":{"text":"boom"}}"#).unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+    }
+
+    #[test]
+    fn parse_collected_nodes_drops_uids_without_an_epoch() {
+        let payload = serde_json::json!({
+            "epoch": 2,
+            "nodes": [
+                {"uid": "2-1", "role": "link", "name": "ok", "value": null, "focused": false},
+                {"uid": "7", "role": "link", "name": "legacy", "value": null, "focused": false},
+            ]
+        });
+        let nodes = parse_collected_nodes(&payload, 10).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].uid, "2-1");
     }
 
     #[test]
@@ -449,16 +566,37 @@ mod tests {
     }
 
     #[test]
-    fn turbo_ax_js_is_tiny_and_tags_uid() {
+    fn turbo_ax_js_is_small_and_carries_its_guards() {
         let injected = turbo_ax_js_injected();
         assert!(
-            injected.len() < 4_096,
-            "keep turbo_ax.js tiny ({})",
+            injected.len() < 10_240,
+            "keep turbo_ax.js small ({})",
             injected.len()
         );
         assert!(injected.contains("data-turbo-uid"));
         assert!(injected.contains("a[href]"));
         assert!(injected.contains("unknown_uid"));
+        // Guards the audit added; losing any of these is a silent regression.
+        assert!(
+            injected.contains("stale_uid"),
+            "uid epoch check must survive"
+        );
+        assert!(
+            injected.contains("getOwnPropertyDescriptor"),
+            "React value-setter path must survive"
+        );
+        assert!(
+            injected.contains("one-time-code"),
+            "credential-field detection must survive"
+        );
+        assert!(
+            injected.contains("getClientRects"),
+            "hidden-element filter must survive"
+        );
+        assert!(
+            injected.contains("shadowRoot"),
+            "shadow DOM traversal must survive"
+        );
         assert!(!injected.contains('\r'), "injected JS must be LF");
         assert_eq!(strip_injected_cr("a\r\nb").as_ref(), "a\nb");
         assert!(matches!(strip_injected_cr("a\nb"), Cow::Borrowed(_)));

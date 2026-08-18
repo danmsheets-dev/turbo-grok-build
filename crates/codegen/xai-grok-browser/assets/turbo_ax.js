@@ -1,17 +1,73 @@
 (function () {
   var SEL =
     "a[href],button,input,textarea,select,[role=button],[role=link],[role=textbox],[contenteditable=true],h1,h2,h3,h4,h5,h6,[role=heading]";
-  function skip(el) {
-    return el.tagName === "INPUT" && String(el.type).toLowerCase() === "hidden";
+  var prev = window.__turboAx;
+  // Survive re-injection: keep the epoch monotonic so a uid minted before a
+  // re-inject can never silently resolve to a different element after it.
+  var epoch = prev && typeof prev.epoch === "number" ? prev.epoch : 0;
+
+  function isHeading(el) {
+    var t = el.tagName;
+    return (
+      t === "H1" || t === "H2" || t === "H3" || t === "H4" || t === "H5" || t === "H6" ||
+      el.getAttribute("role") === "heading"
+    );
   }
-  function tag() {
-    var els = document.querySelectorAll(SEL);
-    var n = 0;
-    for (var i = 0; i < els.length; i++) {
-      if (skip(els[i])) continue;
-      els[i].setAttribute("data-turbo-uid", String(++n));
+  function skip(el) {
+    if (el.tagName === "INPUT" && String(el.type).toLowerCase() === "hidden") return true;
+    // Not rendered: no boxes at all (display:none, detached, empty inline).
+    if (!el.getClientRects().length) return true;
+    if (el.closest('[aria-hidden="true"]')) return true;
+    var view = el.ownerDocument && el.ownerDocument.defaultView;
+    var st = view && view.getComputedStyle(el);
+    if (st && (st.visibility === "hidden" || st.visibility === "collapse")) return true;
+    return false;
+  }
+  // Document order across the light DOM and every open shadow root. One pass:
+  // a shadow host can itself be a candidate, so test and recurse together.
+  function candidates(root, out) {
+    var all = root.querySelectorAll("*");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el.matches(SEL) && !skip(el)) out.push(el);
+      if (el.shadowRoot) candidates(el.shadowRoot, out);
     }
-    return n;
+    return out;
+  }
+  function inViewport(el) {
+    var r = el.getBoundingClientRect();
+    var vh = window.innerHeight || 0;
+    var vw = window.innerWidth || 0;
+    return r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
+  }
+  // Over cap, drop the least useful first: offscreen headings, then headings,
+  // then offscreen interactives. Document order is preserved within each tier.
+  function applyCap(els, cap) {
+    if (els.length <= cap) return els;
+    var tiers = [[], [], [], []];
+    for (var i = 0; i < els.length; i++) {
+      var head = isHeading(els[i]);
+      var vis = inViewport(els[i]);
+      tiers[head ? (vis ? 2 : 3) : vis ? 0 : 1].push(els[i]);
+    }
+    var keep = [];
+    for (var t = 0; t < tiers.length && keep.length < cap; t++) {
+      for (var k = 0; k < tiers[t].length && keep.length < cap; k++) keep.push(tiers[t][k]);
+    }
+    var order = new Map();
+    for (var m = 0; m < els.length; m++) order.set(els[m], m);
+    keep.sort(function (a, b) {
+      return order.get(a) - order.get(b);
+    });
+    return keep;
+  }
+  function tag(cap) {
+    epoch += 1;
+    var els = applyCap(candidates(document, []), cap || 200);
+    for (var i = 0; i < els.length; i++) {
+      els[i].setAttribute("data-turbo-uid", epoch + "-" + (i + 1));
+    }
+    return els;
   }
   function roleOf(el) {
     var r = el.getAttribute("role");
@@ -28,6 +84,7 @@
       if (ty === "submit" || ty === "button" || ty === "reset" || ty === "image") return "button";
       if (ty === "checkbox") return "checkbox";
       if (ty === "radio") return "radio";
+      if (ty === "password") return "password";
       return "textbox";
     }
     if (el.isContentEditable) return "textbox";
@@ -45,44 +102,119 @@
     return String(s).slice(0, 200);
   }
   function valOf(el) {
+    if (el.tagName === "INPUT" && String(el.type).toLowerCase() === "password") return null;
     if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") {
       var v = el.value;
       return v === undefined || v === null || v === "" ? null : String(v);
     }
     return null;
   }
+  // Fields the host must refuse to fill regardless of the value's shape.
+  function secretOf(el) {
+    var ty = String(el.type || "").toLowerCase();
+    if (ty === "password") return "password";
+    var ac = String(el.getAttribute("autocomplete") || "").toLowerCase();
+    if (ac.indexOf("one-time-code") >= 0) return "one-time-code";
+    if (ac.indexOf("current-password") >= 0 || ac.indexOf("new-password") >= 0) return "password";
+    if (ac.indexOf("cc-number") >= 0 || ac.indexOf("cc-csc") >= 0) return "payment";
+    return null;
+  }
   function elByUid(uid) {
-    return document.querySelector('[data-turbo-uid="' + uid + '"]');
+    var q = '[data-turbo-uid="' + String(uid).replace(/["\\]/g, "\\$&") + '"]';
+    var el = document.querySelector(q);
+    if (el) return el;
+    // Shadow roots are not reachable from a document-level selector.
+    var all = document.querySelectorAll("*");
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].shadowRoot) {
+        var hit = all[i].shadowRoot.querySelector(q);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  }
+  // A uid minted by an older snapshot must never resolve. Stale uids are the
+  // difference between clicking "More information" and clicking "Delete".
+  function resolve(uid) {
+    var parts = String(uid).split("-");
+    if (parts.length !== 2 || String(Number(parts[0])) !== parts[0]) {
+      return { ok: false, error: "unknown_uid" };
+    }
+    if (Number(parts[0]) !== epoch) return { ok: false, error: "stale_uid" };
+    var el = elByUid(uid);
+    if (!el) return { ok: false, error: "unknown_uid" };
+    return { ok: true, el: el };
   }
   function lookup(uid) {
-    var el = elByUid(uid);
-    if (!el) return { ok: false, error: "unknown_uid" };
-    return { ok: true, name: nameOf(el), role: roleOf(el) };
+    var r = resolve(uid);
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      name: nameOf(r.el),
+      role: roleOf(r.el),
+      secret: secretOf(r.el),
+      epoch: epoch,
+    };
   }
   function click(uid) {
-    var el = elByUid(uid);
-    if (!el) return { ok: false, error: "unknown_uid" };
+    var r = resolve(uid);
+    if (!r.ok) return r;
+    var el = r.el;
+    if (el.disabled) return { ok: false, error: "element_disabled" };
+    if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "nearest" });
+    // Real pointer sequence: custom menus and framework handlers listen for
+    // pointerdown/mousedown, not the synthetic click() shortcut.
+    var rect = el.getBoundingClientRect();
+    var x = rect.left + rect.width / 2;
+    var y = rect.top + rect.height / 2;
+    var opts = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y };
+    try {
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+    } catch (e) {
+      /* PointerEvent may be unavailable; mouse events below still fire. */
+    }
+    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    if (el.focus) el.focus();
+    try {
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+    } catch (e) {
+      /* ignore */
+    }
+    el.dispatchEvent(new MouseEvent("mouseup", opts));
     el.click();
-    return { ok: true };
+    return { ok: true, epoch: epoch };
   }
   function fill(uid, value) {
-    var el = elByUid(uid);
-    if (!el) return { ok: false, error: "unknown_uid" };
+    var r = resolve(uid);
+    if (!r.ok) return r;
+    var el = r.el;
+    if (el.disabled || el.readOnly) return { ok: false, error: "element_not_editable" };
+    if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "nearest" });
     el.focus();
-    if ("value" in el) el.value = value;
-    else if (el.isContentEditable) el.textContent = value;
+    if ("value" in el) {
+      // React/Vue install their own `value` setter and track the last value they
+      // saw. A plain `el.value = v` leaves that tracker stale, so the framework
+      // dedupes the synthetic `input` and onChange never fires.
+      var proto = Object.getPrototypeOf(el);
+      var desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
+      if (desc && desc.set) desc.set.call(el, value);
+      else el.value = value;
+    } else if (el.isContentEditable) {
+      el.textContent = value;
+    } else {
+      return { ok: false, error: "element_not_editable" };
+    }
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true };
+    el.dispatchEvent(new FocusEvent("blur", { bubbles: false }));
+    return { ok: true, epoch: epoch };
   }
   function collect(cap) {
-    tag();
     cap = cap || 200;
-    var els = document.querySelectorAll("[data-turbo-uid]");
+    var els = tag(cap);
     var out = [];
     var ae = document.activeElement;
-    var n = Math.min(els.length, cap);
-    for (var i = 0; i < n; i++) {
+    for (var i = 0; i < els.length; i++) {
       var el = els[i];
       out.push({
         uid: el.getAttribute("data-turbo-uid"),
@@ -92,8 +224,16 @@
         focused: el === ae,
       });
     }
-    return out;
+    return { epoch: epoch, nodes: out };
   }
-  window.__turboAx = { tag: tag, collect: collect, lookup: lookup, click: click, fill: fill };
-  tag();
+  var api = { tag: tag, collect: collect, lookup: lookup, click: click, fill: fill };
+  // Live getter: `epoch` advances inside tag(), and a re-injection reads it
+  // back off the old object to stay monotonic.
+  Object.defineProperty(api, "epoch", {
+    enumerable: true,
+    get: function () {
+      return epoch;
+    },
+  });
+  window.__turboAx = api;
 })();

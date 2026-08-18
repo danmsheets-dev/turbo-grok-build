@@ -45,10 +45,20 @@ fn children() -> &'static Mutex<HashMap<String, Child>> {
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Per-session spawn lock.
+///
+/// A single global lock was held across the whole 15s wait, so a second
+/// session starting a browser queued behind the first session's timeout.
 #[cfg(windows)]
-fn ensure_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn ensure_lock_for(session_id: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        guard
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
 }
 
 fn lock_map() -> std::sync::MutexGuard<'static, HashMap<String, Child>> {
@@ -188,7 +198,8 @@ pub fn ensure_browser_host(session_id: &str) -> Result<BrowserHostHandle, AgentB
 
     #[cfg(windows)]
     {
-        let _guard = ensure_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let lock = ensure_lock_for(session_id);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         if pipe_connectable(session_id) {
             return Ok(BrowserHostHandle {
                 session_id: session_id.to_owned(),
@@ -216,6 +227,22 @@ pub fn ensure_browser_host(session_id: &str) -> Result<BrowserHostHandle, AgentB
         let deadline = Instant::now() + ENSURE_TIMEOUT;
         loop {
             if pipe_connectable(session_id) {
+                // Drain stderr on its own thread. The pipe is never read on the
+                // success path, so anything the host writes later (a panic, a
+                // WebView2 diagnostic) would fill the ~4KB buffer and block the
+                // host forever on its next write.
+                if let Some(pipe) = child.stderr.take() {
+                    let sid = session_id.to_owned();
+                    let _ = std::thread::Builder::new()
+                        .name("browser-host-stderr".into())
+                        .spawn(move || {
+                            use std::io::BufRead;
+                            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok)
+                            {
+                                tracing::debug!(session = %sid, "browser-host: {line}");
+                            }
+                        });
+                }
                 store_child(session_id, child);
                 return Ok(BrowserHostHandle {
                     session_id: session_id.to_owned(),
@@ -250,14 +277,20 @@ pub fn ensure_browser_host(session_id: &str) -> Result<BrowserHostHandle, AgentB
     }
 }
 
+/// How long to wait for a graceful `browser.shutdown` before killing.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// Ask the host to shut down, then kill the tracked child if it is still alive.
 pub async fn shutdown_browser_host(session_id: &str) {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return;
     }
+    xai_grok_tools::implementations::grok_build::browser::forget_session(session_id);
     let client = BrowserClient::new(session_id);
-    let _ = client.shutdown().await;
+    // Bounded: a wedged host would otherwise hang teardown here and never
+    // reach the kill below, which exists for exactly that case.
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, client.shutdown()).await;
     if let Some(mut child) = take_child(session_id) {
         match child.try_wait() {
             Ok(None) => {

@@ -19,6 +19,9 @@ pub struct BrowserHostArgs {
     /// WebView2 user-data-dir. Default: $GROK_HOME/agent-browser
     #[arg(long)]
     pub user_data_dir: Option<PathBuf>,
+    /// Session folder. `file:` URLs beneath it are allowed; omitted denies all.
+    #[arg(long)]
+    pub session_folder: Option<PathBuf>,
 }
 
 /// Run the sidecar host and return after it exits.
@@ -27,6 +30,7 @@ pub fn run(args: BrowserHostArgs) -> Result<(), HostError> {
         session_id: args.session_id,
         pipe: args.pipe.unwrap_or_default(),
         user_data_dir: args.user_data_dir.unwrap_or_default(),
+        session_folder: args.session_folder,
     })
 }
 
@@ -48,6 +52,7 @@ mod tests {
                         session_id: "sess-1".into(),
                         pipe: None,
                         user_data_dir: None,
+                        session_folder: None,
                     }
                 );
             }

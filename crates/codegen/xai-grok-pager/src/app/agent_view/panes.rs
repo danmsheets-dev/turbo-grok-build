@@ -504,16 +504,56 @@ impl AgentView {
             return;
         }
         self.browser_pane.visible = true;
-        self.browser_pane.host_running = false;
-        if let Some(sid) = self.session.session_id.as_ref() {
-            let sid = sid.0.to_string();
-            let up = xai_grok_shell::session::agent_browser::pipe_connectable(&sid);
-            self.browser_pane.host_running = up;
-            if up {
-                fire_and_forget_browser_raise(sid);
-            }
+        self.refresh_browser_pane();
+        if self.browser_pane.host_running
+            && let Some(sid) = self.session.session_id.as_ref()
+        {
+            fire_and_forget_browser_raise(sid.0.to_string());
         }
         self.set_active_pane(AgentPane::Browser, false);
+    }
+
+    /// Pull the pane's contents from the session's last `browser_snapshot`.
+    ///
+    /// `last_url` / `last_snapshot_lines` used to have no writer at all, so the
+    /// pane always rendered "about:blank" and "(no snapshot yet)". The tools
+    /// layer already keeps the last snapshot per session; read it from there
+    /// rather than issuing a second RPC from the UI thread.
+    pub(super) fn refresh_browser_pane(&mut self) {
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            self.browser_pane.host_running = false;
+            return;
+        };
+        let snapshot =
+            xai_grok_tools::implementations::grok_build::browser::last_snapshot_for(&sid);
+        // A snapshot means the host answered; only probe the pipe when there is
+        // nothing cached, so the common path does no blocking I/O on the UI
+        // thread.
+        self.browser_pane.host_running = match &snapshot {
+            Some(_) => true,
+            None => xai_grok_shell::session::agent_browser::pipe_connectable(&sid),
+        };
+        let Some(snapshot) = snapshot else {
+            self.browser_pane.last_url = None;
+            self.browser_pane.last_snapshot_lines.clear();
+            return;
+        };
+        self.browser_pane.last_url = Some(snapshot.url.clone());
+        let mut lines = Vec::with_capacity(snapshot.nodes.len() + 1);
+        if !snapshot.title.is_empty() {
+            lines.push(format!("title: {}", snapshot.title));
+        }
+        for node in &snapshot.nodes {
+            let mut line = format!("[{}] {} {}", node.uid, node.role, node.name);
+            if let Some(value) = &node.value {
+                line.push_str(&format!(" = {value}"));
+            }
+            if node.focused {
+                line.push_str(" *");
+            }
+            lines.push(line);
+        }
+        self.browser_pane.last_snapshot_lines = lines;
     }
     /// Browser-mirror-focused key handling. Esc / toggle close the pane only.
     pub(super) fn handle_browser_key(
@@ -528,6 +568,19 @@ impl AgentView {
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             self.browser_pane.visible = false;
             self.set_active_pane(AgentPane::Scrollback, false);
+            return InputOutcome::Changed;
+        }
+        if key!('r').matches(key) {
+            self.refresh_browser_pane();
+            return InputOutcome::Changed;
+        }
+        if key!('j').matches(key) || key.code == KeyCode::Down {
+            self.refresh_browser_pane();
+            self.browser_pane.scroll_by(1);
+            return InputOutcome::Changed;
+        }
+        if key!('k').matches(key) || key.code == KeyCode::Up {
+            self.browser_pane.scroll_by(-1);
             return InputOutcome::Changed;
         }
         if key!(Tab).matches(key) {

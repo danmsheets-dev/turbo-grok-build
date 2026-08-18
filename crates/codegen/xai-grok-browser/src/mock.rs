@@ -182,6 +182,7 @@ fn dispatch(
         BrowserRequest::Snapshot { verbose: _ } => to_value(SnapshotResult {
             url: state.url.clone(),
             title: state.title.clone(),
+            source: crate::protocol::SnapshotSource::Dom,
             nodes: state.nodes.clone(),
         }),
         BrowserRequest::Click { uid } => {
@@ -239,14 +240,14 @@ fn current_tabs(state: &MockState) -> TabsResult {
 fn canned_nodes() -> Vec<AxNode> {
     vec![
         AxNode {
-            uid: "1".into(),
+            uid: "1-1".into(),
             role: "link".into(),
             name: "More information".into(),
             value: None,
             focused: false,
         },
         AxNode {
-            uid: "2".into(),
+            uid: "1-2".into(),
             role: "textbox".into(),
             name: "Search".into(),
             value: Some(String::new()),
@@ -291,7 +292,7 @@ mod tests {
         let err = host
             .call(
                 METHOD_FILL,
-                serde_json::json!({ "uid": "2", "value": "123456" }),
+                serde_json::json!({ "uid": "1-2", "value": "123456" }),
             )
             .await
             .unwrap_err();
@@ -325,14 +326,14 @@ mod tests {
         let host = MockBrowserHost::new();
         host.call(
             METHOD_FILL,
-            serde_json::json!({ "uid": "2", "value": "hello" }),
+            serde_json::json!({ "uid": "1-2", "value": "hello" }),
         )
         .await
         .unwrap();
         assert_eq!(
             host.last_action(),
             Some(MockAction::Fill {
-                uid: "2".into(),
+                uid: "1-2".into(),
                 value: "hello".into(),
             })
         );

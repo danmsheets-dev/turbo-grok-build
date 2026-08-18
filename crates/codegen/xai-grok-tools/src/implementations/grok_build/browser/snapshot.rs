@@ -80,6 +80,13 @@ impl xai_tool_runtime::Tool for BrowserSnapshotTool {
             format!("title: {}", result.title),
             format!("nodes: {}", result.nodes.len()),
         ];
+        if !result.source.uids_are_actionable() {
+            lines.push(
+                "note: accessibility-tree fallback — these uids are READ-ONLY and cannot be \
+                 used with browser_click or browser_fill. Snapshot again for actionable uids."
+                    .to_owned(),
+            );
+        }
         for node in result.nodes {
             let mut line = format!("- uid={} role={} name={:?}", node.uid, node.role, node.name);
             if let Some(value) = node.value {
@@ -90,6 +97,6 @@ impl xai_tool_runtime::Tool for BrowserSnapshotTool {
             }
             lines.push(line);
         }
-        Ok(super::text_output(lines.join("\n")))
+        Ok(super::untrusted_page_text(lines.join("\n")))
     }
 }

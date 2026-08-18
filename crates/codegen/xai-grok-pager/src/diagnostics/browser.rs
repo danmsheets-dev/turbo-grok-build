@@ -92,10 +92,22 @@ fn probe_webview2_runtime() -> WebView2Probe {
     }
 }
 
-/// Create `dir` if needed, write `.doctor-write-test`, then delete it.
+/// Check `dir` is writable without creating it for users who never browse.
+///
+/// When the profile does not exist yet, probe its parent instead: `doctor`
+/// should report on the environment, not provision it.
 pub(crate) fn probe_profile_writable(dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("cannot create agent-browser profile {}: {e}", dir.display()))?;
+    if !dir.exists() {
+        let parent = dir.parent().unwrap_or(dir);
+        return if parent.is_dir() {
+            Ok(())
+        } else {
+            Err(format!(
+                "agent-browser profile parent {} does not exist",
+                parent.display()
+            ))
+        };
+    }
     let probe = dir.join(".doctor-write-test");
     let write_err = (|| {
         let mut file = std::fs::OpenOptions::new()

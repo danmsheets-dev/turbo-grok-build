@@ -2193,6 +2193,7 @@ impl AgentView {
                 self.browser_pane.host_running,
                 self.browser_pane.last_url.as_deref(),
                 &self.browser_pane.last_snapshot_lines,
+                self.browser_pane.scroll,
                 &theme,
             );
         }

@@ -314,6 +314,28 @@ pub struct AxNode {
     pub focused: bool,
 }
 
+/// Where a snapshot's nodes came from.
+///
+/// This is load-bearing, not metadata: only [`SnapshotSource::Dom`] uids are
+/// real `data-turbo-uid` attributes. Fallback uids are numbered over a
+/// *different* node set, so clicking one would hit an unrelated element.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotSource {
+    /// Injected collector; uids are actionable.
+    #[default]
+    Dom,
+    /// CDP `Accessibility.getFullAXTree`; uids are **not** actionable.
+    AxFallback,
+}
+
+impl SnapshotSource {
+    /// Whether `click` / `fill` may use uids from this snapshot.
+    pub fn uids_are_actionable(self) -> bool {
+        matches!(self, Self::Dom)
+    }
+}
+
 /// Result of `browser.snapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotResult {
@@ -321,6 +343,9 @@ pub struct SnapshotResult {
     pub url: String,
     /// Document title.
     pub title: String,
+    /// Which collector produced `nodes` (see [`SnapshotSource`]).
+    #[serde(default)]
+    pub source: SnapshotSource,
     /// Compact AX nodes.
     pub nodes: Vec<AxNode>,
 }
@@ -417,6 +442,26 @@ pub enum FillPolicyError {
     /// High-complexity secret or password-named field.
     #[error("fill value looks like a password or recovery secret")]
     PasswordShaped,
+    /// The target field itself is a credential input, whatever the value is.
+    #[error(
+        "target field is a {kind} input; the human signs in themselves in the Agent Browser window"
+    )]
+    SecretField {
+        /// `password`, `one-time-code`, or `payment`.
+        kind: String,
+    },
+}
+
+/// What the page says the fill target is, from the injected `lookup`.
+///
+/// `secret` is authoritative: `<input type="password">` is a credential field
+/// even when it has no label and the value looks innocuous.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FillTarget<'a> {
+    /// Accessible name, if the page exposes one.
+    pub name: Option<&'a str>,
+    /// `password` / `one-time-code` / `payment` from `type` + `autocomplete`.
+    pub secret: Option<&'a str>,
 }
 
 /// `browser.eval` policy failure (fail closed).
@@ -475,7 +520,23 @@ pub fn check_fill_value(value: &str) -> Result<(), FillPolicyError> {
 
 /// Fill policy, optionally using the target field's accessible name / role.
 pub fn check_fill(value: &str, field_name: Option<&str>) -> Result<(), FillPolicyError> {
-    if field_looks_secret(field_name) {
+    check_fill_target(
+        value,
+        &FillTarget {
+            name: field_name,
+            secret: None,
+        },
+    )
+}
+
+/// Fill policy against a resolved page field (see [`FillTarget`]).
+pub fn check_fill_target(value: &str, target: &FillTarget<'_>) -> Result<(), FillPolicyError> {
+    if let Some(kind) = target.secret.map(str::trim).filter(|k| !k.is_empty()) {
+        return Err(FillPolicyError::SecretField {
+            kind: kind.to_ascii_lowercase(),
+        });
+    }
+    if field_looks_secret(target.name) {
         return Err(FillPolicyError::PasswordShaped);
     }
     let trimmed = value.trim();
@@ -524,12 +585,32 @@ fn check_about(rest: &str) -> Result<(), UrlPolicyError> {
     }
 }
 
+/// Authority terminators for a special scheme.
+///
+/// WHATWG treats `\` exactly like `/` here, so `https://evil.test\.example.com/`
+/// has host `evil.test` — not `evil.test\.example.com`. Splitting on `/` alone
+/// let a backslash smuggle an allowlisted suffix past [`check_host_allowlist`]
+/// and an `.localhost` suffix past [`is_allowed_http_host`].
+const AUTHORITY_END: [char; 4] = ['/', '?', '#', '\\'];
+
+/// Strip the `//` after a special scheme. WHATWG accepts any mix of `/` and
+/// `\` (and tolerates extra ones), so `https:\\host` is `https://host`.
+fn strip_authority_slashes(rest: &str) -> Option<&str> {
+    let mut chars = rest.char_indices();
+    let (_, first) = chars.next()?;
+    let (_, second) = chars.next()?;
+    if !matches!(first, '/' | '\\') || !matches!(second, '/' | '\\') {
+        return None;
+    }
+    Some(rest[2..].trim_start_matches(['/', '\\']))
+}
+
 fn check_http_family(rest: &str, https: bool) -> Result<(), UrlPolicyError> {
-    let Some(after_slashes) = rest.strip_prefix("//") else {
+    let Some(after_slashes) = strip_authority_slashes(rest) else {
         return Err(UrlPolicyError::Invalid);
     };
     let authority_end = after_slashes
-        .find(['/', '?', '#'])
+        .find(AUTHORITY_END)
         .unwrap_or(after_slashes.len());
     let authority = &after_slashes[..authority_end];
     if authority.is_empty() {
@@ -556,18 +637,11 @@ pub fn browser_allowlist() -> Vec<String> {
 fn browser_allow_raw() -> Option<String> {
     #[cfg(test)]
     {
-        let guard = test_allow_value().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(over) = guard.as_ref() {
-            return Some(over.clone());
-        }
         // Lib tests ignore ambient env so they cannot leak across `--test-threads`.
-        return None;
+        return TEST_ALLOW.with(|cell| cell.borrow().clone());
     }
     #[cfg(not(test))]
-    match std::env::var(GROK_BROWSER_ALLOW_ENV) {
-        Ok(v) => Some(v),
-        Err(_) => None,
-    }
+    std::env::var(GROK_BROWSER_ALLOW_ENV).ok()
 }
 
 fn parse_browser_allow(raw: &str) -> Vec<String> {
@@ -586,7 +660,7 @@ fn normalize_allow_entry(raw: &str) -> String {
         .or_else(|| trimmed.strip_prefix("http://"))
         .unwrap_or(trimmed.as_str());
     let host_port = without_scheme
-        .split(['/', '?', '#'])
+        .split(AUTHORITY_END)
         .next()
         .unwrap_or(without_scheme);
     let host_port = host_port.strip_prefix("*.").unwrap_or(host_port);
@@ -621,29 +695,20 @@ fn host_matches_allowlist(host: &str, allow: &[String]) -> bool {
     })
 }
 
+// Thread-local, not a global behind a lock: the harness runs tests on separate
+// threads, and a global override leaks into every test that reads the allowlist
+// concurrently — a lock around the writer does not stop unlocked readers.
 #[cfg(test)]
-fn test_allow_value() -> &'static std::sync::Mutex<Option<String>> {
-    static VALUE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-    &VALUE
+thread_local! {
+    static TEST_ALLOW: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
-fn test_allow_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    &LOCK
-}
-
-/// Install `GROK_BROWSER_ALLOW` for the duration of `f` (tests only).
+/// Install `GROK_BROWSER_ALLOW` for the duration of `f` on this thread (tests only).
 #[cfg(test)]
 pub(crate) fn with_browser_allow<R>(allow: &str, f: impl FnOnce() -> R) -> R {
-    let _lock = test_allow_lock().lock().unwrap_or_else(|e| e.into_inner());
-    {
-        *test_allow_value().lock().unwrap_or_else(|e| e.into_inner()) = Some(allow.to_owned());
-    }
+    TEST_ALLOW.with(|cell| *cell.borrow_mut() = Some(allow.to_owned()));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    {
-        *test_allow_value().lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
+    TEST_ALLOW.with(|cell| *cell.borrow_mut() = None);
     match result {
         Ok(r) => r,
         Err(panic) => std::panic::resume_unwind(panic),
@@ -677,7 +742,7 @@ fn parse_http_host(authority: &str) -> Result<String, UrlPolicyError> {
         }
         _ => authority,
     };
-    if host.is_empty() || host.contains(':') {
+    if host.is_empty() || host.contains(':') || host.contains('\\') {
         return Err(UrlPolicyError::Invalid);
     }
     Ok(host.to_string())
@@ -688,12 +753,24 @@ fn is_allowed_http_host(host: &str) -> bool {
         return true;
     }
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
-        return ip.is_loopback() || is_rfc1918(ip);
+        return is_allowed_v4(ip);
     }
     if let Ok(ip) = host.parse::<Ipv6Addr>() {
-        return ip.is_loopback();
+        if ip.is_loopback() {
+            return true;
+        }
+        // `::ffff:127.0.0.1` is loopback to every resolver but not to
+        // `Ipv6Addr::is_loopback`.
+        if let Some(v4) = ip.to_ipv4_mapped() {
+            return is_allowed_v4(v4);
+        }
+        return false;
     }
     false
+}
+
+fn is_allowed_v4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback() || is_rfc1918(ip)
 }
 
 fn is_localhost_name(host: &str) -> bool {
@@ -804,7 +881,25 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 fn path_is_within(path: &Path, root: &Path) -> bool {
     let path = normalize_lexically(path);
     let root = normalize_lexically(root);
-    path.starts_with(root)
+    #[cfg(windows)]
+    {
+        // Windows paths are case-insensitive; `Path::starts_with` is not. A
+        // lowercase drive letter from WebView2 must not read as an escape.
+        let mut p = path.components();
+        for r in root.components() {
+            let Some(seg) = p.next() else {
+                return false;
+            };
+            if !seg.as_os_str().eq_ignore_ascii_case(r.as_os_str()) {
+                return false;
+            }
+        }
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
 }
 
 fn field_looks_secret(field_name: Option<&str>) -> bool {
@@ -965,6 +1060,101 @@ mod tests {
     }
 
     #[test]
+    fn backslash_in_authority_cannot_smuggle_a_host() {
+        // WHATWG parses `\` as `/`, so the real host of each of these is the
+        // segment BEFORE the backslash. Splitting only on `/` used to hand the
+        // whole string to the allowlist / localhost checks.
+        assert!(matches!(
+            check_url(r"http://evil.test\.localhost/"),
+            Err(UrlPolicyError::HostDenied(_))
+        ));
+        assert!(matches!(
+            check_url(r"http://evil.test\.example.localhost/x"),
+            Err(UrlPolicyError::HostDenied(_))
+        ));
+        with_browser_allow("example.com", || {
+            assert_eq!(
+                check_url(r"https://evil.test\.example.com/"),
+                Err(UrlPolicyError::AllowlistDenied("evil.test".into())),
+                "backslash must not smuggle an allowlisted suffix"
+            );
+            assert_eq!(
+                check_url(r"https://evil.test\@example.com/"),
+                Err(UrlPolicyError::AllowlistDenied("evil.test".into()))
+            );
+            // Backslash-form slashes still resolve to the same real host.
+            assert!(check_url(r"https:\\example.com\path").is_ok());
+        });
+    }
+
+    #[test]
+    fn ipv4_mapped_loopback_is_local_http() {
+        assert!(check_url("http://[::ffff:127.0.0.1]/").is_ok());
+        assert!(check_url("http://[::ffff:192.168.1.4]/").is_ok());
+        assert!(matches!(
+            check_url("http://[::ffff:8.8.8.8]/"),
+            Err(UrlPolicyError::HostDenied(_))
+        ));
+    }
+
+    #[test]
+    fn fill_refuses_credential_fields_whatever_the_value() {
+        for kind in ["password", "one-time-code", "payment"] {
+            let err = check_fill_target(
+                "just some text",
+                &FillTarget {
+                    name: Some("Login"),
+                    secret: Some(kind),
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                FillPolicyError::SecretField {
+                    kind: kind.to_owned()
+                }
+            );
+        }
+        // An unlabeled password box used to pass: no secret-shaped name, and
+        // `hunter2hunter2` has no uppercase or symbol.
+        assert!(check_fill_value("hunter2hunter2").is_ok());
+        assert!(
+            check_fill_target(
+                "hunter2hunter2",
+                &FillTarget {
+                    name: None,
+                    secret: Some("password")
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            check_fill_target(
+                "acme search query",
+                &FillTarget {
+                    name: Some("Search"),
+                    secret: None
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_session_folder_compare_is_case_insensitive() {
+        let folder = PathBuf::from(r"C:\tmp\Session-ABC");
+        assert!(
+            check_url_in_session("file:///c:/TMP/session-abc/page.html", Some(&folder)).is_ok(),
+            "drive-letter / segment case must not read as an escape"
+        );
+        assert_eq!(
+            check_url_in_session("file:///c:/tmp/session-abc-evil/page.html", Some(&folder)),
+            Err(UrlPolicyError::FileOutsideSession)
+        );
+    }
+
+    #[test]
     fn url_policy_denies_public_http_and_userinfo() {
         assert!(matches!(
             check_url("http://example.com/"),
@@ -1098,8 +1288,9 @@ mod tests {
         let snap = SnapshotResult {
             url: "https://example.com/".into(),
             title: "Example".into(),
+            source: SnapshotSource::Dom,
             nodes: vec![AxNode {
-                uid: "1".into(),
+                uid: "1-1".into(),
                 role: "link".into(),
                 name: "More information".into(),
                 value: None,
@@ -1108,7 +1299,7 @@ mod tests {
         };
         let v = serde_json::to_value(&snap).unwrap();
         let back: SnapshotResult = serde_json::from_value(v).unwrap();
-        assert_eq!(back.nodes[0].uid, "1");
+        assert_eq!(back.nodes[0].uid, "1-1");
 
         let shot = ScreenshotResult {
             path: "images/browser-1.png".into(),

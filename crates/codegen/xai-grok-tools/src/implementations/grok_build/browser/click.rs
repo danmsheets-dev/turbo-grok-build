@@ -83,11 +83,60 @@ impl xai_tool_runtime::Tool for BrowserClickTool {
     }
 }
 
-/// Accessible names that look like a submit / pay / delete action (plan regex).
+/// Accessible names that look like a consequential action.
+///
+/// Word-boundary matched, not raw `contains`: "Postal code" and "Payment
+/// history" are not submit buttons, and treating them as such trains the model
+/// to reach for `confirm=true` reflexively — which is how a real gate stops
+/// meaning anything.
 pub(super) fn click_name_needs_confirm(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    const NEEDLES: &[&str] = &["submit", "buy", "pay", "delete", "post", "send"];
-    NEEDLES.iter().any(|needle| n.contains(needle))
+    const NEEDLES: &[&str] = &[
+        "submit",
+        "buy",
+        "pay",
+        "purchase",
+        "order",
+        "checkout",
+        "confirm",
+        "delete",
+        "remove",
+        "discard",
+        "post",
+        "send",
+        "publish",
+        "share",
+        "transfer",
+        "withdraw",
+        "subscribe",
+        "unsubscribe",
+        "accept",
+        "agree",
+        "approve",
+        "install",
+        "uninstall",
+        "deploy",
+        "merge",
+        "sign",
+        "login",
+        "logout",
+    ];
+    let lower = name.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|word| {
+        NEEDLES.iter().any(|needle| {
+            // Match the word itself or a plural ("orders"), never a longer
+            // unrelated word ("postal") and never a gerund: action buttons are
+            // imperative ("Send"), while "-ing" forms are prose ("Ordering
+            // information").
+            *word == *needle
+                || word
+                    .strip_prefix(needle)
+                    .is_some_and(|rest| matches!(rest, "s" | "es"))
+        })
+    })
 }
 
 fn skip_click_confirm() -> bool {
@@ -107,6 +156,16 @@ pub(super) fn check_click_against_snapshot(
                 .to_owned(),
         ));
     };
+    // A fallback snapshot numbers its uids over the accessibility tree, not the
+    // tagged DOM. Acting on one would click a different element than the one
+    // whose name was just checked.
+    if !snapshot.source.uids_are_actionable() {
+        return Err(ToolError::invalid_arguments(
+            "The last browser_snapshot came from the accessibility-tree fallback, whose uids are \
+             read-only. Call browser_snapshot again to get actionable uids."
+                .to_owned(),
+        ));
+    }
     let Some(node) = snapshot.nodes.iter().find(|n| n.uid == uid) else {
         return Err(ToolError::invalid_arguments(format!(
             "Unknown snapshot uid {uid}. Call browser_snapshot and use a current uid."
@@ -116,8 +175,94 @@ pub(super) fn check_click_against_snapshot(
         return Ok(());
     }
     Err(ToolError::invalid_arguments(format!(
-        "Click on {:?} looks like a submit/pay/delete action. Ask the user, then retry \
-         browser_click with confirm=true.",
+        "Click on {:?} looks like a consequential action (submit / pay / delete / post / send). \
+         Ask the user, then retry browser_click with confirm=true.",
         node.name
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_grok_browser::{AxNode, SnapshotSource};
+
+    fn snapshot(source: SnapshotSource, uid: &str, name: &str) -> SnapshotResult {
+        SnapshotResult {
+            url: "https://example.com/".into(),
+            title: "Example".into(),
+            source,
+            nodes: vec![AxNode {
+                uid: uid.into(),
+                role: "button".into(),
+                name: name.into(),
+                value: None,
+                focused: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn consequential_names_need_confirmation() {
+        for name in [
+            "Submit",
+            "Buy now",
+            "Pay $40",
+            "Delete account",
+            "Place order",
+            "Checkout",
+            "Confirm",
+            "Transfer funds",
+            "Publish",
+            "Send message",
+            "Remove",
+            "I agree",
+            "Withdraw",
+            "Merge pull request",
+        ] {
+            assert!(click_name_needs_confirm(name), "must gate {name:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_names_do_not() {
+        // Substring matching gated all of these; over-prompting is how a gate
+        // stops being read.
+        for name in [
+            "Postal code",
+            "Payment history",
+            "Sender",
+            "Compose",
+            "Ordering information",
+            "Deleted items",
+            "More information",
+            "Search",
+            "Documentation",
+        ] {
+            assert!(!click_name_needs_confirm(name), "must not gate {name:?}");
+        }
+    }
+
+    #[test]
+    fn fallback_snapshot_uids_are_refused() {
+        let snap = snapshot(SnapshotSource::AxFallback, "ax-1", "More information");
+        let err = check_click_against_snapshot(Some(&snap), "ax-1", false).unwrap_err();
+        assert!(err.to_string().contains("read-only"), "{err}");
+        // Even with confirm: the uid still does not point at that element.
+        assert!(check_click_against_snapshot(Some(&snap), "ax-1", true).is_err());
+    }
+
+    #[test]
+    fn missing_snapshot_fails_closed() {
+        let err = check_click_against_snapshot(None, "1-1", true).unwrap_err();
+        assert!(err.to_string().contains("browser_snapshot"), "{err}");
+    }
+
+    #[test]
+    fn dom_snapshot_allows_a_benign_click() {
+        let snap = snapshot(SnapshotSource::Dom, "1-1", "More information");
+        assert!(check_click_against_snapshot(Some(&snap), "1-1", false).is_ok());
+        let gated = snapshot(SnapshotSource::Dom, "1-1", "Delete account");
+        assert!(check_click_against_snapshot(Some(&gated), "1-1", false).is_err());
+        assert!(check_click_against_snapshot(Some(&gated), "1-1", true).is_ok());
+    }
 }

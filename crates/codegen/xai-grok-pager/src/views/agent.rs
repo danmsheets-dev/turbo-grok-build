@@ -452,12 +452,25 @@ pub fn split_browser_column(area: Rect) -> (Rect, Rect) {
 pub struct BrowserPaneState {
     /// Whether the right-hand mirror column is open.
     pub visible: bool,
-    /// Last known page URL from a tool result (best-effort).
+    /// URL of the session's last `browser_snapshot`.
     pub last_url: Option<String>,
-    /// Last snapshot lines (empty is OK for v1).
+    /// Rendered lines from the session's last `browser_snapshot`.
     pub last_snapshot_lines: Vec<String>,
-    /// Named-pipe host was reachable the last time the pane opened.
+    /// Whether the session's browser host is reachable.
     pub host_running: bool,
+    /// First visible snapshot line (the list is usually taller than the pane).
+    pub scroll: usize,
+}
+
+impl BrowserPaneState {
+    /// Scroll by `delta` lines, clamped to the end of the snapshot.
+    pub fn scroll_by(&mut self, delta: isize) {
+        let max = self.last_snapshot_lines.len().saturating_sub(1);
+        self.scroll = self
+            .scroll
+            .saturating_add_signed(delta)
+            .min(max);
+    }
 }
 
 /// Draw the Agent Browser mirror: title, URL, last snapshot lines.
@@ -468,6 +481,7 @@ pub fn render_browser_pane(
     host_running: bool,
     last_url: Option<&str>,
     snapshot_lines: &[String],
+    scroll: usize,
     theme: &Theme,
 ) {
     if area.area() == 0 {
@@ -519,7 +533,8 @@ pub fn render_browser_pane(
         buf.set_line_safe(inner.x, y, &empty, inner.width);
         return;
     }
-    for line in snapshot_lines {
+    let visible = snapshot_lines.len().saturating_sub(scroll);
+    for line in snapshot_lines.iter().skip(scroll) {
         if y >= inner.y.saturating_add(inner.height) {
             break;
         }
@@ -529,6 +544,16 @@ pub fn render_browser_pane(
         ));
         buf.set_line_safe(inner.x, y, &row, inner.width);
         y = y.saturating_add(1);
+    }
+    // Say so when the snapshot does not fit, rather than silently truncating.
+    let shown = usize::from(y.saturating_sub(inner.y).saturating_sub(1));
+    if visible > shown {
+        let more = Line::from(Span::styled(
+            format!("… {} more (j/k to scroll)", visible - shown),
+            Style::default().fg(theme.gray),
+        ));
+        let last = inner.y.saturating_add(inner.height).saturating_sub(1);
+        buf.set_line_safe(inner.x, last, &more, inner.width);
     }
 }
 /// Fill the screen area with base background and outer padding.

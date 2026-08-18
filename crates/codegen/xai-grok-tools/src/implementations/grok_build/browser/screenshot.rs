@@ -69,7 +69,7 @@ impl xai_tool_runtime::Tool for BrowserScreenshotTool {
         let handle = super::require_handle(&ctx).await?;
         let result = handle.screenshot().await?;
         Ok(super::text_output(format!(
-            "Screenshot saved to {} ({}x{}). When telling the user where it was saved, refer to the short session-relative path.",
+            "Screenshot saved to {} ({}x{}).",
             result.path, result.width, result.height
         )))
     }

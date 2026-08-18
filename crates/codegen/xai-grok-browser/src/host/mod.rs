@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::profile::{agent_browser_user_data_dir, pipe_name};
 use crate::protocol::{
     BrowserRequest, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
-    check_fill, check_url,
+    check_fill, check_url_in_session,
 };
 
 mod ax;
@@ -47,6 +47,11 @@ pub struct HostArgs {
     pub pipe: String,
     /// WebView2 user-data-dir. Empty means [`agent_browser_user_data_dir`].
     pub user_data_dir: PathBuf,
+    /// Session folder. `file:` URLs beneath it are allowed; `None` denies all.
+    ///
+    /// Must match what the client was built with, or the two ends disagree
+    /// about what is reachable and the client's allowance is a dead letter.
+    pub session_folder: Option<PathBuf>,
 }
 
 /// Host startup / runtime failure.
@@ -91,6 +96,26 @@ pub fn probe_webview2_runtime() -> Result<(), HostError> {
 
 #[cfg(windows)]
 pub use webview::ensure_runtime_installed;
+
+/// Reject session ids that are not safe as a pipe segment and a path segment.
+///
+/// `session_id` reaches both `\\.\pipe\turbo-browser-<id>` and the screenshot
+/// directory, so `..` or a separator in it would escape either namespace.
+pub fn validate_session_id(session_id: &str) -> Result<(), HostError> {
+    const MAX: usize = 64;
+    let ok = !session_id.is_empty()
+        && session_id.len() <= MAX
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(HostError::Failed(format!(
+            "invalid session id {session_id:?}: expected 1-{MAX} chars of [A-Za-z0-9_-]"
+        )))
+    }
+}
 
 impl HostArgs {
     /// Fill empty `pipe` / `user_data_dir` with product defaults.
@@ -151,6 +176,7 @@ pub(crate) enum HostCall {
 /// destroyed or `browser.shutdown` is received. Do not call this from a
 /// default unit test.
 pub fn run(args: HostArgs) -> Result<(), HostError> {
+    validate_session_id(&args.session_id)?;
     let args = args.resolve_defaults();
     #[cfg(windows)]
     {
@@ -213,12 +239,22 @@ fn run_windows(args: HostArgs) -> Result<(), HostError> {
     webview::ensure_runtime_installed()?;
 
     let hwnd = window::create_frame_window()?;
-    let mut agent = webview::AgentWebView::create(hwnd, &args.user_data_dir, &args.session_id)?;
+    let mut agent = webview::AgentWebView::create(
+        hwnd,
+        &args.user_data_dir,
+        &args.session_id,
+        args.session_folder.clone(),
+    )?;
     window::show(hwnd);
 
     let ui_thread_id = unsafe { GetCurrentThreadId() };
     let (cmd_tx, cmd_rx) = mpsc::channel::<rpc::UiJob>();
-    let pipe_thread = rpc::spawn_pipe_thread(args.pipe.clone(), ui_thread_id, cmd_tx)?;
+    let pipe_thread = rpc::spawn_pipe_thread(
+        args.pipe.clone(),
+        ui_thread_id,
+        cmd_tx,
+        args.session_folder.clone(),
+    )?;
 
     let mut msg = MSG::default();
     loop {
@@ -372,7 +408,10 @@ pub(crate) struct DecodedRpcError {
 /// Applies [`check_url`] on navigate and [`check_fill`] on fill (fail
 /// closed). Invalid click/fill uids become `unknown_uid`. Multi-tab
 /// methods stay JSON-RPC errors (Task 6).
-pub(crate) fn decode_host_call(line: &str) -> Result<(JsonRpcId, HostCall), DecodedRpcError> {
+pub(crate) fn decode_host_call(
+    line: &str,
+    session_folder: Option<&Path>,
+) -> Result<(JsonRpcId, HostCall), DecodedRpcError> {
     let req: JsonRpcRequest =
         serde_json::from_str(line.trim_end()).map_err(|e| DecodedRpcError {
             id: None,
@@ -409,7 +448,7 @@ pub(crate) fn decode_host_call(line: &str) -> Result<(JsonRpcId, HostCall), Deco
 
     match request {
         BrowserRequest::Navigate { url } => {
-            if let Err(err) = check_url(&url) {
+            if let Err(err) = check_url_in_session(&url, session_folder) {
                 return Err(DecodedRpcError {
                     id: Some(id),
                     error: JsonRpcError {
@@ -571,6 +610,27 @@ pub(crate) fn next_screenshot_path(dir: &Path, n: u32) -> Result<PathBuf, String
     Ok(dir.join(format!("browser-{n}.png")))
 }
 
+/// Highest `browser-<n>.png` already in `dir` (0 when empty or unreadable).
+///
+/// A restarted host resets its counter, and without this it would overwrite
+/// `browser-1.png` — a path the model may already have reported to the user.
+pub(crate) fn highest_screenshot_index(dir: &Path) -> u32 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix("browser-"))
+                .and_then(|n| n.strip_suffix(".png"))
+                .and_then(|n| n.parse::<u32>().ok())
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +646,7 @@ mod tests {
             session_id: "abc".into(),
             pipe: String::new(),
             user_data_dir: PathBuf::new(),
+            session_folder: None,
         }
         .resolve_defaults();
         assert_eq!(resolved.session_id, "abc");
@@ -601,6 +662,7 @@ mod tests {
             session_id: "abc".into(),
             pipe: pipe.into(),
             user_data_dir: dir.clone(),
+            session_folder: None,
         }
         .resolve_defaults();
         assert_eq!(resolved.pipe, pipe);
@@ -627,6 +689,7 @@ mod tests {
             session_id: "stub-sess".into(),
             pipe: String::new(),
             user_data_dir: PathBuf::new(),
+            session_folder: None,
         })
         .expect_err("non-Windows host must refuse");
         assert_eq!(err, HostError::WindowsOnly);
@@ -641,7 +704,7 @@ mod tests {
             serde_json::json!({ "url": "https://example.com/" }),
         )
         .unwrap();
-        match decode_host_call(&nav_line).unwrap() {
+        match decode_host_call(&nav_line, None).unwrap() {
             (JsonRpcId::Number(1), HostCall::Navigate { url }) => {
                 assert_eq!(url, "https://example.com/");
             }
@@ -654,7 +717,7 @@ mod tests {
             serde_json::json!({}),
         )
         .unwrap();
-        match decode_host_call(&shot_line).unwrap() {
+        match decode_host_call(&shot_line, None).unwrap() {
             (JsonRpcId::Number(2), HostCall::Screenshot) => {}
             other => panic!("{other:?}"),
         }
@@ -668,7 +731,7 @@ mod tests {
             serde_json::json!({ "url": "file:///C:/Windows/notepad.exe" }),
         )
         .unwrap();
-        let err = decode_host_call(&line).unwrap_err();
+        let err = decode_host_call(&line, None).unwrap_err();
         assert_eq!(err.error.code, RPC_HOST_ERROR);
         assert!(err.error.message.contains("file:"), "{}", err.error.message);
     }
@@ -682,7 +745,7 @@ mod tests {
                 serde_json::json!({ "url": url }),
             )
             .unwrap();
-            let err = decode_host_call(&line).unwrap_err();
+            let err = decode_host_call(&line, None).unwrap_err();
             assert_eq!(err.error.code, RPC_HOST_ERROR, "{url}");
         }
     }
@@ -695,7 +758,7 @@ mod tests {
             serde_json::json!({ "verbose": true }),
         )
         .unwrap();
-        match decode_host_call(&snap).unwrap() {
+        match decode_host_call(&snap, None).unwrap() {
             (JsonRpcId::Number(5), HostCall::Snapshot { verbose: true }) => {}
             other => panic!("{other:?}"),
         }
@@ -703,23 +766,23 @@ mod tests {
         let click = encode_rpc_request(
             JsonRpcId::Number(6),
             METHOD_CLICK,
-            serde_json::json!({ "uid": "1" }),
+            serde_json::json!({ "uid": "1-1" }),
         )
         .unwrap();
-        match decode_host_call(&click).unwrap() {
-            (_, HostCall::Click { uid }) => assert_eq!(uid, "1"),
+        match decode_host_call(&click, None).unwrap() {
+            (_, HostCall::Click { uid }) => assert_eq!(uid, "1-1"),
             other => panic!("{other:?}"),
         }
 
         let fill = encode_rpc_request(
             JsonRpcId::Number(7),
             METHOD_FILL,
-            serde_json::json!({ "uid": "2", "value": "hello" }),
+            serde_json::json!({ "uid": "1-2", "value": "hello" }),
         )
         .unwrap();
-        match decode_host_call(&fill).unwrap() {
+        match decode_host_call(&fill, None).unwrap() {
             (_, HostCall::Fill { uid, value }) => {
-                assert_eq!(uid, "2");
+                assert_eq!(uid, "1-2");
                 assert_eq!(value, "hello");
             }
             other => panic!("{other:?}"),
@@ -731,7 +794,7 @@ mod tests {
             serde_json::json!({ "function": "() => 1" }),
         )
         .unwrap();
-        match decode_host_call(&eval).unwrap() {
+        match decode_host_call(&eval, None).unwrap() {
             (_, HostCall::Eval { function }) => assert_eq!(function, "() => 1"),
             other => panic!("{other:?}"),
         }
@@ -742,10 +805,10 @@ mod tests {
         let line = encode_rpc_request(
             JsonRpcId::Number(9),
             METHOD_FILL,
-            serde_json::json!({ "uid": "2", "value": "123456" }),
+            serde_json::json!({ "uid": "1-2", "value": "123456" }),
         )
         .unwrap();
-        let err = decode_host_call(&line).unwrap_err();
+        let err = decode_host_call(&line, None).unwrap_err();
         assert_eq!(err.error.code, RPC_HOST_ERROR);
         assert!(
             err.error.message.contains("one-time password"),
@@ -762,7 +825,7 @@ mod tests {
             serde_json::json!({ "uid": "nope" }),
         )
         .unwrap();
-        let err = decode_host_call(&line).unwrap_err();
+        let err = decode_host_call(&line, None).unwrap_err();
         assert_eq!(err.error.code, RPC_HOST_ERROR);
         assert!(
             err.error.message.contains("unknown_uid"),
@@ -775,7 +838,7 @@ mod tests {
     fn decode_new_tab_still_unimplemented() {
         let line = encode_rpc_request(JsonRpcId::Number(11), METHOD_NEW_TAB, serde_json::json!({}))
             .unwrap();
-        let err = decode_host_call(&line).unwrap_err();
+        let err = decode_host_call(&line, None).unwrap_err();
         assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND);
         assert!(
             err.error.message.contains("not implemented"),
@@ -859,6 +922,7 @@ mod tests {
             session_id: session_id.clone(),
             pipe: pipe.clone(),
             user_data_dir,
+            session_folder: None,
         };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let host_thread = std::thread::Builder::new()

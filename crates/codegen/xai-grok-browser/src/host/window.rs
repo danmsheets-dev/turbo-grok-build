@@ -3,13 +3,16 @@
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, HWND_NOTOPMOST, IDC_ARROW,
-    IsWindow, LoadCursorW, PostQuitMessage, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
-    WINDOW_LONG_PTR_INDEX, WM_CLOSE, WM_DESTROY, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    AdjustWindowRectEx, BringWindowToTop, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
+    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowThreadProcessId, HWND_NOTOPMOST, IDC_ARROW, IsIconic, IsWindow,
+    LoadCursorW, PostQuitMessage, RegisterClassW, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_LONG_PTR_INDEX, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_SIZE,
+    WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::PCWSTR;
 
@@ -32,17 +35,34 @@ fn wide_nul(s: &str) -> Vec<u16> {
 pub fn create_frame_window() -> Result<HWND, HostError> {
     let class_name = wide_nul(WINDOW_CLASS);
     let title = wide_nul(WINDOW_TITLE);
+    let instance = unsafe { GetModuleHandleW(None) }
+        .ok()
+        .map(|h| HINSTANCE(h.0));
+
     let class = WNDCLASSW {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(window_proc),
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
         lpszClassName: PCWSTR(class_name.as_ptr()),
+        // Must match the hInstance passed to CreateWindowExW: classes are keyed
+        // by (atom, hInstance), and registering under NULL while creating under
+        // the module handle relies on the global-class fallback.
+        hInstance: instance.unwrap_or_default(),
         ..Default::default()
     };
 
-    // SAFETY: class lives for the RegisterClassW call; a prior register is
-    // ignored (class already exists in this process).
-    let _atom = unsafe { RegisterClassW(&class) };
+    // SAFETY: class lives for the RegisterClassW call.
+    let atom = unsafe { RegisterClassW(&class) };
+    if atom == 0 {
+        // ERROR_CLASS_ALREADY_EXISTS is expected on a second window in this
+        // process; anything else would surface later as a confusing
+        // CreateWindowExW failure.
+        const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+        let err = windows::core::Error::from_win32();
+        if err.code().0 as u32 & 0xFFFF != ERROR_CLASS_ALREADY_EXISTS {
+            return Err(HostError::Failed(format!("RegisterClassW: {err}")));
+        }
+    }
 
     let mut rect = RECT {
         left: 0,
@@ -62,10 +82,6 @@ pub fn create_frame_window() -> Result<HWND, HostError> {
     }
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
-
-    let instance = unsafe { GetModuleHandleW(None) }
-        .ok()
-        .map(|h| HINSTANCE(h.0));
 
     // SAFETY: class name matches RegisterClassW; no parent / menu; not
     // WS_EX_TOPMOST.
@@ -136,15 +152,37 @@ pub fn show(hwnd: HWND) {
     }
 }
 
-/// `SetForegroundWindow` for `browser.raise`.
+/// Bring the frame to the front for `browser.raise`.
+///
+/// `SW_SHOW` alone leaves a minimized window minimized, and Windows' foreground
+/// lock makes a bare `SetForegroundWindow` a silent no-op unless the calling
+/// thread already owns the foreground. Restore first, then briefly attach to
+/// the current foreground thread's input queue so the request is honored.
 pub fn raise(hwnd: HWND) {
     if hwnd.is_invalid() {
         return;
     }
     // SAFETY: hwnd is the host frame on the UI thread.
     unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
+        let foreground = GetForegroundWindow();
+        let self_thread = GetCurrentThreadId();
+        let fg_thread = if foreground.is_invalid() {
+            self_thread
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let attached =
+            fg_thread != self_thread && AttachThreadInput(fg_thread, self_thread, true).as_bool();
         let _ = SetForegroundWindow(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = BringWindowToTop(hwnd);
+        if attached {
+            let _ = AttachThreadInput(fg_thread, self_thread, false);
+        }
     }
 }
 
@@ -191,16 +229,37 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: L
             }
             LRESULT::default()
         }
+        // Per-monitor DPI aware: Windows hands us the suggested rect when the
+        // window moves to a monitor with a different scale. Ignoring it leaves
+        // the frame the wrong physical size.
+        WM_DPICHANGED => {
+            let suggested = l_param.0 as *const RECT;
+            if !suggested.is_null() {
+                // SAFETY: lParam is a RECT* owned by the system for this message.
+                let r = unsafe { *suggested };
+                let _ = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    )
+                };
+            }
+            LRESULT::default()
+        }
         WM_CLOSE => {
             destroy(hwnd);
             LRESULT::default()
         }
         WM_DESTROY => {
-            if let Some(mut state) = take_window_state(hwnd) {
-                if let Some(controller) = state.controller.take() {
+            if let Some(mut state) = take_window_state(hwnd)
+                && let Some(controller) = state.controller.take() {
                     let _ = unsafe { controller.Close() };
                 }
-            }
             // SAFETY: ends the host message loop.
             unsafe {
                 PostQuitMessage(0);

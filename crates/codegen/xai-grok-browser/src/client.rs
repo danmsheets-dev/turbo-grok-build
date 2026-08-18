@@ -160,14 +160,72 @@ pub fn decode_rpc_response(line: &str) -> Result<Value, BrowserClientError> {
         .ok_or_else(|| BrowserClientError::InvalidResult("response missing result".into()))
 }
 
+/// Ceiling on one host round trip.
+///
+/// Slightly above the host's own navigation ceiling so a host-side timeout
+/// surfaces as its real error rather than a bare client disconnect.
+pub const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+
+/// How long to keep retrying `ERROR_PIPE_BUSY` before giving up.
+const BUSY_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Open the pipe, retrying while every instance is busy.
+///
+/// The host serves one connection per instance, so a burst of calls can
+/// momentarily find them all taken. `ERROR_PIPE_BUSY` means "try again", not
+/// "no host" — treating it as fatal produced spurious transport errors.
+#[cfg(windows)]
+async fn open_pipe_client(
+    pipe_name: &str,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, BrowserClientError> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    use windows_sys_pipe::ERROR_PIPE_BUSY;
+
+    let deadline = std::time::Instant::now() + BUSY_RETRY_BUDGET;
+    loop {
+        match ClientOptions::new().open(pipe_name) {
+            Ok(client) => return Ok(client),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(BrowserClientError::Transport(format!(
+                        "{pipe_name}: all pipe instances busy"
+                    )));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => {
+                return Err(BrowserClientError::Transport(format!("{pipe_name}: {e}")));
+            }
+        }
+    }
+}
+
+/// `ERROR_PIPE_BUSY` (231). Avoids pulling in a `windows-sys` dependency for
+/// one constant.
+#[cfg(windows)]
+mod windows_sys_pipe {
+    pub const ERROR_PIPE_BUSY: i32 = 231;
+}
+
 #[cfg(windows)]
 async fn call_named_pipe(pipe_name: &str, request_line: &str) -> Result<Value, BrowserClientError> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::windows::named_pipe::ClientOptions;
+    match tokio::time::timeout(CALL_TIMEOUT, call_named_pipe_inner(pipe_name, request_line)).await {
+        Ok(result) => result,
+        Err(_) => Err(BrowserClientError::Transport(format!(
+            "{pipe_name}: host did not respond within {}s",
+            CALL_TIMEOUT.as_secs()
+        ))),
+    }
+}
 
-    let mut client = ClientOptions::new()
-        .open(pipe_name)
-        .map_err(|e| BrowserClientError::Transport(format!("{pipe_name}: {e}")))?;
+#[cfg(windows)]
+async fn call_named_pipe_inner(
+    pipe_name: &str,
+    request_line: &str,
+) -> Result<Value, BrowserClientError> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut client = open_pipe_client(pipe_name).await?;
     client
         .write_all(request_line.as_bytes())
         .await
@@ -416,15 +474,15 @@ mod tests {
         let snap = client.snapshot(false).await.unwrap();
         assert_eq!(snap.url, "https://example.com/");
         assert_eq!(snap.nodes.len(), 2);
-        assert_eq!(snap.nodes[0].uid, "1");
+        assert_eq!(snap.nodes[0].uid, "1-1");
         assert_eq!(snap.nodes[0].role, "link");
-        assert_eq!(snap.nodes[1].uid, "2");
+        assert_eq!(snap.nodes[1].uid, "1-2");
         assert_eq!(snap.nodes[1].role, "textbox");
 
-        client.click("1").await.unwrap();
+        client.click("1-1").await.unwrap();
         assert_eq!(
             client.transport().last_action(),
-            Some(MockAction::Click { uid: "1".into() })
+            Some(MockAction::Click { uid: "1-1".into() })
         );
         assert_eq!(
             client.transport().call_log(),
@@ -439,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn fill_rejects_otp_in_client_before_send() {
         let client = BrowserClient::with_transport("sess", MockBrowserHost::new());
-        let err = client.fill("2", "123456").await.unwrap_err();
+        let err = client.fill("1-2", "123456").await.unwrap_err();
         assert!(
             matches!(err, BrowserClientError::Fill(FillPolicyError::OtpShaped)),
             "{err:?}"
