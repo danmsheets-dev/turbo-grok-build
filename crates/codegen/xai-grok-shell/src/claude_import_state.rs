@@ -124,11 +124,12 @@ fn compute_settings_hash(paths: &[PathBuf]) -> String {
 
 /// Compute hash for global Claude settings (`~/.claude/settings*.json`, `~/.claude.json`).
 ///
-/// Uses `dirs::home_dir()` to match the home directory resolution used by
-/// `load_claude_json_mcp_servers_as_configs()` in `util/config.rs`.
+/// Uses `xai_grok_workspace::resolved_home_dir()` to match the resolution in
+/// `load_claude_json_mcp_servers_as_configs()` (`util/config.rs`). Both must
+/// agree or this hash tracks different files than the loader reads.
 fn compute_global_hash() -> (String, Vec<PathBuf>) {
     let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_grok_workspace::resolved_home_dir() {
         paths.push(home.join(".claude").join("settings.json"));
         paths.push(home.join(".claude").join("settings.local.json"));
         paths.push(home.join(".claude.json"));
@@ -139,13 +140,13 @@ fn compute_global_hash() -> (String, Vec<PathBuf>) {
 
 /// Compute hash for project-level Claude settings.
 ///
-/// Uses `dirs::home_dir()` to match the home directory resolution used by
-/// the scanner in `claude_import.rs`.
+/// Uses `xai_grok_workspace::resolved_home_dir()` to match the scanner in
+/// `claude_import.rs`.
 fn compute_project_hash(cwd: &Path) -> (String, Vec<PathBuf>) {
     // Use find_claude_settings_paths but filter to only project-level paths
     // (exclude global ~/.claude/ paths).
     let all_paths = find_claude_settings_paths(cwd);
-    let home = dirs::home_dir();
+    let home = xai_grok_workspace::resolved_home_dir();
 
     let project_paths: Vec<PathBuf> = all_paths
         .into_iter()

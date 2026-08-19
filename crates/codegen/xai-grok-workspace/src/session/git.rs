@@ -508,6 +508,21 @@ fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
 /// Returns (is_worktree, main_repo_display_name) if this is a git checkout.
 /// `None` when `cwd` is not inside a repo. The display name is the main repo
 /// path, preferably relative to $HOME as ~...
+/// libgit2 reports repository paths with forward slashes even on Windows.
+/// Normalise to the platform separator before any home-prefix comparison or
+/// display, otherwise `collapse_home_path` silently fails to match and callers
+/// receive a mixed-separator path they cannot compare against an OS path.
+fn platform_separators(path: &Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
 pub async fn get_worktree_info(cwd: &Path) -> Option<(bool, Option<String>)> {
     let cwd = cwd.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -545,8 +560,16 @@ pub async fn get_worktree_info(cwd: &Path) -> Option<(bool, Option<String>)> {
                 }
             }
         }
+        // Only the libgit2-derived path needs separator normalisation. Marker
+        // files and DB records are stored verbatim and may legitimately hold
+        // POSIX paths (e.g. a `/workspace` sandbox root), so normalising those
+        // would corrupt them.
         let linked_main = (repo.path() != repo.commondir())
-            .then(|| repo.commondir().parent().map(display))
+            .then(|| {
+                repo.commondir()
+                    .parent()
+                    .map(|p| display(&platform_separators(p)))
+            })
             .flatten();
         let main_repo = marker_main.or(db_main).or(linked_main);
         let is_worktree = main_repo.is_some() || db_label.is_some();

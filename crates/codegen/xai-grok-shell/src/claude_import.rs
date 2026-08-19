@@ -334,9 +334,10 @@ pub fn scan_importable_settings(cwd: &Path) -> ImportPlan {
     let mut plan = ImportPlan::default();
 
     let all_paths = find_claude_settings_paths(cwd);
-    // Use dirs::home_dir() to match the resolution in config.rs and
-    // claude_import_state.rs (consistent across platforms).
-    let home = dirs::home_dir();
+    // Resolve home the same way config.rs and claude_import_state.rs do.
+    // `xai_grok_workspace::resolved_home_dir` honours HOME/USERPROFILE;
+    // `dirs::home_dir()` does not on Windows (Known Folder API).
+    let home = xai_grok_workspace::resolved_home_dir();
 
     for path in &all_paths {
         let Some(settings) = load_claude_settings(path) else {
@@ -415,7 +416,7 @@ fn scan_claude_path_dirs(cwd: &Path, plan: &mut ImportPlan) {
     let mut global_added: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = xai_grok_workspace::resolved_home_dir() {
         for (kind, sub) in [(PathKind::Skill, "skills"), (PathKind::Rule, "rules")] {
             let dir = home.join(".claude").join(sub);
             if dir.is_dir() {

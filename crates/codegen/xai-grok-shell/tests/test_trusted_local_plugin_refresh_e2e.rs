@@ -116,6 +116,10 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
     let home = dunce::canonicalize(home_tmp.path()).unwrap();
     let grok_home = home.join(".grok");
     let _home_guard = EnvVarGuard::set("HOME", &home);
+    // `TrustStore::is_config_path_auto_trusted` prefers USERPROFILE over HOME, so
+    // guarding HOME alone leaves under-home auto-trust pointing at the real
+    // Windows profile and the refresh silently skips this install.
+    let _profile_guard = EnvVarGuard::set("USERPROFILE", &home);
     let _grok_guard = EnvVarGuard::set("GROK_HOME", &grok_home);
 
     // Live source: a user-home local plugin (mirrors a `~/.claude` local tree).
@@ -228,6 +232,10 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
     // is only for the in-process post-run discovery assertion (which resolves the
     // registry via grok_home()). `#[serial]` keeps it from racing other tests.
     let _home_guard = EnvVarGuard::set("HOME", &home);
+    // `TrustStore::is_config_path_auto_trusted` prefers USERPROFILE over HOME, so
+    // guarding HOME alone leaves under-home auto-trust pointing at the real
+    // Windows profile and the refresh silently skips this install.
+    let _profile_guard = EnvVarGuard::set("USERPROFILE", &home);
     let _grok_guard = EnvVarGuard::set("GROK_HOME", &grok_home);
 
     let mut registry = InstallRegistry::empty(grok_home.join("installed-plugins"));

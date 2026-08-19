@@ -5,6 +5,10 @@
   // Survive re-injection: keep the epoch monotonic so a uid minted before a
   // re-inject can never silently resolve to a different element after it.
   var epoch = prev && typeof prev.epoch === "number" ? prev.epoch : 0;
+  // uid -> element, authoritative for click/fill resolution. Lives in the
+  // isolated world so page script can neither read nor forge entries. Carried
+  // across re-injection with `epoch` so uids minted before a reload stay stale.
+  var registry = prev && prev.registry instanceof Map ? prev.registry : new Map();
 
   function isHeading(el) {
     var t = el.tagName;
@@ -63,9 +67,14 @@
   }
   function tag(cap) {
     epoch += 1;
+    registry.clear();
     var els = applyCap(candidates(document, []), cap || 200);
     for (var i = 0; i < els.length; i++) {
-      els[i].setAttribute("data-turbo-uid", epoch + "-" + (i + 1));
+      var uid = epoch + "-" + (i + 1);
+      // The attribute stays for snapshot debugging, but it is NOT the identity:
+      // it lives in the page's DOM and the page can rewrite it.
+      els[i].setAttribute("data-turbo-uid", uid);
+      registry.set(uid, els[i]);
     }
     return els;
   }
@@ -119,19 +128,18 @@
     if (ac.indexOf("cc-number") >= 0 || ac.indexOf("cc-csc") >= 0) return "payment";
     return null;
   }
+  // Resolve from the isolated-world registry, NEVER from a DOM query.
+  //
+  // `data-turbo-uid` is an ordinary attribute in the page's DOM, so a hostile
+  // page can stamp a uid we just minted onto a control of its choosing;
+  // `querySelector` returns the first match in document order, which lets the
+  // page decide what a click lands on. This registry lives in the CDP isolated
+  // world, which page script cannot reach. It also resolves elements at any
+  // shadow-root depth, where the old document-level query only reached depth 1.
   function elByUid(uid) {
-    var q = '[data-turbo-uid="' + String(uid).replace(/["\\]/g, "\\$&") + '"]';
-    var el = document.querySelector(q);
-    if (el) return el;
-    // Shadow roots are not reachable from a document-level selector.
-    var all = document.querySelectorAll("*");
-    for (var i = 0; i < all.length; i++) {
-      if (all[i].shadowRoot) {
-        var hit = all[i].shadowRoot.querySelector(q);
-        if (hit) return hit;
-      }
-    }
-    return null;
+    var el = registry.get(String(uid));
+    if (!el) return null;
+    return el.isConnected ? el : null;
   }
   // A uid minted by an older snapshot must never resolve. Stale uids are the
   // difference between clicking "More information" and clicking "Delete".
@@ -217,7 +225,9 @@
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
       out.push({
-        uid: el.getAttribute("data-turbo-uid"),
+        // The uid we just minted, not a read-back of the page-writable
+        // attribute, so a page cannot influence what the snapshot reports.
+        uid: epoch + "-" + (i + 1),
         role: roleOf(el),
         name: nameOf(el),
         value: valOf(el),
@@ -226,7 +236,16 @@
     }
     return { epoch: epoch, nodes: out };
   }
-  var api = { tag: tag, collect: collect, lookup: lookup, click: click, fill: fill };
+  var api = {
+    tag: tag,
+    collect: collect,
+    lookup: lookup,
+    click: click,
+    fill: fill,
+    // Handed to the next injection so uid identity survives re-inject. Only
+    // reachable from the isolated world; `window` here is not the page's.
+    registry: registry,
+  };
   // Live getter: `epoch` advances inside tag(), and a re-injection reads it
   // back off the old object to stay monotonic.
   Object.defineProperty(api, "epoch", {

@@ -3122,7 +3122,7 @@ mod tests {
     }
     #[test]
     fn mixed_case_workflow_does_not_take_reserved_name() {
-        let workflows = vec![listing("Login"), listing("Review")];
+        let workflows = vec![listing("Login"), listing("Flakescan")];
         let names: Vec<String> = available_commands(&[], all_gated(), &workflows)
             .into_iter()
             .map(|c| c.name)
@@ -3131,7 +3131,7 @@ mod tests {
             !names.iter().any(|n| n.eq_ignore_ascii_case("login")),
             "{names:?}"
         );
-        assert!(names.iter().any(|n| n == "Review"), "{names:?}");
+        assert!(names.iter().any(|n| n == "Flakescan"), "{names:?}");
     }
     #[test]
     fn resolve_mixed_case_workflow_launch_keeps_listing_name() {
@@ -3360,11 +3360,14 @@ mod tests {
     }
     #[test]
     fn parse_skill_refs_multi_skill() {
-        let skills = vec![make_skill("review", true), make_skill("lint", true)];
-        let refs = parse_skill_references("/review fix auth /lint --strict", &skills, all_gated())
-            .unwrap();
+        // NOTE: fixture names must not collide with PAGER_COMMAND_KEYS — `review`
+        // became a reserved pager alias for `/changes` and is filtered out.
+        let skills = vec![make_skill("flakescan", true), make_skill("lint", true)];
+        let refs =
+            parse_skill_references("/flakescan fix auth /lint --strict", &skills, all_gated())
+                .unwrap();
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].name, "review");
+        assert_eq!(refs[0].name, "flakescan");
         assert_eq!(refs[0].args, "fix auth");
         assert_eq!(refs[1].name, "lint");
         assert_eq!(refs[1].args, "--strict");
@@ -3490,7 +3493,7 @@ mod tests {
             listing("yolo"),
             listing("sessions"),
             listing("commit"),
-            listing("review"),
+            listing("flakescan"),
         ];
         let names: Vec<_> = available_commands(&skills, all_gated(), &workflows)
             .into_iter()
@@ -3502,7 +3505,7 @@ mod tests {
         assert!(!names.iter().any(|name| name == "commit"));
         assert!(names.iter().any(|name| name == "local:commit"));
         assert!(names.iter().any(|name| name == "user:commit"));
-        assert!(names.iter().any(|name| name == "review"));
+        assert!(names.iter().any(|name| name == "flakescan"));
         assert!(matches!(
             resolve(
                 vec![text_block("/status")],

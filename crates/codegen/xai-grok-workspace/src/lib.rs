@@ -129,7 +129,12 @@ pub(crate) fn isolate_home_dir(home: &std::path::Path) -> (TestEnvGuard, TestEnv
 /// `dirs::home_dir()` on Windows uses `SHGetKnownFolderPath` and ignores the
 /// environment, which makes tests and containerized profiles that set
 /// `USERPROFILE` invisible. Prefer env when set, then fall back to `dirs`.
-pub(crate) fn resolved_home_dir() -> Option<std::path::PathBuf> {
+///
+/// Public because the `~/.claude*` / `~/.cursor` config-discovery paths in
+/// `xai-grok-shell` must resolve home identically to this crate's trust store
+/// and Claude-settings reader; a split resolution desynchronises the import
+/// state hash from the loader that consumes it.
+pub fn resolved_home_dir() -> Option<std::path::PathBuf> {
     for key in ["USERPROFILE", "HOME"] {
         if let Ok(val) = std::env::var(key) {
             let path = std::path::PathBuf::from(val);

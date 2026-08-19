@@ -920,7 +920,7 @@ impl PluginsConfig {
             return;
         }
         let mut paths = Vec::new();
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = xai_grok_workspace::resolved_home_dir() {
             paths.push(home.join(".claude").join("settings.json"));
         }
         for path in &paths {

@@ -89,6 +89,21 @@ impl fmt::Display for PathNotFoundHint {
 /// `path` is the resolved (real) filesystem path that failed.
 /// `display_cwd` is the model-facing working directory (for the CWD note).
 #[tracing::instrument(name = "fs.path_not_found_hint", skip_all)]
+/// Join `rel` onto a model-facing display path, staying in that path's namespace.
+///
+/// `display_cwd` belongs to the model's world, which can be POSIX even when the
+/// host is Windows (sandbox / worktree remap). `PathBuf::join` would splice in
+/// the host separator and hand the model `/home/user/project\src`, which it
+/// cannot use verbatim.
+fn join_in_display_namespace(display_cwd: &Path, rel: &Path) -> std::path::PathBuf {
+    let base = display_cwd.to_string_lossy();
+    if base.contains('/') && !base.contains('\\') {
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        return std::path::PathBuf::from(format!("{}/{}", base.trim_end_matches('/'), rel));
+    }
+    display_cwd.join(rel)
+}
+
 pub async fn path_not_found_hint(path: &Path, cwd: &Path, display_cwd: &Path) -> PathNotFoundHint {
     let cwd_note = format!(
         "Note: your current working directory is {}",
@@ -115,7 +130,7 @@ pub async fn path_not_found_hint(path: &Path, cwd: &Path, display_cwd: &Path) ->
     let suggestion = suggestion.map(|corrected| {
         corrected
             .strip_prefix(cwd)
-            .map(|rel| display_cwd.join(rel))
+            .map(|rel| join_in_display_namespace(display_cwd, rel))
             .unwrap_or_else(|_| {
                 tracing::warn!(
                     corrected = %corrected.display(),

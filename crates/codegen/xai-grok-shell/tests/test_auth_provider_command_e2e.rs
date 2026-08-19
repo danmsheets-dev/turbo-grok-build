@@ -22,14 +22,28 @@ use xai_grok_shell::auth::{AuthMode, GrokAuth, GrokComConfig, try_ensure_fresh_a
 
 const SEED_TOKEN: &str = "stale-token-that-must-be-replaced";
 
-/// Point the process at a throwaway grok home. `grok_home()` memoizes into a
-/// `OnceLock`, so every phase below shares this one directory — which is why
-/// they live in a single test rather than racing each other as separate ones.
+/// Point the process at a throwaway grok home and pin the auth shell.
+///
+/// `grok_home()` memoizes into a `OnceLock`, so every phase below shares this
+/// one directory — which is why they live in a single test rather than racing
+/// each other as separate ones.
+///
+/// The auth shell memoizes the same way, and left alone
+/// `detect_windows_auth_shell()` probes the *host* and prefers Git Bash whenever
+/// it happens to be installed. The native-path phase below would then run
+/// `bash -c C:\Windows\System32\whoami.exe`, which POSIX word-splitting mangles
+/// into `C:WindowsSystem32whoami.exe` — exit 127, no credential minted. That is
+/// Git Bash behaving as documented, not the regression under test, so the phase
+/// would silently assert nothing here while passing on a bare CI box. Pin `cmd`:
+/// it is the branch that must carry a native path through intact, and the one a
+/// clean Windows host already selects. Ignored on unix, where `shell_c` always
+/// uses `sh -c`.
 fn use_temp_grok_home(dir: &Path) {
     // SAFETY: single-threaded test entry, before any thread that reads the
     // environment is spawned.
     unsafe {
         std::env::set_var("GROK_HOME", dir);
+        std::env::set_var("GROK_AUTH_SHELL", "cmd");
     }
 }
 

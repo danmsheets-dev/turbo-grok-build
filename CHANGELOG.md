@@ -39,16 +39,57 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
-## [Unreleased]
+## [1.0.0-rc.2] - 2026-08-19
+
+**Agent WebView, Grok 4.6, and a confinement hardening pass.** A week of RC2
+work folded into the release: a product-owned WebView2 browser the agent drives
+directly, the Grok 4.6 default catalog, MCP disk-wins merge, full Disk Clean,
+and remediation of two P0 findings from the RC2 audit
+([`docs/RC2_UNRELEASED_AUDIT.md`](./docs/RC2_UNRELEASED_AUDIT.md)).
 
 ### Added
 - **Grok 4.6 default catalog** — compiled-in `default` / `web_search` / `image_description` / `session_summary` now `grok-4.6` (advertises `xhigh` reasoning effort; hosted backend search on). `grok-4.5` remains selectable. Config / env / CLI overrides still win. Resolved-checkpoint display (`requested (resolved)`) now treats all `grok-4.*` slugs as coding models, not only `grok-4.5`.
 - **Prompt `work_policy` + `browser_verification`** — official completion discipline merged into the primary and subagent templates without dropping Turbo `<action_safety>`. The `<browser_verification>` block renders only when the finalized toolset includes `browser_*` tools (not plan-builtin-only). AGENTS.md user reminders are not suppressed.
 - **Agent WebView** (`browser_*` tools + `turbo browser-host`) — product-owned WebView2 window on `~/.grok/agent-browser`. Ctrl+Shift+B mirrors URL/snapshot in the TUI. Not chrome-devtools MCP.
 
-## [1.0.0-rc.2] - 2026-08-11
+### Security
+- **`--confine` write-boundary escape (P0)** — `cmd /c <engine>` handed the whole
+  compound command to the Windows recovery path and returned early, so sibling
+  invocations were never classified: `cmd /c blender -b ; powershell -c "Set-Content
+  C:\outside\x 1"` was allowed. The escape survived a first fix that counted bash
+  command nodes, because `cmd /c "A & B"` is a single node. The recovery now fails
+  closed on any newline, on any statement separator (`&`, `&&`, `|`, `||`, `;`, `^`)
+  at every recursion depth, and on late-expanded tokens (`%VAR%`, `$env:`, `$(…)`,
+  backticks, `~`) whose target cannot be range-checked. Also closes the glued
+  redirect form `>C:\path`, which resolved as a *relative* path under the root.
+- **Snapshot uid forgery** — `data-turbo-uid` is page-writable and `elByUid` resolved
+  it with `querySelector`, so a page could stamp a live uid onto a control of its
+  choosing and capture the next `browser_click` / `browser_fill`. Resolution now runs
+  through a registry held in the CDP isolated world. This also fixes uid lookup for
+  nested shadow roots, which the old document-level query only reached one level deep.
+- **`turbo disk clean` deleting non-product data** — `plugin-worktrees` hardcoded
+  `H:\gb` / `H:\gb-work` and removed *every* child directory. Roots are now
+  configuration-only (`GROK_BUILD_WORKTREE_ROOT` / `GROK_PLUGIN_WORKTREE_ROOT`, split
+  on `;` only, since a comma is a legal path character), and a child must carry a
+  product-shaped name and not be an ordinary clone. Separately, the shared temp-root
+  filter no longer matches the generic `tmp.*` / `.tmp*` / `uid-*` / `kg-*` spellings
+  that `mktemp -d` and `tempfile` produce for unrelated applications — reachable from
+  a bare `turbo disk clean --safe`.
 
-**Harness polish for Grok Build plugin / CI.** No interactive TUI redesign —
+### Fixed
+- **`disk clean --safe --if-low-space` was a no-op on a healthy disk** — the temp-grok
+  always-sweep retained `TempGrok`, then fell into a volume filter whose low-volume set
+  was empty and which stripped it back out, reporting `ok: false`. Subagent dispose runs
+  exactly this command.
+- **Windows path separators** — `get_worktree_info` returned libgit2's forward slashes,
+  silently defeating the `collapse_home_path` prefix match; and `path_not_found_hint`
+  joined a POSIX display path with the host separator, handing the model
+  `/home/user/project\src`.
+
+### Harness polish (first RC2 drop, 2026-08-11)
+
+Identity, permission-rule compatibility, and job-object ergonomics so delegates
+stop dying at launch against wrong `turbo` binaries or legacy deny prefixes. No interactive TUI redesign —
 focus is identity, permission-rule compatibility, and job-object ergonomics so
 delegates stop dying at launch against wrong `turbo` binaries or legacy deny
 prefixes.
@@ -439,18 +480,6 @@ turn-state / remote-compaction work.
   `streaming-messages-json` reducer, which Turbo does not carry.
 
 ---
-
-## [Unreleased]
-
-### Planned (RC2 candidates — feature request log)
-Rust `target/` disk hygiene product surface (Windows monorepo often 100–300 GB):
-- `turbo disk report` / `turbo disk clean --safe`
-- Doctor free-space probe + agent preflight before heavy cargo / release-dist
-- Windows PDB / light-agent cargo policy; post-ship cache trim (keep `turbo.exe`)
-- Stale absolute-path target self-heal after renames; optional `turbo build ship`
-- Auto developer_log on disk pressure
-
-Review: `turbo features list` / `turbo features export`.
 
 ## [0.2.114-r14] - 2026-08-04
 

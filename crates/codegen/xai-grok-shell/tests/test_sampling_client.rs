@@ -1112,9 +1112,18 @@ async fn test_request_includes_headers() {
 
     let request = server.requests().pop().unwrap();
 
+    // Authorization always rides the wire. The product `x-grok-*` headers do
+    // NOT: `MockInferenceServer` serves plain `http://127.0.0.1:<port>`, and
+    // since the first-party-only change the sampler ships those headers solely
+    // to the xAI host allowlist over HTTPS (`is_first_party_grok_endpoint`,
+    // xai-grok-sampler/src/client.rs:69) and strips them from the finalized
+    // header map otherwise. The positive path is pinned by
+    // `first_party_base_url_includes_x_grok_product_headers` (client.rs:4513);
+    // asserting their absence here keeps this suite honest about what a
+    // third-party base URL actually receives.
     assert_eq!(request.header("authorization"), Some("Bearer test-api-key"));
-    assert_eq!(request.header("x-grok-conv-id"), Some("conv-12345"));
-    assert_eq!(request.header("x-grok-req-id"), Some("req-67890"));
+    assert_eq!(request.header("x-grok-conv-id"), None);
+    assert_eq!(request.header("x-grok-req-id"), None);
 }
 
 /// The session writes the resolved `x-compaction-at` value into
@@ -1245,7 +1254,10 @@ async fn test_doom_loop_check_enabled_sends_header_and_absorbs_check_event() {
 
     let logged = server.requests().pop().unwrap();
     assert!(logged.path.contains("/responses"));
-    assert_eq!(logged.header("x-grok-doom-loop-check"), Some("true"));
+    // Third-party base URL: the `x-grok-*` product headers are stripped (see
+    // `test_request_includes_headers`). What this test proves is that enabling
+    // the check still drives the request and that check frames are absorbed.
+    assert_eq!(logged.header("x-grok-doom-loop-check"), None);
 }
 
 /// With the check disabled no header goes on the wire, and check frames from

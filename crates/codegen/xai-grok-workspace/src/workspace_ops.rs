@@ -1804,7 +1804,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = crate::TestEnvGuard::set("HOME", home.path());
+        // Windows resolves the home dir from USERPROFILE / Known Folders,
+        // so overriding HOME alone leaves the real profile in effect.
+        let _home = crate::isolate_home_dir(home.path());
         let _unset_grok = crate::TestEnvGuard::unset("GROK_HOME");
         let start = home.path().join("src").join("org").join("app");
         let dirs = repos_manifest_search_dirs(&start);
@@ -1824,7 +1826,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = crate::TestEnvGuard::set("HOME", home.path());
+        // Windows resolves the home dir from USERPROFILE / Known Folders,
+        // so overriding HOME alone leaves the real profile in effect.
+        let _home = crate::isolate_home_dir(home.path());
         let _unset_grok = crate::TestEnvGuard::unset("GROK_HOME");
         let global = RepoManifest::new(vec![ProvisionedRepo {
             name: "global".into(),

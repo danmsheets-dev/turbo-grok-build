@@ -9,7 +9,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/version-1.0.0--rc.2-blue" alt="1.0.0-rc.2">
-  <img src="https://img.shields.io/badge/rust-1.93.0-orange?logo=rust" alt="Rust 1.93">
+  <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
 </p>
@@ -20,9 +20,8 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.2`** (shipped
-Windows build also available as **`1.0.0-rc.1`** — see
-[Prebuilt Windows binary](#prebuilt-windows-binary)).
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.2`** — the
+shipped Windows build (see [Prebuilt Windows binary](#prebuilt-windows-binary)).
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
 
@@ -66,33 +65,40 @@ is a multi-agent development runtime** built on that foundation.
 
 ### Prebuilt Windows binary
 
-A production Windows build of **Turbo `1.0.0-rc.1`** is published as a **GitHub
-Release asset** (≈149 MB — not stored as a regular git blob; public-fork LFS
+A production Windows build of **Turbo `1.0.0-rc.2`** is published as a **GitHub
+Release asset** (≈143 MB — not stored as a regular git blob; public-fork LFS
 uploads are blocked on GitHub):
 
 | Wire | Release | Asset name |
 | --- | --- | --- |
+| `1.0.0-rc.2` | [v1.0.0-rc.2](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.2) | `turbo-1.0.0-rc.2-x86_64-pc-windows-msvc.exe` |
 | `1.0.0-rc.1` | [v1.0.0-rc.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.1) | `turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe` |
 
 ```powershell
 # Download the asset from the release page, then:
-Copy-Item .\turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
+Copy-Item .\turbo-1.0.0-rc.2-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
 # or: set GROK_BINARY to the downloaded path for the Grok Build Claude plugin
 ```
 
 Packaging notes: [`releases/windows/README.md`](./releases/windows/README.md).
 
-Wire source in this tree may be ahead of the prebuilt (`VERSION` → `1.0.0-rc.2`
-harness polish: `version --json` identity, Claude-compat deny aliases, job-object
-env aliases). Rebuild from source for the latest wire; use the prebuilt for a
-known-good **rc.1** install. Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
+The prebuilt matches this tree at the `v1.0.0-rc.2` tag. Rebuild from source for
+anything newer. Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
 
 ### Highlights (1.0 line)
 
 **1.0.0-rc.1** merges official **xAI Grok Build 1.0.0** as the permanent upstream
 core while keeping Turbo’s product layer (worktrees, deep-audit, Game Mode,
-multi-provider, English-only). **1.0.0-rc.2** is harness polish for the Grok
-Build Claude plugin (identity card, permission aliases, job-object ergonomics).
+multi-provider, English-only).
+
+**1.0.0-rc.2** adds the **Agent WebView** — a product-owned WebView2 window the
+agent drives through first-class `browser_*` tools, mirrored in the TUI with
+`Ctrl+Shift+B` — plus the **Grok 4.6** default catalog, MCP disk-wins config
+merge, full Disk Clean, and harness polish for the Grok Build Claude plugin
+(identity card, permission aliases, job-object ergonomics). It also carries a
+confinement hardening pass: a `--confine` write-boundary escape and a
+snapshot-uid forgery vector were found and closed before release
+([`docs/RC2_UNRELEASED_AUDIT.md`](./docs/RC2_UNRELEASED_AUDIT.md)).
 
 Earlier community highlights (Game Mode, disk clean, tools list) from the
 `0.2.119-rN` line remain in the product; see [`CHANGELOG.md`](./CHANGELOG.md).
@@ -108,10 +114,13 @@ Earlier community highlights (Game Mode, disk clean, tools list) from the
   (per-server status, tool counts, failure detail, backed by a live status cache);
   eleven new sprite animations; and the office no longer pins the event loop at
   ~12 Hz while idle. Full audit: [`docs/RC2_GAME_MODE_AUDIT.md`](./docs/RC2_GAME_MODE_AUDIT.md)
-- **Test suite green for the first time in a long while** — the crash above
-  aborted the harness partway, hiding everything ordered after it. With it fixed:
-  **26 652 tests pass, 0 fail** across the workspace, and
-  `cargo check --workspace --all-targets` is clean
+- **Test suite** — `cargo check --workspace --all-targets` is clean and
+  **28 414 tests pass** (`cargo test --workspace --lib` is fully green). Nine
+  integration tests are known to fail on a developer machine that has real MCP
+  servers, hooks, or auth configured — they read live user state instead of a
+  fixture; see [`docs/RC2_UNRELEASED_AUDIT.md`](./docs/RC2_UNRELEASED_AUDIT.md).
+  The `xai-grok-pager-pty-harness` crate is excluded: its ConPTY teardown can
+  spin on Windows
 - **Line endings made deterministic** — 34 files carried CRLF **in the git index**,
   so Windows and Linux builders shipped different bytes. Now a `.gitattributes`
   + a CI guard that *derives* the embedded-asset inventory rather than trusting a

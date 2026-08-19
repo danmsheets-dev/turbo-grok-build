@@ -2011,7 +2011,10 @@ fn defaults_round_trip_through_registry() {
             "voice_keybind_enabled" => SettingValue::Bool(true),
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
-            "language" => SettingValue::Enum("auto"),
+            // English-only product surface (RC14): `i18n::canonical_language`
+            // coerces every config value - including the legacy `auto` - to
+            // `en`, so `Enum("auto")` is unreachable.
+            "language" => SettingValue::Enum("en"),
             "plan_mode" => SettingValue::Enum("off"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
@@ -6176,8 +6179,15 @@ fn language_picker_nav_does_not_dispatch_preview() {
         }
 
         let outcome = handle_settings_key(&mut s, &press(*nav_key));
+        // English-only: LANGUAGE_CHOICES has exactly one entry, so every nav key
+        // is a boundary no-op and `handle_picking_enum` reports `Unchanged`. The
+        // invariant under test is unchanged - no `Action` escapes the picker on
+        // nav, so the locale is never applied before the Enter commit.
         assert!(
-            matches!(outcome, SettingsKeyOutcome::Changed),
+            matches!(
+                outcome,
+                SettingsKeyOutcome::Changed | SettingsKeyOutcome::Unchanged
+            ),
             "Nav key {nav_key:?} in language picker MUST NOT dispatch a preview \
              Action. Got {outcome:?}",
         );

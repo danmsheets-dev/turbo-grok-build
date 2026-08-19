@@ -16,6 +16,86 @@ fn write_hook(dir: &Path, filename: &str, content: &str) {
     std::fs::write(dir.join(filename), content).unwrap();
 }
 
+/// True when the runner will hand hook commands to a POSIX shell.
+///
+/// The rest of this file is written in POSIX syntax, which survives every shell
+/// for `echo` / `exit N` / `;`. File **redirection** does not: Windows
+/// PowerShell's `>` emits UTF-16LE, so a fixture that redirects and is then read
+/// back with `read_to_string` fails with "stream did not contain valid UTF-8".
+///
+/// Read the product's own detector rather than guessing, so the fixture and
+/// `runner::command` (which routes through `shell_command_argv`) can never
+/// disagree about which shell is in play.
+fn runner_uses_posix_shell() -> bool {
+    #[cfg(unix)]
+    {
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(
+            xai_grok_config::shell::detect_windows_shell(),
+            xai_grok_config::shell::WindowsShell::GitBash(_)
+        )
+    }
+}
+
+/// A hook command that copies the hook's stdin verbatim into `path` as UTF-8.
+fn capture_stdin_to(path: &Path) -> String {
+    if runner_uses_posix_shell() {
+        format!("cat > {}", path.display())
+    } else {
+        // .NET rather than `>` / `Out-File`, both of which default to UTF-16LE
+        // on Windows PowerShell 5.1 (`File.WriteAllText` is UTF-8, no BOM).
+        //
+        // No `$` anywhere: the runner expands `$name` / `${name}` as an injected
+        // env var and refuses to execute when one is unset, so `$in` / `$false`
+        // would abort the hook with "required env var(s) not set".
+        format!(
+            "[IO.File]::WriteAllText('{}', [Console]::In.ReadToEnd())",
+            path.display()
+        )
+    }
+}
+
+/// A hook command that writes `<label>=<env value>` lines into `path` as UTF-8
+/// and then emits an allow decision on stdout.
+///
+/// `label` is deliberately separate from the variable name: the assertions match
+/// on short labels (`SESSION=`), which would not substring-match the full var
+/// spelling (`GROK_SESSION_ID=`).
+fn capture_env_to(path: &Path, keys: &[(&str, &str)]) -> String {
+    if runner_uses_posix_shell() {
+        let mut cmd = String::new();
+        for (i, (label, var)) in keys.iter().enumerate() {
+            let op = if i == 0 { ">" } else { ">>" };
+            cmd.push_str(&format!(
+                "echo \"{label}=${var}\" {op} {f}; ",
+                f = path.display()
+            ));
+        }
+        cmd.push_str(r#"echo '{"decision":"allow"}'"#);
+        cmd
+    } else {
+        // `[Environment]::GetEnvironmentVariable` instead of `$env:NAME` for the
+        // same reason as above — a literal `$` is claimed by the runner's own
+        // env-var expansion before PowerShell ever sees the command.
+        let body = keys
+            .iter()
+            .map(|(label, var)| {
+                format!("('{label}=' + [Environment]::GetEnvironmentVariable('{var}'))")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "[IO.File]::WriteAllLines('{}', @({})); \
+             Write-Output '{{\"decision\":\"allow\"}}'",
+            path.display(),
+            body
+        )
+    }
+}
+
 fn pre_tool_use_envelope(tool_name: &str) -> HookEventEnvelope {
     HookEventEnvelope {
         hook_event_name: HookEventName::PreToolUse,
@@ -405,7 +485,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
         let dir = tempfile::tempdir().unwrap();
         let output_file = dir.path().join("output.json");
 
-        let cmd = format!("cat > {}", output_file.display());
+        let cmd = capture_stdin_to(&output_file);
         let hook_json = serde_json::json!({
             "hooks": {
                 (case.json_key): [
@@ -478,9 +558,16 @@ async fn runner_injected_vars_override_extra_env_at_spawn() {
     let dir = tempfile::tempdir().unwrap();
     let output_file = dir.path().join("envcap.txt");
 
-    let cmd = format!(
-        r#"echo "EVENT=$GROK_HOOK_EVENT" > {f}; echo "NAME=$GROK_HOOK_NAME" >> {f}; echo "SESSION=$GROK_SESSION_ID" >> {f}; echo "ROOT=$GROK_WORKSPACE_ROOT" >> {f}; echo "PROJ=$CLAUDE_PROJECT_DIR" >> {f}; echo "USER_KEY=$USER_KEY" >> {f}; echo '{{"decision":"allow"}}'"#,
-        f = output_file.display(),
+    let cmd = capture_env_to(
+        &output_file,
+        &[
+            ("EVENT", "GROK_HOOK_EVENT"),
+            ("NAME", "GROK_HOOK_NAME"),
+            ("SESSION", "GROK_SESSION_ID"),
+            ("ROOT", "GROK_WORKSPACE_ROOT"),
+            ("PROJ", "CLAUDE_PROJECT_DIR"),
+            ("USER_KEY", "USER_KEY"),
+        ],
     );
 
     let hook_json = serde_json::json!({
