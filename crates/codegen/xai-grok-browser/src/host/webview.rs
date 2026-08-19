@@ -37,7 +37,7 @@ use super::ax::{
     compact_ax_tree, interpret_uid_action, parse_collected_nodes, parse_eval_cdp,
     parse_world_result, snapshot_cap, turbo_ax_js_injected,
 };
-use super::window::{attach_controller, client_rect};
+use super::window::{attach_controller, client_rect, set_title};
 use super::{HostError, next_screenshot_path, screenshot_dir};
 use crate::protocol::{
     AxNode, FillTarget, NavigateResult, ScreenshotResult, SnapshotResult, SnapshotSource, TabInfo,
@@ -140,13 +140,64 @@ impl AgentWebView {
             ax_world: None,
             blocked,
         };
-        // First paint: about:blank until an agent navigate.
+        // First paint has to explain itself. `run_windows` shows the frame on
+        // the line after this constructor returns, so whatever is in the
+        // document right here is the first thing a human sees - and an empty
+        // about:blank is a white rectangle that reads as "it hung". Navigate the
+        // blank document first (the card needs a body to attach to), then write
+        // the card into it.
+        //
+        // This is strictly before `rpc::spawn_pipe_thread`, so no agent navigate
+        // can race us: the card can never clobber a real page.
         host.navigate("about:blank").map_err(HostError::Failed)?;
+        host.paint_startup_placeholder(user_data_dir);
         Ok(host)
     }
 
-    /// `ICoreWebView2::Navigate` and wait for `NavigationCompleted`.
+    /// Write the "starting" card into the blank first document.
+    ///
+    /// Deliberately not `NavigateToString` and not a `data:` URL:
+    /// `register_navigation_policy` gates every top-level navigation through
+    /// `check_url_in_session`, which denies every scheme but https, local http,
+    /// `about:blank` and session-folder `file:` - and WebView2 reports
+    /// `NavigateToString` to `NavigationStarting` as a `data:` URI. Either would
+    /// be cancelled by our own policy and log a bogus "blocked navigation".
+    /// Writing into the already-navigated `about:blank` document leaves the
+    /// policy untouched, and a real navigation replaces the whole document.
+    ///
+    /// Best effort: a card that fails to paint is cosmetic, so this logs and
+    /// continues rather than failing startup.
+    fn paint_startup_placeholder(&self, user_data_dir: &Path) {
+        let params = serde_json::json!({
+            "expression": startup_placeholder_js(user_data_dir),
+            "returnByValue": true,
+        })
+        .to_string();
+        if let Err(err) = call_cdp(&self.webview, "Runtime.evaluate", &params) {
+            eprintln!("turbo browser-host: startup placeholder not painted: {err}");
+        }
+    }
+
+    /// `ICoreWebView2::Navigate` and wait for `NavigationCompleted`, keeping the
+    /// frame caption pointed at the page.
+    ///
+    /// The requested host goes up *before* the wait, so a slow or wedged load
+    /// still says what it is loading rather than sitting on a stale caption; the
+    /// resolved host replaces it once the navigation lands.
     pub fn navigate(&mut self, url: &str) -> Result<NavigateResult, String> {
+        set_title(self.hwnd, &self.session_id, url);
+        let out = self.navigate_inner(url);
+        let settled = match &out {
+            Ok(res) => res.url.clone(),
+            // Failed load: the window still shows whatever the page left behind,
+            // so name the attempt rather than claim success.
+            Err(_) => url.to_owned(),
+        };
+        set_title(self.hwnd, &self.session_id, &settled);
+        out
+    }
+
+    fn navigate_inner(&mut self, url: &str) -> Result<NavigateResult, String> {
         let _ = self.blocked.take();
         let (tx, rx) = mpsc::channel();
         let handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
@@ -408,6 +459,44 @@ impl AgentWebView {
         let _ = self.hwnd;
         let _ = unsafe { self.controller.Close() };
     }
+}
+
+/// JS that paints the startup card into the current (`about:blank`) document.
+///
+/// Every node is a plain `div` written through `textContent`, and the card
+/// carries `aria-hidden="true"`. That keeps it out of BOTH snapshot paths: the
+/// isolated-world collector selects only links, buttons, fields and headings and
+/// skips anything under `[aria-hidden=true]`, and the `getFullAXTree` fallback
+/// drops `ignored` nodes. A snapshot taken before the first navigate therefore
+/// reports zero nodes at `about:blank`, which is the truth.
+fn startup_placeholder_js(user_data_dir: &Path) -> String {
+    let heading = js_string("Turbo Agent Browser");
+    let waiting = js_string("Waiting for the agent's first browser_navigate…");
+    let profile = js_string(&format!("profile: {}", user_data_dir.display()));
+    let hint = js_string(
+        "This window is driven by the agent. Closing it hides it; the host keeps running.",
+    );
+    let body_style = js_string(
+        "margin:0;height:100%;display:flex;align-items:center;justify-content:center;\
+         background:#12141a;color:#e6e8ee;font:15px/1.6 'Segoe UI',system-ui,sans-serif",
+    );
+    let card_style = js_string("text-align:center;max-width:80ch;padding:0 32px");
+    let title_style = js_string("font-size:20px;font-weight:600;margin-bottom:12px");
+    let path_style = js_string("opacity:.72;word-break:break-all;font-family:Consolas,monospace");
+    let hint_style = js_string("opacity:.55;margin-top:12px");
+
+    format!(
+        "(function(){{document.title={heading};var b=document.body;if(!b){{return false;}}\
+         b.setAttribute('style',{body_style});var c=document.createElement('div');\
+         c.setAttribute('aria-hidden','true');c.setAttribute('style',{card_style});\
+         var t=document.createElement('div');t.setAttribute('style',{title_style});\
+         t.textContent={heading};var w=document.createElement('div');w.textContent={waiting};\
+         var p=document.createElement('div');p.setAttribute('style',{path_style});\
+         p.textContent={profile};var h=document.createElement('div');\
+         h.setAttribute('style',{hint_style});h.textContent={hint};\
+         c.appendChild(t);c.appendChild(w);c.appendChild(p);c.appendChild(h);\
+         b.appendChild(c);return true;}})()"
+    )
 }
 
 fn js_string(s: &str) -> String {

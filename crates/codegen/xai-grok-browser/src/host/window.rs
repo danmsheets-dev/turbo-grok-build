@@ -9,8 +9,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BringWindowToTop, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
     DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetForegroundWindow,
     GetWindowLongPtrW, GetWindowThreadProcessId, HWND_NOTOPMOST, IDC_ARROW, IsIconic, IsWindow,
-    LoadCursorW, PostQuitMessage, RegisterClassW, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    IsWindowVisible, LoadCursorW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow,
     WINDOW_EX_STYLE, WINDOW_LONG_PTR_INDEX, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_SIZE,
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
@@ -26,15 +28,117 @@ pub const WINDOW_CLASS: &str = "TurboAgentBrowser";
 pub const CLIENT_WIDTH: i32 = 1280;
 /// Client-area height.
 pub const CLIENT_HEIGHT: i32 = 800;
+/// Longest host label the title bar carries.
+const TITLE_HOST_MAX: usize = 64;
+/// Longest session tag the title bar carries (ids run to 64 chars).
+const TITLE_SESSION_MAX: usize = 12;
 
 fn wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Host label for the title bar, or `None` when there is no page to name
+/// (`about:blank`, empty, a scheme with no authority).
+pub fn title_host(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once(':')?;
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-')
+    {
+        return None;
+    }
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => {
+            // WHATWG treats a backslash exactly like `/`, so both terminate the
+            // authority - otherwise `https://evil.test\.example.com/` would
+            // paint `example.com` in the title bar.
+            let after = rest.trim_start_matches(['/', '\\']);
+            let end = after.find(['/', '?', '#', '\\']).unwrap_or(after.len());
+            let authority = &after[..end];
+            // Userinfo is denied by policy upstream; drop it here too so a
+            // caption can never be spoofed by `https://www.bank.test@evil/`.
+            let host_port = match authority.rsplit_once('@') {
+                Some((_, host)) => host,
+                None => authority,
+            };
+            let host = match host_port.rsplit_once(':') {
+                Some((h, port)) if !h.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
+                _ => host_port,
+            };
+            title_part(
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .trim_end_matches('.'),
+                TITLE_HOST_MAX,
+            )
+        }
+        // `file:` beneath the session folder is reachable; name the file.
+        "file" => {
+            let path = rest.split(['?', '#']).next().unwrap_or(rest);
+            let name = path
+                .rsplit(|c| c == '/' || c == '\\')
+                .find(|part| !part.is_empty())?;
+            title_part(name, TITLE_HOST_MAX)
+        }
+        _ => None,
+    }
+}
+
+/// Trim a title fragment: no control characters (this is a UI surface), capped.
+fn title_part(raw: &str, max: usize) -> Option<String> {
+    let part: String = raw.chars().filter(|c| !c.is_control()).take(max).collect();
+    if part.is_empty() { None } else { Some(part) }
+}
+
+/// Tail of the session id - the part that differs between concurrent hosts.
+fn session_tag(session_id: &str) -> Option<String> {
+    let clean: Vec<char> = session_id.chars().filter(|c| !c.is_control()).collect();
+    if clean.is_empty() {
+        return None;
+    }
+    if clean.len() <= TITLE_SESSION_MAX {
+        return Some(clean.into_iter().collect());
+    }
+    let tail: String = clean[clean.len() - TITLE_SESSION_MAX..].iter().collect();
+    Some(format!("\u{2026}{tail}"))
+}
+
+/// Frame caption: product name, the page host once there is one, and a short
+/// session tag.
+///
+/// The tag keeps a leftover smoke host distinguishable from the live one when
+/// both sit on the same URL - host alone is not enough.
+pub fn frame_title(session_id: &str, url: &str) -> String {
+    match (title_host(url), session_tag(session_id)) {
+        (Some(host), Some(tag)) => format!("{WINDOW_TITLE} \u{2014} {host} [{tag}]"),
+        (Some(host), None) => format!("{WINDOW_TITLE} \u{2014} {host}"),
+        (None, Some(tag)) => format!("{WINDOW_TITLE} [{tag}]"),
+        (None, None) => WINDOW_TITLE.to_owned(),
+    }
+}
+
+/// Point the title bar at `url`'s host.
+///
+/// **UI thread only.** `SetWindowTextW` is a `WM_SETTEXT` `SendMessage`: on the
+/// thread that owns the window it dispatches inline, but from the pipe thread it
+/// would block until the UI thread pumps - the exact wedge this sidecar must
+/// not have.
+pub fn set_title(hwnd: HWND, session_id: &str, url: &str) {
+    if hwnd.is_invalid() {
+        return;
+    }
+    let title = wide_nul(&frame_title(session_id, url));
+    // SAFETY: `title` is NUL-terminated and outlives the call.
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
+    }
+}
+
 /// Create a 1280×800 overlapped window that is **not** topmost.
-pub fn create_frame_window() -> Result<HWND, HostError> {
+pub fn create_frame_window(session_id: &str) -> Result<HWND, HostError> {
     let class_name = wide_nul(WINDOW_CLASS);
-    let title = wide_nul(WINDOW_TITLE);
+    let title = wide_nul(&frame_title(session_id, ""));
     let instance = unsafe { GetModuleHandleW(None) }
         .ok()
         .map(|h| HINSTANCE(h.0));
@@ -152,6 +256,40 @@ pub fn show(hwnd: HWND) {
     }
 }
 
+/// Re-show a frame that the close button hid.
+///
+/// `WM_CLOSE` hides instead of destroying, so a perfectly healthy host can own
+/// an invisible window. Every `browser_*` call except `browser.shutdown` runs
+/// this first: otherwise the agent drives a page nobody can see and
+/// `browser.screenshot` captures a hidden frame. `SW_SHOWNOACTIVATE` does not
+/// steal focus - `raise` is the call that does that.
+pub fn ensure_visible(hwnd: HWND) {
+    if hwnd.is_invalid() {
+        return;
+    }
+    // SAFETY: hwnd is the host frame; UI thread only.
+    if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return;
+    }
+    set_controller_visible(hwnd, true);
+    // SAFETY: hwnd is the host frame; UI thread only.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = UpdateWindow(hwnd);
+    }
+}
+
+/// Track frame visibility on the WebView2 side so a hidden window stops painting
+/// instead of rendering into nothing.
+fn set_controller_visible(hwnd: HWND, visible: bool) {
+    if let Some(state) = window_state(hwnd)
+        && let Some(controller) = state.controller.as_ref()
+    {
+        // SAFETY: controller belongs to this hwnd, UI thread only.
+        let _ = unsafe { controller.SetIsVisible(visible) };
+    }
+}
+
 /// Bring the frame to the front for `browser.raise`.
 ///
 /// `SW_SHOW` alone leaves a minimized window minimized, and Windows' foreground
@@ -162,6 +300,9 @@ pub fn raise(hwnd: HWND) {
     if hwnd.is_invalid() {
         return;
     }
+    // Undo a close-button hide first: SW_SHOW alone would reveal the frame but
+    // leave the WebView2 controller marked invisible.
+    ensure_visible(hwnd);
     // SAFETY: hwnd is the host frame on the UI thread.
     unsafe {
         if IsIconic(hwnd).as_bool() {
@@ -251,8 +392,18 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: L
             }
             LRESULT::default()
         }
+        // The X button HIDES the frame; the host stays alive and keeps serving
+        // the pipe, so the next browser_* call or `browser.raise` brings it back
+        // (see `ensure_visible`). Only `browser.shutdown` or the pipe going away
+        // destroys it. Destroying here made one stray click look exactly like a
+        // crash, with no telemetry to say otherwise.
         WM_CLOSE => {
-            destroy(hwnd);
+            eprintln!("turbo browser-host: window hidden (close button); host still serving");
+            set_controller_visible(hwnd, false);
+            // SAFETY: hwnd is the host frame on the UI thread.
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
             LRESULT::default()
         }
         WM_DESTROY => {
@@ -337,6 +488,68 @@ mod tests {
         assert_eq!(
             String::from_utf16_lossy(&title_w[..title_w.len() - 1]),
             WINDOW_TITLE
+        );
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    /// Every host used to carry the identical caption, so a leftover smoke host
+    /// was indistinguishable from the live window and covered the real page.
+    #[test]
+    fn caption_names_the_page_host_and_the_session() {
+        let t = frame_title("019ffc2f-9daa-7e41", "https://www.betterimpact.com/volunteer");
+        assert!(t.starts_with(WINDOW_TITLE), "{t}");
+        assert!(t.contains("www.betterimpact.com"), "{t}");
+        assert!(t.contains("2f-9daa-7e41"), "session tag missing: {t}");
+    }
+
+    /// Two hosts on the same URL must still be tellable apart.
+    #[test]
+    fn same_url_different_sessions_get_different_captions() {
+        let a = frame_title("smoke1", "https://example.com/");
+        let b = frame_title("019ffc2f-9daa-7e41", "https://example.com/");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn blank_and_unnamed_pages_fall_back_to_the_product_name() {
+        assert_eq!(title_host("about:blank"), None);
+        assert_eq!(title_host(""), None);
+        assert_eq!(title_host("not a url"), None);
+        assert!(frame_title("", "about:blank") == WINDOW_TITLE);
+    }
+
+    /// The caption is a trust surface: it must not be spoofable into naming a
+    /// site the user is not on.
+    #[test]
+    fn caption_host_cannot_be_spoofed() {
+        // userinfo before the real host
+        assert_eq!(
+            title_host("https://www.bank.test@evil.example/").as_deref(),
+            Some("evil.example")
+        );
+        // WHATWG: a backslash terminates the authority just like `/`
+        assert_eq!(
+            title_host(r"https://evil.test\.example.com/").as_deref(),
+            Some("evil.test")
+        );
+        // control characters are stripped, not rendered
+        assert_eq!(
+            title_host("https://ev\u{7}il.test/").as_deref(),
+            Some("evil.test")
+        );
+    }
+
+    #[test]
+    fn port_and_ipv6_and_file_are_named_sensibly() {
+        assert_eq!(title_host("http://localhost:8080/x").as_deref(), Some("localhost"));
+        assert_eq!(title_host("https://[::1]:443/").as_deref(), Some("::1"));
+        assert_eq!(
+            title_host(r"file:///C:/sessions/abc/report.html").as_deref(),
+            Some("report.html")
         );
     }
 }

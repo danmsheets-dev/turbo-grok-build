@@ -82,7 +82,13 @@ impl From<BrowserTabsInput> for crate::types::tool_io::ToolInput {
 }
 
 /// Sync hook the shell installs so the first pipe call can spawn the host.
-pub type BrowserEnsureFn = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+/// Lazy-start hook for the sidecar.
+///
+/// Takes the session folder as well as the id: the host only permits `file:`
+/// URLs beneath a folder it was told about at spawn, so without it the client
+/// allows a `file:` URL that the host then refuses.
+pub type BrowserEnsureFn =
+    Arc<dyn Fn(&str, Option<&std::path::Path>) -> Result<(), String> + Send + Sync>;
 
 static BROWSER_ENSURE: OnceLock<RwLock<Option<BrowserEnsureFn>>> = OnceLock::new();
 
@@ -395,9 +401,10 @@ impl BrowserHandle {
                 let ensure = self.ensure.clone().or_else(installed_browser_ensure);
                 if let Some(ensure) = ensure {
                     let sid = self.session_id.clone();
+                    let folder = self.session_folder.clone();
                     // Spawn + 15s pipe wait must not block the session
                     // current-thread runtime (cancel / other tools).
-                    tokio::task::spawn_blocking(move || ensure(&sid))
+                    tokio::task::spawn_blocking(move || ensure(&sid, folder.as_deref()))
                         .await
                         .map_err(|e| host_error(e.to_string()))?
                         .map_err(host_error)?;
@@ -629,7 +636,7 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let flag = called.clone();
         let mut handle = BrowserHandle::mock("sess-browser-mock-never-calls-ensure");
-        handle.ensure = Some(Arc::new(move |_| {
+        handle.ensure = Some(Arc::new(move |_, _| {
             flag.store(true, Ordering::SeqCst);
             Ok(())
         }));

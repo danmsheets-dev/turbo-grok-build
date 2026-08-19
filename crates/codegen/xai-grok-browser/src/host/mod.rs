@@ -238,7 +238,7 @@ fn run_windows(args: HostArgs) -> Result<(), HostError> {
 
     webview::ensure_runtime_installed()?;
 
-    let hwnd = window::create_frame_window()?;
+    let hwnd = window::create_frame_window(&args.session_id)?;
     let mut agent = webview::AgentWebView::create(
         hwnd,
         &args.user_data_dir,
@@ -295,6 +295,11 @@ fn run_windows(args: HostArgs) -> Result<(), HostError> {
     agent.close();
     // If shutdown came from RPC, the window may still exist.
     window::destroy(hwnd);
+    // Say goodbye on the way out. The shell drains this stderr into tracing, so
+    // a window that disappears is explainable instead of reading as a crash -
+    // whether it went away by RPC shutdown, a dead pipe, or the job object
+    // taking the host down with a restarting pager.
+    eprintln!("turbo browser-host: exiting (pump ended); session={}", args.session_id);
     Ok(())
 }
 
@@ -304,6 +309,13 @@ fn handle_ui_job(
     hwnd: windows::Win32::Foundation::HWND,
     call: Result<(JsonRpcId, HostCall), DecodedRpcError>,
 ) -> String {
+    // The close button hides the frame rather than destroying it, so any call
+    // may arrive at an invisible window. Un-hide before doing the work:
+    // otherwise the agent drives a page nobody can see and `browser.screenshot`
+    // captures a hidden frame. Shutdown is exempt - it is on its way out.
+    if !matches!(call, Ok((_, HostCall::Shutdown))) {
+        window::ensure_visible(hwnd);
+    }
     match call {
         Err(err) => encode_rpc_error(err.id.unwrap_or(JsonRpcId::Number(0)), err.error),
         Ok((id, HostCall::Navigate { url })) => match agent.navigate(&url) {

@@ -39,6 +39,57 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [1.0.0-rc.2.1] - 2026-08-19
+
+**Agent WebView hotfix.** rc.2 shipped the Agent WebView with a defect that made
+it unusable: the window opened and stayed white. Everything here is that bug and
+the field report that followed it.
+
+### Fixed
+- **`browser_*` calls hung forever (release blocker)** — the named-pipe server
+  created `SPARE_INSTANCES + 1` instances but called `connect()` on exactly one.
+  Windows hands an incoming client to *any* listening instance, so a client that
+  landed on one of the four nobody awaited was accepted and then blocked forever.
+  A fresh `browser_navigate` had a **four-in-five chance of never returning**, which
+  is why the window opened and stayed blank. Reproduced by driving the pipe
+  directly: four hangs, one reply, then pool exhaustion. The server now runs one
+  acceptor task per instance, each awaiting its own `connect()` and re-arming after
+  it serves. Regression test included — verified to fail against the old shape.
+- **A wedged host produced no reply at all** — the pipe side awaited the UI
+  thread's response with no deadline, so a request the UI thread never reached
+  left the connection open with nothing written on it and the caller saw a bare
+  75s transport timeout. There is now a middle rung between `NAV_TIMEOUT` (60s)
+  and the client's `CALL_TIMEOUT` (75s) that answers with a real JSON-RPC error on
+  the caller's own id.
+- **First paint was an empty white rectangle**, which reads as a crash. The host
+  now paints a card naming itself, the profile path, and what it is waiting for.
+  Written into the blank document rather than via `NavigateToString` (which the
+  navigation policy would cancel as a `data:` URI), and `aria-hidden` so neither
+  snapshot path mistakes it for page content.
+- **Every window was titled `Turbo Agent Browser`**, so a leftover host was
+  indistinguishable from the live one and could sit on top of it. The caption is
+  now `Turbo Agent Browser — <host> [<session>]`, set before the load starts and
+  again when it settles. Host extraction rejects userinfo spoofing
+  (`https://bank.test@evil/`), treats a backslash as an authority terminator per
+  WHATWG, and strips control characters.
+- **The close button killed the host with no telemetry** — one stray click looked
+  exactly like a crash. `X` now hides the window and marks the WebView2 controller
+  invisible; the host keeps serving and any `browser_*` call re-shows it. Host exit
+  and close-to-hide both log to stderr, which the shell already drains into tracing.
+- **`file:` URLs were refused by the host** — the spawn never passed
+  `--session-folder`, so the host had nothing to measure them against while the
+  client-side policy allowed them (audit finding C1).
+- **The Agent Boot Card omitted the browser** even with `browser_*` registered, so
+  the agent had no idea the window existed and went looking for a command to open
+  it. There is none — the window appears on the first tool call. The card now
+  carries a gated launch line (guaranteed by test); the click/fill/uid loop stays
+  in the `agent-browser` skill.
+- **The boot card reported the wrong version** (`1.0.0-rc.1` while `turbo --version`
+  said `1.0.0-rc.2`). Three crates carried independent version strings and
+  `xai-grok-version` was never bumped. Both build scripts now resolve
+  `GROK_VERSION` → workspace `VERSION` file → crate version, so the `VERSION` file
+  is the single source of truth, with a test asserting they agree.
+
 ## [1.0.0-rc.2] - 2026-08-19
 
 **Agent WebView, Grok 4.6, and a confinement hardening pass.** A week of RC2

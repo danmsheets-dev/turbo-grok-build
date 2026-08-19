@@ -367,6 +367,9 @@ impl PromptContext {
             // Prefer spawn_tool_present so "Subagents: enabled" matches the schema.
             ctx.subagents_enabled = self.spawn_tool_present && self.subagents_enabled;
             ctx.spawn_tool_present = self.spawn_tool_present;
+            // Same finalized-toolset signal that gates `<browser_verification>`,
+            // so the card can never advertise a browser the session lacks.
+            ctx.browser_tools_present = self.include_browser_verification;
             if let Some(card) = crate::prompt::boot_card::render_boot_card(mode, &ctx) {
                 crate::prompt::boot_card::inject_boot_card(&mut prompt, &card);
                 tracing::info!(

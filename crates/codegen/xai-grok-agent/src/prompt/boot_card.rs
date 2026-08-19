@@ -47,6 +47,10 @@ pub struct BootCardContext {
     pub subagents_enabled: bool,
     /// Whether `spawn_subagent` is actually in the model tool schema.
     pub spawn_tool_present: bool,
+    /// Whether the finalized toolset carries the `browser_*` tools. Gated on the
+    /// same signal as `<browser_verification>`: advertising an Agent WebView the
+    /// session cannot actually drive is worse than saying nothing.
+    pub browser_tools_present: bool,
     pub binary_name: String,
     pub isolation: String,
     /// Absolute root of Auto Developer Log (for agent orientation).
@@ -71,6 +75,7 @@ impl Default for BootCardContext {
             os: std::env::consts::OS.into(),
             subagents_enabled: true,
             spawn_tool_present: true,
+            browser_tools_present: false,
             binary_name: "turbo".into(),
             isolation: "worktree".into(),
             developer_log_dir: String::new(),
@@ -122,6 +127,7 @@ impl BootCardContext {
                 })
                 .unwrap_or(true),
             spawn_tool_present: true,
+            browser_tools_present: false,
             binary_name,
             isolation: infer_isolation_label(cwd),
             developer_log_dir,
@@ -397,6 +403,23 @@ fn render_short(ctx: &BootCardContext) -> String {
         "## Feature Request Log\n- Disabled this session (GROK_FEATURE_REQUEST_LOG=0). Note capability gaps in your final report.".into()
     };
     let workflows = render_workflows_section(ctx);
+    // One line, only when the tools are really registered. Without it the model
+    // has no idea the Agent WebView exists and goes looking for a way to "open"
+    // it — there is no such command; the window appears on the first call.
+    let browser = if ctx.browser_tools_present {
+        // Launch facts only. The click/fill/uid loop, login rules and uid
+        // discipline stay in the agent-browser skill and <browser_verification>;
+        // this card is token-budgeted. What belongs here is what the model and
+        // the human cannot discover on their own: that the window is opened by a
+        // tool call rather than a command, that it is white until the first
+        // navigate returns, and that closing it stops the host.
+        "\n- browser: `browser_navigate` opens Turbo's own WebView (first call starts `browser-host`) \
+         → `browser_snapshot` → click/fill by that snapshot's `uid`. Windows-only. White until the \
+         first navigate returns. Closing the window stops the host. Ctrl+Shift+B is a TUI text \
+         mirror, not the page. Not chrome-devtools MCP"
+    } else {
+        ""
+    };
     format!(
         r#"# Turbo Agent Boot Card (v1, short)
 Operational briefing for this session. Not project rules. Prefer this for product behavior.
@@ -426,7 +449,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - surface: spawn={spawn} · isolation={isolation} · adl=`{adl_root}` · frl=`{frl_root}`
 - CLI: `{bin} issues|features file --class …` (aliases `--error-class` / `--request-class`)
 - disk: `{bin} disk report|check|clean --safe [--include …]` · `{bin} disk prune` · `{bin} subagent prune` · `{bin} tree prune`
-- tools: `{bin} tools list [--require spawn_subagent]` (headless schema assert)
+- tools: `{bin} tools list [--require spawn_subagent]` (headless schema assert){browser}
 
 {workflows}
 {adl}
@@ -492,6 +515,7 @@ Use silently. Do the user's task."#,
         adl_root = ctx.developer_log_dir,
         frl_root = ctx.feature_request_log_dir,
         bin = bin,
+        browser = browser,
         workflows = workflows,
         adl = adl,
         frl = frl,
@@ -605,6 +629,7 @@ mod tests {
             os: "windows".into(),
             subagents_enabled: true,
             spawn_tool_present: true,
+            browser_tools_present: false,
             binary_name: "turbo".into(),
             isolation: "worktree".into(),
             developer_log_dir: r"C:\Users\me\.grok\developer-log".into(),
@@ -743,5 +768,70 @@ mod tests {
         // Under budget: returned verbatim, no suffix.
         let short = "short card";
         assert_eq!(truncate_to_budget(short, 1000), short);
+    }
+}
+
+#[cfg(test)]
+mod browser_line_tests {
+    use super::*;
+
+    fn ctx_with_browser(present: bool) -> BootCardContext {
+        BootCardContext {
+            browser_tools_present: present,
+            ..BootCardContext::default()
+        }
+    }
+
+    /// The line must be GUARANTEED whenever `browser_*` is registered. A live
+    /// session shipped with the tools available and no mention on the card, so
+    /// the agent went looking for a command to "open" the window (there is none)
+    /// and the human saw an unexplained white rectangle.
+    ///
+    /// Session cards only. The Child card is a focused isolation briefing with no
+    /// tools section; subagents get the launch facts from the agent-browser skill
+    /// and the toolset-gated `<browser_verification>` block instead.
+    #[test]
+    fn browser_line_present_in_session_cards_when_tools_registered() {
+        for mode in [BootCardMode::Short, BootCardMode::Full] {
+            let Some(card) = render_boot_card(mode, &ctx_with_browser(true)) else {
+                continue;
+            };
+            assert!(
+                card.text.contains("browser_navigate"),
+                "{mode:?} card must name browser_navigate when the tools are registered"
+            );
+            assert!(
+                card.text.contains("Windows-only"),
+                "{mode:?} card must say the feature is Windows-only"
+            );
+        }
+    }
+
+    /// ...and never when they are not, so the card cannot advertise a browser
+    /// the session has no way to drive.
+    #[test]
+    fn browser_line_absent_when_tools_not_registered() {
+        for mode in [BootCardMode::Short, BootCardMode::Full, BootCardMode::Child] {
+            let Some(card) = render_boot_card(mode, &ctx_with_browser(false)) else {
+                continue;
+            };
+            assert!(
+                !card.text.contains("browser_navigate"),
+                "{mode:?} card must not mention the browser when it is unavailable"
+            );
+        }
+    }
+
+    /// The card is budgeted: the launch facts belong here, the full loop does not.
+    #[test]
+    fn browser_line_stays_a_launch_summary() {
+        let card = render_boot_card(BootCardMode::Short, &ctx_with_browser(true))
+            .expect("short card renders");
+        for skill_only in ["browser_eval", "one-time-code", "confirm=true"] {
+            assert!(
+                !card.text.contains(skill_only),
+                "`{skill_only}` belongs in the agent-browser skill, not the boot card"
+            );
+        }
     }
 }

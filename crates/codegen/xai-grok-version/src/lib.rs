@@ -73,3 +73,28 @@ mod tests {
         assert!(display_version(" [stable]").ends_with("[stable]"));
     }
 }
+
+#[cfg(test)]
+mod version_source_tests {
+    /// Regression: this crate's `CARGO_PKG_VERSION` drifted to 1.0.0-rc.1 while
+    /// the workspace `VERSION` file and `xai-grok-pager-bin` moved to rc.2, so
+    /// `turbo --version` and the Agent Boot Card reported different builds to
+    /// the same user. `build.rs` now feeds `GROK_VERSION` from `VERSION`.
+    #[test]
+    fn installed_matches_workspace_version_file() {
+        let version_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.join("VERSION"))
+            .expect("workspace root");
+        let Ok(raw) = std::fs::read_to_string(&version_file) else {
+            return; // packaged build without the workspace tree
+        };
+        assert_eq!(
+            super::VERSION,
+            raw.trim(),
+            "compiled VERSION must match the workspace VERSION file"
+        );
+    }
+}

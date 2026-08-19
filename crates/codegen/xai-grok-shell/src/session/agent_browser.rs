@@ -75,12 +75,19 @@ fn store_child(session_id: &str, child: Child) {
 }
 
 /// Argv after `current_exe()` for the sidecar (no program name).
-pub fn browser_host_argv(session_id: &str) -> Vec<String> {
-    vec![
+pub fn browser_host_argv(session_id: &str, session_folder: Option<&std::path::Path>) -> Vec<String> {
+    let mut argv = vec![
         "browser-host".to_owned(),
         "--session-id".to_owned(),
         session_id.to_owned(),
-    ]
+    ];
+    // Without this the host refuses every `file:` URL the client policy allows,
+    // because it has no session folder to measure them against.
+    if let Some(folder) = session_folder {
+        argv.push("--session-folder".to_owned());
+        argv.push(folder.display().to_string());
+    }
+    argv
 }
 
 /// Product-facing timeout text (always 15s, even if a test uses a shorter wait).
@@ -171,8 +178,8 @@ pub fn inject_browser_tools(config: &mut xai_grok_tools::registry::types::ToolSe
 
 /// Install the process-wide `BrowserHandle` ensure hook (idempotent replace).
 pub fn install_browser_ensure_hook() {
-    set_browser_ensure(Arc::new(|session_id| {
-        ensure_browser_host(session_id)
+    set_browser_ensure(Arc::new(|session_id, session_folder| {
+        ensure_browser_host_in(session_id, session_folder)
             .map(|_| ())
             .map_err(|err| err.to_string())
     }));
@@ -183,6 +190,15 @@ pub fn install_browser_ensure_hook() {
 /// Waits up to 15s for the named pipe. Children inherit the parent Job Object
 /// (no breakaway). Non-Windows: [`AgentBrowserError::WindowsOnly`].
 pub fn ensure_browser_host(session_id: &str) -> Result<BrowserHostHandle, AgentBrowserError> {
+    ensure_browser_host_in(session_id, None)
+}
+
+/// [`ensure_browser_host`], additionally telling the sidecar which folder may
+/// serve `file:` URLs.
+pub fn ensure_browser_host_in(
+    session_id: &str,
+    session_folder: Option<&std::path::Path>,
+) -> Result<BrowserHostHandle, AgentBrowserError> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return Err(AgentBrowserError::Failed(
@@ -213,7 +229,7 @@ pub fn ensure_browser_host(session_id: &str) -> Result<BrowserHostHandle, AgentB
 
         let exe = std::env::current_exe()
             .map_err(|e| AgentBrowserError::Failed(format!("current_exe for browser-host: {e}")))?;
-        let argv = browser_host_argv(session_id);
+        let argv = browser_host_argv(session_id, session_folder);
         let mut cmd = std::process::Command::new(&exe);
         cmd.args(&argv);
         xai_tty_utils::detach_std_command(&mut cmd);
@@ -326,13 +342,25 @@ mod tests {
     #[test]
     fn browser_host_argv_is_browser_host_and_session_id() {
         assert_eq!(
-            browser_host_argv("sess-1"),
+            browser_host_argv("sess-1", None),
             vec![
                 "browser-host".to_string(),
                 "--session-id".to_string(),
                 "sess-1".to_string()
             ]
         );
+    }
+
+    /// Regression: the spawn dropped the session folder, so the host refused
+    /// every `file:` URL the client-side policy had just allowed.
+    #[test]
+    fn browser_host_argv_carries_the_session_folder() {
+        let argv = browser_host_argv("sess-1", Some(std::path::Path::new(r"H:\sessionsbc")));
+        let i = argv
+            .iter()
+            .position(|a| a == "--session-folder")
+            .expect("--session-folder must be passed to the host");
+        assert_eq!(argv[i + 1], r"H:\sessionsbc");
     }
 
     #[test]

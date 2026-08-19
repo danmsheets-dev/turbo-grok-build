@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-1.0.0--rc.2-blue" alt="1.0.0-rc.2">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.2.1-blue" alt="1.0.0-rc.2.1">
   <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.2`** — the
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.2.1`** — the
 shipped Windows build (see [Prebuilt Windows binary](#prebuilt-windows-binary)).
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
@@ -65,24 +65,24 @@ is a multi-agent development runtime** built on that foundation.
 
 ### Prebuilt Windows binary
 
-A production Windows build of **Turbo `1.0.0-rc.2`** is published as a **GitHub
+A production Windows build of **Turbo `1.0.0-rc.2.1`** is published as a **GitHub
 Release asset** (≈143 MB — not stored as a regular git blob; public-fork LFS
 uploads are blocked on GitHub):
 
 | Wire | Release | Asset name |
 | --- | --- | --- |
-| `1.0.0-rc.2` | [v1.0.0-rc.2](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.2) | `turbo-1.0.0-rc.2-x86_64-pc-windows-msvc.exe` |
+| `1.0.0-rc.2.1` | [v1.0.0-rc.2.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.2.1) | `turbo-1.0.0-rc.2.1-x86_64-pc-windows-msvc.exe` |
 | `1.0.0-rc.1` | [v1.0.0-rc.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.1) | `turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe` |
 
 ```powershell
 # Download the asset from the release page, then:
-Copy-Item .\turbo-1.0.0-rc.2-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
+Copy-Item .\turbo-1.0.0-rc.2.1-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
 # or: set GROK_BINARY to the downloaded path for the Grok Build Claude plugin
 ```
 
 Packaging notes: [`releases/windows/README.md`](./releases/windows/README.md).
 
-The prebuilt matches this tree at the `v1.0.0-rc.2` tag. Rebuild from source for
+The prebuilt matches this tree at the `v1.0.0-rc.2.1` tag. Rebuild from source for
 anything newer. Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
 
 ### Highlights (1.0 line)
@@ -99,6 +99,13 @@ merge, full Disk Clean, and harness polish for the Grok Build Claude plugin
 confinement hardening pass: a `--confine` write-boundary escape and a
 snapshot-uid forgery vector were found and closed before release
 ([`docs/RC2_UNRELEASED_AUDIT.md`](./docs/RC2_UNRELEASED_AUDIT.md)).
+
+**1.0.0-rc.2.1** is the Agent WebView hotfix. rc.2 shipped it with a named-pipe
+defect that gave a fresh `browser_navigate` a four-in-five chance of never
+returning, so the window opened and stayed white. That is fixed, along with the
+field report it produced: a wedged host now returns a real error instead of a
+transport timeout, first paint explains itself, the title carries the page host
+and session, and the close button hides the window instead of killing the host.
 
 Earlier community highlights (Game Mode, disk clean, tools list) from the
 `0.2.119-rN` line remain in the product; see [`CHANGELOG.md`](./CHANGELOG.md).
