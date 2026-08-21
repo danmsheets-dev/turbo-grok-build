@@ -35,7 +35,11 @@ pub(crate) mod host;
 // cpal-based capture: the Windows backend, the macOS fallback, and the macOS
 // `__mic-capture` child implementation.
 #[cfg(not(target_os = "linux"))]
+mod pcm;
+#[cfg(not(target_os = "linux"))]
 mod capture;
+#[cfg(target_os = "windows")]
+mod loopback;
 // Wire protocol shared by the `__mic-capture` child (writer, in `capture`)
 // and the macOS parent (parser, in `capture_subprocess`).
 #[cfg(not(target_os = "linux"))]
@@ -46,6 +50,60 @@ pub use capture::capture_pcm_for_duration;
 pub(crate) use capture::run_capture_child_cli;
 #[cfg(target_os = "windows")]
 pub use capture::{CaptureHandle, input_device_info, spawn_pcm_capture};
+
+/// What a meeting capture session actually opened.
+#[derive(Debug, Clone)]
+pub struct MeetingCaptureReport {
+    pub used_loopback: bool,
+    pub mic: bool,
+    pub device_labels: Vec<String>,
+}
+
+/// Capture for `/meeting`: Windows prefers WASAPI loopback (all participants)
+/// mixed with the mic; other OS / failures fall back to the default microphone.
+pub fn spawn_meeting_pcm_capture(
+    sample_rate: u32,
+    pcm_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    prefer_loopback: bool,
+    include_mic: bool,
+) -> Result<(CaptureHandle, MeetingCaptureReport), crate::error::VoiceError> {
+    #[cfg(target_os = "windows")]
+    {
+        if prefer_loopback {
+            match loopback::spawn_loopback_mix(sample_rate, pcm_tx.clone(), include_mic) {
+                Ok((handle, report)) => {
+                    return Ok((
+                        handle,
+                        MeetingCaptureReport {
+                            used_loopback: report.used_loopback,
+                            mic: report.mic,
+                            device_labels: report.device_labels,
+                        },
+                    ));
+                }
+                Err(e) => {
+                    if !include_mic {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        error = %e,
+                        "WASAPI loopback failed; falling back to microphone"
+                    );
+                }
+            }
+        }
+    }
+    let _ = (prefer_loopback, include_mic);
+    let handle = spawn_pcm_capture(sample_rate, pcm_tx)?;
+    Ok((
+        handle,
+        MeetingCaptureReport {
+            used_loopback: false,
+            mic: true,
+            device_labels: vec!["microphone".into()],
+        },
+    ))
+}
 
 // Shared PCM-over-pipe plumbing for the two subprocess backends.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

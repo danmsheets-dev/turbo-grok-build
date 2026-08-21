@@ -174,6 +174,43 @@ Reopen the current session in the other render mode. `/minimal` (offered while y
 
 A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, `/workflows`, and `/dashboard` are fullscreen-only, while `/expand` and `/edit-prompt` are minimal-only. Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, Grok says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode — press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
 
+### `/meeting`
+
+Fathom-style meeting notetaker (built into Turbo, not a third-party bot vendor).
+
+```
+/meeting join <url> [name]
+/meeting stop
+/meeting status
+/meeting transcript
+/meeting notes
+/meeting ask [question]
+```
+
+`join` opens the Zoom/Teams/Meet/Webex link and starts capture. On Windows that is **WASAPI loopback of system playback** (everyone you hear in Teams/Zoom) **mixed with the microphone** (you, on a headset). If loopback cannot open, it falls back to the mic. Optional `[name]` is the meeting title (otherwise Teams Graph `subject` if `GROK_GRAPH_TOKEN` is set). Grok STT writes a transcript under the session folder (`meetings/<id>/transcript.jsonl`). Set `GROK_MEETING_CAPTURE=mic` to force microphone-only, or `GROK_MEETING_CAPTURE=loopback` for playback mix without the mic.
+
+**When the meeting is done**, `/meeting stop` (or `/meeting notes`) writes a **work-only** summary into the folder you launched Turbo from:
+
+```
+Meetings/2026-08-21 - Weekly website standup.md
+```
+
+The file starts with the date and meeting name. Small talk, jokes, and personal chatter are omitted — only project/business content (status, decisions, owners, action items). `/meeting notes` rewrites the same file if you want a fresh recap.
+
+**Coworker Q&A.** Launch Turbo from the project folder you want it to know about (for example `H:\better impact\`). People type `Turbo: How is the new website going` in the meeting, or you run:
+
+```
+/meeting ask How is the new website project going
+```
+
+Turbo researches that workspace with the usual tools — files, connected MCP servers, web — plus current meeting notes as extra context. It does not need a separate knowledge folder. Then it calls `meeting_reply`. With `GROK_GRAPH_TOKEN` set to a delegated Graph token (`Chat.ReadWrite` + `OnlineMeetings.Read`), the answer is posted **as you** in Teams chat, prefixed `[Turbo]`. Without a token, the answer is saved as `last_reply.md` for you to paste.
+
+Spoken or typed `Turbo: …` **starts a research turn automatically** (workspace files, MCP, web) and replies with `[Turbo]`. Chat detection needs `GROK_GRAPH_TOKEN`. Set `GROK_MEETING_AUTO_ASK=0` to queue only; `/meeting status` shows pending items and `/meeting ask` drains them.
+
+The end-of-meeting summary includes **For you** (requests aimed at you) and **Projects** (work matched to folders in the launch workspace).
+
+Set `GROK_MEETING_NO_CAPTURE=1` to skip audio (tests).
+
 ### `/voice`
 
 Toggle microphone dictation into the prompt composer. This remains speech-to-text only; it does not play spoken responses.

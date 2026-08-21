@@ -86,13 +86,7 @@ pub fn spawn_pcm_capture(
     // under pager load. The loop exits on its own when capture stops (sync_tx is
     // dropped) or the STT consumer goes away (`blocking_send` errors), so the
     // `abort()` in `CaptureHandle`'s teardown is only a backstop.
-    let bridge = tokio::task::spawn_blocking(move || {
-        while let Ok(bytes) = sync_rx.recv() {
-            if pcm_tx.blocking_send(bytes).is_err() {
-                break;
-            }
-        }
-    });
+    let bridge = spawn_pcm_bridge(sync_rx, pcm_tx);
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
@@ -122,11 +116,34 @@ pub fn spawn_pcm_capture(
         }
     }
 
-    Ok(CaptureHandle {
-        stop,
-        thread: Some(thread),
-        bridge,
+    Ok(CaptureHandle::from_parts(stop, thread, bridge))
+}
+
+pub(super) fn spawn_pcm_bridge(
+    sync_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    pcm_tx: async_mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        while let Ok(bytes) = sync_rx.recv() {
+            if pcm_tx.blocking_send(bytes).is_err() {
+                break;
+            }
+        }
     })
+}
+
+impl CaptureHandle {
+    pub(super) fn from_parts(
+        stop: Arc<AtomicBool>,
+        thread: JoinHandle<()>,
+        bridge: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            stop,
+            thread: Some(thread),
+            bridge,
+        }
+    }
 }
 
 /// Default cpal input device, or a config error when the cpal host has none.
@@ -247,6 +264,34 @@ fn run_capture_loop(
 /// host, where the stream stays until the returned handle is dropped. All
 /// device/config/permission failures surface here as a `VoiceError` so the
 /// caller can report them before entering the steady-state loop.
+/// Spawn the default-mic capture loop on its own thread. Returns after the
+/// device opens (or errors). Used by meeting mix so loopback can run alongside.
+pub(super) fn spawn_mic_to_sync(
+    sample_rate: u32,
+    sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+) -> Result<JoinHandle<()>, VoiceError> {
+    let stop_flag = Arc::clone(&stop);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), VoiceError>>(1);
+    let thread = thread::spawn(move || {
+        run_capture_loop(sample_rate, sync_tx, stop_flag, ready_tx);
+    });
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => Ok(thread),
+        Ok(Err(e)) => {
+            let _ = thread.join();
+            Err(e)
+        }
+        Err(_) => {
+            stop.store(true, Ordering::Release);
+            let _ = thread.join();
+            Err(VoiceError::Config(
+                "voice capture did not start within 5s".into(),
+            ))
+        }
+    }
+}
+
 pub(super) fn open_capture_stream(
     sample_rate: u32,
     sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
@@ -410,11 +455,25 @@ where
                 if stop_cb.load(Ordering::Acquire) {
                     return;
                 }
-                let mono = frames_to_mono_i16(data, channels);
+                let mono: Vec<i16> = if channels == 1 {
+                    data.iter().map(|s| i16::from_sample(*s)).collect()
+                } else {
+                    let mut mono = Vec::with_capacity(data.len() / channels);
+                    for frame in data.chunks_exact(channels) {
+                        let mut sum: i32 = 0;
+                        for sample in frame {
+                            sum += i32::from(i16::from_sample(*sample));
+                        }
+                        let avg = (sum / channels as i32)
+                            .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+                        mono.push(avg as i16);
+                    }
+                    mono
+                };
                 let pcm = if stream_rate == target_rate {
                     mono
                 } else {
-                    resample_mono_i16(&mono, stream_rate, target_rate)
+                    super::pcm::resample_mono_i16(&mono, stream_rate, target_rate)
                 };
                 if pcm.is_empty() {
                     return;
@@ -444,55 +503,7 @@ fn send_pcm(pcm: &[i16], sync_tx: &std::sync::mpsc::SyncSender<Vec<u8>>, dropped
     }
 }
 
-fn frames_to_mono_i16<T>(data: &[T], channels: usize) -> Vec<i16>
-where
-    T: Sample,
-    i16: FromSample<T>,
-{
-    if channels == 0 {
-        return Vec::new();
-    }
-    if channels == 1 {
-        return data.iter().map(|s| i16::from_sample(*s)).collect();
-    }
-    let mut mono = Vec::with_capacity(data.len() / channels);
-    for frame in data.chunks_exact(channels) {
-        let mut sum: i32 = 0;
-        for sample in frame {
-            sum += i16::from_sample(*sample) as i32;
-        }
-        let avg = (sum / channels as i32).clamp(i16::MIN as i32, i16::MAX as i32);
-        mono.push(avg as i16);
-    }
-    mono
-}
 
-fn resample_mono_i16(samples: &[i16], input_rate: u32, output_rate: u32) -> Vec<i16> {
-    if samples.is_empty() || input_rate == 0 || output_rate == 0 {
-        return Vec::new();
-    }
-    if input_rate == output_rate {
-        return samples.to_vec();
-    }
-
-    let output_len =
-        ((samples.len() as u64 * output_rate as u64) / input_rate as u64).max(1) as usize;
-    let step = input_rate as f64 / output_rate as f64;
-    let mut output = Vec::with_capacity(output_len);
-
-    for i in 0..output_len {
-        let src_pos = i as f64 * step;
-        let idx = src_pos.floor() as usize;
-        let frac = src_pos - idx as f64;
-        let s0 = samples[idx] as f64;
-        let s1 = *samples.get(idx + 1).unwrap_or(&samples[idx]) as f64;
-        let sample = s0 + (s1 - s0) * frac;
-        let clamped = sample.round().max(i16::MIN as f64).min(i16::MAX as f64);
-        output.push(clamped as i16);
-    }
-
-    output
-}
 
 // ---------------------------------------------------------------------------
 // `__mic-capture` child mode (see the module docs and `capture_subprocess`).
@@ -675,12 +686,7 @@ mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
-    #[test]
-    fn resample_halves_rate() {
-        let input: Vec<i16> = (0..48).map(|i| (i * 100) as i16).collect();
-        let out = resample_mono_i16(&input, 48_000, 16_000);
-        assert_eq!(out.len(), 16);
-    }
+
 
     /// Regression for the WASAPI use-after-free (see [`super::super::host`]).
     ///
@@ -756,7 +762,7 @@ mod tests {
     #[test]
     fn downmix_stereo_to_mono() {
         let stereo = [i16::MAX, i16::MIN];
-        let mono = frames_to_mono_i16(&stereo, 2);
+        let mono = super::super::pcm::frames_to_mono_i16_i16(&stereo, 2);
         assert_eq!(mono.len(), 1);
         assert_eq!(mono[0], 0);
     }

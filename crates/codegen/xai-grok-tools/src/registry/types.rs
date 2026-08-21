@@ -720,6 +720,14 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::BrowserHoverTool>();
         b.register::<grok_build::BrowserSetFileTool>();
         b.register::<grok_build::BrowserRaiseTool>();
+        b.register::<grok_build::MeetingJoinTool>();
+        b.register::<grok_build::MeetingStopTool>();
+        b.register::<grok_build::MeetingStatusTool>();
+        b.register::<grok_build::MeetingTranscriptTool>();
+        b.register::<grok_build::MeetingNotesTool>();
+        b.register::<grok_build::MeetingKnowledgeTool>();
+        b.register::<grok_build::MeetingAskTool>();
+        b.register::<grok_build::MeetingReplyTool>();
         b.register::<grok_build::LspTool>();
         b.register::<grok_build::ImageGenTool>();
         b.register::<grok_build::ImageEditTool>();
@@ -1131,6 +1139,29 @@ impl ToolRegistryBuilder {
                 ));
             } else {
                 resources.insert(BrowserHandle::unbound());
+            }
+        }
+        {
+            use crate::implementations::grok_build::MeetingHandle;
+            let session_folder = resources
+                .get::<crate::types::resources::SessionFolder>()
+                .map(|folder| folder.0.clone());
+            if let Some(session_id) = ctx
+                .owner_session_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+            {
+                let notif = resources
+                    .get::<crate::types::resources::NotificationHandle>()
+                    .map(|n| n.0.clone());
+                resources.insert(MeetingHandle::new(
+                    session_id,
+                    session_folder,
+                    ctx.api_key_provider.clone(),
+                    notif,
+                ));
+            } else {
+                resources.insert(MeetingHandle::unbound());
             }
         }
         let concise_ns = crate::types::tool::ToolNamespace::GrokBuildConcise.to_string();

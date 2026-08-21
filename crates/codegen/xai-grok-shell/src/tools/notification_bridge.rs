@@ -675,6 +675,29 @@ async fn handle_notification(
         ToolNotification::LspServerFailed(s) => {
             tracing::error!(server = %s.server_name, error = %s.error, "LSP server failed");
         }
+        ToolNotification::MeetingQuestion(q) => {
+            tracing::info!(from = %q.from, "Meeting Turbo: question — injecting ask turn");
+            let task_id = if q.task_id.is_empty() {
+                "meeting-qa".to_string()
+            } else {
+                q.task_id.clone()
+            };
+            let inject_payload = serde_json::json!({
+                "sessionId": config.session_id,
+                "taskId": task_id,
+                "prompt": &q.prompt,
+                "humanSchedule": "Turbo Q&A",
+                "nextFireAt": serde_json::Value::Null,
+            });
+            if let Ok(params) = serde_json::value::to_raw_value(&inject_payload) {
+                config
+                    .gateway
+                    .forward_fire_and_forget(acp::ExtNotification::new(
+                        "x.ai/scheduled_task_inject_prompt",
+                        params.into(),
+                    ));
+            }
+        }
         ToolNotification::ScheduledTaskFired(fired) => {
             tracing::info!(
                 task_id = %fired.task_id,

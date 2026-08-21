@@ -16295,6 +16295,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-meetings"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
 name = "xai-grok-memory"
 version = "0.1.0"
 dependencies = [
@@ -16460,7 +16471,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -17110,11 +17121,13 @@ dependencies = [
  "xai-grok-developer-log",
  "xai-grok-env",
  "xai-grok-extra-ca",
+ "xai-grok-meetings",
  "xai-grok-paths",
  "xai-grok-sandbox",
  "xai-grok-test-support",
  "xai-grok-tools-api",
  "xai-grok-version",
+ "xai-grok-voice",
  "xai-grok-workspace-types",
  "xai-interjection-core",
  "xai-test-utils",
@@ -17204,6 +17217,7 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.3",
  "webrtc",
+ "windows 0.61.3",
  "xai-tty-utils",
 ]
 

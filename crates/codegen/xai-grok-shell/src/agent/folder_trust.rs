@@ -1348,7 +1348,10 @@ mod tests {
         record_for_test(untrusted.path(), false);
         let kept = filter_untrusted_project_mcp(untrusted.path(), merged());
         let names: HashSet<&str> = kept.iter().map(mcp_server_name).collect();
-        assert_eq!(names, ["client", "global"].into_iter().collect());
+        assert_eq!(
+            names,
+            ["client", "global"].into_iter().collect::<HashSet<_>>()
+        );
 
         // Trusted: every server is retained even with project configs present.
         let trusted = repo_with_project_mcp();

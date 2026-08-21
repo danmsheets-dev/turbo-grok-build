@@ -33,9 +33,37 @@ onward, official Grok Build is the permanent upstream core remote
 | r2 | `0.2.119-r2` | Game Mode overhaul, disk gates, tools list |
 | r3 | `0.2.119-r3` | Full Disk Clean (taxonomy, multi-path, prune, telemetry) |
 | **1.0 rc1** | **`1.0.0-rc.1`** | **Grok Build 1.0.0 core + Turbo product layer** |
+| **1.0 rc2** | **`1.0.0-rc.2`** | Agent WebView, Grok 4.6, confinement harden |
+| **1.0 rc2.1** | **`1.0.0-rc.2.1`** | Agent WebView named-pipe hotfix |
+| **1.0 rc3** | **`1.0.0-rc.3`** | Agent WebView field-test pass |
+| **1.0 rc4** | **`1.0.0-rc.4`** | Fathom-style `/meeting` notetaker |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
+
+---
+
+## Unreleased
+
+---
+
+## [1.0.0-rc.4] - 2026-08-21
+
+**Fathom-style meeting notetaker.** Join a Zoom/Teams/Meet/Webex link, transcribe all participants on Windows, auto-answer coworker `Turbo:` questions from the launch workspace, and save a work-only recap.
+
+### Added
+- **Fathom-style meeting notetaker** — `/meeting join <url> [name]` opens a Zoom/Teams/Meet/Webex **https** join URL. On Windows, captures **system playback (all participants) mixed with the mic** via WASAPI loopback, transcribed with Grok STT (falls back to mic if loopback cannot open, unless `GROK_MEETING_CAPTURE=loopback`). `/meeting stop` writes a **work-only** summary to `{workspace}/Meetings/YYYY-MM-DD - <Meeting Name>.md`. Set `GROK_MEETING_CAPTURE=mic` to force microphone-only.
+- **Meeting Q&A** — Coworkers type or say `Turbo: …`. Turbo **auto-injects** a research turn (workspace files, MCP, web) and `meeting_reply` posts `[Turbo] …` to Teams when `GROK_GRAPH_TOKEN` is set. Coworker text is treated as untrusted data (not extra system instructions). Set `GROK_MEETING_AUTO_ASK=0` to queue only. `/meeting ask` still drains manually.
+- **Meeting recap highlights** — `/meeting stop` summary includes **For you** (asks/actions for the operator) and **Projects** (matched to the launch workspace).
+
+### Fixed
+- Join URLs are parsed as real `https` URLs (host-based platform classify, no `cmd` metacharacters). Windows opens via `explorer.exe` instead of `cmd /c start`. `GROK_TEST_OPEN_URL_FILE` is test-only.
+- `GROK_MEETING_CAPTURE=loopback` no longer falls back to the microphone when WASAPI mix fails.
+- Recap writes stay inside `{workspace}/Meetings` (no `..` reuse, no symlinked Meetings folder). Meeting ids reject path separators.
+- Graph `$filter` percent-encodes `JoinWebUrl` and matches the returned meeting; chat ids are path-encoded; Graph error bodies are truncated.
+- WASAPI mix-format / event HANDLE leaks on loopback open failure; `CoUninitialize` only after a successful `CoInitializeEx`.
+- Oracle execution-budget test matched the 24-turn / 48-tool definition (was still expecting 12/40).
+- Nested-subagent depth test hung: default max depth is 2, so a depth-1 spawn waited forever on the mock backend.
 
 ---
 

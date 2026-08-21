@@ -32,21 +32,21 @@ fn cancellation_makes_an_otherwise_complete_usage_snapshot_incomplete() {
 fn oracle_execution_budget_resolves_and_reserves_finalization_capacity() {
     let mut definition = xai_grok_agent::config::AgentDefinition::oracle();
     let budget = SubagentExecutionBudget::resolve(& definition, None);
-    assert_eq!(budget.max_turns, Some(12));
-    assert_eq!(budget.max_tool_calls, Some(40));
-    assert_eq!(budget.timeout_secs, Some(180));
-    assert_eq!(budget.finalize_grace_secs, Some(30));
-    assert_eq!(budget.finalize_at_model_calls(), Some(11));
-    assert_eq!(budget.finalize_at_tool_calls(), Some(32));
-    assert_eq!(budget.finalize_at_elapsed(), Some(std::time::Duration::from_secs(150)));
+    assert_eq!(budget.max_turns, Some(24));
+    assert_eq!(budget.max_tool_calls, Some(48));
+    assert_eq!(budget.timeout_secs, Some(600));
+    assert_eq!(budget.finalize_grace_secs, Some(45));
+    assert_eq!(budget.finalize_at_model_calls(), Some(23));
+    assert_eq!(budget.finalize_at_tool_calls(), Some(40));
+    assert_eq!(budget.finalize_at_elapsed(), Some(std::time::Duration::from_secs(555)));
     let wire = budget.wire().expect("Oracle is bounded");
-    assert_eq!(wire.max_turns, Some(12));
-    assert_eq!(wire.max_tool_calls, Some(40));
+    assert_eq!(wire.max_turns, Some(24));
+    assert_eq!(wire.max_tool_calls, Some(48));
     append_execution_budget_prompt(& mut definition, budget);
     let prompt = definition.prompt_body.expect("Oracle prompt");
-    assert!(prompt.contains("12 model/tool-use rounds"));
-    assert!(prompt.contains("40 tool calls"));
-    assert!(prompt.contains("180 seconds total wall-clock time"));
+    assert!(prompt.contains("24 model/tool-use rounds"));
+    assert!(prompt.contains("48 tool calls"));
+    assert!(prompt.contains("600 seconds total wall-clock time"));
 }
 #[test]
 fn partial_budget_results_require_new_plain_text_output() {

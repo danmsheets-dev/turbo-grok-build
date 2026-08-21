@@ -1333,6 +1333,7 @@ fn dashboard_peek_cycle_does_not_retire_the_nudge() {
         "the dashboard peek must not retire (or attribute) the nudge",
     );
 }
+#[serial_test::serial(GROK_HOME)]
 #[test]
 fn dashboard_open_or_merges_session_is_worktree_when_probe_is_plain() {
     let repo = crate::test_util::TempGitRepo::init("main");
@@ -1354,6 +1355,7 @@ fn dashboard_open_or_merges_session_is_worktree_when_probe_is_plain() {
     );
     assert_eq!(agent.current_branch.as_deref(), Some("main"));
 }
+#[serial_test::serial(GROK_HOME)]
 #[test]
 fn dashboard_open_clears_stale_agent_is_worktree_when_probe_and_session_false() {
     let repo = crate::test_util::TempGitRepo::init("main");
@@ -1375,6 +1377,7 @@ fn dashboard_open_clears_stale_agent_is_worktree_when_probe_and_session_false() 
     );
     assert_eq!(agent.current_branch.as_deref(), Some("main"));
 }
+#[serial_test::serial(GROK_HOME)]
 #[test]
 fn dashboard_open_detects_standalone_grok_worktree() {
     let main = crate::test_util::TempGitRepo::init("main-only");

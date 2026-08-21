@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-1.0.0--rc.3-blue" alt="1.0.0-rc.3">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.4-blue" alt="1.0.0-rc.4">
   <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.3`** — the
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.4`** — the
 shipped Windows build (see [Prebuilt Windows binary](#prebuilt-windows-binary)).
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
@@ -60,29 +60,30 @@ is a multi-agent development runtime** built on that foundation.
 | Agent orientation | System prompt + project rules | **Agent Boot Card** + Workspace Tree atlas |
 | Product field signal | `/feedback`, crashes | **Auto Developer Log** + **Feature Request Log** |
 | Providers | xAI-centric | Multi-provider (Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, …) |
-| UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) |
+| UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) + **`/meeting` notetaker** |
 | Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
 ### Prebuilt Windows binary
 
-A production Windows build of **Turbo `1.0.0-rc.2.1`** is published as a **GitHub
-Release asset** (≈143 MB — not stored as a regular git blob; public-fork LFS
-uploads are blocked on GitHub):
+A production Windows build of **Turbo `1.0.0-rc.4`** is published as a **GitHub
+Release asset** (not stored as a regular git blob; public-fork LFS uploads are
+blocked on GitHub):
 
 | Wire | Release | Asset name |
 | --- | --- | --- |
+| `1.0.0-rc.4` | [v1.0.0-rc.4](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.4) | `turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.exe` |
 | `1.0.0-rc.2.1` | [v1.0.0-rc.2.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.2.1) | `turbo-1.0.0-rc.2.1-x86_64-pc-windows-msvc.exe` |
 | `1.0.0-rc.1` | [v1.0.0-rc.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.1) | `turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe` |
 
 ```powershell
 # Download the asset from the release page, then:
-Copy-Item .\turbo-1.0.0-rc.2.1-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
+Copy-Item .\turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
 # or: set GROK_BINARY to the downloaded path for the Grok Build Claude plugin
 ```
 
 Packaging notes: [`releases/windows/README.md`](./releases/windows/README.md).
 
-The prebuilt matches this tree at the `v1.0.0-rc.2.1` tag. Rebuild from source for
+The prebuilt matches this tree at the `v1.0.0-rc.4` tag. Rebuild from source for
 anything newer. Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
 
 ### Highlights (1.0 line)
@@ -106,6 +107,17 @@ returning, so the window opened and stayed white. That is fixed, along with the
 field report it produced: a wedged host now returns a real error instead of a
 transport timeout, first paint explains itself, the title carries the page host
 and session, and the close button hides the window instead of killing the host.
+
+**1.0.0-rc.3** is the Agent WebView field-test pass (page-control tools, OAuth
+popups, session-scoped profiles). See [`CHANGELOG.md`](./CHANGELOG.md).
+
+**1.0.0-rc.4** adds the **Fathom-style meeting notetaker**: `/meeting join <url>
+[name]` opens Zoom/Teams/Meet/Webex, transcribes **all participants** on Windows
+(WASAPI loopback + mic → Grok STT), auto-answers coworker `Turbo:` questions
+from the launch workspace (MCP ok), and writes a work-only recap to
+`Meetings/YYYY-MM-DD - <name>.md` with **For you** and **Projects** sections.
+A deep-audit pass closed join-URL `cmd` injection, loopback-only mic fallback,
+recap path escape, and Graph `$filter` encoding.
 
 Earlier community highlights (Game Mode, disk clean, tools list) from the
 `0.2.119-rN` line remain in the product; see [`CHANGELOG.md`](./CHANGELOG.md).
@@ -178,6 +190,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Game Mode** | `Ctrl+G` pixel office of supervisor + subagent desks; hover tooltips (Supervisor / MCP rack), 11 animations, parks when idle | RC11 / RC2 |
 | **Multi-provider** | Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, … | r2+ |
 | **Headless honesty** | Streaming-json tool/subagent events, confine, trust gates | RC6 |
+| **`/meeting` notetaker** | Join Zoom/Teams/Meet/Webex; Windows loopback STT; coworker `Turbo:` Q&A; work-only recap in `Meetings/` | **1.0-rc.4** |
 
 ---
 
@@ -197,10 +210,14 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **r14** | `0.2.114-r14` | **`web_fetch`** + **workflow routing** |
 | **r15** | `0.2.119-r1` | **Upstream 0.2.119 sync**, security + Windows correctness |
 | **r2** | **`0.2.119-r2`** | **Windows voice-crash fix**, **Game Mode overhaul**, green suite, LF normalization, disk keep-N / free gate, **`turbo tools list`** |
+| **1.0-rc.1** | **`1.0.0-rc.1`** | **Grok Build 1.0.0 core** + Turbo product layer |
+| **1.0-rc.2** | **`1.0.0-rc.2`** | **Agent WebView**, Grok 4.6, confinement harden |
+| **1.0-rc.2.1** | **`1.0.0-rc.2.1`** | Agent WebView named-pipe hotfix |
+| **1.0-rc.3** | **`1.0.0-rc.3`** | Agent WebView field-test pass |
+| **1.0-rc.4** | **`1.0.0-rc.4`** | **Fathom-style `/meeting` notetaker** (loopback STT, `Turbo:` Q&A, work-only recap) |
 
 > RC numbering follows the **wire version**, which restarted at `r1` when RC15
-> synced upstream `0.2.119`. So the release after RC15 is **r2** (`0.2.119-r2`),
-> not "r16".
+> synced upstream `0.2.119`. The 1.0 line starts at **`1.0.0-rc.1`**.
 
 Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 

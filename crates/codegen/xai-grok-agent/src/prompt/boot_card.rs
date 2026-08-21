@@ -456,6 +456,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - CLI: `{bin} issues|features file --class …` (aliases `--error-class` / `--request-class`)
 - disk: `{bin} disk report|check|clean --safe [--include …]` · `{bin} disk prune` · `{bin} subagent prune` · `{bin} tree prune`
 - tools: `{bin} tools list [--require spawn_subagent]` (headless schema assert){browser}
+- meeting: `/meeting join <url> [name]` notes (Windows: WASAPI loopback + mic); `Turbo: …` in chat/audio auto-asks the workspace (MCP ok) and replies `[Turbo]`; `/meeting stop` writes work-only `Meetings/YYYY-MM-DD - Name.md` with For you + Projects.
 
 {workflows}
 {adl}

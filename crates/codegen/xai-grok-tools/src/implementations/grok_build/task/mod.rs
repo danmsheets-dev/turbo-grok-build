@@ -850,7 +850,9 @@ mod tests {
         let (backend, _rx) = make_backend();
         let mut resources = Resources::new();
         resources.insert(backend);
-        resources.insert(SubagentDepthCounter(1)); // first-level subagent
+        // Default max is 2 (one nested spawn from a first-level child). Depth 2
+        // is the hard stop — a grandchild must not spawn further.
+        resources.insert(SubagentDepthCounter(MAX_SUBAGENT_DEPTH));
         resources.insert(SessionIdResource("child-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
 
@@ -880,7 +882,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("depth limit exceeded"),
-            "subagent at depth 1 must not spawn: {err}"
+            "subagent at depth {MAX_SUBAGENT_DEPTH} must not spawn: {err}"
         );
     }
 

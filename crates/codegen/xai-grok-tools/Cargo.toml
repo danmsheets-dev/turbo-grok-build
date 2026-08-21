@@ -18,6 +18,8 @@ async-openai = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-grok-auth = { workspace = true }
 xai-grok-browser = { workspace = true }
+xai-grok-meetings = { workspace = true }
+xai-grok-voice = { path = "../xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-config = { path = "../xai-grok-config" }
 xai-grok-paths = { path = "../xai-grok-paths" }
 xai-grok-developer-log = { workspace = true }

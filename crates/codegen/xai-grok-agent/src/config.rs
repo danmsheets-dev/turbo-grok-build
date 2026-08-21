@@ -292,6 +292,14 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             // Workspace tree atlas (Phase 1 MVP).
             (&grok_build::WorkspaceTreeTool).into(),
             (&grok_build::ResolvePathTool).into(),
+            (&grok_build::MeetingJoinTool).into(),
+            (&grok_build::MeetingStopTool).into(),
+            (&grok_build::MeetingStatusTool).into(),
+            (&grok_build::MeetingTranscriptTool).into(),
+            (&grok_build::MeetingNotesTool).into(),
+            (&grok_build::MeetingKnowledgeTool).into(),
+            (&grok_build::MeetingAskTool).into(),
+            (&grok_build::MeetingReplyTool).into(),
         ],
         behavior_preset: None,
     }
@@ -2689,6 +2697,10 @@ description: Test default tool config
         assert!(
             ids.iter().any(|id| id.contains("feature_request_log")),
             "default toolset must expose feature_request_log; got {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.contains("meeting_join")),
+            "default toolset must expose meeting_join; got {ids:?}"
         );
         // Explore (RO) also gets it so deepaudit children can file incidents.
         let explore = explore_toolset();

@@ -23,6 +23,7 @@ pub mod image_gen;
 pub mod kill_task;
 pub mod list_dir;
 pub mod lsp;
+pub mod meeting;
 pub mod monitor;
 pub mod read_file;
 pub mod resolve_path;
@@ -67,6 +68,15 @@ pub use image_gen::{
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
+pub use meeting::{
+    MEETING_ASK_TOOL_NAME, MEETING_COMMAND_NAME, MEETING_JOIN_TOOL_NAME,
+    MEETING_KNOWLEDGE_TOOL_NAME, MEETING_NOTES_TOOL_NAME, MEETING_REPLY_TOOL_NAME,
+    MEETING_STATUS_TOOL_NAME, MEETING_STOP_TOOL_NAME, MEETING_TRANSCRIPT_TOOL_NAME, MeetingAskTool,
+    MeetingHandle, MeetingJoinTool, MeetingKnowledgeTool, MeetingNotesTool, MeetingReplyTool,
+    MeetingStatusTool, MeetingStopTool, MeetingTranscriptTool, ask_instruction, join_instruction,
+    knowledge_instruction, notes_instruction, reply_instruction, split_join_args,
+    status_instruction, stop_instruction, transcript_instruction, usage_message,
+};
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
 pub use resolve_path::{RESOLVE_PATH_TOOL_NAME, ResolvePathTool};

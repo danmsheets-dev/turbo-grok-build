@@ -43,6 +43,7 @@ pub mod login;
 pub mod logout;
 pub mod loop_cmd;
 pub mod mcps;
+pub mod meeting;
 pub mod model;
 pub mod multiline;
 pub mod new;
@@ -154,6 +155,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(readiness::ReadinessCommand),
         Arc::new(changes::ChangesCommand),
         Arc::new(voice::VoiceCommand),
+        Arc::new(meeting::MeetingCommand),
         #[cfg(feature = "codex-live")]
         Arc::new(live::LiveCommand),
         Arc::new(loop_cmd::LoopCommand),
@@ -343,6 +345,7 @@ mod tests {
             "m",
             "marketplace",
             "mcps",
+            "meeting",
             "minimal",
             "ml",
             "model",

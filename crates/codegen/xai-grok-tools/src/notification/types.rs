@@ -298,6 +298,19 @@ pub struct LspServerFailed {
     pub attempts: u32,
 }
 
+/// A coworker `Turbo:` question should start an agent turn (research + reply).
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MeetingQuestion {
+    pub from: String,
+    pub question: String,
+    /// Full inject prompt (`ask_instruction`).
+    pub prompt: String,
+    /// Stable id for pager de-dup (`meeting-qa-…`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub task_id: String,
+}
+
 /// Notification that a scheduled task has fired and its prompt should be executed.
 /// Sent by the `SchedulerActor` when a recurring or one-shot task's interval elapses.
 #[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
@@ -438,6 +451,9 @@ pub enum ToolNotification {
     LspServerRetrying(LspServerRetrying),
     LspServerFailed(LspServerFailed),
 
+    /// A coworker asked Turbo in meeting chat or audio; inject `/meeting ask`.
+    MeetingQuestion(MeetingQuestion),
+
     /// A scheduled task fired and its prompt should be injected into the session.
     ScheduledTaskFired(ScheduledTaskFired),
 
@@ -507,6 +523,7 @@ notification_variants! {
     LspServerCrashed => LspServerCrashed,
     LspServerRetrying => LspServerRetrying,
     LspServerFailed => LspServerFailed,
+    MeetingQuestion => MeetingQuestion,
     ScheduledTaskFired => ScheduledTaskFired,
     ScheduledTaskRemoved => ScheduledTaskRemoved,
     ScheduledTaskCreated => ScheduledTaskCreated,

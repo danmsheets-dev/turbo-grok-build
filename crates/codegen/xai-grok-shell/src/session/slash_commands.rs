@@ -564,6 +564,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "m",
     "marketplace",
     "mcps",
+    "meeting",
     "minimal",
     "ml",
     "model",

@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::types::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
     BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
-    LspServerRetrying, LspServerStarting, MonitorEvent, PlanModeEntered, PlanModeExited,
-    ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, SubagentCompleted,
+    LspServerRetrying, LspServerStarting, MeetingQuestion, MonitorEvent, PlanModeEntered,
+    PlanModeExited, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved,
+    SubagentCompleted,
     ToolNotification, UserQuestionAsked,
 };
 use crate::types::TaskSnapshot;
@@ -141,6 +142,7 @@ fn is_critical_notification(notification: &ToolNotification) -> bool {
             | ToolNotification::UserQuestionAsked(_)
             | ToolNotification::LspServerCrashed(_)
             | ToolNotification::LspServerFailed(_)
+            | ToolNotification::MeetingQuestion(_)
             | ToolNotification::ScheduledTaskFired(_)
             | ToolNotification::ScheduledTaskRemoved(_)
     )
@@ -367,6 +369,7 @@ impl ToolNotificationHandle {
         send_lsp_crashed, LspServerCrashed, LspServerCrashed;
         send_lsp_retrying, LspServerRetrying, LspServerRetrying;
         send_lsp_failed, LspServerFailed, LspServerFailed;
+        send_meeting_question, MeetingQuestion, MeetingQuestion;
         send_scheduled_task_fired, ScheduledTaskFired, ScheduledTaskFired;
         send_scheduled_task_removed, ScheduledTaskRemoved, ScheduledTaskRemoved;
         send_scheduled_task_created, ScheduledTaskCreated, ScheduledTaskCreated;
