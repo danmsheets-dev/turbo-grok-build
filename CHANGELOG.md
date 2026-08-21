@@ -37,6 +37,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc2.1** | **`1.0.0-rc.2.1`** | Agent WebView named-pipe hotfix |
 | **1.0 rc3** | **`1.0.0-rc.3`** | Agent WebView field-test pass |
 | **1.0 rc4** | **`1.0.0-rc.4`** | Fathom-style `/meeting` notetaker |
+| **1.0 rc5** | **`1.0.0-rc.5`** | Harness Q&A: spawn catalog, WebView save, logs/redaction |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -44,6 +45,52 @@ Older release notes (r1–r13 detail) are archived under
 ---
 
 ## Unreleased
+
+---
+
+## [1.0.0-rc.5] - 2026-08-21
+
+**Harness Q&A follow-through.** Isolated-worktree and Agent WebView field tests
+on rc.4 produced a concrete list of spawn-catalog, download, log-redaction, and
+timeout-finalize bugs. This release lands those product fixes.
+
+### Added
+- **`browser_downloads` on the live toolset** — the session inject list was
+  missing the listing tool even though the host already brokered files.
+- **`browser_save`** — save the current page URL (or an explicit https URL)
+  into the session `downloads/` folder with sanitized names, size limits, and
+  `browser_downloads` listing. Public PDF/guide save no longer depends on
+  Chromium raising `DownloadStarting`.
+- **`browser_downloads wait_ms`** — optional wait until a completed brokered
+  file appears (JS download interstitials).
+
+### Fixed
+- **`openai/gpt-5.5` (and other `openai/gpt-5.*`) spawn slugs** alias to
+  `openai-codex/…` the same way Luna/Sol already did. Spawn descriptions list
+  only session-spawnable catalog keys plus those aliases.
+- **Child boot card `Model:`** uses the child's resolved sampling model, not
+  the parent `ModelsManager` current id.
+- **Worktree DisplayCwd** remaps onto the **source git repo** (nested
+  `turbo-grok-build` under an umbrella workspace), not the umbrella root.
+- **HTTP error pages** (404 HTML) are a successful `browser_navigate`;
+  download-shaped navigations that fire `DownloadStarting` are not reported as
+  `-32000 navigation failed`.
+- **`browser_set_file`** copies workspace/confine files into a session
+  `uploads/` broker before the host path check (host remains session-folder
+  only).
+- **`mcp_server_health`** documents `failed` / overall `unknown`, and
+  remediation names `turbo mcp doctor` (with `grok mcp doctor` as alias).
+- **developer_log `snapshot_ref` redaction** and **feature_request evidence**
+  sanitization.
+- **Subagent turn-result `schema_version`** uses `GCS_SCHEMA_VERSION` (`v1.24`).
+- **Explicit `timeout_ms` finalize grace** defaults to `timeout/6` clamped
+  30–120s so children get a stop-and-summarize window before hard cancel.
+- **`turbo tools list`** injects the same Windows `browser_*` set a live
+  session gets (including `browser_downloads` / `browser_save`).
+- **Windows release CI** — drop `/DEBUG:LongSymbolTruncate` (GitHub
+  windows-2022 `link.exe` 14.44 rejects it with LNK1117). Keep
+  `/DEBUG:FASTLINK` for PDB limits. Release.yml no longer blocks publishing
+  on `cargo test --workspace`.
 
 ---
 

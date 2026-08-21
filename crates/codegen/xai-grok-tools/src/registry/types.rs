@@ -713,6 +713,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::BrowserScreenshotTool>();
         b.register::<grok_build::BrowserTabsTool>();
         b.register::<grok_build::BrowserDownloadsTool>();
+        b.register::<grok_build::BrowserSaveTool>();
         b.register::<grok_build::BrowserWaitTool>();
         b.register::<grok_build::BrowserScrollTool>();
         b.register::<grok_build::BrowserPressKeyTool>();

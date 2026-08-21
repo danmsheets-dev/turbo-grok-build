@@ -16,6 +16,8 @@
 //! - when spawn is stripped and no background-capable bash remains, lifecycle
 //!   tools (`get_command_or_subagent_output`, `wait_commands_or_subagents`,
 //!   `kill_command_or_subagent`) are pruned (builder parity)
+//! - Agent WebView `browser_*` tools are injected the same way a live session
+//!   injects them (`inject_browser_tools`)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -120,7 +122,7 @@ fn tool_names_for_preset(
     subagents_enabled: bool,
     cwd: &Path,
 ) -> Result<(Vec<String>, AgentBuilderGates)> {
-    let config = if preset.trim().eq_ignore_ascii_case("grok-build") || preset.trim().is_empty() {
+    let mut config = if preset.trim().eq_ignore_ascii_case("grok-build") || preset.trim().is_empty() {
         workspace_grok_build_toolset()
     } else {
         xai_grok_agent::config::toolset_for_preset(preset).ok_or_else(|| {
@@ -130,6 +132,9 @@ fn tool_names_for_preset(
             )
         })?
     };
+    // Live primary sessions inject the Agent WebView tools after the static
+    // preset. Headless `turbo tools list` must advertise the same surface.
+    xai_grok_shell::session::agent_browser::inject_browser_tools(&mut config);
 
     let mut names: Vec<String> = config.tools.iter().map(client_name).collect();
     names.sort();
@@ -272,6 +277,17 @@ mod tests {
             names
         );
         assert!(names.iter().any(|n| n == "run_terminal_command"));
+        assert!(
+            names.iter().any(|n| n == "browser_downloads"),
+            "browser_downloads missing from {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n == "browser_save"),
+            "browser_save missing from {:?}",
+            names
+        );
+        assert!(names.iter().any(|n| n == "browser_navigate"));
     }
 
     #[test]

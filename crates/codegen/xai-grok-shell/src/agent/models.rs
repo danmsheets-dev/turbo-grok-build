@@ -112,11 +112,34 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
         ("openai/gpt-5.6-sol-pro", "openai-codex/gpt-5.6-sol-pro"),
         ("gpt-5.6-sol", "openai-codex/gpt-5.6-sol"),
         ("gpt-5.6-sol-pro", "openai-codex/gpt-5.6-sol-pro"),
+        ("openai/gpt-5.6-terra", "openai-codex/gpt-5.6-terra"),
+        ("openai/gpt-5.6-terra-pro", "openai-codex/gpt-5.6-terra-pro"),
+        ("gpt-5.6-terra", "openai-codex/gpt-5.6-terra"),
+        ("gpt-5.6-terra-pro", "openai-codex/gpt-5.6-terra-pro"),
+        ("openai/gpt-5.5", "openai-codex/gpt-5.5"),
+        ("openai/gpt-5.5-pro", "openai-codex/gpt-5.5-pro"),
+        ("gpt-5.5", "openai-codex/gpt-5.5"),
+        ("gpt-5.5-pro", "openai-codex/gpt-5.5-pro"),
+        ("openai/gpt-5.4", "openai-codex/gpt-5.4"),
+        ("openai/gpt-5.4-mini", "openai-codex/gpt-5.4-mini"),
+        ("gpt-5.4", "openai-codex/gpt-5.4"),
+        ("gpt-5.4-mini", "openai-codex/gpt-5.4-mini"),
+        ("openai/gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"),
+        ("gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"),
     ];
     for (from, to) in CODEX_FAMILY {
         if lower == *from || lower.ends_with(&format!("/{from}")) {
             out.push((*to).to_string());
         }
+    }
+    // Generic openai/foo → openai-codex/foo so spawn descriptions and retries
+    // match the catalog key the runtime actually accepts.
+    if let Some(rest) = lower.strip_prefix("openai/")
+        && !rest.is_empty()
+        && !rest.starts_with("codex/")
+        && !rest.starts_with("gpt-oss")
+    {
+        out.push(format!("openai-codex/{rest}"));
     }
 
     if lower.contains("nemotron-3.5-lightning")
@@ -668,6 +691,30 @@ impl ModelsManager {
         let cat = self.inner.catalog.read();
         let models = &cat.models;
         task_model_error_for_catalog(requested, models, is_session_auth)
+    }
+
+    /// Catalog keys (plus `openai/` aliases of `openai-codex/` keys) that
+    /// `spawn_subagent` will accept for this session's auth.
+    pub(crate) fn spawnable_task_model_slugs(&self) -> Vec<String> {
+        let is_session_auth = self.is_session_auth();
+        let cat = self.inner.catalog.read();
+        let mut slugs: Vec<String> = cat
+            .models
+            .iter()
+            .filter(|(_, entry)| {
+                entry.info.user_selectable && entry.visible_for_auth(is_session_auth)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let aliases: Vec<String> = slugs
+            .iter()
+            .filter_map(|key| {
+                key.strip_prefix("openai-codex/")
+                    .map(|rest| format!("openai/{rest}"))
+            })
+            .collect();
+        slugs.extend(aliases);
+        slugs
     }
 
     pub fn current_model_id(&self) -> acp::ModelId {

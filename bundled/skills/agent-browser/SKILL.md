@@ -43,7 +43,8 @@ First-class GrokBuild tools (no `search_tool` / `use_tool`):
 | `browser_select` | Choose a `<select>` option by value or label. |
 | `browser_hover` | Open hover menus. |
 | `browser_set_file` | Set `<input type=file>` to a workspace, confine-root, or session-folder file (resume PDF). Does not submit. |
-| `browser_downloads` | List completed files in the session-scoped brokered downloads folder. |
+| `browser_downloads` | List completed files in the session-scoped brokered downloads folder. Optional `wait_ms` / `name_contains`. |
+| `browser_save` | Save the current document (or an explicit URL) into session `downloads/`. Use this for inline PDFs whose Save icon has no snapshot uid. |
 | `browser_eval` | Last resort. `() => document.title` is a read. Writes need `confirm=true`. |
 | `browser_screenshot` | PNG of the Agent window. Tell the user the short path (`images/browser-1.png`). |
 | `browser_tabs` | List tabs. v1 is a single tab. |
@@ -130,7 +131,7 @@ LinkedIn. No lead-list blasting, no credential stuffing.
 ## What the host refuses on your behalf
 
 - **Every** navigation is policy-checked, including iframes and clicked links.
-- **Downloads are brokered** into `<session-folder>/downloads` with sanitized, collision-safe filenames. Use `browser_downloads` to list completed files; no page can choose an arbitrary destination.
+- **Downloads are brokered** into `<session-folder>/downloads` with sanitized, collision-safe filenames. Use `browser_downloads` to list completed files; use `browser_save` when a PDF opened inline and `DownloadStarting` never fired. No page can choose an arbitrary destination.
 - Ordinary `window.open` / `target=_blank` load in the same window. **OAuth /
   GSI popups** (`accounts.google.com/gsi`, Microsoft login) open as a real
   popup so sign-in can finish.

@@ -342,7 +342,7 @@ impl xai_tool_runtime::Tool for SearchTool {
                 .collect::<Vec<_>>()
                 .join("; ");
             let extra = format!(
-                "Failed MCP servers (not in results): {failed_line}. Run `grok mcp doctor` or check /mcps."
+                "Failed MCP servers (not in results): {failed_line}. Run `turbo mcp doctor` (alias: `grok mcp doctor`) or check /mcps."
             );
             note = Some(match note {
                 Some(n) => format!("{n} {extra}"),

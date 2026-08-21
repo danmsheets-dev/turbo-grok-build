@@ -254,10 +254,26 @@ impl AgentWebView {
         if !success {
             // Prefer the policy reason over "navigation failed" — cancelling in
             // NavigationStarting surfaces here as a plain failure otherwise.
-            return Err(self
-                .blocked
-                .take()
-                .unwrap_or_else(|| format!("navigation failed: {url}")));
+            if let Some(reason) = self.blocked.take() {
+                return Err(reason);
+            }
+            // Zip/PDF attachments often complete as DownloadStarting and leave
+            // NavigationCompleted IsSuccess=false. Treat an in-flight brokered
+            // download as success so the agent can list it.
+            if !self.active_downloads.borrow().is_empty() {
+                return Ok(NavigateResult {
+                    url: url.to_owned(),
+                    title: "Download in progress".to_owned(),
+                });
+            }
+            // HTTP error documents (404 HTML) still have a Source URL.
+            if let Ok(loc) = self.location()
+                && !loc.url.is_empty()
+                && !loc.url.eq_ignore_ascii_case("about:blank")
+            {
+                return Ok(loc);
+            }
+            return Err(format!("navigation failed: {url}"));
         }
         if let Some(reason) = self.blocked.take() {
             return Err(reason);

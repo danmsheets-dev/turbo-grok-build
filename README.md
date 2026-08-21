@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-1.0.0--rc.4-blue" alt="1.0.0-rc.4">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.5-blue" alt="1.0.0-rc.5">
   <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,8 +20,8 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.4`** — the
-shipped Windows build (see [Prebuilt Windows binary](#prebuilt-windows-binary)).
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.5`** — GitHub
+**Latest** with `SHA256SUMS` so managed `~/.turbo` installs auto-update.
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
 
@@ -63,28 +63,30 @@ is a multi-agent development runtime** built on that foundation.
 | UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) + **`/meeting` notetaker** |
 | Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
-### Prebuilt Windows binary
+### Prebuilt binaries and auto-update
 
-A production Windows build of **Turbo `1.0.0-rc.4`** is published as a **GitHub
-Release asset** (not stored as a regular git blob; public-fork LFS uploads are
-blocked on GitHub):
+Production builds ship as **GitHub Release** archives (not git blobs). The
+community updater and `install.ps1` / `install.sh` require:
 
-| Wire | Release | Asset name |
+- `turbo-<version>-<target-triple>.zip` (Windows) or `.tar.gz` (macOS/Linux)
+- `SHA256SUMS`
+
+| Wire | Release | Windows asset |
 | --- | --- | --- |
-| `1.0.0-rc.4` | [v1.0.0-rc.4](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.4) | `turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.exe` |
-| `1.0.0-rc.2.1` | [v1.0.0-rc.2.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.2.1) | `turbo-1.0.0-rc.2.1-x86_64-pc-windows-msvc.exe` |
-| `1.0.0-rc.1` | [v1.0.0-rc.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.1) | `turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe` |
+| `1.0.0-rc.5` | [v1.0.0-rc.5](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.5) | `turbo-1.0.0-rc.5-x86_64-pc-windows-msvc.zip` |
+| `1.0.0-rc.4` | [v1.0.0-rc.4](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.4) | `turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.zip` |
 
 ```powershell
-# Download the asset from the release page, then:
-Copy-Item .\turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.exe $env:USERPROFILE\.turbo\bin\turbo.exe
-# or: set GROK_BINARY to the downloaded path for the Grok Build Claude plugin
+# Managed install (enables `turbo update` / launch auto-update)
+irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+turbo update --check
 ```
 
-Packaging notes: [`releases/windows/README.md`](./releases/windows/README.md).
+Keep `[cli] auto_update = true` in `~/.grok/config.toml`. Do **not** mark
+GitHub Releases as prerelease if they should become `/releases/latest`.
 
-The prebuilt matches this tree at the `v1.0.0-rc.4` tag. Rebuild from source for
-anything newer. Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
+Packaging notes: [`releases/windows/README.md`](./releases/windows/README.md).
+Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
 
 ### Highlights (1.0 line)
 
@@ -215,6 +217,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **1.0-rc.2.1** | **`1.0.0-rc.2.1`** | Agent WebView named-pipe hotfix |
 | **1.0-rc.3** | **`1.0.0-rc.3`** | Agent WebView field-test pass |
 | **1.0-rc.4** | **`1.0.0-rc.4`** | **Fathom-style `/meeting` notetaker** (loopback STT, `Turbo:` Q&A, work-only recap) |
+| **1.0-rc.5** | **`1.0.0-rc.5`** | **Harness Q&A:** spawn catalog aliases, `browser_save`/`browser_downloads`, log redaction |
 
 > RC numbering follows the **wire version**, which restarted at `r1` when RC15
 > synced upstream `0.2.119`. The 1.0 line starts at **`1.0.0-rc.1`**.
@@ -239,7 +242,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **RC2** · `0.2.119-r2` |
+| Release line | upstream cadence | **1.0.0-rc.5** |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -270,23 +273,18 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v0.2.119-r2
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v1.0.0-rc.5
 ```
 
 ```powershell
-# Windows — pin RC2
-irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
-# or from a clone after a release tag exists:
-# .\install.ps1 -Version v0.2.119-r2
+# Windows — pin this release
+.\install.ps1 -Version v1.0.0-rc.5
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
-(`%USERPROFILE%\.turbo\bin\turbo.exe` on Windows).
-
-> **Note:** Prebuilt install requires a published GitHub Release for
-> `v0.2.119-r2`. Until then, [build from source](#building-from-source) and copy
-> `target/release-dist/turbo` into `~/.turbo/bin`.  
-> Repo: [danmsheets-dev/turbo-grok-build](https://github.com/danmsheets-dev/turbo-grok-build).
+(`%USERPROFILE%\.turbo\bin\turbo.exe` on Windows), and activates `bundled/`
+under `~/.grok/bundled`. Managed installs auto-update from GitHub `/latest`
+when `[cli] auto_update = true`.
 
 ### Install with Nix
 

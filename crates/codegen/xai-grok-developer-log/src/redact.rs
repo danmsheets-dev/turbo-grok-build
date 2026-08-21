@@ -82,7 +82,7 @@ fn sanitize_repro(mut repro: Repro) -> Repro {
     repro
 }
 
-fn sanitize_evidence(mut evidence: Evidence) -> Evidence {
+pub(crate) fn sanitize_evidence(mut evidence: Evidence) -> Evidence {
     if let Some(n) = evidence.notes.as_mut() {
         *n = truncate_field(&redact_text(n), NOTE_MAX);
     }
@@ -106,6 +106,9 @@ fn sanitize_evidence(mut evidence: Evidence) -> Evidence {
         *p = redact_text(p);
     }
     if let Some(p) = evidence.session_ref.as_mut() {
+        *p = redact_text(p);
+    }
+    if let Some(p) = evidence.snapshot_ref.as_mut() {
         *p = redact_text(p);
     }
     evidence
@@ -139,5 +142,16 @@ mod tests {
         let out = truncate_field(&long, 10);
         assert!(out.chars().count() <= 10);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn sanitize_evidence_redacts_snapshot_ref() {
+        let mut evidence = Evidence {
+            snapshot_ref: Some("refs/grok/subagents/sa Authorization: Bearer sk-CANARYabcdefghij1234567890".into()),
+            ..Evidence::default()
+        };
+        evidence = super::sanitize_evidence(evidence);
+        let snap = evidence.snapshot_ref.expect("kept");
+        assert!(!snap.contains("CANARY"), "snapshot_ref secret survived: {snap}");
     }
 }

@@ -55,10 +55,12 @@ impl crate::types::tool_metadata::ToolMetadata for McpServerHealthTool {
     fn description_template(&self) -> &str {
         "Report readiness of configured MCP servers.\n\n\
          Returns JSON: for each server, name, tool_count, and status \
-         (`ready` | `partial` | `unknown`). Overall status is `ready` when the \
-         tool index is fully initialized, else `partial`.\n\n\
-         Note: failed handshakes may only appear in system-reminders; use \
-         `search_tool` to discover tools. Failed servers include a remediation hint. This tool does not call MCP servers."
+         (`ready` | `partial` | `unknown` | `failed`). Overall status is \
+         `ready` when the tool index is fully initialized and no server failed, \
+         `partial` when some servers are still connecting or have failed, and \
+         `unknown` when no tool index exists.\n\n\
+         Failed servers include a remediation hint. This tool does not call MCP servers. \
+         Use search_tool to discover tools."
     }
 
     fn is_read_only(&self) -> bool {
@@ -196,8 +198,9 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
                 .map(|f| format!("{} ({})", f.name, f.reason))
                 .collect::<Vec<_>>()
                 .join("; ");
-            let extra =
-                format!("Failed MCP servers: {failed_line}. Run `grok mcp doctor` or check /mcps.");
+            let extra = format!(
+                "Failed MCP servers: {failed_line}. Run `turbo mcp doctor` (alias: `grok mcp doctor`) or check /mcps."
+            );
             note = Some(match note {
                 Some(n) => format!("{n} {extra}"),
                 None => extra,

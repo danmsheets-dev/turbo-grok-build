@@ -48,6 +48,18 @@ fn oracle_execution_budget_resolves_and_reserves_finalization_capacity() {
     assert!(prompt.contains("48 tool calls"));
     assert!(prompt.contains("600 seconds total wall-clock time"));
 }
+
+#[test]
+fn explicit_timeout_ms_scales_finalize_grace() {
+    let definition = xai_grok_agent::config::AgentDefinition::default_grok_build();
+    let budget = SubagentExecutionBudget::resolve_with_override(&definition, None, Some(720_000));
+    assert_eq!(budget.timeout_secs, Some(720));
+    assert_eq!(budget.finalize_grace_secs, Some(120));
+    assert_eq!(
+        budget.finalize_at_elapsed(),
+        Some(std::time::Duration::from_secs(600))
+    );
+}
 #[test]
 fn partial_budget_results_require_new_plain_text_output() {
     assert!(can_use_partial_budget_result(true, "useful partial answer", false));
@@ -2381,6 +2393,29 @@ fn resumed_tool_model_override_is_ignored() {
             "resume must preserve source-model pinning"
         );
 }
+#[test]
+fn gpt55_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = indexmap::IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-5.5".to_string(),
+        test_model_entry("gpt-5.5"),
+    );
+    assert!(
+        super::handle_request::task_model_override_error(
+            Some("openai/gpt-5.5"),
+            ModelOverrideProvenance::Tool,
+            false,
+            &models,
+            false,
+        )
+        .is_none(),
+        "openai/gpt-5.5 must resolve to openai-codex/gpt-5.5"
+    );
+    let (key, _) = crate::agent::models::find_task_model_entry(&models, "openai/gpt-5.5")
+        .expect("alias must resolve");
+    assert_eq!(key, "openai-codex/gpt-5.5");
+}
+
 #[test]
 fn luna_openai_slash_slug_aliases_to_openai_codex() {
     let mut models = indexmap::IndexMap::new();

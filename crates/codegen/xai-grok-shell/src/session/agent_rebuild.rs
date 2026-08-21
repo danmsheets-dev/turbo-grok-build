@@ -85,6 +85,9 @@ pub(crate) struct AgentRebuildSpec {
     pub bridge_state_path: PathBuf,
     pub session_env: Arc<HashMap<String, String>>,
     pub models_manager: crate::agent::models::ModelsManager,
+    /// Child/session model for the boot card `Model:` line. When unset, falls
+    /// back to `models_manager.current_model_id()`.
+    pub session_model: Option<String>,
     pub compaction_policy: CompactionPolicy,
     pub reminder_policy: ReminderPolicy,
     pub memory_enabled: bool,
@@ -188,6 +191,7 @@ impl AgentRebuildSpec {
             bridge_state_path,
             session_env,
             models_manager,
+            session_model,
             compaction_policy,
             reminder_policy,
             memory_enabled,
@@ -255,7 +259,12 @@ impl AgentRebuildSpec {
         .with_memory_paths(memory_global_path.clone(), memory_workspace_path.clone())
         .with_is_non_interactive(*is_non_interactive)
         .with_system_prompt_label(system_prompt_label.clone())
-        .with_session_model(models_manager.current_model_id().0.as_ref().to_string())
+        .with_session_model(
+            session_model
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| models_manager.current_model_id().0.as_ref().to_string()),
+        )
         .with_session_env(session_env.clone())
         .with_state_path(bridge_state_path.clone())
         .with_web_search_config(web_search_config.clone())
@@ -269,13 +278,7 @@ impl AgentRebuildSpec {
         .with_subagents_enabled(*subagents_enabled)
         .with_subagent_toggle(subagent_toggle.clone())
         .with_background_workflows_enabled(*background_workflows_enabled)
-        .with_task_model_slugs(
-            models_manager
-                .available()
-                .keys()
-                .map(|model_id| model_id.0.to_string())
-                .collect::<Vec<_>>(),
-        )
+        .with_task_model_slugs(models_manager.spawnable_task_model_slugs())
         .with_ask_user_question_enabled(*ask_user_question_enabled)
         .with_persona_summaries(persona_summaries.clone())
         .with_prompt_audience(*prompt_audience)
@@ -450,6 +453,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         bridge_state_path: std::env::temp_dir().join("test_tool_state.json"),
         session_env: Arc::new(HashMap::new()),
         models_manager: crate::agent::models::ModelsManager::default(),
+        session_model: None,
         compaction_policy: CompactionPolicy::default(),
         reminder_policy: ReminderPolicy::default(),
         memory_enabled: false,

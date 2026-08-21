@@ -1,4 +1,5 @@
 use super::*;
+use crate::upload::trace::GCS_SCHEMA_VERSION;
 use xai_grok_sampling_types::ReasoningEffort;
 use xai_grok_tools::implementations::{grok_build, opencode};
 pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u64 {
@@ -1197,9 +1198,11 @@ pub(crate) async fn run_shell_child(
         persona: effective_runtime.persona.clone(),
         resumed_from: request.resume_from.clone(),
         child_cwd: Some(child_session_info.cwd.clone()),
-        display_cwd: worktree_path
-            .as_ref()
-            .map(|_| ctx.parent_cwd.to_string_lossy().into_owned()),
+        display_cwd: worktree_path.as_ref().map(|_| {
+            parent_source_cwd(&ctx, request.cwd.as_deref())
+                .to_string_lossy()
+                .into_owned()
+        }),
         worktree_path: worktree_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
@@ -1341,9 +1344,11 @@ pub(crate) async fn run_shell_child(
             budget: execution_budget.wire(),
             workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
             child_cwd: Some(child_session_info.cwd.clone()),
-            display_cwd: worktree_path
-                .as_ref()
-                .map(|_| ctx.parent_cwd.to_string_lossy().into_owned()),
+            display_cwd: worktree_path.as_ref().map(|_| {
+                parent_source_cwd(&ctx, request.cwd.as_deref())
+                    .to_string_lossy()
+                    .into_owned()
+            }),
             worktree_path: worktree_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
@@ -1847,11 +1852,14 @@ pub(crate) async fn run_shell_child(
         ctx.workflow_max_concurrent_agents,
         ctx.ask_user_question_enabled,
         ctx.client_hooks.clone(),
-        // Isolation: model sees parent project path; tools rewrite abs paths onto
-        // the worktree via DisplayCwd (prevents parent-tree writes via absolute paths).
-        worktree_path
-            .as_ref()
-            .map(|_| ctx.parent_cwd.to_string_lossy().into_owned()),
+        // Isolation: model sees the *source git repo* path; tools rewrite abs
+        // worktree paths onto that repo (nested checkouts under a non-git
+        // umbrella must not remap onto the umbrella root).
+        worktree_path.as_ref().map(|_| {
+            parent_source_cwd(&ctx, request.cwd.as_deref())
+                .to_string_lossy()
+                .into_owned()
+        }),
         std::collections::HashMap::new(),
         Vec::new(),
         xai_grok_agent::prompt::context::PromptAudience::Subagent,
@@ -2405,7 +2413,7 @@ pub(crate) async fn run_shell_child(
             .resolved_model_id
             .or_else(|| gcs_upload_ctx.model_id.clone());
         let turn_result_meta = TurnResultMetadata {
-            schema_version: "1",
+            schema_version: GCS_SCHEMA_VERSION,
             request_id: child_prompt_id,
             completed: result.success,
             stop_reason: None,

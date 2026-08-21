@@ -1,45 +1,41 @@
 # Windows release binaries
 
-Prebuilt **`turbo.exe`** builds for Windows (x86_64) ship as **GitHub Release
-assets** (not in the git tree — ~149 MB is over the regular git object limit,
-and public-fork LFS uploads are blocked on GitHub).
+Prebuilt Windows (x86_64) builds ship as **GitHub Release** zip archives plus
+`SHA256SUMS` (not in the git tree — ~150 MB is over the regular git object
+limit, and public-fork LFS uploads are blocked on GitHub).
+
+`install.ps1` and `turbo update` require **exactly** these names:
 
 | Wire version | Release | Asset |
 | --- | --- | --- |
-| `1.0.0-rc.4` | [v1.0.0-rc.4](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.4) | `turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.exe` |
-| `1.0.0-rc.1` | [v1.0.0-rc.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.1) | `turbo-1.0.0-rc.1-x86_64-pc-windows-msvc.exe` |
+| `1.0.0-rc.5` | [v1.0.0-rc.5](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.5) | `turbo-1.0.0-rc.5-x86_64-pc-windows-msvc.zip` |
+| `1.0.0-rc.4` | [v1.0.0-rc.4](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.4) | `turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.zip` |
+
+A raw `.exe` on the release is a convenience copy only; auto-update ignores it.
 
 ## Install
 
 ```powershell
-# Download the latest RC4 Windows asset from GitHub Releases, then:
-$dest = Join-Path $env:USERPROFILE ".turbo\bin"
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Copy-Item -Force .\turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.exe (Join-Path $dest "turbo.exe")
-turbo version
+irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+turbo update --check
+# → turbo 1.0.0-rc.5 (latest: 1.0.0-rc.5) [stable]
 ```
 
-Or point the Grok Build Claude Code plugin at the downloaded artifact:
+Or pin: `.\install.ps1 -Version v1.0.0-rc.5`
 
-```powershell
-$env:GROK_BINARY = (Resolve-Path .\turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.exe).Path
-```
+The zip must contain a root-level `turbo.exe` plus `bundled/`. The installer
+activates the binary at `%USERPROFILE%\.turbo\bin\turbo.exe` and the bundle at
+`%USERPROFILE%\.grok\bundled`.
 
 ## Verify
 
 ```text
 turbo version
-# → turbo 1.0.0-rc.4 (<commit>)
+# → turbo 1.0.0-rc.5 (<commit>)
 ```
-
-Source tree `VERSION` may be newer than the last GitHub asset. Rebuild with
-cargo for the latest wire; release assets are frozen ship builds only.
 
 ## Local packaging note
 
-When building a ship binary, place it at:
-
-`releases/windows/turbo-<version>-x86_64-pc-windows-msvc.exe`
-
-and attach it to a GitHub Release (`gh release upload …`). The path is
-gitignored for the `.exe`; this README stays tracked.
+`release.yml` on tag `v*` builds `turbo-<version>-x86_64-pc-windows-msvc.zip`.
+Do not pass `/DEBUG:LongSymbolTruncate` (GitHub `link.exe` 14.44 → LNK1117).
+The path `releases/windows/*.exe` is gitignored; this README stays tracked.

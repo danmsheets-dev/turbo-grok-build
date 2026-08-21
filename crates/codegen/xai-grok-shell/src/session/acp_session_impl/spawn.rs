@@ -994,6 +994,7 @@ pub(crate) async fn spawn_session_actor(
         bridge_state_path: bridge_state_path.clone(),
         session_env: tool_context.session_env.clone(),
         models_manager: models_manager.clone(),
+        session_model: Some(session_model_id.0.to_string()),
         compaction_policy,
         reminder_policy,
         memory_enabled: memory_config.as_ref().is_some_and(|mc| mc.enabled),

@@ -1074,6 +1074,22 @@ mod tests {
     }
 
     #[test]
+    fn test_path_rewriter_maps_worktree_onto_nested_source_repo() {
+        let rw = PathRewriter::new(
+            r"C:\Users\me\.grok\worktrees\grok-build-turbo-grok-build\subagent-1",
+            Some(r"H:\Apps\grok build\turbo-grok-build"),
+        )
+        .expect("distinct paths");
+        let rewritten = rw.rewrite_path(Path::new(
+            r"C:\Users\me\.grok\worktrees\grok-build-turbo-grok-build\subagent-1\crates\foo.rs",
+        ));
+        assert_eq!(
+            rewritten,
+            PathBuf::from(r"H:\Apps\grok build\turbo-grok-build\crates\foo.rs")
+        );
+    }
+
+    #[test]
     fn test_path_rewriter_rewrites_list_dir_raw_output() {
         let rw = PathRewriter::new(
             "/root/.grok/worktrees/myproject/ab-123",

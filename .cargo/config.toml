@@ -66,7 +66,10 @@ rustflags = [
 # /DEBUG:FASTLINK: avoid MSVC PDB public-symbol ceiling (LNK4319) when linking
 #   the huge turbo binary (pager + leptos dashboard + wasmtime + …) in debug.
 #   Full PDBs still blow LNK4318/LNK4319 on this monorepo under VS link.exe.
-# /DEBUG:LongSymbolTruncate: rustc/LLVM demangled names exceed PDB limits (LNK4318).
+# Do NOT pass /DEBUG:LongSymbolTruncate. GitHub windows-2022 ships
+# link.exe 14.44 (VS 17.14) which rejects it with LNK1117 ("syntax error in
+# option 'DEBUG:LongSymbolTruncate'") and aborts the Windows release-dist
+# job before packaging. FASTLINK is the portable workaround on that linker.
 # /STACK:16MiB: default Windows main-thread stack (1MiB) overflows on turbo
 #   startup (large frames in CLI/init). RUST_MIN_STACK only affects Rust
 #   threads, not the PE main stack — reserve size must be set here.
@@ -74,7 +77,6 @@ rustflags = [
     "-C", "force-unwind-tables=yes",
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/DEBUG:FASTLINK",
-    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
     "-C", "link-arg=/STACK:16777216",
 ]
 
@@ -83,7 +85,6 @@ rustflags = [
     "-C", "force-unwind-tables=yes",
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/DEBUG:FASTLINK",
-    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
     "-C", "link-arg=/STACK:16777216",
 ]
 

@@ -107,12 +107,98 @@ impl xai_tool_runtime::Tool for BrowserSetFileTool {
                 canonical.display()
             )));
         }
-        let path = canonical.to_string_lossy().into_owned();
+        let session_path = match session_folder.as_ref() {
+            Some(folder) => broker_into_session(folder, &canonical)?,
+            None => {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    "browser_set_file: no session folder is configured",
+                ));
+            }
+        };
+        let path = session_path.to_string_lossy().into_owned();
         handle.set_file(input.uid.clone(), path.clone()).await?;
         Ok(super::text_output(format!(
             "Set file input {} to {}",
             input.uid, path
         )))
+    }
+}
+
+fn broker_into_session(
+    session_folder: &Path,
+    src: &Path,
+) -> Result<PathBuf, xai_tool_runtime::ToolError> {
+    let session_canon = dunce::canonicalize(session_folder).unwrap_or_else(|_| session_folder.to_path_buf());
+    if path_is_under_confine_root(src, &session_canon) {
+        return Ok(src.to_path_buf());
+    }
+    let uploads = session_folder.join("uploads");
+    std::fs::create_dir_all(&uploads).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!("browser_set_file: cannot create {}: {e}", uploads.display()),
+        )
+    })?;
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("upload.bin");
+    let dest = unique_upload_path(&uploads, name);
+    std::fs::copy(src, &dest).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!(
+                "browser_set_file: cannot broker {} into session: {e}",
+                src.display()
+            ),
+        )
+    })?;
+    dunce::canonicalize(&dest).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!("browser_set_file: cannot resolve {}: {e}", dest.display()),
+        )
+    })
+}
+
+fn unique_upload_path(folder: &Path, filename: &str) -> PathBuf {
+    let candidate = folder.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = Path::new(filename);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("upload");
+    let extension = path.extension().and_then(|s| s.to_str());
+    for index in 1..=10_000u32 {
+        let name = match extension {
+            Some(ext) => format!("{stem} ({index}).{ext}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = folder.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    folder.join("upload.bin")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broker_copies_workspace_file_into_session_uploads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("ws");
+        let session = tmp.path().join("session");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&session).unwrap();
+        let src = workspace.join("resume.pdf");
+        std::fs::write(&src, b"%PDF").unwrap();
+        let dest = broker_into_session(&session, &src).unwrap();
+        assert!(dest.starts_with(&session));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"%PDF");
+        assert_ne!(dest, src);
     }
 }
 

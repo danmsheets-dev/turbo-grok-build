@@ -26,6 +26,7 @@ pub mod hover;
 pub mod navigate;
 pub mod press_key;
 pub mod raise;
+pub mod save;
 pub mod screenshot;
 pub mod scroll;
 pub mod select;
@@ -42,6 +43,7 @@ pub use hover::{BROWSER_HOVER_TOOL_NAME, BrowserHoverInput, BrowserHoverTool};
 pub use navigate::{BROWSER_NAVIGATE_TOOL_NAME, BrowserNavigateInput, BrowserNavigateTool};
 pub use press_key::{BROWSER_PRESS_KEY_TOOL_NAME, BrowserPressKeyInput, BrowserPressKeyTool};
 pub use raise::{BROWSER_RAISE_TOOL_NAME, BrowserRaiseInput, BrowserRaiseTool};
+pub use save::{BROWSER_SAVE_TOOL_NAME, BrowserSaveInput, BrowserSaveTool};
 pub use screenshot::{BROWSER_SCREENSHOT_TOOL_NAME, BrowserScreenshotInput, BrowserScreenshotTool};
 pub use scroll::{BROWSER_SCROLL_TOOL_NAME, BrowserScrollInput, BrowserScrollTool};
 pub use select::{BROWSER_SELECT_TOOL_NAME, BrowserSelectInput, BrowserSelectTool};
@@ -142,6 +144,12 @@ impl From<BrowserSetFileInput> for crate::types::tool_io::ToolInput {
 
 impl From<BrowserRaiseInput> for crate::types::tool_io::ToolInput {
     fn from(input: BrowserRaiseInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserSaveInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserSaveInput) -> Self {
         dynamic_tool_input(&input)
     }
 }
@@ -764,6 +772,8 @@ mod tests {
         assert_eq!(BrowserHoverTool.id().as_str(), "browser_hover");
         assert_eq!(BrowserSetFileTool.id().as_str(), "browser_set_file");
         assert_eq!(BrowserRaiseTool.id().as_str(), "browser_raise");
+        assert_eq!(BrowserDownloadsTool.id().as_str(), "browser_downloads");
+        assert_eq!(BrowserSaveTool.id().as_str(), "browser_save");
     }
 
     #[tokio::test]
@@ -944,6 +954,8 @@ mod tests {
             "GrokBuild:browser_hover",
             "GrokBuild:browser_set_file",
             "GrokBuild:browser_raise",
+            "GrokBuild:browser_downloads",
+            "GrokBuild:browser_save",
         ] {
             assert!(builder.has_tool_id(id), "missing {id}");
         }

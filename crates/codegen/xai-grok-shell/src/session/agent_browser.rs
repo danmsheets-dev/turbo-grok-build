@@ -196,6 +196,8 @@ pub fn inject_browser_tools(config: &mut xai_grok_tools::registry::types::ToolSe
         ToolConfig::from(&gb::BrowserHoverTool),
         ToolConfig::from(&gb::BrowserSetFileTool),
         ToolConfig::from(&gb::BrowserRaiseTool),
+        ToolConfig::from(&gb::BrowserDownloadsTool),
+        ToolConfig::from(&gb::BrowserSaveTool),
     ];
     for extra in extras {
         if !config.tools.iter().any(|tool| tool.id == extra.id) {
@@ -375,10 +377,12 @@ mod tests {
         let ids: Vec<_> = config.tools.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(
             ids.iter().filter(|id| id.contains("browser_")).count(),
-            14,
+            16,
             "{ids:?}"
         );
         assert!(ids.contains(&"GrokBuild:browser_navigate"));
+        assert!(ids.contains(&"GrokBuild:browser_downloads"));
+        assert!(ids.contains(&"GrokBuild:browser_save"));
     }
 
     #[test]

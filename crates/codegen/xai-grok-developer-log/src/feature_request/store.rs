@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::redact::{redact_text, truncate_field};
+use crate::redact::{redact_text, sanitize_evidence, truncate_field};
 use crate::schema::Environment;
 
 use super::fingerprint::compute_fr_fingerprint;
@@ -712,6 +712,7 @@ fn sanitize_report(mut req: FeatureRequestReport) -> FeatureRequestReport {
     if let Some(m) = req.source.reporter_model.as_mut() {
         *m = truncate_field(&redact_text(m), 128);
     }
+    req.evidence = sanitize_evidence(req.evidence);
     req
 }
 
@@ -728,6 +729,7 @@ fn sanitize_request_doc(mut fr: FeatureRequest) -> FeatureRequest {
         *p = truncate_field(&redact_text(p), 4_000);
     }
     sanitize_env_fields(&mut fr.environment);
+    fr.evidence = sanitize_evidence(fr.evidence);
     fr
 }
 

@@ -46,11 +46,13 @@ pub use bash::BashTool;
 pub use browser::{
     BROWSER_CLICK_TOOL_NAME, BROWSER_DOWNLOADS_TOOL_NAME, BROWSER_EVAL_TOOL_NAME,
     BROWSER_FILL_TOOL_NAME, BROWSER_HOVER_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME,
-    BROWSER_PRESS_KEY_TOOL_NAME, BROWSER_RAISE_TOOL_NAME, BROWSER_SCREENSHOT_TOOL_NAME,
+    BROWSER_PRESS_KEY_TOOL_NAME, BROWSER_RAISE_TOOL_NAME, BROWSER_SAVE_TOOL_NAME,
+    BROWSER_SCREENSHOT_TOOL_NAME,
     BROWSER_SCROLL_TOOL_NAME, BROWSER_SELECT_TOOL_NAME, BROWSER_SET_FILE_TOOL_NAME,
     BROWSER_SNAPSHOT_TOOL_NAME, BROWSER_TABS_TOOL_NAME, BROWSER_WAIT_TOOL_NAME, BrowserClickTool,
     BrowserDownloadsTool, BrowserEvalTool, BrowserFillTool, BrowserHandle, BrowserHoverTool,
-    BrowserNavigateTool, BrowserPressKeyTool, BrowserRaiseTool, BrowserScreenshotTool,
+    BrowserNavigateTool, BrowserPressKeyTool, BrowserRaiseTool, BrowserSaveTool,
+    BrowserScreenshotTool,
     BrowserScrollTool, BrowserSelectTool, BrowserSetFileTool, BrowserSnapshotTool, BrowserTabsTool,
     BrowserWaitTool,
 };

@@ -2037,9 +2037,10 @@ impl SubagentExecutionBudget {
             }),
         };
         let finalize_grace_secs = timeout_secs.map(|timeout| {
+            let default_grace = timeout.saturating_div(6).clamp(30, 120);
             definition
                 .finalize_grace_secs
-                .unwrap_or(30)
+                .unwrap_or(default_grace)
                 .min(timeout.saturating_sub(1).max(1))
         });
         // Stall: explicit → scoped allowed_paths 3 min (finish after last tool
