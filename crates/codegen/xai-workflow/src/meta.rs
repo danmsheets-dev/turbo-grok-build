@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MAX_PHASE_DETAIL_LEN, MAX_PHASE_TITLE_LEN, MAX_WORKFLOW_DESCRIPTION_LEN, MAX_WORKFLOW_NAME_LEN,
-    MAX_WORKFLOW_PHASES, MAX_WORKFLOW_WHEN_TO_USE_LEN,
+    MAX_WORKFLOW_PHASES, MAX_WORKFLOW_TASKS, MAX_WORKFLOW_WHEN_TO_USE_LEN, TaskDefinition,
+    TaskQueueState,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -14,6 +15,9 @@ pub struct WorkflowMeta {
     pub when_to_use: Option<String>,
     #[serde(default)]
     pub phases: Vec<PhaseMeta>,
+    /// Declarative, bounded tasks exposed through the workflow task queue.
+    #[serde(default)]
+    pub tasks: Vec<TaskDefinition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +48,8 @@ pub enum MetaError {
     },
     #[error("meta.phases must contain at most {max} entries (got {actual})")]
     TooManyPhases { max: usize, actual: usize },
+    #[error("meta.tasks must contain at most {max} entries (got {actual})")]
+    TooManyTasks { max: usize, actual: usize },
 }
 
 const META_PROBE_MAX_OPS: u64 = 100_000;
@@ -55,7 +61,11 @@ pub fn extract_meta(script: &str) -> Result<WorkflowMeta, MetaError> {
 
     let mut engine = rhai::Engine::new();
     engine.set_max_operations(META_PROBE_MAX_OPS);
+    engine.set_max_call_levels(64);
     engine.set_max_expr_depths(128, 64);
+    engine.set_max_string_size(16 * 1024 * 1024);
+    engine.set_max_array_size(65_536);
+    engine.set_max_map_size(65_536);
     engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
     engine.disable_symbol("eval");
 
@@ -134,6 +144,14 @@ fn validate_meta(meta: &WorkflowMeta) -> Result<(), MetaError> {
             )?;
         }
     }
+    if meta.tasks.len() > MAX_WORKFLOW_TASKS {
+        return Err(MetaError::TooManyTasks {
+            max: MAX_WORKFLOW_TASKS,
+            actual: meta.tasks.len(),
+        });
+    }
+    TaskQueueState::from_definitions(&meta.tasks)
+        .map_err(|error| MetaError::InvalidShape(format!("meta.tasks: {error}")))?;
     Ok(())
 }
 

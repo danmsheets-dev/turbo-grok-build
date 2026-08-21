@@ -47,11 +47,7 @@ pub fn effective_pixel_scale(cell_w: u16, cell_h: u16) -> u32 {
         return base;
     }
     let cells = u32::from(cell_w).saturating_mul(u32::from(cell_h));
-    if cells >= 4800 {
-        base.min(2)
-    } else {
-        base
-    }
+    if cells >= 4800 { base.min(2) } else { base }
 }
 
 /// Default scale constant (for docs/tests). Prefer [`pixel_scale()`] /
@@ -202,7 +198,12 @@ mod floor_stamp {
                 let c = if let Some(base) = sample {
                     let tile = floor_tile_at(px_, py);
                     let mix = |a: u8, b: u8| ((u16::from(a) * 2 + u16::from(b)) / 3) as u8;
-                    [mix(base[0], tile[0]), mix(base[1], tile[1]), mix(base[2], tile[2]), 255]
+                    [
+                        mix(base[0], tile[0]),
+                        mix(base[1], tile[1]),
+                        mix(base[2], tile[2]),
+                        255,
+                    ]
                 } else {
                     floor_tile_at(px_, py)
                 };
@@ -279,12 +280,7 @@ fn filled_body(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, fill: [u8; 4
 /// stores*: no new cache keys, no new fingerprint inputs. Frame 3 is the
 /// "compile flash" (one bright beat per cycle), which is why the ramp is not
 /// monotonic.
-const MONITOR_GLOW: [[u8; 3]; 4] = [
-    [8, 26, 18],
-    [14, 44, 30],
-    [10, 32, 22],
-    [56, 120, 96],
-];
+const MONITOR_GLOW: [[u8; 3]; 4] = [[8, 26, 18], [14, 44, 30], [10, 32, 22], [56, 120, 96]];
 
 /// Error-mode counterpart of [`MONITOR_GLOW`] (RC2 §4 #1).
 ///
@@ -358,7 +354,11 @@ pub fn sprite_square_monitor(mode: MonitorMode, frame: u8) -> RgbaImage {
                     y,
                     len,
                     1,
-                    if row == 0 && frame % 2 == 0 { bar } else { bar_d },
+                    if row == 0 && frame % 2 == 0 {
+                        bar
+                    } else {
+                        bar_d
+                    },
                 );
             }
             if frame % 2 == 0 {
@@ -569,7 +569,19 @@ pub fn sprite_developer_at_desk(pal: DevPalette, typing: bool, frame: u8) -> Rgb
     // Worker body (side-ish 3/4 view facing monitor)
     filled_body(&mut img, 3, 12, 8, 9, pal.shirt);
     // collar / badge
-    fill_rect(&mut img, 5, 12, 4, 1, [pal.shirt[0].saturating_add(20), pal.shirt[1].saturating_add(20), pal.shirt[2].saturating_add(20), 255]);
+    fill_rect(
+        &mut img,
+        5,
+        12,
+        4,
+        1,
+        [
+            pal.shirt[0].saturating_add(20),
+            pal.shirt[1].saturating_add(20),
+            pal.shirt[2].saturating_add(20),
+            255,
+        ],
+    );
     px(&mut img, 6, 14, pal.accent);
     // head
     filled_body(&mut img, 4, 4, 7, 8, pal.skin);
@@ -1250,9 +1262,11 @@ mod tests {
     #[test]
     fn sprites_non_empty() {
         assert!(!sprite_empty_desk().as_raw().is_empty());
-        assert!(!sprite_developer_at_desk(DevPalette::by_index(0), true, 1)
-            .as_raw()
-            .is_empty());
+        assert!(
+            !sprite_developer_at_desk(DevPalette::by_index(0), true, 1)
+                .as_raw()
+                .is_empty()
+        );
         let mon = sprite_square_monitor(MonitorMode::Active, 0);
         assert_eq!(mon.width(), mon.height());
         // Detailed desk sprites — keep within composable bounds
@@ -1453,10 +1467,7 @@ mod tests {
                     }
                     y += 3;
                 }
-                assert!(
-                    moved,
-                    "sample phase ({ox}, {oy}) sees no animation at all"
-                );
+                assert!(moved, "sample phase ({ox}, {oy}) sees no animation at all");
             }
         }
     }
@@ -1566,7 +1577,9 @@ mod tests {
         // screen and left of the scrolling code, so it stays the base color.
         for f in 0..4u8 {
             assert_eq!(
-                sprite_square_monitor(MonitorMode::Active, f).get_pixel(2, 2).0,
+                sprite_square_monitor(MonitorMode::Active, f)
+                    .get_pixel(2, 2)
+                    .0,
                 [12, 20, 28, 255],
                 "frame {f}: glow washed the screen instead of rimming it"
             );
@@ -1635,7 +1648,9 @@ mod tests {
             );
         }
         // ...and the other modes are untouched by the new branch.
-        let active = sprite_square_monitor(MonitorMode::Active, 0).get_pixel(2, 2).0;
+        let active = sprite_square_monitor(MonitorMode::Active, 0)
+            .get_pixel(2, 2)
+            .0;
         assert!(active[2] > active[0], "active screen must stay cool-toned");
         assert_eq!(
             sprite_square_monitor(MonitorMode::Off, 0).get_pixel(2, 2).0,

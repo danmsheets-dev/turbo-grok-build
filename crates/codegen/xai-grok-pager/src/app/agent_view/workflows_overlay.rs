@@ -43,8 +43,14 @@ fn transcript_target(
     run: &crate::views::workflows::WorkflowRunSnapshot,
     phase: Option<&str>,
 ) -> Option<String> {
-    let all_agents = run.phases.is_empty() && run.current_phase.is_none();
-    let agents = run.agents_in_phase(if all_agents { None } else { phase });
+    let all_agents = run.tasks.is_empty() && run.phases.is_empty() && run.current_phase.is_none();
+    let agents = if all_agents {
+        run.agents_in_phase(None)
+    } else if !run.tasks.is_empty() {
+        phase.map_or_else(Vec::new, |task_id| run.agents_in_task(task_id))
+    } else {
+        run.agents_in_phase(phase)
+    };
     agents
         .iter()
         .rev()
@@ -266,9 +272,8 @@ impl AgentView {
                                 .find(|(rect, _)| hit(rect))
                                 .map(|(_, phase_name)| phase_name.clone())
                                 && let Some(run) = view.detail_run(&runs)
-                                && let Some(idx) = crate::views::workflows::phase_rail(run)
-                                    .iter()
-                                    .position(|(title, _)| title == &phase_name)
+                                && let Some(idx) =
+                                    crate::views::workflows::phase_index_for_key(run, &phase_name)
                             {
                                 view.select_phase(idx, run);
                             }
@@ -323,7 +328,9 @@ mod workflows_overlay_key_tests {
             management_available: true,
             builtin: false,
             phases: Vec::new(),
+            tasks: Vec::new(),
             current_phase: None,
+            current_task_id: None,
             agents: Vec::new(),
             agent_budget: None,
             agents_used: 0,
@@ -461,6 +468,7 @@ mod workflows_overlay_key_tests {
                 agent_id: "child-done".to_owned(),
                 label: "done".to_owned(),
                 phase: Some("Research".to_owned()),
+                task_id: None,
                 model: None,
                 state: "done".to_owned(),
                 tokens_used: 0,
@@ -470,6 +478,7 @@ mod workflows_overlay_key_tests {
                 agent_id: "child-running".to_owned(),
                 label: "running".to_owned(),
                 phase: Some("Research".to_owned()),
+                task_id: None,
                 model: None,
                 state: "running".to_owned(),
                 tokens_used: 0,

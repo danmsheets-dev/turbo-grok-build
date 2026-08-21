@@ -52,6 +52,63 @@ impl From<std::io::Error> for ComputerError {
 pub trait AsyncFileSystem: Send + Sync {
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, ComputerError>;
 
+    /// Read only a bounded prefix for inexpensive type detection. Backends
+    /// should avoid materializing the complete file for this probe.
+    async fn read_file_prefix(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        let mut bytes = self.read_file(path).await?;
+        bytes.truncate(max_bytes);
+        Ok(bytes)
+    }
+
+    /// Count logical text lines without retaining the file contents.
+    async fn read_file_line_count(&self, path: &Path) -> Result<usize, ComputerError> {
+        let bytes = self.read_file(path).await?;
+        if bytes.is_empty() {
+            Ok(0)
+        } else {
+            Ok(bytes.iter().filter(|&&byte| byte == b'\n').count() + 1)
+        }
+    }
+
+    /// Whether a non-empty file ends in a newline, without retaining its body.
+    async fn read_file_ends_with_newline(&self, path: &Path) -> Result<bool, ComputerError> {
+        Ok(self
+            .read_file(path)
+            .await?
+            .last()
+            .is_some_and(|&byte| byte == b'\n'))
+    }
+
+    /// Read a bounded 1-based line window. The returned bytes preserve line
+    /// endings so the caller can apply the normal line-numbering projection.
+    async fn read_file_lines(
+        &self,
+        path: &Path,
+        start_line: usize,
+        limit: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        let bytes = self.read_file(path).await?;
+        if bytes.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let start = start_line.max(1).saturating_sub(1);
+        let end = start.saturating_add(limit);
+        let mut output = Vec::new();
+        for (index, line) in bytes.split_inclusive(|&byte| byte == b'\n').enumerate() {
+            if index >= start && index < end {
+                output.extend_from_slice(line);
+            }
+            if index >= end {
+                break;
+            }
+        }
+        Ok(output)
+    }
+
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError>;
 
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError>;

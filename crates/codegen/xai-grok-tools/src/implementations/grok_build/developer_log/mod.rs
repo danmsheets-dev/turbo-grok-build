@@ -29,7 +29,7 @@ pub struct DeveloperLogInput {
     pub summary: String,
 
     #[schemars(
-        description = "Stable error class for dedup/triage: worktree_tombstone | isolation_fallback | subagent_stall | protocol_deser | provider_400 | provider_auth | tool_schema | land_conflict | mcp_connect | catalog_stale | docs_gap | feature_gap | perf_regression | work_lost_risk | unknown"
+        description = "Stable error class for dedup/triage: worktree_tombstone | isolation_fallback | subagent_stall | protocol_deser | provider_400 | provider_429 | provider_auth | tool_schema | land_conflict | mcp_connect | catalog_stale | docs_gap | feature_gap | perf_regression | work_lost_risk | unknown"
     )]
     pub error_class: String,
 
@@ -44,9 +44,7 @@ pub struct DeveloperLogInput {
     pub severity: Option<String>,
 
     #[serde(default)]
-    #[schemars(
-        description = "Product components, e.g. [\"subagent\",\"worktree\",\"lifecycle\"]"
-    )]
+    #[schemars(description = "Product components, e.g. [\"subagent\",\"worktree\",\"lifecycle\"]")]
     pub component: Option<Vec<String>>,
 
     #[serde(default)]
@@ -241,9 +239,9 @@ impl xai_tool_runtime::Tool for DeveloperLogTool {
             .and_then(xai_grok_developer_log::Severity::parse);
 
         let session_id = ctx.get::<SessionContext>().map(|s| s.0.clone());
-        let cwd_hash = ctx.get::<Cwd>().map(|c| {
-            xai_grok_config::encode_cwd_dirname(&c.0.to_string_lossy())
-        });
+        let cwd_hash = ctx
+            .get::<Cwd>()
+            .map(|c| xai_grok_config::encode_cwd_dirname(&c.0.to_string_lossy()));
 
         let request = xai_grok_developer_log::ReportRequest {
             title: input.title,
@@ -296,15 +294,9 @@ impl xai_tool_runtime::Tool for DeveloperLogTool {
                 format!("developer_log task failed: {e}"),
             )
         })?
-        .map_err(|e| {
-            xai_tool_runtime::ToolError::custom("developer_log_failed", e.to_string())
-        })?;
+        .map_err(|e| xai_tool_runtime::ToolError::custom("developer_log_failed", e.to_string()))?;
 
-        let action = if result.is_new {
-            "Created"
-        } else {
-            "Updated"
-        };
+        let action = if result.is_new { "Created" } else { "Updated" };
         let message = format!(
             "{action} Auto Developer Log incident `{}` (fingerprint `{}`, occurrences={}, severity={}). Path: {}. Review with `turbo issues show {}` or `turbo issues export`.",
             result.incident_id,

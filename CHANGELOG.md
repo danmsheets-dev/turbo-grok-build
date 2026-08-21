@@ -39,6 +39,112 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [1.0.0-rc.3] - 2026-08-19
+
+**Agent WebView field-test pass.** rc.2.1 made the window usable. This release
+is the evening QA round: new page-control tools, click/fill/eval policy that
+matches job-hunt and 1:1 outreach, OAuth popups that do not hijack the only
+tab, session-scoped profiles, and a compaction retry that recognizes more
+context-window overflow wordings.
+
+### Added
+- **Brokered Agent WebView downloads** — page-initiated downloads are redirected into the session-scoped `downloads/` folder with sanitized collision-safe names; `browser_downloads` reports completed files without exposing arbitrary destination writes.
+- **NVIDIA Integrate models** — Muse Glimmer (`meta/muse-glimmer-30b`, 131K),
+  Poolside Laguna XS 2.1 (`poolside/laguna-xs-2.1`, 256K), and
+  Mistral-Nemotron (`mistralai/mistral-nemotron`, 128K) via
+  `https://integrate.api.nvidia.com/v1` / `$NVIDIA_API_KEY`. Catalog keys
+  `nvidia/meta/…`, `nvidia/poolside/…`, `nvidia/mistralai/…` plus short
+  `nvidia/<id>` aliases; same `request_compat` as other NIM chat models.
+- **`browser_wait`** — poll until `text` is on the page or the URL contains
+  `url_substring`. Timeout names what was waited for.
+- **`browser_scroll` / `browser_press_key` / `browser_select` / `browser_hover` /
+  `browser_set_file`** — below-the-fold Apply, combobox Enter, filters, hover
+  menus, and workspace / session-folder file inputs (resume PDFs). Downloads
+  stay blocked.
+- **`browser_raise`** — bring the hidden window back for human login.
+- **`browser_snapshot include_text`** — truncated main/article text so LinkedIn
+  Experience and Indeed job bodies survive the 200-node cap.
+- **Session-scoped WebView profile** — default
+  `$GROK_HOME/agent-browser/sessions/<id>`. `GROK_BROWSER_PROFILE=durable` opts
+  into a shared job-hunt profile.
+- **LinkedIn 1:1 playbook** in the `agent-browser` skill (Connect vs Message,
+  200-char notes, Pending stop, close the messaging overlay first).
+
+### Fixed
+- **Umbrella isolation source repo** — `isolation=worktree` plus `cwd` selects
+  the source git checkout (child still runs in a new worktree). Unique nested
+  git discovery and `GROK_SUBAGENT_REPO_ROOT` remain as fallbacks. Multiple
+  nested git dirs without an explicit `cwd` still fail-closed.
+- **Nested spawn default `max_depth=2`** — first-level children can spawn one
+  grandchild. Operators can still set `GROK_SUBAGENTS_MAX_DEPTH=1`. Child boot
+  card says when spawn is stripped at the ceiling.
+- **Sol Medium spawn aliases** — `openai/gpt-5.6-sol` (and `-pro`, short
+  `gpt-5.6-sol`) resolve to `openai-codex/gpt-5.6-sol` like Luna.
+- **Explore/oracle wall-clock** — explore 5 min / 24 turns; oracle 10 min /
+  24 turns so read-only children finish instead of 120–180s stalls.
+- **Spawn start honesty** — background spawn result includes
+  `isolation_requested` and the DisplayCwd-remap note.
+- **Worktree `cargo` under confine** — `cargo` / `rustc` / `rustfmt` / `rustup`
+  run|show|which` are modelled. Implicit `target/` plus `--target-dir` /
+  `--root` are confine operands so `cargo test -p …` works and `cargo install`
+  to `~/.cargo` still fail-closes.
+- **CMake/MSBuild FileTracker FTK1011** — worktree children pin
+  `CARGO_TARGET_DIR` to the real `{worktree}/target` instead of inheriting or
+  remapping onto the parent `H:\…\target`.
+- **Detached HEAD after worktree commit** — `git worktree add` uses
+  `-B grok/<dest-basename>` so commits stay on a named child branch.
+- **NVIDIA child wall-clock** — default 10 min → 1 hour; stall 10 min → 30 min.
+  Explicit `timeout_ms` is not capped at 30 minutes.
+- **Reviewer stall** — agents whose name contains `review` default to 48 tool
+  calls and a 10 min budget unless the definition overrides them.
+- **`review-current-branch`** — no longer hardcodes `origin/dev`. Scope uses
+  `capability_mode=execute` so git works; empty baseline resolves
+  `@{upstream}` then `HEAD`.
+- **`allowed_paths` refusals** name the prefix to re-spawn with. Root
+  `.gitattributes` / `.gitignore` are writable and landable even when the
+  allowlist is crate-scoped.
+- **`location.href` reads no longer need `confirm=true`**. Assignment / replace /
+  assign / `el['click']` / `document.write` / `.src=` still do. The host
+  re-checks mutating eval.
+- **Denied `browser_navigate` no longer drops the snapshot**, so the next click
+  is not "call browser_snapshot first".
+- **Click reports a cancelled navigation** instead of success-on-the-old-page.
+  Result includes the post-click URL.
+- **Overlapping writes are refused** (`browser_busy`) instead of last-write-wins
+  on the single tab.
+- **Click confirm** gates Apply / Connect / Follow / Invite / Message; **Sign in**
+  does not (the human types secrets in the window).
+- **Snapshots** pick up `role=status|option|listbox|dialog`, `<label for>`,
+  overlay Close, and keep Experience/About headings under the cap. Same-origin
+  iframes are walked.
+- **contenteditable / Lexical fill** uses `insertText` + composed InputEvents
+  (and a paste-shaped fallback) so LinkedIn Send enables.
+- **Google/Microsoft OAuth popups** are real windows. GSI is no longer
+  Navigated into the only tab.
+- **Iframe navigations** go through the same URL policy as the top-level frame.
+- **Pipe binds before WebView2 init**; ensure wait is 45s. The host is enrolled
+  in a Job Object / process scope so leftover `msedgewebview2.exe` dies with
+  the pager.
+- **Uid schema examples** are epoch-index (`4-17`), not positional `"2"`.
+- **Boot card** documents close-hides. **chrome-mcp** skill now says: use
+  `browser_*` unless the user asked for daily Chrome.
+- **Compaction** treats more overflow phrasings (`context window`, `token
+  limit`, `too many tokens`, `input too long`) as deterministic context-length
+  errors so the input ladder can step down instead of failing closed.
+  `should_compact_on_error` now recovers from CLE text even when stream
+  metadata is missing or the token estimate sits under the advertised window.
+  StreamError overflow is no longer retried as a blip. Checkpoint is written
+  after the forked history is resolved, and the jsonl marker is not written if
+  the checkpoint file cannot be queued. Truncated unclosed `<summary>` blocks
+  are degenerate and retried.
+
+### Policy
+- Agent WebView is HITL assist, not a bot. Skill forbids bulk Indeed apply and
+  LinkedIn connect/message loops.
+
+### Changed
+- Wire version **`1.0.0-rc.3`**.
+
 ## [1.0.0-rc.2.1] - 2026-08-19
 
 **Agent WebView hotfix.** rc.2 shipped the Agent WebView with a defect that made

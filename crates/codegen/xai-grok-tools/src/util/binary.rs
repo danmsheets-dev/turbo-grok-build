@@ -54,9 +54,7 @@ pub fn refuse_text_edit_reason(path: &std::path::Path) -> Option<&'static str> {
             "Blender binary (`.blend` / save-backup). Never text-patch; \
              use `bpy` via `blender --background --factory-startup --python-exit-code 1 --python <script>`.",
         ),
-        "pck" => Some(
-            "Godot pack (`.pck`) is a binary archive — not editable as text.",
-        ),
+        "pck" => Some("Godot pack (`.pck`) is a binary archive — not editable as text."),
         "res" | "scn" => Some(
             "Godot binary resource (`.res`/`.scn`). Prefer text `.tres`/`.tscn` forms; \
              do not byte-patch binary resources.",
@@ -105,8 +103,8 @@ mod tests {
     #[test]
     fn detects_known_binary_extensions() {
         for ext in &[
-            "zip", "exe", "wasm", "dll", "so", "dylib", "png", "mp4", "jpeg", "jpg", "webp", "tiff",
-            "blend", "blend1", "pck", "res", "scn",
+            "zip", "exe", "wasm", "dll", "so", "dylib", "png", "mp4", "jpeg", "jpg", "webp",
+            "tiff", "blend", "blend1", "pck", "res", "scn",
         ] {
             assert!(is_binary(ext, &[]), "extension '{ext}' should be binary");
         }
@@ -126,9 +124,7 @@ mod tests {
     fn refuse_text_edit_blend_and_godot_cache() {
         assert!(refuse_text_edit_reason(std::path::Path::new("mesh.blend")).is_some());
         assert!(refuse_text_edit_reason(std::path::Path::new("game.pck")).is_some());
-        assert!(
-            refuse_text_edit_reason(std::path::Path::new(".godot/imported/foo")).is_some()
-        );
+        assert!(refuse_text_edit_reason(std::path::Path::new(".godot/imported/foo")).is_some());
         assert!(refuse_text_edit_reason(std::path::Path::new("scene.tscn")).is_none());
         assert!(refuse_text_edit_reason(std::path::Path::new("icon.svg.uid")).is_none());
         assert!(refuse_text_edit_reason(std::path::Path::new("tex.png.import")).is_none());

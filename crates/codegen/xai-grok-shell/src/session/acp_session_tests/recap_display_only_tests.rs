@@ -1468,16 +1468,17 @@ async fn parent_cached_request_labels_recap_and_btw_calls() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             let session_id = actor.session_info.id.to_string();
 
-            let call = |backend: ApiBackend, conv_id: &str, req_id: &str| super::side_call::AuxCall {
-                items: vec![ConversationItem::user("q")],
-                tools: vec![],
-                hosted_tools: vec![],
-                model: "test-model".into(),
-                reasoning_effort: None,
-                backend,
-                conv_id: conv_id.to_string(),
-                req_id: req_id.to_string(),
-            };
+            let call =
+                |backend: ApiBackend, conv_id: &str, req_id: &str| super::side_call::AuxCall {
+                    items: vec![ConversationItem::user("q")],
+                    tools: vec![],
+                    hosted_tools: vec![],
+                    model: "test-model".into(),
+                    reasoning_effort: None,
+                    backend,
+                    conv_id: conv_id.to_string(),
+                    req_id: req_id.to_string(),
+                };
 
             assert!(
                 ApiBackend::Responses.forwards_prompt_cache_key(),

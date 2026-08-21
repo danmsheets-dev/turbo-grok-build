@@ -33,11 +33,9 @@ pub fn export_feature_requests(
 ) -> Result<FrExportResult, FrStoreError> {
     let entries = store.list(&options.filter)?;
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let out_dir = options.out_dir.unwrap_or_else(|| {
-        store
-            .bundles_dir()
-            .join(format!("export-{stamp}"))
-    });
+    let out_dir = options
+        .out_dir
+        .unwrap_or_else(|| store.bundles_dir().join(format!("export-{stamp}")));
     fs::create_dir_all(&out_dir)?;
     let evidence_dir = out_dir.join("evidence");
     fs::create_dir_all(&evidence_dir)?;
@@ -83,7 +81,9 @@ pub fn export_feature_requests(
 
     let csv_path = out_dir.join("fingerprints.csv");
     {
-        let mut csv = String::from("request_id,fingerprint,priority,status,request_class,occurrence_count,title\n");
+        let mut csv = String::from(
+            "request_id,fingerprint,priority,status,request_class,occurrence_count,title\n",
+        );
         for e in &loaded_entries {
             csv.push_str(&format!(
                 "{},{},{},{},{},{},\"{}\"\n",

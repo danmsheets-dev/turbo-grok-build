@@ -38,7 +38,7 @@ impl crate::types::tool_metadata::ToolMetadata for WebSearchTool {
     }
 
     fn description_template(&self) -> &str {
-        "Search the web for up-to-date information, tailored for coding and software development tasks."
+        "Search the web for up-to-date information, tailored for coding and software development tasks. Use lawful public-source fallbacks for paywalled results; never bypass access controls."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {

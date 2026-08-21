@@ -14,12 +14,14 @@ pub const GROK_BROWSER_SKIP_CLICK_CONFIRM_ENV: &str = "GROK_BROWSER_SKIP_CLICK_C
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BrowserClickInput {
     /// Snapshot uid from the last `browser_snapshot`.
-    #[schemars(description = "Snapshot uid from the last browser_snapshot (e.g. \"1\").")]
+    #[schemars(
+        description = "Snapshot uid from the last browser_snapshot (e.g. \"4-17\"). Epoch-index, not a positional \"2\"."
+    )]
     pub uid: String,
-    /// Confirm a click whose accessible name looks like submit / buy / pay / delete / post / send.
+    /// Confirm a click whose accessible name looks like submit / buy / pay / delete / post / send / apply / connect / message.
     #[serde(default)]
     #[schemars(
-        description = "Set true after the user approved a submit/buy/pay/delete/post/send click. Default false."
+        description = "Set true after the user approved a submit/buy/pay/delete/post/send/apply/connect/message click. Default false. Sign in does not need confirm — the human types secrets in the window."
     )]
     pub confirm: bool,
 }
@@ -37,7 +39,7 @@ impl crate::types::tool_metadata::ToolMetadata for BrowserClickTool {
     }
 
     fn description_template(&self) -> &str {
-        "Click an element in the Turbo Agent WebView by snapshot uid. Call browser_snapshot first. Clicks whose name looks like submit/buy/pay/delete/post/send require confirm=true after the user approves. Unknown uids fail closed."
+        "Click an element in the Turbo Agent WebView by snapshot uid. Call browser_snapshot first. Clicks whose name looks like submit/buy/pay/delete/post/send/apply/connect/message require confirm=true after the user approves. Sign in does not. Unknown uids fail closed."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -78,8 +80,11 @@ impl xai_tool_runtime::Tool for BrowserClickTool {
         input: BrowserClickInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let handle = super::require_handle(&ctx).await?;
-        handle.click(&input.uid, input.confirm).await?;
-        Ok(super::text_output(format!("Clicked uid {}", input.uid)))
+        let result = handle.click(&input.uid, input.confirm).await?;
+        Ok(super::text_output(format!(
+            "Clicked uid {} — now at {} (title: {})",
+            input.uid, result.url, result.title
+        )))
     }
 }
 
@@ -116,9 +121,15 @@ pub(super) fn click_name_needs_confirm(name: &str) -> bool {
         "uninstall",
         "deploy",
         "merge",
-        "sign",
+        "apply",
+        "connect",
+        "follow",
+        "invite",
+        "message",
         "login",
         "logout",
+        "signup",
+        "signin",
     ];
     let lower = name.to_ascii_lowercase();
     let words: Vec<&str> = lower
@@ -167,8 +178,13 @@ pub(super) fn check_click_against_snapshot(
         ));
     }
     let Some(node) = snapshot.nodes.iter().find(|n| n.uid == uid) else {
+        let hint = if uid.chars().all(|c| c.is_ascii_digit()) {
+            " Uids look like 4-17 (epoch-index from the latest snapshot), not a positional 2."
+        } else {
+            ""
+        };
         return Err(ToolError::invalid_arguments(format!(
-            "Unknown snapshot uid {uid}. Call browser_snapshot and use a current uid."
+            "Unknown snapshot uid {uid}.{hint} Call browser_snapshot and use a current uid."
         )));
     };
     if confirm || skip_click_confirm() || !click_name_needs_confirm(&node.name) {
@@ -198,6 +214,7 @@ mod tests {
                 value: None,
                 focused: false,
             }],
+            ..Default::default()
         }
     }
 
@@ -218,6 +235,13 @@ mod tests {
             "I agree",
             "Withdraw",
             "Merge pull request",
+            "Apply now",
+            "Apply with Indeed",
+            "Easy Apply",
+            "Connect",
+            "Follow",
+            "Invite",
+            "Message",
         ] {
             assert!(click_name_needs_confirm(name), "must gate {name:?}");
         }
@@ -237,6 +261,9 @@ mod tests {
             "More information",
             "Search",
             "Documentation",
+            "Sign in",
+            "Sign in with email",
+            "Continue with Google",
         ] {
             assert!(!click_name_needs_confirm(name), "must not gate {name:?}");
         }
@@ -249,6 +276,14 @@ mod tests {
         assert!(err.to_string().contains("read-only"), "{err}");
         // Even with confirm: the uid still does not point at that element.
         assert!(check_click_against_snapshot(Some(&snap), "ax-1", true).is_err());
+    }
+
+    #[test]
+    fn positional_uid_is_explained() {
+        let snap = snapshot(SnapshotSource::Dom, "1-1", "Search");
+        let err = check_click_against_snapshot(Some(&snap), "2", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("4-17") || msg.contains("epoch"), "{msg}");
     }
 
     #[test]

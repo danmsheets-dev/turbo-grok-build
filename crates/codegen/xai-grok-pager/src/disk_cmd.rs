@@ -20,7 +20,7 @@ use clap::{Subcommand, ValueEnum};
 use fs2::FileExt;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -1389,50 +1389,63 @@ fn clean(opts: CleanOpts) -> Result<()> {
         all_targets.insert(0, target.clone());
     }
 
-    // Profile locks: release-dist-caches, debug, release (Cargo profile .cargo-lock).
-    let mut release_dist_lock: Option<std::fs::File> = None;
-    let mut debug_lock: Option<std::fs::File> = None;
-    let mut release_lock: Option<std::fs::File> = None;
+    // Cargo profile locks are per target root. Hold every acquired lock until
+    // its corresponding target tree has been reclaimed; a lock on the primary
+    // target must never authorize deletion in a nested target.
+    let mut release_dist_locks = BTreeMap::<PathBuf, File>::new();
+    let mut debug_locks = BTreeMap::<PathBuf, File>::new();
+    let mut release_locks = BTreeMap::<PathBuf, File>::new();
+    let mut blocked_release_dist = BTreeSet::new();
+    let mut blocked_debug = BTreeSet::new();
+    let mut blocked_release = BTreeSet::new();
 
     if categories.contains(&CleanCategory::ReleaseDistCaches) {
-        let rd = target.join("release-dist");
-        match try_acquire_profile_lock(&rd) {
-            Ok(f) => release_dist_lock = f,
-            Err(reason) => {
-                if dry {
-                    result
-                        .skipped
-                        .push(format!("release-dist-caches blocked: {reason}"));
-                    for name in release_dist_cache_names() {
-                        let p = rd.join(name);
-                        if p.is_dir() {
-                            let sz = dir_size_capped(&p, 300_000).bytes;
-                            push_action(
-                                &mut result,
-                                format!(
-                                    "would remove {} ({}) [blocked: {reason}]",
-                                    p.display(),
-                                    fmt_bytes(sz)
-                                ),
-                            );
-                        }
+        for t in &all_targets {
+            let rd = t.join("release-dist");
+            match try_acquire_profile_lock(&rd) {
+                Ok(Some(lock)) => {
+                    release_dist_locks.insert(t.clone(), lock);
+                    if opts.active_build_grace_secs > 0
+                        && let Some(hint) =
+                            release_dist_recent_mtime_hint(&rd, opts.active_build_grace_secs)
+                    {
+                        result.skipped.push(format!(
+                            "warning: recent release-dist activity ({hint}); lock acquired — proceeding carefully"
+                        ));
                     }
-                } else {
-                    bail!(
-                        "release-dist-caches refused: {reason}. \
-                         Wait for cargo to finish. \
-                         (--active-build-grace-secs only affects mtime warnings after a lock is acquired; it cannot force through a held lock.)"
-                    );
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    blocked_release_dist.insert(t.clone());
+                    if dry {
+                        result.skipped.push(format!(
+                            "release-dist-caches blocked at {}: {reason}",
+                            rd.display()
+                        ));
+                        for name in release_dist_cache_names() {
+                            let p = rd.join(name);
+                            if p.is_dir() {
+                                let sz = dir_size_capped(&p, 300_000).bytes;
+                                push_action(
+                                    &mut result,
+                                    format!(
+                                        "would remove {} ({}) [blocked: {reason}]",
+                                        p.display(),
+                                        fmt_bytes(sz)
+                                    ),
+                                );
+                            }
+                        }
+                    } else {
+                        bail!(
+                            "release-dist-caches refused at {}: {reason}. \
+                             Wait for cargo to finish. \
+                             (--active-build-grace-secs only affects mtime warnings after a lock is acquired; it cannot force through a held lock.)",
+                            rd.display()
+                        );
+                    }
                 }
             }
-        }
-        if release_dist_lock.is_some()
-            && opts.active_build_grace_secs > 0
-            && let Some(hint) = release_dist_recent_mtime_hint(&rd, opts.active_build_grace_secs)
-        {
-            result.skipped.push(format!(
-                "warning: recent release-dist activity ({hint}); lock acquired — proceeding carefully"
-            ));
         }
     }
 
@@ -1440,16 +1453,23 @@ fn clean(opts: CleanOpts) -> Result<()> {
         || categories.contains(&CleanCategory::DebugPdbs)
         || categories.contains(&CleanCategory::DebugIncremental)
     {
-        let debug = target.join("debug");
-        if debug.is_dir() {
+        for t in &all_targets {
+            let debug = t.join("debug");
             match try_acquire_profile_lock(&debug) {
-                Ok(f) => debug_lock = f,
+                Ok(Some(lock)) => {
+                    debug_locks.insert(t.clone(), lock);
+                }
+                Ok(None) => {}
                 Err(reason) => {
+                    blocked_debug.insert(t.clone());
                     if dry {
-                        result.skipped.push(format!("debug blocked: {reason}"));
+                        result
+                            .skipped
+                            .push(format!("debug blocked at {}: {reason}", debug.display()));
                     } else {
                         bail!(
-                            "debug reclaim refused: {reason}. Wait for cargo test/build to finish."
+                            "debug reclaim refused at {}: {reason}. Wait for cargo test/build to finish.",
+                            debug.display()
                         );
                     }
                 }
@@ -1457,16 +1477,23 @@ fn clean(opts: CleanOpts) -> Result<()> {
         }
     }
     if categories.contains(&CleanCategory::Release) {
-        let rel = target.join("release");
-        if rel.is_dir() {
+        for t in &all_targets {
+            let rel = t.join("release");
             match try_acquire_profile_lock(&rel) {
-                Ok(f) => release_lock = f,
+                Ok(Some(lock)) => {
+                    release_locks.insert(t.clone(), lock);
+                }
+                Ok(None) => {}
                 Err(reason) => {
+                    blocked_release.insert(t.clone());
                     if dry {
-                        result.skipped.push(format!("release blocked: {reason}"));
+                        result
+                            .skipped
+                            .push(format!("release blocked at {}: {reason}", rel.display()));
                     } else {
                         bail!(
-                            "release reclaim refused: {reason}. Wait for cargo build --release to finish."
+                            "release reclaim refused at {}: {reason}. Wait for cargo build --release to finish.",
+                            rel.display()
                         );
                     }
                 }
@@ -1474,35 +1501,32 @@ fn clean(opts: CleanOpts) -> Result<()> {
         }
     }
 
-    let skip_rd_caches = categories.contains(&CleanCategory::ReleaseDistCaches)
-        && release_dist_lock.is_none()
-        && dry;
-    let skip_debug = (categories.contains(&CleanCategory::Debug)
-        || categories.contains(&CleanCategory::DebugPdbs)
-        || categories.contains(&CleanCategory::DebugIncremental))
-        && debug_lock.is_none()
-        && target.join("debug").is_dir()
-        && dry
-        && result
-            .skipped
-            .iter()
-            .any(|s| s.starts_with("debug blocked"));
-    let skip_release = categories.contains(&CleanCategory::Release)
-        && release_lock.is_none()
-        && target.join("release").is_dir()
-        && dry
-        && result
-            .skipped
-            .iter()
-            .any(|s| s.starts_with("release blocked"));
+    let cargo_home_lock = if categories.contains(&CleanCategory::CargoHome) {
+        match try_acquire_cargo_home_lock(&cargo_home_path()) {
+            Ok(lock) => lock,
+            Err(reason) => {
+                if dry {
+                    result.skipped.push(format!("cargo-home blocked: {reason}"));
+                    None
+                } else {
+                    bail!("cargo-home reclaim refused: {reason}. Wait for Cargo to finish.");
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    let skip_cargo_home =
+        categories.contains(&CleanCategory::CargoHome) && cargo_home_lock.is_none() && dry;
 
     for cat in &categories {
         match cat {
             CleanCategory::Debug => {
-                if skip_debug {
-                    continue;
-                }
                 for t in &all_targets {
+                    if blocked_debug.contains(t) {
+                        continue;
+                    }
                     reclaim_dir(&mut result, "debug", &t.join("debug"), dry, 1_000_000);
                     for name in ["incremental", ".fingerprint"] {
                         reclaim_dir(&mut result, "debug", &t.join(name), dry, 200_000);
@@ -1510,18 +1534,18 @@ fn clean(opts: CleanOpts) -> Result<()> {
                 }
             }
             CleanCategory::DebugPdbs => {
-                if skip_debug {
-                    continue;
-                }
                 for t in &all_targets {
+                    if blocked_debug.contains(t) {
+                        continue;
+                    }
                     reclaim_pdbs(&mut result, &t.join("debug"), dry);
                 }
             }
             CleanCategory::DebugIncremental => {
-                if skip_debug {
-                    continue;
-                }
                 for t in &all_targets {
+                    if blocked_debug.contains(t) {
+                        continue;
+                    }
                     reclaim_dir(
                         &mut result,
                         "debug-incremental",
@@ -1532,25 +1556,19 @@ fn clean(opts: CleanOpts) -> Result<()> {
                 }
             }
             CleanCategory::Release => {
-                if skip_release {
-                    continue;
-                }
                 for t in &all_targets {
+                    if blocked_release.contains(t) {
+                        continue;
+                    }
                     reclaim_dir(&mut result, "release", &t.join("release"), dry, 1_000_000);
                 }
             }
             CleanCategory::ReleaseDistCaches => {
-                if skip_rd_caches {
-                    // already recorded blocked actions in preflight
-                } else {
-                    for t in &all_targets {
-                        reclaim_release_dist_caches(
-                            &mut result,
-                            &t.join("release-dist"),
-                            dry,
-                            release_dist_lock.as_ref(),
-                        )?;
+                for t in &all_targets {
+                    if blocked_release_dist.contains(t) {
+                        continue;
                     }
+                    reclaim_release_dist_caches(&mut result, &t.join("release-dist"), dry)?;
                 }
             }
             CleanCategory::Worktrees => {
@@ -1563,16 +1581,19 @@ fn clean(opts: CleanOpts) -> Result<()> {
                 reclaim_temp_grok_aged(&mut result, dry, 24);
             }
             CleanCategory::CargoHome => {
-                reclaim_cargo_home(&mut result, dry);
+                if !skip_cargo_home {
+                    reclaim_cargo_home(&mut result, dry);
+                }
             }
             CleanCategory::PluginWorktrees => {
                 reclaim_plugin_worktrees(&mut result, opts.worktree_hours, dry);
             }
         }
     }
-    drop(release_dist_lock);
-    drop(debug_lock);
-    drop(release_lock);
+    drop(release_dist_locks);
+    drop(debug_locks);
+    drop(release_locks);
+    drop(cargo_home_lock);
 
     result.free_bytes_after = free_bytes_for_path(&root);
     result.ok = !result.skipped.iter().any(|s| {
@@ -1580,6 +1601,7 @@ fn clean(opts: CleanOpts) -> Result<()> {
             || s.starts_with("debug blocked")
             || s.starts_with("release blocked")
             || s.starts_with("release-dist-caches blocked")
+            || s.starts_with("cargo-home blocked")
             || s.contains("failed remove")
     });
 
@@ -1763,6 +1785,31 @@ fn try_acquire_profile_lock(profile_dir: &Path) -> Result<Option<std::fs::File>,
     }
 }
 
+/// Acquire Cargo's global package-cache lock before touching registry/git caches.
+///
+/// Cargo uses `.package-cache` to serialize mutations of `CARGO_HOME`. Holding
+/// this lock prevents cleanup from deleting cache entries during a concurrent
+/// dependency fetch or package-cache update.
+fn try_acquire_cargo_home_lock(home: &Path) -> Result<Option<File>, String> {
+    if !home.is_dir() {
+        return Ok(None);
+    }
+    let lock_path = home.join(".package-cache");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(e) => Err(format!(
+            "Cargo package-cache lock held or unavailable at {} ({e})",
+            lock_path.display()
+        )),
+    }
+}
+
 /// Soft mtime hint only (not the safety barrier).
 fn release_dist_recent_mtime_hint(rd: &Path, grace_secs: u64) -> Option<String> {
     if grace_secs == 0 || !rd.is_dir() {
@@ -1806,12 +1853,7 @@ fn release_dist_recent_mtime_hint(rd: &Path, grace_secs: u64) -> Option<String> 
     None
 }
 
-fn reclaim_release_dist_caches(
-    result: &mut CleanResult,
-    rd: &Path,
-    dry_run: bool,
-    _lock: Option<&std::fs::File>,
-) -> Result<()> {
+fn reclaim_release_dist_caches(result: &mut CleanResult, rd: &Path, dry_run: bool) -> Result<()> {
     if !rd.is_dir() {
         return Ok(());
     }
@@ -2870,6 +2912,70 @@ mod tests {
         assert!(rd.join("turbo.exe").exists());
         assert!(rd.join("deps").join("hot.rlib").exists());
         drop(holder);
+    }
+
+    #[test]
+    fn clean_release_dist_caches_checks_each_target_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_rd = tmp.path().join("target").join("release-dist");
+        fs::create_dir_all(root_rd.join("deps")).unwrap();
+        fs::write(root_rd.join("deps").join("root.rlib"), b"root").unwrap();
+
+        let nested = tmp.path().join("nested");
+        let nested_rd = nested.join("target").join("release-dist");
+        fs::create_dir_all(nested_rd.join("deps")).unwrap();
+        fs::write(nested.join("Cargo.toml"), b"[package]\nname=\"nested\"\n").unwrap();
+        fs::write(nested_rd.join("deps").join("nested.rlib"), b"nested").unwrap();
+
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(nested_rd.join(".cargo-lock"))
+            .unwrap();
+        holder.try_lock_exclusive().unwrap();
+
+        let cats = resolve_categories(&[CleanCategory::ReleaseDistCaches], false).unwrap();
+        let err = clean(CleanOpts {
+            root: Some(tmp.path().to_path_buf()),
+            dry_run: false,
+            worktree_hours: 24,
+            tree_days: 14,
+            if_low_space: false,
+            min_free_gb: None,
+            categories: cats,
+            json: false,
+            active_build_grace_secs: 120,
+        });
+        assert!(
+            err.is_err(),
+            "nested target lock must block cleanup: {err:?}"
+        );
+        assert!(root_rd.join("deps").join("root.rlib").exists());
+        assert!(nested_rd.join("deps").join("nested.rlib").exists());
+    }
+
+    #[test]
+    fn cargo_home_lock_refuses_concurrent_cache_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("cargo-home");
+        fs::create_dir_all(home.join("registry").join("cache")).unwrap();
+        let lock_path = home.join(".package-cache");
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock_exclusive().unwrap();
+
+        let err = try_acquire_cargo_home_lock(&home).unwrap_err();
+        assert!(
+            err.contains("package-cache"),
+            "unexpected lock error: {err}"
+        );
+        drop(holder);
+        assert!(try_acquire_cargo_home_lock(&home).unwrap().is_some());
     }
 
     #[test]

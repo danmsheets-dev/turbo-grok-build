@@ -431,8 +431,7 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let toggles = HashMap::new();
         for ty in ["explore", "plan", "oracle"] {
-            let definition =
-                resolve_agent_definition(ty, &context(cwd.path(), &toggles)).unwrap();
+            let definition = resolve_agent_definition(ty, &context(cwd.path(), &toggles)).unwrap();
             assert!(
                 definition.isolation.is_none(),
                 "{ty} definition should leave isolation unset so residual applies"

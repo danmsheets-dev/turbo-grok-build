@@ -115,11 +115,7 @@ mod tests {
     #[test]
     fn purge_expired_removes_stale_entries() {
         let mut cache = FetchCache::new(Duration::from_millis(1), 10);
-        cache.insert_text(
-            "https://example.com/a".into(),
-            output("a"),
-            false,
-        );
+        cache.insert_text("https://example.com/a".into(), output("a"), false);
         std::thread::sleep(Duration::from_millis(5));
         // get() purges expired entries even for a different key.
         assert!(cache.get("https://example.com/missing").is_none());

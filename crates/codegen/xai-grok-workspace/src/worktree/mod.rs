@@ -1446,6 +1446,7 @@ pub async fn export_subagent_changes_patch_with_baseline(
             ),
         );
         // Optional name-status for land safety / top-paths summary.
+        // Drop harness markers so meta/changed_paths is agent payload only.
         let names_path = dest_dir.join("changed_paths.txt");
         if let Ok(names) = std::process::Command::new("git")
             .args(["-C"])
@@ -1458,7 +1459,14 @@ pub async fn export_subagent_changes_patch_with_baseline(
             .output()
         {
             if names.status.success() {
-                let _ = std::fs::write(&names_path, names.stdout);
+                let filtered: String = String::from_utf8_lossy(&names.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .filter(|s| !xai_fast_worktree::is_harness_snapshot_path(s))
+                    .flat_map(|s| [s, "\n"])
+                    .collect();
+                let _ = std::fs::write(&names_path, filtered);
             }
         }
         Ok(SubagentPatchExportResult {
@@ -3448,7 +3456,9 @@ mod label_path_guard_tests {
     fn auto_label_is_always_a_usable_directory_name() {
         assert!(label_is_usable_dir_name(&auto_label()));
         assert!(label_is_usable_dir_name(&derive_worktree_label(None)));
-        assert!(label_is_usable_dir_name(&derive_worktree_label(Some("   "))));
+        assert!(label_is_usable_dir_name(&derive_worktree_label(Some(
+            "   "
+        ))));
     }
 
     #[test]

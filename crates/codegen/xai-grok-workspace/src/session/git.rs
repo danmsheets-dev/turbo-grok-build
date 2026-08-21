@@ -2579,25 +2579,22 @@ pub async fn soft_restore_git_state(
             "soft_restore_git_state: reset --soft failed"
         );
         let stash_ref = match stash_ref {
-            Some(stash) => match git_cli_mut(
-                &git_root,
-                &["-c", "core.autocrlf=false", "stash", "pop"],
-            )
-            .await
-            {
-                Ok(_) => None,
-                Err(pop_err) => {
-                    tracing::warn!(
-                        path = %git_root.display(),
-                        session_id,
-                        stash_ref = %stash,
-                        error = %pop_err,
-                        "soft_restore_git_state: could not restore stashed changes after a \
-                         failed reset; uncommitted work remains in the stash"
-                    );
-                    Some(stash)
+            Some(stash) => {
+                match git_cli_mut(&git_root, &["-c", "core.autocrlf=false", "stash", "pop"]).await {
+                    Ok(_) => None,
+                    Err(pop_err) => {
+                        tracing::warn!(
+                            path = %git_root.display(),
+                            session_id,
+                            stash_ref = %stash,
+                            error = %pop_err,
+                            "soft_restore_git_state: could not restore stashed changes after a \
+                             failed reset; uncommitted work remains in the stash"
+                        );
+                        Some(stash)
+                    }
                 }
-            },
+            }
             None => None,
         };
         return GitRestoreOutcome {

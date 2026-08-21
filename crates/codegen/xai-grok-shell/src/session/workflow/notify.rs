@@ -1,11 +1,12 @@
 use crate::extensions::notification::{
     SessionNotification as XaiSessionNotification, SessionUpdate as XaiSessionUpdate,
-    WorkflowAgentInfo, WorkflowPhaseInfo,
+    WorkflowAgentInfo, WorkflowPhaseInfo, WorkflowTaskInfo,
 };
 use crate::session::persistence::PersistenceMsg;
 
 use super::store::WorkflowRunStore;
 use super::tracker::WorkflowRunState;
+use xai_workflow::TaskQueueState;
 
 #[derive(Clone)]
 pub(crate) struct WorkflowNotifySender {
@@ -35,7 +36,12 @@ impl WorkflowNotifySender {
             tracing::warn!(run_id = %state.run_id, %error, "failed to queue workflow manifest");
         }
         self.dispatch(
-            build_workflow_updated(state, elapsed_ms, active_agents),
+            build_workflow_updated_with_tasks(
+                state,
+                &self.store.task_queue_for(&state.run_id),
+                elapsed_ms,
+                active_agents,
+            ),
             true,
         );
     }
@@ -50,7 +56,12 @@ impl WorkflowNotifySender {
             tracing::warn!(run_id = %state.run_id, %error, "failed to queue workflow manifest");
         }
         self.dispatch(
-            build_workflow_updated(state, elapsed_ms, active_agents),
+            build_workflow_updated_with_tasks(
+                state,
+                &self.store.task_queue_for(&state.run_id),
+                elapsed_ms,
+                active_agents,
+            ),
             false,
         );
     }
@@ -63,7 +74,12 @@ impl WorkflowNotifySender {
         persist_update: bool,
     ) {
         self.dispatch(
-            build_workflow_updated(state, elapsed_ms, active_agents),
+            build_workflow_updated_with_tasks(
+                state,
+                &self.store.task_queue_for(&state.run_id),
+                elapsed_ms,
+                active_agents,
+            ),
             persist_update,
         );
     }
@@ -97,6 +113,15 @@ impl WorkflowNotifySender {
 pub(crate) fn build_workflow_updated(
     state: &WorkflowRunState,
     elapsed_ms: u64,
+    active_agents: u32,
+) -> XaiSessionUpdate {
+    build_workflow_updated_with_tasks(state, &TaskQueueState::default(), elapsed_ms, active_agents)
+}
+
+fn build_workflow_updated_with_tasks(
+    state: &WorkflowRunState,
+    task_queue: &TaskQueueState,
+    elapsed_ms: u64,
     _active_agents: u32,
 ) -> XaiSessionUpdate {
     let last = state.history.last();
@@ -129,6 +154,7 @@ pub(crate) fn build_workflow_updated(
             agent_id: a.agent_id.clone(),
             label: a.label.clone(),
             phase: a.phase.clone(),
+            task_id: a.task_id.clone(),
             model: a.model.clone(),
             state: a.state.clone(),
             tokens_used: a.tokens_used,
@@ -146,6 +172,20 @@ pub(crate) fn build_workflow_updated(
         .filter(|agent| agent.state == "running")
         .count() as u32;
 
+    let tasks = task_queue
+        .tasks
+        .iter()
+        .map(|task| WorkflowTaskInfo {
+            id: task.id.clone(),
+            title: task.description.clone(),
+            description: Some(task.description.clone()),
+            status: task.status.as_str().to_string(),
+            attempts: task.attempts,
+            max_attempts: task.max_attempts,
+            depends_on: task.depends_on.clone(),
+            result_summary: task.result_summary.clone(),
+        })
+        .collect();
     let agents_reserved = 0u64;
     let agents_remaining = state
         .agent_budget
@@ -159,7 +199,9 @@ pub(crate) fn build_workflow_updated(
         status: state.status.as_str().to_string(),
         foreground: false,
         phases,
+        tasks,
         current_phase: state.current_phase.clone(),
+        current_task_id: task_queue.current_task.clone(),
         agent_budget: state.agent_budget,
         agents_used: state.agents_used,
         agents_reserved,

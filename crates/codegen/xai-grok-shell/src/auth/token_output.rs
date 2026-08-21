@@ -121,9 +121,7 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            std::process::Command::new("true")
-                .status()
-                .expect("true")
+            std::process::Command::new("true").status().expect("true")
         }
     }
 

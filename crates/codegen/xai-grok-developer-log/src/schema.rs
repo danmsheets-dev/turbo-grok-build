@@ -110,6 +110,7 @@ pub enum ErrorClass {
     SubagentStall,
     ProtocolDeser,
     Provider400,
+    Provider429,
     ProviderAuth,
     ToolSchema,
     LandConflict,
@@ -131,6 +132,7 @@ impl ErrorClass {
             Self::SubagentStall => "subagent_stall",
             Self::ProtocolDeser => "protocol_deser",
             Self::Provider400 => "provider_400",
+            Self::Provider429 => "provider_429",
             Self::ProviderAuth => "provider_auth",
             Self::ToolSchema => "tool_schema",
             Self::LandConflict => "land_conflict",
@@ -151,6 +153,7 @@ impl ErrorClass {
             "subagent_stall" => Some(Self::SubagentStall),
             "protocol_deser" => Some(Self::ProtocolDeser),
             "provider_400" => Some(Self::Provider400),
+            "provider_429" => Some(Self::Provider429),
             "provider_auth" => Some(Self::ProviderAuth),
             "tool_schema" => Some(Self::ToolSchema),
             "land_conflict" => Some(Self::LandConflict),
@@ -171,6 +174,7 @@ impl ErrorClass {
             Self::IsolationFallback
             | Self::SubagentStall
             | Self::Provider400
+            | Self::Provider429
             | Self::ProviderAuth
             | Self::LandConflict => Severity::P1,
             Self::ToolSchema
@@ -191,9 +195,11 @@ impl ErrorClass {
             | Self::ToolSchema
             | Self::LandConflict
             | Self::WorkLostRisk => IncidentKind::Bug,
-            Self::Provider400 | Self::ProviderAuth | Self::CatalogStale | Self::McpConnect => {
-                IncidentKind::ProviderCompat
-            }
+            Self::Provider400
+            | Self::Provider429
+            | Self::ProviderAuth
+            | Self::CatalogStale
+            | Self::McpConnect => IncidentKind::ProviderCompat,
             Self::FeatureGap => IncidentKind::FeatureGap,
             Self::DocsGap => IncidentKind::DocsGap,
             Self::PerfRegression => IncidentKind::Perf,

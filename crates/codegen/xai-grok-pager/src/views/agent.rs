@@ -442,8 +442,8 @@ impl AgentViewLayout {
 
 /// Split the agent screen into the main column and a right 40% browser mirror.
 pub fn split_browser_column(area: Rect) -> (Rect, Rect) {
-    let chunks = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(area);
+    let chunks =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
     (chunks[0], chunks[1])
 }
 
@@ -466,10 +466,7 @@ impl BrowserPaneState {
     /// Scroll by `delta` lines, clamped to the end of the snapshot.
     pub fn scroll_by(&mut self, delta: isize) {
         let max = self.last_snapshot_lines.len().saturating_sub(1);
-        self.scroll = self
-            .scroll
-            .saturating_add_signed(delta)
-            .min(max);
+        self.scroll = self.scroll.saturating_add_signed(delta).min(max);
     }
 }
 

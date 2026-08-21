@@ -80,7 +80,10 @@ pub async fn list_available_models(agent_config: &AgentConfig, args: &ModelsArgs
 
     if args.json {
         let mut entries = Vec::with_capacity(models.len());
-        for (id, entry) in models.iter() {
+        for (id, entry) in models
+            .iter()
+            .filter(|(_, entry)| entry.info.user_selectable && !entry.info.hidden)
+        {
             let billing = billing_for_model_id(id);
             let info = entry.info();
             // Full effort ladder the model advertises (HYPER-2). Empty when
@@ -133,7 +136,11 @@ pub async fn list_available_models(agent_config: &AgentConfig, args: &ModelsArgs
     println!("Default model: {default_model}");
     println!();
     println!("Available models:");
-    let mut ids: Vec<_> = models.keys().cloned().collect();
+    let mut ids: Vec<_> = models
+        .iter()
+        .filter(|(_, entry)| entry.info.user_selectable && !entry.info.hidden)
+        .map(|(id, _)| id.clone())
+        .collect();
     ids.sort();
     for id in ids {
         let billing = billing_for_model_id(&id);

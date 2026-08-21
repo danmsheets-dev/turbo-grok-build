@@ -811,11 +811,7 @@ mod tests {
         // Bare name "fetch" → both servers' tools, in registration order, so
         // the model can pick the one it meant.
         let snap = index.search_snapshot("fetch", 5);
-        let names: Vec<&str> = snap
-            .results
-            .iter()
-            .map(|r| r.tool_name.as_str())
-            .collect();
+        let names: Vec<&str> = snap.results.iter().map(|r| r.tool_name.as_str()).collect();
         assert_eq!(names, ["server_a__fetch", "server_b__fetch"]);
         let servers: Vec<&str> = snap
             .results

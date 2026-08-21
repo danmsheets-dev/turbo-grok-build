@@ -117,12 +117,7 @@ pub fn summary(index: &TreeIndex, limit: usize) -> SummaryResult {
         .root
         .children
         .as_ref()
-        .map(|c| {
-            c.iter()
-                .take(limit)
-                .map(ListEntry::from_node)
-                .collect()
-        })
+        .map(|c| c.iter().take(limit).map(ListEntry::from_node).collect())
         .unwrap_or_default();
     SummaryResult {
         meta: QueryMeta::from_index(index),
@@ -140,9 +135,8 @@ pub fn summary(index: &TreeIndex, limit: usize) -> SummaryResult {
 /// up to that relative depth (collapsed nodes never expand).
 pub fn list(index: &TreeIndex, path: &str, depth: u32, limit: usize) -> Result<ListResult> {
     let path = normalize_rel(path);
-    let node = find_node(&index.root, &path).ok_or_else(|| Error::NotFound {
-        path: path.clone(),
-    })?;
+    let node =
+        find_node(&index.root, &path).ok_or_else(|| Error::NotFound { path: path.clone() })?;
     let depth = depth.max(1);
     let mut entries = Vec::new();
     collect_list(node, 1, depth, limit, &mut entries);
@@ -322,7 +316,13 @@ pub fn resolve_path(
     }
 }
 
-fn collect_list(node: &TreeNode, level: u32, max_depth: u32, limit: usize, out: &mut Vec<ListEntry>) {
+fn collect_list(
+    node: &TreeNode,
+    level: u32,
+    max_depth: u32,
+    limit: usize,
+    out: &mut Vec<ListEntry>,
+) {
     if out.len() >= limit {
         return;
     }
@@ -468,4 +468,3 @@ mod tests {
         }
     }
 }
-

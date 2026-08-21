@@ -190,7 +190,7 @@ impl Theme {
 
             accent_plan: rgb(230, 180, 50), // #E6B432 â€” golden
 
-            accent_verify: MAGENTA, // #bb9af7: violet (distinct from plan)
+            accent_verify: MAGENTA,  // #bb9af7: violet (distinct from plan)
             accent_feedback: GREEN1, // #73daca — warm teal/green
 
             accent_remember: Color::Rgb(139, 195, 74), // #8BC34A â€” Material Design light green

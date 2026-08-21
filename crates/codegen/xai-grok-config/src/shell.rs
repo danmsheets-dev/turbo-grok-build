@@ -354,10 +354,7 @@ pub fn looks_like_posix_project_script(command: &str) -> bool {
         return false;
     }
     let lower = token.to_ascii_lowercase();
-    let base = lower
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(lower.as_str());
+    let base = lower.rsplit(['/', '\\']).next().unwrap_or(lower.as_str());
     if base == "bash" || base == "bash.exe" || base == "sh" || base == "sh.exe" {
         return true;
     }
@@ -366,9 +363,7 @@ pub fn looks_like_posix_project_script(command: &str) -> bool {
     }
     // `scripts/foo` without extension is still common for repo helpers.
     let norm = lower.replace('\\', "/");
-    norm.starts_with("./scripts/")
-        || norm.starts_with("scripts/")
-        || norm.contains("/scripts/")
+    norm.starts_with("./scripts/") || norm.starts_with("scripts/") || norm.contains("/scripts/")
 }
 
 /// Prefer Git Bash for bare `bash` / project scripts when installed.
@@ -945,14 +940,20 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn looks_like_posix_detects_bash_and_scripts() {
-        assert!(looks_like_posix_project_script("bash tools/publish-build.sh 0.1.12"));
+        assert!(looks_like_posix_project_script(
+            "bash tools/publish-build.sh 0.1.12"
+        ));
         assert!(looks_like_posix_project_script("bash.exe -lc 'echo hi'"));
-        assert!(looks_like_posix_project_script("./scripts/check-line-endings.sh"));
+        assert!(looks_like_posix_project_script(
+            "./scripts/check-line-endings.sh"
+        ));
         assert!(looks_like_posix_project_script("scripts/foo.sh --flag"));
         assert!(looks_like_posix_project_script(r"tools\run_tests.sh"));
         assert!(!looks_like_posix_project_script("cargo test -p foo"));
         assert!(!looks_like_posix_project_script("msbuild /t:Build"));
-        assert!(!looks_like_posix_project_script("pwsh -Command Get-ChildItem"));
+        assert!(!looks_like_posix_project_script(
+            "pwsh -Command Get-ChildItem"
+        ));
     }
 
     #[cfg(not(unix))]

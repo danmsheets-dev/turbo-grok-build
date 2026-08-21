@@ -81,6 +81,51 @@ fn scoped_allowed_paths_uses_shorter_stall_and_first_progress() {
     assert_eq!(budget.first_progress_timeout_ms, Some(60_000));
     assert!(budget.is_unbounded() || budget.stall_timeout_ms.is_some());
 }
+
+#[test]
+fn nvidia_platform_default_budget_is_one_hour() {
+    let definition = xai_grok_agent::config::AgentDefinition::general_purpose();
+    let budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
+        &definition,
+        None,
+        None,
+        None,
+        Some("nvidia/meta/muse-glimmer-30b"),
+        false,
+    );
+    assert_eq!(budget.timeout_secs, Some(3_600));
+    assert_eq!(budget.stall_timeout_ms, Some(1_800_000));
+}
+
+#[test]
+fn explicit_timeout_ms_is_not_capped_at_thirty_minutes() {
+    let definition = xai_grok_agent::config::AgentDefinition::general_purpose();
+    let budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
+        &definition,
+        None,
+        Some(7_200_000),
+        None,
+        Some("nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"),
+        false,
+    );
+    assert_eq!(budget.timeout_secs, Some(7_200));
+}
+
+#[test]
+fn reviewer_agents_default_to_forty_eight_tools() {
+    let mut definition = xai_grok_agent::config::AgentDefinition::general_purpose();
+    definition.name = "code-reviewer".into();
+    let budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
+        &definition,
+        None,
+        None,
+        None,
+        Some("grok-4.6"),
+        false,
+    );
+    assert_eq!(budget.max_tool_calls, Some(48));
+    assert_eq!(budget.timeout_secs, Some(600));
+}
 #[test]
 fn budget_trigger_codes_and_reasons_are_stable() {
     for trigger in [
@@ -97,7 +142,78 @@ fn budget_trigger_codes_and_reasons_are_stable() {
     }
     assert!(SubagentBudgetTrigger::MaxToolCalls.is_hard());
     assert!(SubagentBudgetTrigger::Timeout.is_hard());
+    assert!(SubagentBudgetTrigger::Stall.is_hard());
     assert!(! SubagentBudgetTrigger::FinalizingTurns.is_hard());
+}
+
+#[test]
+fn in_flight_tools_pause_stall_and_first_progress_but_not_wall_clock() {
+    let definition = xai_grok_agent::config::AgentDefinition::general_purpose();
+    let budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
+        &definition,
+        None,
+        Some(1_800_000),
+        None,
+        Some("grok-4.6"),
+        true,
+    );
+    assert_eq!(budget.stall_timeout_ms, Some(180_000));
+    assert_eq!(budget.timeout_secs, Some(1_800));
+
+    let stall_age = std::time::Duration::from_millis(200_000);
+    let first_age = std::time::Duration::from_millis(90_000);
+    // Running blender/shell: no stall, no first-progress.
+    assert_eq!(
+        evaluate_hard_budget(
+            budget,
+            first_age,
+            stall_age,
+            0,
+            1,
+            true,
+        ),
+        None
+    );
+    assert_eq!(
+        evaluate_hard_budget(
+            budget,
+            std::time::Duration::from_millis(385_000),
+            stall_age,
+            32,
+            1,
+            false,
+        ),
+        None
+    );
+    // Idle (no in-flight) past stall → cancel.
+    assert_eq!(
+        evaluate_hard_budget(budget, stall_age, stall_age, 32, 0, false),
+        Some(SubagentBudgetTrigger::Stall)
+    );
+    // Never started and idle past first-progress → cancel.
+    assert_eq!(
+        evaluate_hard_budget(
+            budget,
+            first_age,
+            first_age,
+            0,
+            0,
+            true,
+        ),
+        Some(SubagentBudgetTrigger::FirstProgress)
+    );
+    // Wall-clock still wins even while a tool is running.
+    assert_eq!(
+        evaluate_hard_budget(
+            budget,
+            std::time::Duration::from_secs(1_800),
+            std::time::Duration::from_secs(1),
+            4,
+            1,
+            false,
+        ),
+        Some(SubagentBudgetTrigger::Timeout)
+    );
 }
 #[tokio::test]
 async fn usage_ack_precedes_terminal_presentation() {
@@ -2286,6 +2402,59 @@ fn luna_openai_slash_slug_aliases_to_openai_codex() {
     let (key, _) = crate::agent::models::find_task_model_entry(&models, "openai/gpt-5.6-luna")
         .expect("alias must resolve");
     assert_eq!(key, "openai-codex/gpt-5.6-luna");
+}
+#[test]
+fn sol_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = indexmap::IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-5.6-sol".to_string(),
+        test_model_entry("gpt-5.6-sol"),
+    );
+    assert!(
+        super::handle_request::task_model_override_error(
+            Some("openai/gpt-5.6-sol"),
+            ModelOverrideProvenance::Tool,
+            false,
+            &models,
+            false,
+        )
+        .is_none(),
+        "openai/gpt-5.6-sol must resolve to openai-codex/gpt-5.6-sol"
+    );
+    let (key, _) = crate::agent::models::find_task_model_entry(&models, "openai/gpt-5.6-sol")
+        .expect("alias must resolve");
+    assert_eq!(key, "openai-codex/gpt-5.6-sol");
+}
+
+#[test]
+fn worktree_source_cwd_uses_spawn_cwd_when_it_is_a_git_dir() {
+    let parent = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::create_dir(source.path().join(".git")).unwrap();
+    let got = resolve_worktree_source_cwd(parent.path(), source.path().to_str());
+    assert_eq!(got, source.path());
+}
+
+#[test]
+fn worktree_source_cwd_discovers_unique_nested_git() {
+    let parent = tempfile::tempdir().unwrap();
+    let nested = parent.path().join("only-repo");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::create_dir(nested.join(".git")).unwrap();
+    let got = resolve_worktree_source_cwd(parent.path(), None);
+    assert_eq!(got, nested);
+}
+
+#[test]
+fn worktree_source_cwd_does_not_guess_when_two_nested_gits_exist() {
+    let parent = tempfile::tempdir().unwrap();
+    for name in ["repo-a", "repo-b"] {
+        let nested = parent.path().join(name);
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::create_dir(nested.join(".git")).unwrap();
+    }
+    let got = resolve_worktree_source_cwd(parent.path(), None);
+    assert_eq!(got, parent.path());
 }
 #[test]
 fn harness_model_override_keeps_internal_fallback_behavior() {

@@ -978,7 +978,13 @@ mod tests {
         );
         assert_eq!(rows[0].status_detail.as_deref(), Some("connection refused"));
         assert!(
-            patch_status_row(&mut rows, "alpha", McpServerDisplayStatus::Ready, None, None),
+            patch_status_row(
+                &mut rows,
+                "alpha",
+                McpServerDisplayStatus::Ready,
+                None,
+                None
+            ),
             "clearing the detail on recovery is a change"
         );
         assert!(rows[0].status_detail.is_none());

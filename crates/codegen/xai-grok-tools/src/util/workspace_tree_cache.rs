@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use xai_workspace_tree::{
-    build_and_save, load_index_for_root, load_or_build, TreeIndex, WorkspaceTreeConfig,
+    TreeIndex, WorkspaceTreeConfig, build_and_save, load_index_for_root, load_or_build,
 };
 
 use crate::types::resources::{SharedResources, WorkspaceTreeIndexingAllowed};
@@ -50,9 +50,7 @@ fn load_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
 }
 
 fn lock_for_key(key: &str) -> Arc<Mutex<()>> {
-    let mut map = load_locks()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut map = load_locks().lock().unwrap_or_else(|e| e.into_inner());
     map.entry(key.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
@@ -221,4 +219,3 @@ mod tests {
         assert!(c.name_index.contains_key("b.rs") || c.name_index.contains_key("b"));
     }
 }
-

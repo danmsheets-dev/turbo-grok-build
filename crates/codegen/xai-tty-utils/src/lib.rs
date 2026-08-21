@@ -43,9 +43,7 @@ mod process_resources;
 pub use process_resources::{ProcessResources, sample_process_memory, sample_process_resources};
 
 mod process_scope;
-pub use process_scope::{
-    ProcessScope, enter_self_job_object_if_requested, global_process_scope,
-};
+pub use process_scope::{ProcessScope, enter_self_job_object_if_requested, global_process_scope};
 
 /// How long a shell gets to forward a hangup to its jobs before it is killed.
 pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);

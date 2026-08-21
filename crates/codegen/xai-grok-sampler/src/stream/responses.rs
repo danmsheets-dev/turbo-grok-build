@@ -671,7 +671,12 @@ mod tests {
     fn raw_events(
         events: Vec<Result<rs::ResponseStreamEvent, SamplingError>>,
     ) -> BoxStream<'static, Result<ResponsesStreamItem, SamplingError>> {
-        stream::iter(events.into_iter().map(|r| r.map(ResponsesStreamItem::Event))).boxed()
+        stream::iter(
+            events
+                .into_iter()
+                .map(|r| r.map(ResponsesStreamItem::Event)),
+        )
+        .boxed()
     }
 
     /// Build a minimal `rs_types::Response` for use in `ResponseCompleted`
@@ -750,11 +755,13 @@ mod tests {
                 id: "msg_1".into(),
                 role: rs::AssistantRole::Assistant,
                 status: rs::OutputStatus::Completed,
-                content: vec![rs::OutputMessageContent::OutputText(rs::OutputTextContent {
-                    text: text.into(),
-                    annotations: vec![],
-                    logprobs: None,
-                })],
+                content: vec![rs::OutputMessageContent::OutputText(
+                    rs::OutputTextContent {
+                        text: text.into(),
+                        annotations: vec![],
+                        logprobs: None,
+                    },
+                )],
             }),
         })
     }

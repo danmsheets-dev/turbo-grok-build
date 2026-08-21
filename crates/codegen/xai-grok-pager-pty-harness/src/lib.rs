@@ -294,7 +294,7 @@ impl PtyHarness {
         operations: &[EnvOp<'_>],
         cwd: Option<&Path>,
     ) -> Result<Self> {
-        Self::new_in_sandbox_ops(
+        let mut harness = Self::new_in_sandbox_ops(
             binary,
             rows,
             cols,
@@ -302,7 +302,11 @@ impl PtyHarness {
             content.sandbox(),
             operations,
             cwd,
-        )
+        )?;
+        // Content-backed pager launches use the real terminal protocol and
+        // need the harness to answer cursor/device queries during startup.
+        harness.set_respond_to_queries(true);
+        Ok(harness)
     }
 
     // ── PTY control ──────────────────────────────────────────────────

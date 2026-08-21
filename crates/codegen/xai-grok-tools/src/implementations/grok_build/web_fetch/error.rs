@@ -80,10 +80,7 @@ fn ssrf_recovery_hint(host: &str) -> &'static str {
 /// Exact/suffix match only — avoid false positives like `notgithub.evil.com`
 /// that a bare `contains("github")` would hit.
 fn is_github_host(host: &str) -> bool {
-    let h = host
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
     h == "github.com"
         || h.ends_with(".github.com")
         || h == "github.io"

@@ -8,6 +8,7 @@
 //!   script cannot replace `__turboAx` and feed the agent a forged snapshot.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
+    COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED,
     COREWEBVIEW2_PERMISSION_STATE_DENY, CreateCoreWebView2EnvironmentWithOptions,
     GetAvailableCoreWebView2BrowserVersionString, ICoreWebView2, ICoreWebView2_4,
     ICoreWebView2Controller, ICoreWebView2Environment,
@@ -23,7 +25,8 @@ use webview2_com::{
     CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     DownloadStartingEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, take_pwstr,
+    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, StateChangedEventHandler,
+    take_pwstr,
 };
 use windows::Win32::Foundation::{E_POINTER, HWND};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -40,8 +43,9 @@ use super::ax::{
 use super::window::{attach_controller, client_rect, set_title};
 use super::{HostError, next_screenshot_path, screenshot_dir};
 use crate::protocol::{
-    AxNode, FillTarget, NavigateResult, ScreenshotResult, SnapshotResult, SnapshotSource, TabInfo,
-    TabsResult, check_fill_target, check_url_in_session,
+    AxNode, ClickResult, DownloadInfo, DownloadsResult, FillTarget, NavigateResult,
+    ScreenshotResult, SnapshotResult, SnapshotSource, TabInfo, TabsResult, WaitResult,
+    check_fill_target, check_url_in_session, is_oauth_popup_url,
 };
 
 /// Ceiling on a single script / CDP round trip before the host gives up.
@@ -91,6 +95,8 @@ pub struct AgentWebView {
     controller: ICoreWebView2Controller,
     webview: ICoreWebView2,
     session_id: String,
+    session_folder: Option<PathBuf>,
+    active_downloads: Rc<RefCell<HashSet<PathBuf>>>,
     screenshot_n: u32,
     /// Isolated-world execution context for the collector; dropped on navigate.
     ax_world: Option<i64>,
@@ -127,8 +133,14 @@ impl AgentWebView {
 
         apply_settings(&webview)?;
         let blocked = Rc::new(BlockLog::default());
-        register_navigation_policy(&webview, session_folder, Rc::clone(&blocked))?;
-        register_popup_download_permission(&webview, Rc::clone(&blocked))?;
+        let active_downloads = Rc::new(RefCell::new(HashSet::new()));
+        register_navigation_policy(&webview, session_folder.clone(), Rc::clone(&blocked))?;
+        register_popup_download_permission(
+            &webview,
+            session_folder.clone(),
+            Rc::clone(&blocked),
+            Rc::clone(&active_downloads),
+        )?;
         attach_controller(hwnd, controller.clone());
 
         let mut host = Self {
@@ -136,6 +148,8 @@ impl AgentWebView {
             controller,
             webview,
             session_id: session_id.to_owned(),
+            session_folder: session_folder.clone(),
+            active_downloads,
             screenshot_n: 0,
             ax_world: None,
             blocked,
@@ -252,21 +266,43 @@ impl AgentWebView {
     }
 
     /// Compact AX snapshot from the isolated-world collector (CDP fallback).
-    pub fn snapshot(&mut self, verbose: bool) -> Result<SnapshotResult, String> {
+    pub fn snapshot(
+        &mut self,
+        verbose: bool,
+        include_text: bool,
+    ) -> Result<SnapshotResult, String> {
         let cap = snapshot_cap(verbose);
         let js = format!("window.__turboAx.collect({cap})");
-        let (nodes, source) = match self.eval_in_world(&js) {
-            Ok(value) => (parse_collected_nodes(&value, cap)?, SnapshotSource::Dom),
+        let (nodes, source, overlay) = match self.eval_in_world(&js) {
+            Ok(value) => {
+                let overlay = value.get("overlay").and_then(Value::as_bool);
+                (
+                    parse_collected_nodes(&value, cap)?,
+                    SnapshotSource::Dom,
+                    overlay,
+                )
+            }
             Err(_) => (
                 self.snapshot_cdp_fallback(verbose)?,
                 SnapshotSource::AxFallback,
+                None,
             ),
+        };
+        let text = if include_text && source == SnapshotSource::Dom {
+            self.eval_in_world("window.__turboAx.pageText()")
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .filter(|s| !s.is_empty())
+        } else {
+            None
         };
         let loc = self.location()?;
         Ok(SnapshotResult {
             url: loc.url,
             title: loc.title,
             source,
+            overlay,
+            text,
             nodes,
         })
     }
@@ -278,10 +314,191 @@ impl AgentWebView {
     }
 
     /// Click `[data-turbo-uid=…]`. Missing or stale node → `unknown_uid`.
-    pub fn click(&mut self, uid: &str) -> Result<(), String> {
+    ///
+    /// After the click, if NavigationStarting cancelled the resulting hop,
+    /// surface that BlockLog instead of pretending the click succeeded on the
+    /// original page.
+    pub fn click(&mut self, uid: &str) -> Result<ClickResult, String> {
+        let _ = self.blocked.take();
         let js = format!("window.__turboAx.click({uid})", uid = js_string(uid));
         let raw = self.eval_in_world(&js)?;
         interpret_uid_action(uid, &raw)?;
+        pump_for(Duration::from_millis(400));
+        if let Some(reason) = self.blocked.take() {
+            return Err(reason);
+        }
+        let loc = self.location()?;
+        set_title(self.hwnd, &self.session_id, &loc.url);
+        Ok(ClickResult {
+            url: loc.url,
+            title: loc.title,
+        })
+    }
+
+    /// Poll until `text` appears in the page or the URL contains `url_substring`.
+    pub fn wait(
+        &mut self,
+        text: Option<&str>,
+        url_substring: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<WaitResult, String> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1));
+        let wanted_text = text.map(str::trim).filter(|s| !s.is_empty());
+        let wanted_url = url_substring.map(str::trim).filter(|s| !s.is_empty());
+        loop {
+            let loc = self.location()?;
+            let url_ok = wanted_url.is_none_or(|needle| {
+                loc.url
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase())
+            });
+            let text_ok = match wanted_text {
+                None => true,
+                Some(needle) => self
+                    .eval_in_world(&format!(
+                        "window.__turboAx.pageContains({needle})",
+                        needle = js_string(needle)
+                    ))
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    // Immediately after a successful navigation the isolated
+                    // collector may not have been injected yet. Fall back to
+                    // the document text in the main world rather than timing
+                    // out even though the page has already landed.
+                    .or_else(|| {
+                        let params = serde_json::json!({
+                            "expression": format!(
+                                "String(document.body?.innerText || '').toLowerCase().includes({})",
+                                js_string(&needle.to_ascii_lowercase())
+                            ),
+                            "returnByValue": true,
+                        })
+                        .to_string();
+                        call_cdp(&self.webview, "Runtime.evaluate", &params)
+                            .ok()
+                            .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+                            .and_then(|value| {
+                                value.pointer("/result/value").and_then(Value::as_bool)
+                            })
+                    })
+                    .unwrap_or(false),
+            };
+            if url_ok && text_ok {
+                return Ok(WaitResult {
+                    url: loc.url,
+                    title: loc.title,
+                });
+            }
+            if Instant::now() >= deadline {
+                let mut unmet = Vec::new();
+                if !url_ok && let Some(u) = wanted_url {
+                    unmet.push(format!("url containing {u:?}"));
+                }
+                if !text_ok && let Some(t) = wanted_text {
+                    unmet.push(format!("text {t:?}"));
+                }
+                return Err(format!(
+                    "wait timed out after {timeout_ms}ms; unmet: {}; current url: {}",
+                    unmet.join(" and "),
+                    loc.url
+                ));
+            }
+            pump_for(Duration::from_millis(150));
+        }
+    }
+
+    /// Scroll a uid into view, or scroll the window by `(dx, dy)`.
+    pub fn scroll(&mut self, uid: Option<&str>, dx: i32, dy: i32) -> Result<(), String> {
+        if let Some(uid) = uid.filter(|s| !s.is_empty()) {
+            let js = format!("window.__turboAx.scrollTo({uid})", uid = js_string(uid));
+            interpret_uid_action(uid, &self.eval_in_world(&js)?)?;
+            return Ok(());
+        }
+        let js = format!("window.__turboAx.scrollBy({dx},{dy})");
+        let _ = self.eval_in_world(&js)?;
+        Ok(())
+    }
+
+    /// Dispatch a key (optionally targeting a uid first).
+    pub fn press_key(&mut self, key: &str, uid: Option<&str>) -> Result<(), String> {
+        let js = match uid.filter(|s| !s.is_empty()) {
+            Some(uid) => format!(
+                "window.__turboAx.pressKey({key},{uid})",
+                key = js_string(key),
+                uid = js_string(uid)
+            ),
+            None => format!(
+                "window.__turboAx.pressKey({key},null)",
+                key = js_string(key)
+            ),
+        };
+        let raw = self.eval_in_world(&js)?;
+        if raw.get("ok").and_then(Value::as_bool) == Some(false) {
+            return Err(raw
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("press_key failed")
+                .to_owned());
+        }
+        Ok(())
+    }
+
+    /// Choose a `<select>` option by value or label.
+    pub fn select_option(&mut self, uid: &str, value: &str) -> Result<(), String> {
+        let js = format!(
+            "window.__turboAx.select({uid},{value})",
+            uid = js_string(uid),
+            value = js_string(value)
+        );
+        interpret_uid_action(uid, &self.eval_in_world(&js)?)?;
+        Ok(())
+    }
+
+    /// Hover a uid.
+    pub fn hover(&mut self, uid: &str) -> Result<(), String> {
+        let js = format!("window.__turboAx.hover({uid})", uid = js_string(uid));
+        interpret_uid_action(uid, &self.eval_in_world(&js)?)?;
+        Ok(())
+    }
+
+    /// Set an `<input type=file>` from a session-folder path via CDP.
+    pub fn set_file(&mut self, uid: &str, path: &str) -> Result<(), String> {
+        let mark = format!(
+            "window.__turboAx.markFileInput({uid})",
+            uid = js_string(uid)
+        );
+        interpret_uid_action(uid, &self.eval_in_world(&mark)?)?;
+        let _ = call_cdp(&self.webview, "DOM.enable", "{}");
+        let doc = call_cdp(
+            &self.webview,
+            "DOM.getDocument",
+            r#"{"depth":-1,"pierce":true}"#,
+        )?;
+        let doc_val: Value =
+            serde_json::from_str(&doc).map_err(|e| format!("DOM.getDocument JSON: {e}"))?;
+        let root_id = doc_val
+            .pointer("/root/nodeId")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "DOM.getDocument missing root.nodeId".to_owned())?;
+        let q = serde_json::json!({
+            "nodeId": root_id,
+            "selector": "[data-turbo-file-target=\"1\"]",
+        })
+        .to_string();
+        let found = call_cdp(&self.webview, "DOM.querySelector", &q)?;
+        let found_val: Value =
+            serde_json::from_str(&found).map_err(|e| format!("DOM.querySelector JSON: {e}"))?;
+        let node_id = found_val
+            .get("nodeId")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .ok_or_else(|| "file input not found in DOM".to_owned())?;
+        let set = serde_json::json!({
+            "nodeId": node_id,
+            "files": [path],
+        })
+        .to_string();
+        let _ = call_cdp(&self.webview, "DOM.setFileInputFiles", &set)?;
         Ok(())
     }
 
@@ -434,6 +651,14 @@ impl AgentWebView {
         })
     }
 
+    /// List regular files in the session-scoped download broker directory.
+    pub fn downloads(&self) -> Result<DownloadsResult, String> {
+        self.session_folder.as_deref().map_or_else(
+            || Ok(DownloadsResult::default()),
+            |folder| list_brokered_downloads(folder, &self.active_downloads.borrow()),
+        )
+    }
+
     /// Current Source + DocumentTitle.
     pub fn location(&self) -> Result<NavigateResult, String> {
         let mut uri = PWSTR::null();
@@ -574,21 +799,51 @@ fn pump_until<T>(rx: &mpsc::Receiver<T>, timeout: Duration) -> Result<T, PumpErr
     }
 }
 
+/// Pump the UI thread for `dur` so a click-driven navigation can commit
+/// (or be cancelled) before we read `BlockLog` / `Source`.
+fn pump_for(dur: Duration) {
+    let deadline = Instant::now() + dur;
+    let mut msg = MSG::default();
+    while Instant::now() < deadline {
+        let slice = (deadline - Instant::now()).as_millis().min(50) as u32;
+        unsafe {
+            MsgWaitForMultipleObjectsEx(
+                None,
+                slice,
+                QS_ALLINPUT,
+                MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(MWMO_INPUTAVAILABLE.0),
+            );
+        }
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                unsafe { PostQuitMessage(msg.wParam.0 as i32) };
+                return;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event handlers: navigation policy, popups, downloads, permissions
 // ---------------------------------------------------------------------------
 
-/// Gate **every** top-level navigation on the URL policy.
+/// Gate **every** top-level *and* iframe navigation on the URL policy.
 ///
 /// Checking only `browser.navigate` made `GROK_BROWSER_ALLOW` a one-hop check:
-/// a 302, a meta refresh, or a clicked link walked straight out of it. Subframe
-/// loads are deliberately not gated — third-party iframes are ordinary page
-/// structure, and cancelling them breaks legitimate sites.
+/// a 302, a meta refresh, or a clicked link walked straight out of it. An
+/// allowed page can also iframe public http / off-allowlist https and share
+/// the Agent cookie jar, so subframe starts are cancelled the same way.
 fn register_navigation_policy(
     webview: &ICoreWebView2,
     session_folder: Option<PathBuf>,
     blocked: Rc<BlockLog>,
 ) -> Result<(), HostError> {
+    let folder_main = session_folder.clone();
+    let blocked_main = Rc::clone(&blocked);
     let handler = NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
         let Some(args) = args else {
             return Ok(());
@@ -598,10 +853,10 @@ fn register_navigation_policy(
             return Ok(());
         }
         let url = take_pwstr(uri);
-        if let Err(err) = check_url_in_session(&url, session_folder.as_deref()) {
+        if let Err(err) = check_url_in_session(&url, folder_main.as_deref()) {
             let message = format!("blocked navigation to {url}: {err}");
             eprintln!("turbo browser-host: {message}");
-            blocked.set(message);
+            blocked_main.set(message);
             let _ = unsafe { args.SetCancel(true) };
         }
         Ok(())
@@ -609,13 +864,38 @@ fn register_navigation_policy(
     let mut token = 0i64;
     unsafe { webview.add_NavigationStarting(&handler, &mut token) }
         .map_err(|e| HostError::Failed(format!("add_NavigationStarting: {e}")))?;
+
+    let folder_frame = session_folder;
+    let blocked_frame = blocked;
+    let frame = NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut uri = PWSTR::null();
+        if unsafe { args.Uri(&mut uri) }.is_err() {
+            return Ok(());
+        }
+        let url = take_pwstr(uri);
+        if let Err(err) = check_url_in_session(&url, folder_frame.as_deref()) {
+            let message = format!("blocked frame navigation to {url}: {err}");
+            eprintln!("turbo browser-host: {message}");
+            blocked_frame.set(message);
+            let _ = unsafe { args.SetCancel(true) };
+        }
+        Ok(())
+    }));
+    let mut frame_token = 0i64;
+    unsafe { webview.add_FrameNavigationStarting(&frame, &mut frame_token) }
+        .map_err(|e| HostError::Failed(format!("add_FrameNavigationStarting: {e}")))?;
     Ok(())
 }
 
-/// Keep `window.open` in the same view, refuse downloads, deny permissions.
+/// Keep `window.open` in the same view, broker downloads, and deny permissions.
 fn register_popup_download_permission(
     webview: &ICoreWebView2,
+    session_folder: Option<PathBuf>,
     blocked: Rc<BlockLog>,
+    active_downloads: Rc<RefCell<HashSet<PathBuf>>>,
 ) -> Result<(), HostError> {
     // window.open / target=_blank. Unhandled, WebView2 spawns a runtime-owned
     // popup the agent cannot see, drive, or close — and browser.tabs would
@@ -639,6 +919,15 @@ fn register_popup_download_permission(
             popup_blocked.set(message);
             return Ok(());
         }
+        // GSI / OAuth popups postMessage back to the opener and then close.
+        // Navigating them into the only tab leaves a white gsi/select page
+        // with no opener. Let WebView2 own a real popup for those URLs; the
+        // human finishes sign-in there.
+        if is_oauth_popup_url(&url) {
+            let _ = unsafe { args.SetHandled(false) };
+            eprintln!("turbo browser-host: oauth popup left as a real window: {url}");
+            return Ok(());
+        }
         let wide = CoTaskMemPWSTR::from(url.as_str());
         let _ = unsafe { nav_target.Navigate(*wide.as_ref().as_pcwstr()) };
         Ok(())
@@ -647,18 +936,113 @@ fn register_popup_download_permission(
     unsafe { webview.add_NewWindowRequested(&popup, &mut token) }
         .map_err(|e| HostError::Failed(format!("add_NewWindowRequested: {e}")))?;
 
-    // Downloads are a side effect on the user's disk that nobody approved.
-    // `add_DownloadStarting` arrived in ICoreWebView2_4; on an older Evergreen
-    // runtime we simply cannot intercept, so say so rather than refusing to
-    // start.
+    // Downloads are brokered into the session folder instead of allowing a
+    // page to choose an arbitrary path. The browser tool can then retrieve the
+    // file with read_file, while the host never writes outside the session root.
+    let download_folder = session_folder;
+    let download_blocked = Rc::clone(&blocked);
+    let download_active = Rc::clone(&active_downloads);
     let download = DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
         let Some(args) = args else {
             return Ok(());
         };
-        let _ = unsafe { args.SetCancel(true) };
-        let message = "blocked a download started by the page".to_owned();
-        eprintln!("turbo browser-host: {message}");
-        blocked.set(message);
+        let Some(session_folder) = download_folder.as_ref() else {
+            let _ = unsafe { args.SetCancel(true) };
+            download_blocked.set("download cancelled: no session folder is configured".to_owned());
+            return Ok(());
+        };
+        let folder = match prepare_download_folder(session_folder) {
+            Ok(folder) => folder,
+            Err(error) => {
+                let _ = unsafe { args.SetCancel(true) };
+                download_blocked.set(format!("download cancelled: {error}"));
+                return Ok(());
+            }
+        };
+        let operation = unsafe { args.DownloadOperation() }.ok();
+        let filename = operation
+            .as_ref()
+            .and_then(|operation| {
+                let mut uri = PWSTR::null();
+                unsafe { operation.Uri(&mut uri) }.ok()?;
+                let uri = take_pwstr(uri);
+                uri.split('?')
+                    .next()
+                    .and_then(|path| path.rsplit('/').next())
+                    .map(str::to_owned)
+            })
+            .and_then(|name| safe_download_filename(&name))
+            .unwrap_or_else(|| "download.bin".to_owned());
+        let final_destination = unique_download_path(&folder, &filename);
+        let partial_name = format!(
+            ".{}.part",
+            final_destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("download.bin")
+        );
+        let partial_destination = unique_download_path(&folder, &partial_name);
+        let destination_string = partial_destination.to_string_lossy().into_owned();
+        let destination_wide = CoTaskMemPWSTR::from(destination_string.as_str());
+        if unsafe { args.SetResultFilePath(*destination_wide.as_ref().as_pcwstr()) }.is_err() {
+            let _ = unsafe { args.SetCancel(true) };
+            download_blocked.set("download cancelled: WebView2 rejected broker path".to_owned());
+            return Ok(());
+        }
+        download_active
+            .borrow_mut()
+            .insert(partial_destination.clone());
+        if let Some(operation) = operation {
+            let active = Rc::clone(&download_active);
+            let blocked = Rc::clone(&download_blocked);
+            let partial_path = partial_destination.clone();
+            let final_path = final_destination.clone();
+            let state_changed =
+                StateChangedEventHandler::create(Box::new(move |operation, _args| {
+                    let Some(operation) = operation else {
+                        return Ok(());
+                    };
+                    let mut state = Default::default();
+                    unsafe { operation.State(&mut state) }?;
+                    if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
+                        let finalization = match std::fs::symlink_metadata(&final_path) {
+                            Ok(_) => Err(std::io::Error::new(
+                                std::io::ErrorKind::AlreadyExists,
+                                "final download path already exists",
+                            )),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                std::fs::rename(&partial_path, &final_path)
+                            }
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = finalization {
+                            blocked.set(format!(
+                                "brokered download completed but could not finalize file: {error}"
+                            ));
+                        }
+                        active.borrow_mut().remove(&partial_path);
+                    } else if state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
+                        active.borrow_mut().remove(&partial_path);
+                        let _ = std::fs::remove_file(&partial_path);
+                    }
+                    Ok(())
+                }));
+            let mut state_token = 0i64;
+            if let Err(error) =
+                unsafe { operation.add_StateChanged(&state_changed, &mut state_token) }
+            {
+                download_active.borrow_mut().remove(&partial_destination);
+                let _ = unsafe { args.SetCancel(true) };
+                download_blocked.set(format!(
+                    "download cancelled: cannot track brokered download: {error}"
+                ));
+                return Ok(());
+            }
+        }
+        eprintln!(
+            "turbo browser-host: brokered download to {}",
+            final_destination.display()
+        );
         Ok(())
     }));
     match webview.cast::<ICoreWebView2_4>() {
@@ -668,10 +1052,10 @@ fn register_popup_download_permission(
                 .map_err(|e| HostError::Failed(format!("add_DownloadStarting: {e}")))?;
         }
         Err(_) => {
-            eprintln!(
-                "turbo browser-host: WebView2 runtime predates ICoreWebView2_4; \
-                 page-initiated downloads cannot be blocked"
-            );
+            return Err(HostError::Failed(
+                "WebView2 runtime lacks download interception; refusing unsafe browser host startup"
+                    .to_owned(),
+            ));
         }
     }
 
@@ -687,6 +1071,178 @@ fn register_popup_download_permission(
     unsafe { webview.add_PermissionRequested(&permission, &mut token) }
         .map_err(|e| HostError::Failed(format!("add_PermissionRequested: {e}")))?;
     Ok(())
+}
+
+fn prepare_download_folder(session_folder: &Path) -> Result<PathBuf, String> {
+    reject_symlink_components(session_folder)?;
+    if !session_folder.is_dir() {
+        return Err(format!(
+            "session folder is not an existing directory: {}",
+            session_folder.display()
+        ));
+    }
+    let session_root = session_folder
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize session folder: {error}"))?;
+    let folder = session_folder.join("downloads");
+    if folder.exists() {
+        let metadata = std::fs::symlink_metadata(&folder)
+            .map_err(|error| format!("cannot inspect broker folder: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("broker folder is not a real directory".to_owned());
+        }
+    } else {
+        std::fs::create_dir(&folder)
+            .map_err(|error| format!("cannot create broker folder: {error}"))?;
+    }
+    reject_symlink_components(&folder)?;
+    let canonical_folder = folder
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize broker folder: {error}"))?;
+    if !canonical_folder.starts_with(&session_root) {
+        return Err("broker folder escapes the session folder".to_owned());
+    }
+    Ok(canonical_folder)
+}
+
+fn reject_symlink_components(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "path contains symlink component: {}",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot inspect path component: {error}")),
+        }
+    }
+    Ok(())
+}
+
+fn list_brokered_downloads(
+    session_folder: &Path,
+    active_downloads: &HashSet<PathBuf>,
+) -> Result<DownloadsResult, String> {
+    reject_symlink_components(session_folder)?;
+    let session_root = session_folder
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize session folder: {error}"))?;
+    let folder = session_folder.join("downloads");
+    let folder_metadata = match std::fs::symlink_metadata(&folder) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DownloadsResult::default());
+        }
+        Err(error) => {
+            return Err(format!("cannot inspect broker folder: {error}"));
+        }
+    };
+    if folder_metadata.file_type().is_symlink() || !folder_metadata.is_dir() {
+        return Err("broker folder is not a real directory".to_owned());
+    }
+    let folder = folder
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize broker folder: {error}"))?;
+    if !folder.starts_with(&session_root) {
+        return Err("broker folder escapes the session folder".to_owned());
+    }
+    let entries = match std::fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return Err(format!("cannot list brokered downloads: {error}"));
+        }
+    };
+    let mut downloads = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read brokered download: {error}"))?;
+        // Do not follow links while exposing brokered files. A symlink in the
+        // broker directory must not turn this read-only listing into a path
+        // disclosure outside the session folder.
+        let metadata = entry
+            .path()
+            .symlink_metadata()
+            .map_err(|error| format!("cannot inspect brokered download: {error}"))?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".part") {
+            continue;
+        }
+        downloads.push(DownloadInfo {
+            name: name.to_owned(),
+            path: path.to_string_lossy().into_owned(),
+            bytes: metadata.len(),
+            completed: !active_downloads.contains(&path),
+        });
+    }
+    downloads.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(DownloadsResult { downloads })
+}
+
+fn safe_download_filename(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+    {
+        return None;
+    }
+    let trimmed = name.trim_end_matches([' ', '.']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stem = trimmed.split('.').next().unwrap_or_default();
+    let upper_stem = stem.to_ascii_uppercase();
+    let reserved_device = matches!(upper_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper_stem.len() == 4
+            && (upper_stem.starts_with("COM") || upper_stem.starts_with("LPT"))
+            && upper_stem.as_bytes()[3].is_ascii_digit());
+    if reserved_device {
+        return None;
+    }
+    Some(trimmed.chars().take(180).collect())
+}
+
+fn unique_download_path(folder: &Path, filename: &str) -> PathBuf {
+    let candidate = folder.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let extension = path.extension().and_then(|s| s.to_str());
+    for index in 1..=10_000u32 {
+        let name = match extension {
+            Some(extension) => format!("{stem} ({index}).{extension}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = folder.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    folder.join(format!(
+        "download-{}-{}.bin",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ))
 }
 
 fn apply_settings(webview: &ICoreWebView2) -> Result<(), HostError> {
@@ -855,6 +1411,92 @@ fn is_runtime_missing(err: &windows::core::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_listing_returns_sorted_regular_files_only() {
+        let session = std::env::temp_dir().join(format!(
+            "turbo-browser-download-list-test-{}",
+            std::process::id()
+        ));
+        let downloads = session.join("downloads");
+        let _ = std::fs::remove_dir_all(&session);
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("zeta.txt"), b"123").unwrap();
+        std::fs::write(downloads.join("alpha.pdf"), b"12").unwrap();
+        std::fs::create_dir(downloads.join("nested")).unwrap();
+
+        let canonical_downloads = downloads.canonicalize().unwrap();
+        let result = list_brokered_downloads(&session, &HashSet::new()).unwrap();
+        assert_eq!(
+            result.downloads,
+            vec![
+                DownloadInfo {
+                    name: "alpha.pdf".into(),
+                    path: canonical_downloads
+                        .join("alpha.pdf")
+                        .to_string_lossy()
+                        .into_owned(),
+                    bytes: 2,
+                    completed: true,
+                },
+                DownloadInfo {
+                    name: "zeta.txt".into(),
+                    path: canonical_downloads
+                        .join("zeta.txt")
+                        .to_string_lossy()
+                        .into_owned(),
+                    bytes: 3,
+                    completed: true,
+                },
+            ]
+        );
+        let _ = std::fs::remove_dir_all(session);
+    }
+
+    #[test]
+    fn active_downloads_are_not_reported_complete() {
+        let session = std::env::temp_dir().join(format!(
+            "turbo-browser-active-download-test-{}",
+            std::process::id()
+        ));
+        let downloads = session.join("downloads");
+        let path = downloads.join("partial.bin.part");
+        let _ = std::fs::remove_dir_all(&session);
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(&path, b"partial").unwrap();
+
+        let active = HashSet::from([path.canonicalize().unwrap()]);
+        let result = list_brokered_downloads(&session, &active).unwrap();
+        assert!(result.downloads.is_empty());
+        let _ = std::fs::remove_dir_all(session);
+    }
+
+    #[test]
+    fn download_filename_rejects_traversal_and_devices() {
+        for name in ["", ".", "..", "..\\secret.txt", "CON", "LPT1.txt"] {
+            assert!(safe_download_filename(name).is_none(), "accepted {name:?}");
+        }
+        assert_eq!(
+            safe_download_filename(" report.pdf. "),
+            Some("report.pdf".to_owned())
+        );
+    }
+
+    #[test]
+    fn download_path_adds_collision_suffix() {
+        let dir = std::env::temp_dir().join(format!(
+            "turbo-browser-download-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.pdf"), b"existing").unwrap();
+        assert_eq!(
+            unique_download_path(&dir, "report.pdf"),
+            dir.join("report (1).pdf")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn task_canceled_means_nested_pump_consumed_quit() {

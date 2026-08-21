@@ -3,9 +3,9 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use xai_grok_developer_log::{
-    DIR_ENV, DeveloperLogStore, Environment, ErrorClass, ExportOptions, IncidentStatus,
-    ListFilter, ReportRequest, ReporterKind, Severity, Source, clear_configured_dir,
-    config_file_path, export_pack, root_resolution_note, set_configured_dir,
+    DIR_ENV, DeveloperLogStore, Environment, ErrorClass, ExportOptions, IncidentStatus, ListFilter,
+    ReportRequest, ReporterKind, Severity, Source, clear_configured_dir, config_file_path,
+    export_pack, root_resolution_note, set_configured_dir,
 };
 
 #[derive(Debug, clap::Args, Clone)]
@@ -61,13 +61,9 @@ pub enum IssuesCommand {
         error_class: Option<String>,
     },
     /// Mark an incident resolved
-    Resolve {
-        id: String,
-    },
+    Resolve { id: String },
     /// Mark an incident acknowledged
-    Ack {
-        id: String,
-    },
+    Ack { id: String },
     /// Print the developer-log root path and how it was resolved
     Path {
         /// Emit JSON
@@ -143,7 +139,9 @@ pub fn run(args: IssuesArgs) -> Result<()> {
                     "No open Auto Developer Log incidents under {}.",
                     store.root().display()
                 );
-                println!("Agents file them with the `developer_log` tool; export with `turbo issues export`.");
+                println!(
+                    "Agents file them with the `developer_log` tool; export with `turbo issues export`."
+                );
             } else {
                 println!(
                     "{:<4} {:<6} {:>5} {:<22} {}",
@@ -168,11 +166,17 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             Ok(())
         }
         IssuesCommand::Show { id, json } => {
-            let inc = store.get(&id).with_context(|| format!("get incident `{id}`"))?;
+            let inc = store
+                .get(&id)
+                .with_context(|| format!("get incident `{id}`"))?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&inc)?);
             } else {
-                println!("# {} [{}]", inc.title, inc.severity.as_str().to_ascii_uppercase());
+                println!(
+                    "# {} [{}]",
+                    inc.title,
+                    inc.severity.as_str().to_ascii_uppercase()
+                );
                 println!();
                 println!("- id:           {}", inc.incident_id);
                 println!("- fingerprint:  {}", inc.fingerprint);
@@ -308,17 +312,17 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             component,
             suggested_fix,
         } => {
-            let error_class =
-                ErrorClass::parse(&error_class).unwrap_or(ErrorClass::Unknown);
-            let severity = severity
-                .as_deref()
-                .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
-                    "p0" => Some(Severity::P0),
-                    "p1" => Some(Severity::P1),
-                    "p2" => Some(Severity::P2),
-                    "p3" => Some(Severity::P3),
-                    _ => None,
-                });
+            let error_class = ErrorClass::parse(&error_class).unwrap_or(ErrorClass::Unknown);
+            let severity =
+                severity
+                    .as_deref()
+                    .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+                        "p0" => Some(Severity::P0),
+                        "p1" => Some(Severity::P1),
+                        "p2" => Some(Severity::P2),
+                        "p3" => Some(Severity::P3),
+                        _ => None,
+                    });
             let req = ReportRequest {
                 title,
                 summary,

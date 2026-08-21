@@ -351,18 +351,24 @@ pub fn inject_boot_card(system_prompt: &mut String, card: &RenderedBootCard) {
 }
 
 fn render_child(ctx: &BootCardContext) -> String {
+    let nested_spawn = if ctx.spawn_tool_present {
+        "Nested spawn: yes."
+    } else {
+        "Nested spawn: disabled at max depth — do not call spawn_subagent."
+    };
     format!(
-        "You are a Turbo subagent. Isolation claim: isolation={isolation} (verify before writing).\n\
-         VERIFY before first write: your **tool CWD** is `{cwd}` (this is the real process CWD, not DisplayCwd).\n\
-         - isolation=worktree: CWD must contain `.grok/worktrees` (or `grok/worktrees`) and `subagent-` — on Windows use absolute form under USERPROFILE\\.grok\\worktrees\\…\n\
-         - isolation=none / shared fallback: CWD is the parent repo — only edit if the task allows shared writes; else stop and developer_log(error_class=isolation_fallback).\n\
-         Prefer relative paths from CWD. Absolute parent paths are remapped into this CWD when isolation=worktree; do not try to write outside it.\n\
-         Edit only within capability_mode. Do not land/merge/Copy-Item into the parent. Parent recovers via snapshot + land from parent.\n\
-         Return a concise result (paths changed + isolation verified).\n\
+        "You are a Turbo subagent. Isolation claim: isolation={isolation}.\n\
+         Tool CWD (real process/tool FS): `{cwd}`.\n\
+         DisplayCwd / user_info Workspace Path / Get-Location may show the parent repo — that is remap, not isolation_fallback. Do not refuse or no-op solely because those look like the parent.\n\
+         - isolation=worktree: writes remap into this tool CWD (under .grok/worktrees/…/subagent-…). Proceed even if DisplayCwd is the parent.\n\
+         - isolation=none or isolation_fallback=true: shared parent CWD — only edit if the task allows shared writes.\n\
+         {nested_spawn}\n\
+         Prefer relative paths from tool CWD. Do not land/merge/Copy-Item into the parent.\n\
          Product bugs → developer_log. Missing capability → feature_request_log.\n\
          Model: {model}",
         isolation = ctx.isolation,
         cwd = ctx.cwd,
+        nested_spawn = nested_spawn,
         model = ctx.model,
     )
 }
@@ -374,7 +380,7 @@ fn render_short(ctx: &BootCardContext) -> String {
             r#"## Auto Developer Log (REQUIRED for bugs/friction)
 - ALWAYS call the `developer_log` tool when you hit Turbo product bugs, friction, or broken behavior that blocks work (worktrees, land/diff, providers, MCP, timeouts, docs gaps).
 - One call per distinct issue; the store dedups by fingerprint (do not spam).
-- Required fields: title, summary, error_class (e.g. worktree_tombstone | work_lost_risk | subagent_stall | protocol_deser | provider_400 | feature_gap | docs_gap | land_conflict | isolation_fallback | unknown).
+- Required fields: title, summary, error_class (e.g. worktree_tombstone | work_lost_risk | subagent_stall | protocol_deser | provider_400 | provider_429 | feature_gap | docs_gap | land_conflict | isolation_fallback | unknown).
 - Optional: component, repro_steps, expected, actual, suggested_fix, subagent_id, provider, model.
 - Never put secrets/tokens/API keys in the log.
 - Log root: {dir}
@@ -411,12 +417,12 @@ fn render_short(ctx: &BootCardContext) -> String {
         // discipline stay in the agent-browser skill and <browser_verification>;
         // this card is token-budgeted. What belongs here is what the model and
         // the human cannot discover on their own: that the window is opened by a
-        // tool call rather than a command, that it is white until the first
-        // navigate returns, and that closing it stops the host.
+        // tool call rather than a command, that it shows a startup card before the first
+        // real navigation, and that closing it hides the window.
         "\n- browser: `browser_navigate` opens Turbo's own WebView (first call starts `browser-host`) \
-         → `browser_snapshot` → click/fill by that snapshot's `uid`. Windows-only. White until the \
-         first navigate returns. Closing the window stops the host. Ctrl+Shift+B is a TUI text \
-         mirror, not the page. Not chrome-devtools MCP"
+         → `browser_snapshot` → click/fill by that snapshot's `uid`. Windows-only. A startup card \
+         appears until the first navigate returns. Closing the window hides it; the next `browser_*` call re-shows it. \
+         Ctrl+Shift+B is a TUI text mirror, not the page. Not chrome-devtools MCP"
     } else {
         ""
     };
@@ -478,7 +484,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - FOOTGUNS: (1) dirty parent untracked without baseline inflates land (2) parent edits during children (3) trust isolation without tags (4) manual copy instead of land
 - Land refuses >50 files unless force=true; merge fail-closed
 - allowed_paths enforced at write time + land/diff (fail closed)
-- Land ignores harness markers (`.grok-subagent-live`, `.grok/`) and does not copy them
+- Land/diff/snapshot omit harness markers (`.grok-subagent-live`, `.grok/`) and do not copy them
 - `assets/manifest/*.json` union-merges by name; `land --json-union-by=name` for other JSON
 - `turbo disk clean --safe` sweeps `%TEMP%/grok` plus aged TEMP-root `grok-*` leftovers
 
@@ -737,12 +743,32 @@ mod tests {
         let card = render_boot_card(BootCardMode::Child, &ctx).unwrap();
         // Isolation verify rules need more room than the old one-liner stub.
         assert!(
-            card.token_estimate <= 320,
+            card.token_estimate <= 420,
             "child stub tokens={}",
             card.token_estimate
         );
-        assert!(card.text.contains("VERIFY"));
+        assert!(card.text.contains("Tool CWD"));
+        assert!(card.text.contains("Do not refuse"));
         assert!(!card.text.contains("turbo subagent land"));
+        assert!(
+            !card.text.contains("else stop and developer_log"),
+            "DisplayCwd-as-parent must not instruct a refuse"
+        );
+        assert!(card.text.contains("Nested spawn: yes"));
+    }
+
+    #[test]
+    fn child_card_says_when_spawn_is_stripped() {
+        let ctx = BootCardContext {
+            model: "x".into(),
+            isolation: "worktree".into(),
+            cwd: "/home/u/.grok/worktrees/repo/subagent-abc".into(),
+            spawn_tool_present: false,
+            ..Default::default()
+        };
+        let card = render_boot_card(BootCardMode::Child, &ctx).unwrap();
+        assert!(card.text.contains("Nested spawn: disabled at max depth"));
+        assert!(card.text.contains("do not call spawn_subagent"));
     }
 
     /// The soft cap must actually cap. The suffix reservation used to be a

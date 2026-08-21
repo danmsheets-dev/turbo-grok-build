@@ -1,13 +1,11 @@
 //! Directory walker: gitignore + hard excludes + collapse.
 
-use crate::config::{
-    default_hard_exclude_exts, effective_hard_exclude_names, WorkspaceTreeConfig,
-};
+use crate::config::{WorkspaceTreeConfig, default_hard_exclude_exts, effective_hard_exclude_names};
 use crate::error::{Error, Result};
 use crate::identity::{canonicalize_root, path_to_identity_key, workspace_id_for_canonical};
 use crate::model::{
-    detect_workspace_profile, role_tags_for, to_posix_rel, BuildInfo, Freshness, FreshnessState,
-    GitInfo, Meta, NodeKind, Stats, TreeIndex, TreeNode, SCHEMA_VERSION,
+    BuildInfo, Freshness, FreshnessState, GitInfo, Meta, NodeKind, SCHEMA_VERSION, Stats,
+    TreeIndex, TreeNode, detect_workspace_profile, role_tags_for, to_posix_rel,
 };
 use ignore::WalkBuilder;
 use std::collections::{BTreeMap, HashSet};
@@ -28,10 +26,8 @@ pub fn build_index(root: &Path, config: &WorkspaceTreeConfig) -> Result<TreeInde
 
     let hard_names = effective_hard_exclude_names(config);
     let hard_exts = default_hard_exclude_exts();
-    let hard_name_set: std::collections::HashSet<String> = hard_names
-        .iter()
-        .map(|s| s.to_ascii_lowercase())
-        .collect();
+    let hard_name_set: std::collections::HashSet<String> =
+        hard_names.iter().map(|s| s.to_ascii_lowercase()).collect();
     let hard_ext_set: std::collections::HashSet<String> =
         hard_exts.iter().map(|s| s.to_ascii_lowercase()).collect();
 
@@ -91,13 +87,9 @@ pub fn build_index(root: &Path, config: &WorkspaceTreeConfig) -> Result<TreeInde
                 }
             }
         }
-        if follow_symlinks
-            && entry.file_type().map(|t| t.is_symlink()).unwrap_or(false)
-        {
+        if follow_symlinks && entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
             if let Ok(target) = std::fs::canonicalize(entry.path()) {
-                let mut seen = visited_for_filter
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut seen = visited_for_filter.lock().unwrap_or_else(|e| e.into_inner());
                 if !seen.insert(target) {
                     // Cycle: already walked this symlink target.
                     return false;
@@ -633,10 +625,7 @@ fn build_name_index(node: &TreeNode, index: &mut std::collections::HashMap<Strin
         index.entry(key).or_default().push(node.rel_path.clone());
         // Also index stem for files
         if node.kind == NodeKind::File {
-            if let Some(stem) = Path::new(&node.name)
-                .file_stem()
-                .and_then(|s| s.to_str())
-            {
+            if let Some(stem) = Path::new(&node.name).file_stem().and_then(|s| s.to_str()) {
                 let sk = stem.to_ascii_lowercase();
                 if sk != node.name.to_ascii_lowercase() {
                     index.entry(sk).or_default().push(node.rel_path.clone());
@@ -727,7 +716,11 @@ fn count_tree(node: &TreeNode) -> (u32, u32, u32) {
 fn freshness_basis(built_at: &str, git: &GitInfo) -> String {
     let mut basis = format!("full_walk+built_at={built_at}");
     if let Some(ref head) = git.head {
-        let short = if head.len() > 8 { &head[..8] } else { head.as_str() };
+        let short = if head.len() > 8 {
+            &head[..8]
+        } else {
+            head.as_str()
+        };
         basis.push_str("+git_head=");
         basis.push_str(short);
         if let Some(ref branch) = git.branch {
@@ -766,9 +759,8 @@ pub fn reassess_freshness(root: &Path, meta: &mut Meta) -> FreshnessState {
             FreshnessState::Stale
         }
         (Some(_), None) | (None, Some(_)) => {
-            meta.freshness.basis = Some(
-                "likely_fresh: git head presence changed (or unreadable)".into(),
-            );
+            meta.freshness.basis =
+                Some("likely_fresh: git head presence changed (or unreadable)".into());
             FreshnessState::LikelyFresh
         }
         (Some(_), Some(_)) => {
@@ -815,11 +807,7 @@ pub(crate) fn detect_git(root: &Path) -> GitInfo {
                     Some(gd) => {
                         let gd_path = {
                             let p = PathBuf::from(&gd);
-                            if p.is_absolute() {
-                                p
-                            } else {
-                                root.join(p)
-                            }
+                            if p.is_absolute() { p } else { root.join(p) }
                         };
                         let common = resolve_git_common_dir(&gd_path);
                         (
@@ -847,15 +835,11 @@ pub(crate) fn detect_git(root: &Path) -> GitInfo {
             }
         }
     } else {
-        (
-            Some(path_to_identity_key(&git_path)),
-            git_path.clone(),
-        )
+        (Some(path_to_identity_key(&git_path)), git_path.clone())
     };
 
     // Re-resolve common dir for ref lookup (identity string is for meta only).
-    let common_path =
-        resolve_git_common_dir(&git_dir).unwrap_or_else(|| git_dir.clone());
+    let common_path = resolve_git_common_dir(&git_dir).unwrap_or_else(|| git_dir.clone());
 
     let (head, branch) = read_git_head_and_branch(&git_dir, &common_path);
     GitInfo {
@@ -890,10 +874,7 @@ fn resolve_git_common_dir(git_dir: &Path) -> Option<PathBuf> {
 ///
 /// Linked worktrees keep HEAD in the worktree gitdir but branch refs often live
 /// under the common dir (`commondir`).
-fn read_git_head_and_branch(
-    git_dir: &Path,
-    common_dir: &Path,
-) -> (Option<String>, Option<String>) {
+fn read_git_head_and_branch(git_dir: &Path, common_dir: &Path) -> (Option<String>, Option<String>) {
     let head_path = git_dir.join("HEAD");
     let Ok(head_contents) = std::fs::read_to_string(&head_path) else {
         // Fallback: try common dir HEAD
@@ -977,8 +958,11 @@ mod tests {
         // Fake .git with HEAD pointing at a SHA
         std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
         std::fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
-        std::fs::write(root.join(".git/refs/heads/main"), b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
-            .unwrap();
+        std::fs::write(
+            root.join(".git/refs/heads/main"),
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .unwrap();
 
         let mut meta = Meta {
             schema_version: SCHEMA_VERSION,
@@ -1056,4 +1040,3 @@ mod tests {
         assert_eq!(reassess_freshness(root, &mut meta), FreshnessState::Fresh);
     }
 }
-

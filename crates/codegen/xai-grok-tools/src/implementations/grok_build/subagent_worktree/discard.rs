@@ -227,11 +227,7 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
             subagent_id: work.subagent_id,
             success: true,
             worktree_removed,
-            snapshot_ref: if snapshot_dropped {
-                None
-            } else {
-                snapshot_ref
-            },
+            snapshot_ref: if snapshot_dropped { None } else { snapshot_ref },
             snapshot_dropped,
             message,
         })

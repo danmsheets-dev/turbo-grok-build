@@ -17,11 +17,13 @@ use serde_json::Value;
 
 use crate::profile::pipe_name;
 use crate::protocol::{
-    EvalPolicyError, FillPolicyError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
-    METHOD_CLICK, METHOD_CLOSE_TAB, METHOD_EVAL, METHOD_FILL, METHOD_NAVIGATE, METHOD_NEW_TAB,
-    METHOD_RAISE, METHOD_SCREENSHOT, METHOD_SELECT_TAB, METHOD_SHUTDOWN, METHOD_SNAPSHOT,
-    METHOD_TABS, NavigateResult, ProtocolError, ScreenshotResult, SnapshotResult, TabsResult,
-    UrlPolicyError, check_eval_result, check_fill, check_url_in_session,
+    ClickResult, DownloadsResult, EvalPolicyError, FillPolicyError, JsonRpcId, JsonRpcRequest,
+    JsonRpcResponse, JsonRpcVersion, METHOD_CLICK, METHOD_CLOSE_TAB, METHOD_DOWNLOADS, METHOD_EVAL,
+    METHOD_FILL, METHOD_HOVER, METHOD_NAVIGATE, METHOD_NEW_TAB, METHOD_PRESS_KEY, METHOD_RAISE,
+    METHOD_SCREENSHOT, METHOD_SCROLL, METHOD_SELECT, METHOD_SELECT_TAB, METHOD_SET_FILE,
+    METHOD_SHUTDOWN, METHOD_SNAPSHOT, METHOD_TABS, METHOD_WAIT, NavigateResult, ProtocolError,
+    ScreenshotResult, SnapshotResult, TabsResult, UrlPolicyError, WaitResult, check_eval_result,
+    check_fill, check_url_in_session,
 };
 
 /// Client / transport failure (policy, RPC, or I/O).
@@ -319,6 +321,12 @@ impl<T: BrowserTransport> BrowserClient<T> {
         self.roundtrip(METHOD_TABS, serde_json::json!({})).await
     }
 
+    /// `browser.downloads`. List files in the session-scoped broker directory.
+    pub async fn downloads(&self) -> Result<DownloadsResult, BrowserClientError> {
+        self.roundtrip(METHOD_DOWNLOADS, serde_json::json!({}))
+            .await
+    }
+
     /// `browser.new_tab`. Optional URL is checked before send.
     pub async fn new_tab(&self, url: Option<String>) -> Result<TabsResult, BrowserClientError> {
         if let Some(url) = url.as_deref() {
@@ -342,13 +350,25 @@ impl<T: BrowserTransport> BrowserClient<T> {
 
     /// `browser.snapshot`.
     pub async fn snapshot(&self, verbose: bool) -> Result<SnapshotResult, BrowserClientError> {
-        self.roundtrip(METHOD_SNAPSHOT, serde_json::json!({ "verbose": verbose }))
-            .await
+        self.snapshot_ex(verbose, false).await
+    }
+
+    /// `browser.snapshot` with optional main-landmark text.
+    pub async fn snapshot_ex(
+        &self,
+        verbose: bool,
+        include_text: bool,
+    ) -> Result<SnapshotResult, BrowserClientError> {
+        self.roundtrip(
+            METHOD_SNAPSHOT,
+            serde_json::json!({ "verbose": verbose, "include_text": include_text }),
+        )
+        .await
     }
 
     /// `browser.click`.
-    pub async fn click(&self, uid: impl Into<String>) -> Result<(), BrowserClientError> {
-        self.send_ok(METHOD_CLICK, serde_json::json!({ "uid": uid.into() }))
+    pub async fn click(&self, uid: impl Into<String>) -> Result<ClickResult, BrowserClientError> {
+        self.roundtrip(METHOD_CLICK, serde_json::json!({ "uid": uid.into() }))
             .await
     }
 
@@ -370,16 +390,102 @@ impl<T: BrowserTransport> BrowserClient<T> {
 
     /// `browser.eval`. Result size is capped after the host returns.
     pub async fn eval(&self, function: impl Into<String>) -> Result<Value, BrowserClientError> {
+        self.eval_ex(function, false).await
+    }
+
+    /// `browser.eval` with an explicit confirm flag for mutating script.
+    pub async fn eval_ex(
+        &self,
+        function: impl Into<String>,
+        confirm: bool,
+    ) -> Result<Value, BrowserClientError> {
         let value = self
             .transport
             .call(
                 METHOD_EVAL,
-                serde_json::json!({ "function": function.into() }),
+                serde_json::json!({ "function": function.into(), "confirm": confirm }),
             )
             .await?;
         let serialized = serde_json::to_string(&value).map_err(BrowserClientError::from_json)?;
         check_eval_result(&serialized)?;
         Ok(value)
+    }
+
+    /// `browser.wait`.
+    pub async fn wait(
+        &self,
+        text: Option<String>,
+        url_substring: Option<String>,
+        timeout_ms: Option<u64>,
+    ) -> Result<WaitResult, BrowserClientError> {
+        self.roundtrip(
+            METHOD_WAIT,
+            serde_json::json!({
+                "text": text,
+                "url_substring": url_substring,
+                "timeout_ms": timeout_ms,
+            }),
+        )
+        .await
+    }
+
+    /// `browser.scroll`.
+    pub async fn scroll(
+        &self,
+        uid: Option<String>,
+        dx: Option<i32>,
+        dy: Option<i32>,
+    ) -> Result<(), BrowserClientError> {
+        self.send_ok(
+            METHOD_SCROLL,
+            serde_json::json!({ "uid": uid, "dx": dx, "dy": dy }),
+        )
+        .await
+    }
+
+    /// `browser.press_key`.
+    pub async fn press_key(
+        &self,
+        key: impl Into<String>,
+        uid: Option<String>,
+    ) -> Result<(), BrowserClientError> {
+        self.send_ok(
+            METHOD_PRESS_KEY,
+            serde_json::json!({ "key": key.into(), "uid": uid }),
+        )
+        .await
+    }
+
+    /// `browser.select`.
+    pub async fn select(
+        &self,
+        uid: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), BrowserClientError> {
+        self.send_ok(
+            METHOD_SELECT,
+            serde_json::json!({ "uid": uid.into(), "value": value.into() }),
+        )
+        .await
+    }
+
+    /// `browser.hover`.
+    pub async fn hover(&self, uid: impl Into<String>) -> Result<(), BrowserClientError> {
+        self.send_ok(METHOD_HOVER, serde_json::json!({ "uid": uid.into() }))
+            .await
+    }
+
+    /// `browser.set_file`.
+    pub async fn set_file(
+        &self,
+        uid: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Result<(), BrowserClientError> {
+        self.send_ok(
+            METHOD_SET_FILE,
+            serde_json::json!({ "uid": uid.into(), "path": path.into() }),
+        )
+        .await
     }
 
     /// `browser.screenshot`.
@@ -525,6 +631,14 @@ mod tests {
             "denied file: URL must not be sent to the host"
         );
         assert_eq!(client.transport().url(), "about:blank");
+    }
+
+    #[tokio::test]
+    async fn downloads_roundtrip_returns_session_broker_state() {
+        let client = BrowserClient::with_transport("sess", MockBrowserHost::new());
+        let result = client.downloads().await.unwrap();
+        assert!(result.downloads.is_empty());
+        assert_eq!(client.transport().call_log(), vec![METHOD_DOWNLOADS]);
     }
 
     #[tokio::test]

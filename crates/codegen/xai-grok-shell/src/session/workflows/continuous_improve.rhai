@@ -9,6 +9,13 @@ let meta = #{
         #{ title: "Verify", detail: "Review the result and list residual risks" },
         #{ title: "Report", detail: "Hand off snapshot recovery / land instructions" },
     ],
+    tasks: [
+        #{ id: "research", description: "Explore the codebase and identify files, risks, and constraints", max_attempts: 2 },
+        #{ id: "plan", description: "Turn the research into a bounded implementation checklist", depends_on: ["research"], max_attempts: 2 },
+        #{ id: "implement", description: "Implement the approved checklist in an isolated worktree", depends_on: ["plan"], max_attempts: 2 },
+        #{ id: "verify", description: "Review the implementation and identify residual risks", depends_on: ["implement"], max_attempts: 2 },
+        #{ id: "report", description: "Produce the final report and recovery instructions", depends_on: ["verify"], max_attempts: 1 },
+    ],
 };
 
 // Rhai string::trim() mutates in place and returns (); return the string.
@@ -35,15 +42,9 @@ if args.timeout_ms != () && args.timeout_ms > 0 {
     timeout_ms = args.timeout_ms;
 }
 
-// Durable LoopCheckpoint (RC8 WP8 + R6):
-// - Workflow scratch: write_scratch_file("loop_checkpoint.json") under
-//   session `workflows/<run_id>/scratch/loop_checkpoint.json`
-//   (host rejects nested scratch names — single path component only).
-// - Cross-process durable mirror (host side): when session_dir is available,
-//   the host also persists the same body to
-//   `session/loops/<workflow_run_id>/checkpoint.json` so a new process can
-//   read the last successful phase without the scratch tree.
-// Same-process Rhai journal still applies for replay.
+// LoopCheckpoint is written to the workflow scratch directory after each
+// successful phase. The workflow journal keeps same-process replay deterministic;
+// a new process resumes from the durable workflow manifest and journal.
 fn save_checkpoint(phase_name, payload) {
     let body = json_encode(#{
         phase: phase_name,
@@ -54,6 +55,7 @@ fn save_checkpoint(phase_name, payload) {
     write_scratch_file("loop_checkpoint.json", body);
 }
 
+task_start("research");
 phase("Research");
 let research_schema = #{
     "type": "object",
@@ -78,10 +80,13 @@ let research = agent(
     },
 );
 if !research.success {
+    task_fail("research", "Research phase failed: " + json_encode(research.output));
     pause("no_progress", "Research phase failed: " + research.output);
 }
+task_complete("research", "Research completed");
 save_checkpoint("research_done", #{ research: research.output });
 
+task_start("plan");
 phase("Plan");
 let plan_schema = #{
     "type": "object",
@@ -110,10 +115,13 @@ let plan = agent(
     },
 );
 if !plan.success {
+    task_fail("plan", "Plan phase failed: " + json_encode(plan.output));
     pause("no_progress", "Plan phase failed: " + plan.output);
 }
+task_complete("plan", "Plan completed");
 save_checkpoint("plan_done", #{ research: research.output, plan: plan.output });
 
+task_start("implement");
 phase("Implement");
 let implement = agent(
     "Implement the plan for the objective. Stay scoped to the checklist.\n"
@@ -121,7 +129,7 @@ let implement = agent(
         + json_encode(objective)
         + "\n\nPlan:\n"
         + json_encode(plan.output)
-        + "\n\nWhen done, summarize files changed and how to verify.",
+        + "\n\nWhen done, summarize files changed and how to verify. End with a machine-readable artifact section containing worktree_path, snapshot_ref, and patch_path when available so a separate verifier can inspect the actual implementation rather than trusting prose.",
     #{
         label: "improve-implement",
         agent_type: "general-purpose",
@@ -132,14 +140,17 @@ let implement = agent(
     },
 );
 if !implement.success {
+    task_fail("implement", "Implement phase failed or timed out: " + json_encode(implement.output));
     pause("verification", "Implement phase failed or timed out: " + implement.output);
 }
+task_complete("implement", "Implementation completed");
 save_checkpoint("implement_done", #{
     research: research.output,
     plan: plan.output,
     implement: implement.output,
 });
 
+task_start("verify");
 phase("Verify");
 let verify_schema = #{
     "type": "object",
@@ -156,8 +167,9 @@ let verify = agent(
         + json_encode(objective)
         + "\n\nPlan:\n"
         + json_encode(plan.output)
-        + "\n\nImplementer report:\n"
-        + json_encode(implement.output),
+        + "\n\nImplementer report and artifact references:\n"
+        + json_encode(implement.output)
+        + "\n\nIf worktree_path, snapshot_ref, or patch_path is present, inspect that artifact directly. Do not treat the implementer report as proof by itself.",
     #{
         label: "improve-verify",
         agent_type: "explore",
@@ -166,7 +178,16 @@ let verify = agent(
         output_schema: verify_schema,
     },
 );
-
+if !verify.success {
+    task_fail("verify", "Verification phase failed: " + json_encode(verify.output));
+    pause("verification", "Verification phase failed: " + verify.output);
+}
+if verify.output == () || verify.output.ok != true {
+    let reason = "Verifier rejected the implementation: " + json_encode(verify.output);
+    task_fail("verify", reason);
+    pause("verification", reason);
+}
+task_complete("verify", "Verification completed");
 save_checkpoint("verify_done", #{
     research: research.output,
     plan: plan.output,
@@ -174,6 +195,7 @@ save_checkpoint("verify_done", #{
     verify: verify.output,
 });
 
+task_start("report");
 phase("Report");
 let report = "# Continuous improve report\n\n"
     + "## Objective\n\n"
@@ -189,9 +211,10 @@ let report = "# Continuous improve report\n\n"
     + "\n\n## Next steps\n\n"
     + "- Review with `diff_subagent` then merge with `land_subagent` (merge mode fails closed on conflict).\n"
     + "- Recover via `<snapshot_ref>` / `<patch_path>` if the worktree was cleaned; implement phase uses retain_worktree when possible.\n"
-    + "- LoopCheckpoint: workflow scratch `loop_checkpoint.json` and durable `loops/<run_id>/checkpoint.json` hold the last successful phase payload.\n"
+    + "- LoopCheckpoint: workflow scratch `loop_checkpoint.json` holds the last successful phase payload.\n"
     + "- Re-run `/workflow continuous-improve` with a tighter objective for the next iteration.\n";
 
+task_complete("report", "Report completed");
 save_checkpoint("complete", #{
     research: research.output,
     plan: plan.output,

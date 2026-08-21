@@ -321,13 +321,11 @@ const RENDER_MERMAID_CHOICES: &[EnumChoice] = &[
 // compatibility; non-`en` values are coerced to English in `i18n::canonical_language`.
 // ---------------------------------------------------------------------------
 
-const LANGUAGE_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "en",
-        display: "English",
-        description: "English UI (only supported language).",
-    },
-];
+const LANGUAGE_CHOICES: &[EnumChoice] = &[EnumChoice {
+    canonical: "en",
+    display: "English",
+    description: "English UI (only supported language).",
+}];
 
 // Scroll-input catalog. SHELL-owned, persisted to `[ui].scroll_mode`.
 // Canonical strings match `ScrollMode::as_canonical` (pinned by test).

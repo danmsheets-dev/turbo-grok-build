@@ -34,7 +34,9 @@ use regex::Regex;
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
 
 /// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
-pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+/// Depth 0 is the top-level session. `max = 2` allows one nested spawn from a
+/// first-level child (orchestrator → worktree grandchild) without unbounded fan-out.
+pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 
 pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
     resources
@@ -350,32 +352,35 @@ impl xai_tool_runtime::Tool for TaskTool {
             model
         };
 
+        let reasoning_effort = if resume_from.is_some() {
+            if input.reasoning_effort.is_some() {
+                tracing::debug!("ignoring reasoning_effort override because resume_from is set");
+            }
+            None
+        } else {
+            input.reasoning_effort
+        };
+
         // Treat blank/empty/"null" cwd as absent (models sometimes emit these).
         // Also strip stray surrounding quote characters and expand `~`.
         let cwd = input.cwd.as_deref().and_then(sanitize_cwd_value);
 
-        // Validate mutual exclusion: cwd and isolation=worktree cannot both
-        // be set. Both set the effective cwd — setting both is ambiguous.
-        // However, if the cwd path doesn't exist as a real directory on disk,
-        // the model likely passed a nonsense path — just clear it so worktree wins.
+        // isolation=worktree + cwd: cwd names the *source git repo*; the child
+        // still runs in a new worktree. A non-existent path is model noise —
+        // clear it so worktree create uses the parent/session repo.
         let cwd = if cwd.is_some() && input.isolation == Some(SubagentIsolationMode::Worktree) {
             if cwd
                 .as_deref()
                 .is_some_and(|p| std::path::Path::new(p).is_dir())
             {
-                return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                    "cwd and isolation=\"worktree\" are mutually exclusive. \
-                     Use cwd to point the subagent at an existing directory, \
-                     or isolation=\"worktree\" to create a new isolated worktree, \
-                     but not both.",
-                ));
+                cwd
+            } else {
+                tracing::debug!(
+                    cwd = %cwd.as_deref().unwrap_or(""),
+                    "clearing non-existent cwd path; isolation=worktree uses parent/source repo"
+                );
+                None
             }
-            // Non-existent path alongside worktree — clear it so worktree wins.
-            tracing::debug!(
-                cwd = %cwd.as_deref().unwrap_or(""),
-                "clearing non-existent cwd path because isolation=worktree is set"
-            );
-            None
         } else {
             cwd
         };
@@ -512,7 +517,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             runtime_overrides: SubagentRuntimeOverrides {
                 model,
                 model_override_provenance: ModelOverrideProvenance::Tool,
-                reasoning_effort: None,
+                reasoning_effort,
                 persona: None,
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
@@ -568,16 +573,23 @@ impl xai_tool_runtime::Tool for TaskTool {
 
             let continue_parent =
                 detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
-            return Ok(ToolOutput::Text(
-                xai_tool_types::format_subagent_started_background(
-                    &id,
-                    &input.subagent_type,
-                    &input.description,
-                    &task_output_name,
-                    continue_parent,
-                )
-                .into(),
+            let mut started = xai_tool_types::format_subagent_started_background(
+                &id,
+                &input.subagent_type,
+                &input.description,
+                &task_output_name,
+                continue_parent,
+            );
+            let iso = input
+                .isolation
+                .map(|m| m.as_str())
+                .unwrap_or("default");
+            started.push_str(&format!(
+                "\nisolation_requested: {iso}\n\
+                 isolation=worktree creates a disposable git worktree; DisplayCwd may still \
+                 show the parent — that is remap, not isolation_fallback."
             ));
+            return Ok(ToolOutput::Text(started.into()));
         }
 
         // 5. Blocking mode (default): spawn via backend and await result
@@ -780,6 +792,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -816,6 +829,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -853,6 +867,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -887,6 +902,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -948,6 +964,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -1007,6 +1024,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -1053,6 +1071,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -1164,6 +1183,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             timeout_ms: None,
             retain_worktree: None,
             allowed_paths: None,
@@ -1690,6 +1710,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: Some("test-model".into()),
+            reasoning_effort: None,
             timeout_ms: None,
             retain_worktree: None,
             allowed_paths: None,
@@ -1970,6 +1991,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             timeout_ms: None,
             retain_worktree: None,
             allowed_paths: None,
@@ -2022,6 +2044,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2061,6 +2084,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             timeout_ms: None,
             retain_worktree: None,
             allowed_paths: None,
@@ -2110,6 +2134,7 @@ mod tests {
                 resume_from: Some("prev-id".into()),
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2179,6 +2204,7 @@ mod tests {
                     resume_from: Some(sentinel.into()),
                     cwd: None,
                     model: None,
+                    reasoning_effort: None,
                     timeout_ms: None,
                     retain_worktree: None,
                     allowed_paths: None,
@@ -2228,6 +2254,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             timeout_ms: None,
             retain_worktree: None,
             allowed_paths: None,
@@ -2238,27 +2265,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cwd_and_worktree_isolation_are_mutually_exclusive() {
-        let (backend, _rx) = make_backend();
+    async fn cwd_with_worktree_isolation_selects_source_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().to_string_lossy().into_owned();
+        let (backend, mut rx) = make_backend();
         let mut resources = Resources::new();
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
+        let drain = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(request.cwd.as_deref(), Some(source.as_str()));
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
         let result = xai_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                description: "test cwd conflict".into(),
+                description: "test cwd as source repo".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
                 resume_from: None,
-                cwd: Some("/tmp".into()),
+                cwd: Some(tmp.path().to_string_lossy().into_owned()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2267,12 +2311,12 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("mutually exclusive"),
-            "should reject cwd + isolation=worktree: {err}"
+            result.is_ok(),
+            "cwd + isolation=worktree must select the source repo, not reject: {:?}",
+            result.err()
         );
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
     }
 
     #[tokio::test]
@@ -2316,6 +2360,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2369,6 +2414,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("null".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2422,6 +2468,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("  ".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2478,6 +2525,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2515,6 +2563,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2573,6 +2622,7 @@ mod tests {
                     resume_from: None,
                     cwd: Some(sentinel.into()),
                     model: None,
+                    reasoning_effort: None,
                     timeout_ms: None,
                     retain_worktree: None,
                     allowed_paths: None,
@@ -2629,6 +2679,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2689,6 +2740,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("\"/tmp".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2744,6 +2796,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,
@@ -2795,6 +2848,7 @@ mod tests {
                 resume_from: Some("prev-id".into()),
                 cwd: Some("/tmp/some-dir".into()),
                 model: None,
+                reasoning_effort: None,
                 timeout_ms: None,
                 retain_worktree: None,
                 allowed_paths: None,

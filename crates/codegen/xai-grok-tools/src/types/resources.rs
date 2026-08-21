@@ -487,15 +487,47 @@ pub struct AllowedPathsViolation {
     pub allowed: Vec<String>,
 }
 
+/// Repo-root files crate-scoped tasks still need to pin (eol=lf, ignore).
+const ROOT_METADATA_RELS: &[&str] = &[".gitattributes", ".gitignore"];
+
+pub(crate) fn is_root_metadata_rel(rel: &str) -> bool {
+    let n = rel.replace('\\', "/");
+    let n = n.trim_start_matches("./");
+    ROOT_METADATA_RELS.iter().any(|f| {
+        if cfg!(windows) {
+            n.eq_ignore_ascii_case(f)
+        } else {
+            n == *f
+        }
+    })
+}
+
+fn allowlist_respawn_hint(path: &str) -> String {
+    let n = path.replace('\\', "/");
+    let n = n.trim_start_matches("./");
+    if is_root_metadata_rel(n) {
+        return n.to_owned();
+    }
+    match n.split_once('/') {
+        Some((first, _)) if !first.is_empty() => format!("{first}/"),
+        _ => n.to_owned(),
+    }
+}
+
 impl AllowedPathsViolation {
     pub fn code(&self) -> &'static str {
         "path_allowlist_violation"
     }
 
     pub fn message(&self) -> String {
+        let hint = allowlist_respawn_hint(&self.path);
         format!(
             "write refused: path `{}` is outside allowed_paths {:?}. \
-             Edit only under those prefixes, or re-spawn without allowed_paths.",
+             Re-spawn with allowed_paths that includes this prefix, e.g. \
+             allowed_paths=[..., \"{hint}\"], or omit allowed_paths for \
+             unrestricted writes (isolation=none parent files like \
+             .gitattributes need an explicit prefix unless they are \
+             root metadata).",
             self.path, self.allowed
         )
     }
@@ -516,6 +548,16 @@ pub fn enforce_allowed_write_paths(
     allowed: &[String],
 ) -> Result<(), AllowedPathsViolation> {
     if allowed.is_empty() {
+        return Ok(());
+    }
+    // Root metadata pins (eol=lf, ignore) are always writable even when
+    // allowed_paths is crate-scoped — Task 5 / include_str! assets.
+    if let Some(rel) = resolved
+        .strip_prefix(cwd)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        && is_root_metadata_rel(&rel)
+    {
         return Ok(());
     }
     let rel: PathBuf = match resolved.strip_prefix(cwd) {
@@ -544,6 +586,9 @@ pub fn enforce_allowed_write_paths(
             allowed: allowed.to_vec(),
         });
     };
+    if is_root_metadata_rel(&norm) {
+        return Ok(());
+    }
     let allowed_ok = allowed.iter().any(|prefix| {
         let Some(p) = normalize_rel_allowlist_path(prefix) else {
             return false;
@@ -1082,9 +1127,7 @@ pub fn confine_shell_enforcement() -> ConfineShellEnforcement {
         .to_ascii_lowercase()
         .as_str()
     {
-        "operand" | "operand-scan" | "allowlist" | "legacy" => {
-            ConfineShellEnforcement::OperandScan
-        }
+        "operand" | "operand-scan" | "allowlist" | "legacy" => ConfineShellEnforcement::OperandScan,
         _ => ConfineShellEnforcement::FailClosed,
     }
 }
@@ -1126,13 +1169,7 @@ pub fn set_streaming_json_confine_emit(enabled: bool) {
 /// `rule` names the confine rule that fired (e.g. `path-outside-root`,
 /// `shell-unmodelled-program`, `shell-unparseable`, `mcp-path-outside-root`,
 /// `fs-write-chokepoint`) so operators can act without replaying the run.
-pub fn emit_confine_violation(
-    tool: &str,
-    path: &str,
-    resolved_path: &str,
-    root: &str,
-    rule: &str,
-) {
+pub fn emit_confine_violation(tool: &str, path: &str, resolved_path: &str, root: &str, rule: &str) {
     if !STREAMING_JSON_CONFINE_EMIT.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -2310,15 +2347,17 @@ mod tests {
     }
     #[test]
     fn path_looks_like_isolated_worktree_detects_product_and_temp() {
-        assert!(super::path_looks_like_isolated_worktree(std::path::Path::new(
-            "/home/user/.grok/worktrees/pirates/subagent-abc/src/main.rs"
-        )));
-        assert!(super::path_looks_like_isolated_worktree(std::path::Path::new(
-            r"C:\Users\dan_m\.grok\worktrees\pirates\subagent-019ffc2f-9daa\tools\x.py"
-        )));
-        assert!(!super::path_looks_like_isolated_worktree(std::path::Path::new(
-            "/home/user/Pirates/tools/x.py"
-        )));
+        assert!(super::path_looks_like_isolated_worktree(
+            std::path::Path::new("/home/user/.grok/worktrees/pirates/subagent-abc/src/main.rs")
+        ));
+        assert!(super::path_looks_like_isolated_worktree(
+            std::path::Path::new(
+                r"C:\Users\dan_m\.grok\worktrees\pirates\subagent-019ffc2f-9daa\tools\x.py"
+            )
+        ));
+        assert!(!super::path_looks_like_isolated_worktree(
+            std::path::Path::new("/home/user/Pirates/tools/x.py")
+        ));
     }
     #[test]
     fn resolve_model_path_tilde_expands_to_home() {
@@ -2512,6 +2551,19 @@ mod tests {
         super::enforce_allowed_write_paths(cwd, &ok_path, &["docs".into()]).unwrap();
     }
 
+    #[test]
+    fn enforce_allowed_write_paths_allows_root_gitattributes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let ga = cwd.join(".gitattributes");
+        super::enforce_allowed_write_paths(cwd, &ga, &["crates/foo/".into()]).unwrap();
+        let gi = cwd.join(".gitignore");
+        super::enforce_allowed_write_paths(cwd, &gi, &["crates/foo/".into()]).unwrap();
+        let nested = cwd.join("crates").join(".gitattributes");
+        let err = super::enforce_allowed_write_paths(cwd, &nested, &["docs".into()]).unwrap_err();
+        assert!(err.message().contains("Re-spawn with allowed_paths"));
+    }
+
     /// WP-H4 regression: table-driven confine escapes that previously wrote
     /// into a denied checkout because matching was lexical only.
     #[test]
@@ -2619,7 +2671,8 @@ mod tests {
         let c = super::canonicalize_for_permission(&via_dotdot);
         assert!(!c.lexical_only, "existing ancestor must resolve");
         assert!(
-            c.compare.starts_with(&super::canonicalize_for_permission(&root).compare),
+            c.compare
+                .starts_with(&super::canonicalize_for_permission(&root).compare),
             "dotdot path should land under root: {:?}",
             c.display
         );
@@ -2630,8 +2683,8 @@ mod tests {
     #[cfg(windows)]
     fn short_path_name(path: &std::path::Path) -> Result<String, String> {
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        use windows::core::PCWSTR;
 
         let wide: Vec<u16> = path
             .as_os_str()
@@ -2644,8 +2697,7 @@ mod tests {
         let needed = unsafe { GetShortPathNameW(long, None) };
         if needed == 0 {
             return Err(
-                "GetShortPathNameW failed (8.3 generation may be disabled on this volume)"
-                    .into(),
+                "GetShortPathNameW failed (8.3 generation may be disabled on this volume)".into(),
             );
         }
         let mut buf = vec![0u16; needed as usize];

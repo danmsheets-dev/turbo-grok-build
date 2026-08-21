@@ -1676,7 +1676,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-            runtime: None,
+                runtime: None,
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),
@@ -2726,9 +2726,8 @@ mod tests {
             .unwrap();
         assert_eq!(rekeyed.display_name.as_deref(), Some("zz-copyfix-japandi"));
         assert!(
-            std::path::Path::new(&rekeyed.path).ends_with(
-                std::path::Path::new("zz-copyfix-japandi2").join("SKILL.md")
-            )
+            std::path::Path::new(&rekeyed.path)
+                .ends_with(std::path::Path::new("zz-copyfix-japandi2").join("SKILL.md"))
         );
     }
 }

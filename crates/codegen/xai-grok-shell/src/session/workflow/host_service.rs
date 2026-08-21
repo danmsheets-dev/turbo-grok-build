@@ -10,7 +10,9 @@ use xai_grok_tools::implementations::grok_build::task::types::{
     ModelOverrideProvenance, SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
     SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
 };
-use xai_workflow::{AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostRequest};
+use xai_workflow::{
+    AgentOpts, AgentResult, BudgetState, HostError, TaskQueueState, WorkflowHostRequest,
+};
 
 use super::notify::WorkflowNotifySender;
 use super::schema_contract::{
@@ -151,6 +153,12 @@ fn reply_cancelled(req: WorkflowHostRequest) {
         | R::WriteScratchFile { reply, .. }
         | R::ReadScratchFile { reply, .. }
         | R::GitDiffSince { reply, .. } => {
+            let _ = reply.send(Err(HostError::Cancelled));
+        }
+        R::TaskStart { reply, .. }
+        | R::TaskComplete { reply, .. }
+        | R::TaskFail { reply, .. }
+        | R::TaskQueue { reply } => {
             let _ = reply.send(Err(HostError::Cancelled));
         }
         R::Phase { .. } | R::Log { .. } | R::Telemetry { .. } => {}
@@ -328,6 +336,41 @@ impl HostService {
             WorkflowHostRequest::BudgetQuery { reply } => {
                 let _ = reply.send(Ok(self.budget_state()));
             }
+            WorkflowHostRequest::TaskStart { task_id, reply } => {
+                let result = self.apply_task_mutation(|tracker| {
+                    tracker.task_start(&self.params.run_id, &task_id)
+                });
+                let _ = reply.send(result);
+            }
+            WorkflowHostRequest::TaskComplete {
+                task_id,
+                result_summary,
+                reply,
+            } => {
+                let result = self.apply_task_mutation(|tracker| {
+                    tracker.task_complete(&self.params.run_id, &task_id, result_summary)
+                });
+                let _ = reply.send(result);
+            }
+            WorkflowHostRequest::TaskFail {
+                task_id,
+                result_summary,
+                reply,
+            } => {
+                let result = self.apply_task_mutation(|tracker| {
+                    tracker.task_fail(&self.params.run_id, &task_id, result_summary)
+                });
+                let _ = reply.send(result);
+            }
+            WorkflowHostRequest::TaskQueue { reply } => {
+                let queue = self
+                    .params
+                    .tracker
+                    .lock()
+                    .task_queue(&self.params.run_id)
+                    .unwrap_or_else(|| self.params.store.task_queue_for(&self.params.run_id));
+                let _ = reply.send(Ok(queue));
+            }
             WorkflowHostRequest::RenderTemplate { name, vars, reply } => {
                 let _ = reply.send(self.render_template(&name, &vars));
             }
@@ -354,6 +397,61 @@ impl HostService {
                 });
             }
         }
+    }
+
+    fn apply_task_mutation<F>(&self, mutate: F) -> Result<TaskQueueState, HostError>
+    where
+        F: FnOnce(
+            &mut WorkflowTracker,
+        ) -> Result<
+            crate::session::workflow::tracker::WorkflowRunState,
+            xai_workflow::TaskQueueError,
+        >,
+    {
+        let (before_state, before_queue, result) = {
+            let mut tracker = self.params.tracker.lock();
+            let Some((before_state, before_queue)) =
+                tracker.task_mutation_snapshot(&self.params.run_id)
+            else {
+                return Err(HostError::Failed(
+                    "workflow run not found for task mutation".into(),
+                ));
+            };
+            let result = mutate(&mut tracker);
+            (before_state, before_queue, result)
+        };
+        let state = result.map_err(|error| HostError::Failed(error.to_string()))?;
+        let queue = self
+            .params
+            .tracker
+            .lock()
+            .task_queue(&self.params.run_id)
+            .ok_or_else(|| HostError::Failed("workflow run not found for task mutation".into()))?;
+        if queue == before_queue {
+            return Ok(queue);
+        }
+        self.params
+            .store
+            .set_task_queue(&self.params.run_id, queue.clone());
+        if let Err(error) = self.params.store.persist_now(&state) {
+            self.params.tracker.lock().restore_task_mutation(
+                &self.params.run_id,
+                before_state,
+                before_queue.clone(),
+            );
+            self.params
+                .store
+                .set_task_queue(&self.params.run_id, before_queue);
+            return Err(HostError::Failed(format!(
+                "workflow task state could not be persisted: {error}"
+            )));
+        }
+        self.params.notify.emit(
+            &state,
+            self.elapsed_ms(),
+            self.active_agents.load(Ordering::Relaxed),
+        );
+        Ok(queue)
     }
 
     fn budget_state(&self) -> BudgetState {
@@ -511,6 +609,10 @@ impl HostService {
                 agent_id: id.clone(),
                 label: explicit_label.unwrap_or_default(),
                 phase: opts.phase.clone(),
+                // `agent_started` stamps the current task while holding the
+                // tracker lock; do not acquire the same non-reentrant lock in
+                // the row initializer.
+                task_id: None,
                 model: opts.model.clone(),
                 state: "running".to_string(),
                 tokens_used: 0,
@@ -786,6 +888,11 @@ impl HostService {
     }
 
     fn reject_symlink(path: &Path, what: &str) -> Result<(), HostError> {
+        if let Err(error) = crate::session::workflow::store::reject_reparse_components(path) {
+            return Err(HostError::Failed(format!(
+                "{what} contains a reparse point: {error}"
+            )));
+        }
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => Err(HostError::Failed(format!(
                 "{what} must not be a symlink: {}",
@@ -865,16 +972,10 @@ impl HostService {
         let scratch_dir = self.params.scratch_dir.clone();
         let body = content.as_bytes().to_vec();
         tokio::task::spawn_blocking(move || {
-            use std::io::Write as _;
-            let mut tmp = tempfile::NamedTempFile::new_in(&scratch_dir)
-                .map_err(|e| HostError::Failed(format!("scratch temp file: {e}")))?;
             Self::reject_symlink(&scratch_dir, "scratch directory")?;
             Self::reject_symlink(&path, "scratch file")?;
-            tmp.write_all(&body)
-                .map_err(|e| HostError::Failed(format!("scratch write: {e}")))?;
-            tmp.persist(&path)
-                .map_err(|e| HostError::Failed(format!("scratch atomic persist: {}", e.error)))?;
-            Ok::<(), HostError>(())
+            crate::session::storage::write_bytes_atomic(&path, &body)
+                .map_err(|e| HostError::Failed(format!("scratch atomic persist: {e}")))
         })
         .await
         .map_err(|e| HostError::Failed(format!("scratch writer task failed: {e}")))??;
@@ -886,27 +987,15 @@ impl HostService {
         let _io = self.scratch_io.lock().await;
         Self::reject_symlink(&self.params.scratch_dir, "scratch directory")?;
         Self::reject_symlink(&path, "scratch file")?;
-        let meta = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|e| HostError::Failed(format!("scratch read metadata: {e}")))?;
-        if meta.file_type().is_symlink() {
-            return Err(HostError::Failed(
-                "scratch file must not be a symlink".into(),
-            ));
-        }
-        if !meta.is_file() {
-            return Err(HostError::Failed(
-                "scratch path is not a regular file".into(),
-            ));
-        }
-        if meta.len() > WORKFLOW_MAX_SCRATCH_FILE_BYTES as u64 {
-            return Err(HostError::Failed(format!(
-                "scratch file exceeds {WORKFLOW_MAX_SCRATCH_FILE_BYTES} byte read limit"
-            )));
-        }
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| HostError::Failed(format!("scratch read: {e}")))?;
+        let bytes = tokio::task::spawn_blocking(move || {
+            crate::session::workflow::store::read_bounded_nofollow(
+                &path,
+                WORKFLOW_MAX_SCRATCH_FILE_BYTES as u64,
+            )
+        })
+        .await
+        .map_err(|e| HostError::Failed(format!("scratch reader task failed: {e}")))?
+        .map_err(|e| HostError::Failed(format!("scratch read: {e}")))?;
         String::from_utf8(bytes)
             .map_err(|e| HostError::Failed(format!("scratch file is not UTF-8: {e}")))
     }

@@ -5,6 +5,7 @@ use crate::{Journal, WorkflowOutcome, WorkflowRunParams, extract_meta, run_workf
 pub struct ValidationReport {
     pub name: String,
     pub phases: usize,
+    pub tasks: usize,
     pub outcome_ok: bool,
     pub outcome_summary: String,
 }
@@ -46,10 +47,14 @@ pub fn validate_script_with_agent_budget(
 ) -> Result<ValidationReport, ValidationError> {
     let meta = extract_meta(script)?;
 
+    let task_count = meta.tasks.len();
+    let task_queue = crate::TaskQueueState::from_definitions(&meta.tasks)
+        .map_err(|error| ValidationError::Run(format!("tasks: {error}")))?;
     let (host_tx, mut host_rx) = tokio::sync::mpsc::unbounded_channel();
     let host = std::thread::spawn(move || {
         use WorkflowHostRequest as R;
         let mut agent_calls = 0u64;
+        let mut task_queue = task_queue;
         while let Some(req) = host_rx.blocking_recv() {
             match req {
                 R::ReserveAgentCalls { count, reply } => {
@@ -109,6 +114,38 @@ pub fn validate_script_with_agent_budget(
                 R::GitDiffSince { reply, .. } => {
                     let _ = reply.send(Ok("".into()));
                 }
+                R::TaskStart { task_id, reply } => {
+                    let _ = reply.send(
+                        task_queue
+                            .start(&task_id)
+                            .map_err(|error| crate::HostError::Failed(error.to_string())),
+                    );
+                }
+                R::TaskComplete {
+                    task_id,
+                    result_summary,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        task_queue
+                            .complete(&task_id, result_summary)
+                            .map_err(|error| crate::HostError::Failed(error.to_string())),
+                    );
+                }
+                R::TaskFail {
+                    task_id,
+                    result_summary,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        task_queue
+                            .fail(&task_id, result_summary)
+                            .map_err(|error| crate::HostError::Failed(error.to_string())),
+                    );
+                }
+                R::TaskQueue { reply } => {
+                    let _ = reply.send(Ok(task_queue.clone()));
+                }
                 R::Phase { .. } | R::Log { .. } | R::Telemetry { .. } => {}
             }
         }
@@ -142,6 +179,7 @@ pub fn validate_script_with_agent_budget(
     Ok(ValidationReport {
         name: meta.name,
         phases: meta.phases.len(),
+        tasks: task_count,
         outcome_ok,
         outcome_summary,
     })

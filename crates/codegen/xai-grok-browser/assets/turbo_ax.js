@@ -1,6 +1,11 @@
 (function () {
   var SEL =
-    "a[href],button,input,textarea,select,[role=button],[role=link],[role=textbox],[contenteditable=true],h1,h2,h3,h4,h5,h6,[role=heading]";
+    "a[href],button,input,textarea,select,[contenteditable=true]," +
+    "h1,h2,h3,h4,h5,h6,[role=heading]," +
+    "[role=button],[role=link],[role=textbox],[role=tab],[role=menuitem]," +
+    "[role=option],[role=listbox],[role=combobox],[role=switch],[role=checkbox]," +
+    "[role=radio],[role=status],[role=alert],[role=dialog],[role=alertdialog]," +
+    "dialog,[aria-modal=true]";
   var prev = window.__turboAx;
   // Survive re-injection: keep the epoch monotonic so a uid minted before a
   // re-inject can never silently resolve to a different element after it.
@@ -17,6 +22,32 @@
       el.getAttribute("role") === "heading"
     );
   }
+  function roleName(el) {
+    return String(el.getAttribute("role") || "").toLowerCase();
+  }
+  function isOverlay(el) {
+    var r = roleName(el);
+    if (r === "dialog" || r === "alertdialog") return true;
+    if (el.tagName === "DIALOG") return true;
+    if (el.getAttribute("aria-modal") === "true") return true;
+    return false;
+  }
+  function isStatus(el) {
+    var r = roleName(el);
+    return r === "status" || r === "alert";
+  }
+  function headingPriority(el) {
+    if (!isHeading(el)) return false;
+    var n = nameOf(el).toLowerCase();
+    return (
+      n === "experience" ||
+      n === "about" ||
+      n === "education" ||
+      n === "featured" ||
+      n.indexOf("experience") === 0 ||
+      n.indexOf("about") === 0
+    );
+  }
   function skip(el) {
     if (el.tagName === "INPUT" && String(el.type).toLowerCase() === "hidden") return true;
     // Not rendered: no boxes at all (display:none, detached, empty inline).
@@ -27,14 +58,22 @@
     if (st && (st.visibility === "hidden" || st.visibility === "collapse")) return true;
     return false;
   }
-  // Document order across the light DOM and every open shadow root. One pass:
-  // a shadow host can itself be a candidate, so test and recurse together.
+  // Document order across the light DOM, open shadow roots, and same-origin
+  // iframes. Closed shadows and cross-origin frames stay unreachable here.
   function candidates(root, out) {
     var all = root.querySelectorAll("*");
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
       if (el.matches(SEL) && !skip(el)) out.push(el);
       if (el.shadowRoot) candidates(el.shadowRoot, out);
+      if (el.tagName === "IFRAME" || el.tagName === "FRAME") {
+        try {
+          var doc = el.contentDocument;
+          if (doc && doc.documentElement) candidates(doc, out);
+        } catch (e) {
+          /* cross-origin */
+        }
+      }
     }
     return out;
   }
@@ -44,15 +83,25 @@
     var vw = window.innerWidth || 0;
     return r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
   }
-  // Over cap, drop the least useful first: offscreen headings, then headings,
-  // then offscreen interactives. Document order is preserved within each tier.
+  // Over cap, drop the least useful first. Overlay/status/Experience headings
+  // stay even when Activity/feed nodes would otherwise consume the cap.
   function applyCap(els, cap) {
     if (els.length <= cap) return els;
-    var tiers = [[], [], [], []];
+    var tiers = [[], [], [], [], [], []];
     for (var i = 0; i < els.length; i++) {
-      var head = isHeading(els[i]);
-      var vis = inViewport(els[i]);
-      tiers[head ? (vis ? 2 : 3) : vis ? 0 : 1].push(els[i]);
+      var el = els[i];
+      var vis = inViewport(el);
+      var overlay = isOverlay(el) || isCloseControl(el);
+      var priority = headingPriority(el) || isStatus(el);
+      var head = isHeading(el);
+      var tier;
+      if (overlay) tier = 0;
+      else if (priority && vis) tier = 1;
+      else if (!head && vis) tier = 2;
+      else if (!head) tier = 3;
+      else if (vis) tier = 4;
+      else tier = 5;
+      tiers[tier].push(el);
     }
     var keep = [];
     for (var t = 0; t < tiers.length && keep.length < cap; t++) {
@@ -64,6 +113,12 @@
       return order.get(a) - order.get(b);
     });
     return keep;
+  }
+  function isCloseControl(el) {
+    var n = nameOf(el).toLowerCase();
+    if (n === "close" || n === "dismiss" || n.indexOf("close your") === 0) return true;
+    if (n === "close your conversation" || n.indexOf("close this") === 0) return true;
+    return false;
   }
   function tag(cap) {
     epoch += 1;
@@ -97,13 +152,47 @@
       return "textbox";
     }
     if (el.isContentEditable) return "textbox";
+    if (el.tagName === "DIALOG") return "dialog";
     return "generic";
+  }
+  function labelledBy(el) {
+    var ids = el.getAttribute("aria-labelledby");
+    if (!ids) return "";
+    var parts = ids.split(/\s+/);
+    var out = [];
+    var doc = el.ownerDocument || document;
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      var n = doc.getElementById(parts[i]);
+      if (n) out.push(((n.innerText || n.textContent || "") + "").replace(/\s+/g, " ").trim());
+    }
+    return out.filter(Boolean).join(" ");
+  }
+  function labelFor(el) {
+    if (el.labels && el.labels.length) {
+      return ((el.labels[0].innerText || el.labels[0].textContent || "") + "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+    if (el.id) {
+      try {
+        var lab = (el.ownerDocument || document).querySelector(
+          'label[for="' + CSS.escape(el.id) + '"]'
+        );
+        if (lab) return ((lab.innerText || lab.textContent || "") + "").replace(/\s+/g, " ").trim();
+      } catch (e) {
+        /* CSS.escape unavailable */
+      }
+    }
+    return "";
   }
   function nameOf(el) {
     var s =
       el.getAttribute("aria-label") ||
+      labelledBy(el) ||
       el.getAttribute("alt") ||
       el.getAttribute("title") ||
+      labelFor(el) ||
       el.getAttribute("placeholder") ||
       el.getAttribute("name") ||
       "";
@@ -192,6 +281,96 @@
     el.click();
     return { ok: true, epoch: epoch };
   }
+  function selectAll(el) {
+    try {
+      if (typeof el.select === "function") {
+        el.select();
+        return;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    if (!el.isContentEditable) return;
+    var doc = el.ownerDocument || document;
+    var sel = (doc.defaultView || window).getSelection();
+    if (!sel) return;
+    var range = doc.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  function fillContentEditable(el, value) {
+    selectAll(el);
+    var inserted = false;
+    try {
+      inserted = document.execCommand("insertText", false, value);
+    } catch (e) {
+      inserted = false;
+    }
+    if (!inserted) {
+      try {
+        var before = new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          inputType: "insertText",
+          data: value,
+        });
+        el.dispatchEvent(before);
+        if (!before.defaultPrevented) {
+          el.textContent = value;
+        }
+      } catch (e2) {
+        el.textContent = value;
+      }
+      try {
+        el.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            cancelable: false,
+            composed: true,
+            inputType: "insertText",
+            data: value,
+          })
+        );
+      } catch (e3) {
+        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      }
+    }
+    // Lexical/Ember often only enable Send after a paste-shaped clipboard event.
+    try {
+      var dt = new DataTransfer();
+      dt.setData("text/plain", value);
+      el.dispatchEvent(
+        new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt })
+      );
+    } catch (e4) {
+      /* ClipboardEvent may reject constructed clipboardData */
+    }
+  }
+  function fillNativeValue(el, value) {
+    // React/Vue install their own `value` setter and track the last value they
+    // saw. A plain `el.value = v` leaves that tracker stale, so the framework
+    // dedupes the synthetic `input` and onChange never fires.
+    var proto = Object.getPrototypeOf(el);
+    var desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+    try {
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: false,
+          composed: true,
+          inputType: "insertText",
+          data: value,
+        })
+      );
+    } catch (e) {
+      el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
   function fill(uid, value) {
     var r = resolve(uid);
     if (!r.ok) return r;
@@ -199,31 +378,108 @@
     if (el.disabled || el.readOnly) return { ok: false, error: "element_not_editable" };
     if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "nearest" });
     el.focus();
-    if ("value" in el) {
-      // React/Vue install their own `value` setter and track the last value they
-      // saw. A plain `el.value = v` leaves that tracker stale, so the framework
-      // dedupes the synthetic `input` and onChange never fires.
-      var proto = Object.getPrototypeOf(el);
-      var desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
-      if (desc && desc.set) desc.set.call(el, value);
-      else el.value = value;
-    } else if (el.isContentEditable) {
-      el.textContent = value;
+    if (el.isContentEditable) {
+      fillContentEditable(el, value);
+    } else if ("value" in el) {
+      fillNativeValue(el, value);
     } else {
       return { ok: false, error: "element_not_editable" };
     }
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
     el.dispatchEvent(new FocusEvent("blur", { bubbles: false }));
     return { ok: true, epoch: epoch };
+  }
+  function hover(uid) {
+    var r = resolve(uid);
+    if (!r.ok) return r;
+    var el = r.el;
+    if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "nearest" });
+    var rect = el.getBoundingClientRect();
+    var x = rect.left + rect.width / 2;
+    var y = rect.top + rect.height / 2;
+    var opts = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y };
+    el.dispatchEvent(new MouseEvent("mouseover", opts));
+    el.dispatchEvent(new MouseEvent("mouseenter", opts));
+    el.dispatchEvent(new MouseEvent("mousemove", opts));
+    return { ok: true, epoch: epoch };
+  }
+  function selectOption(uid, value) {
+    var r = resolve(uid);
+    if (!r.ok) return r;
+    var el = r.el;
+    if (el.tagName !== "SELECT") return { ok: false, error: "not_select" };
+    var wanted = String(value);
+    var found = false;
+    for (var i = 0; i < el.options.length; i++) {
+      var opt = el.options[i];
+      if (opt.value === wanted || opt.text === wanted || opt.label === wanted) {
+        el.selectedIndex = i;
+        found = true;
+        break;
+      }
+    }
+    if (!found) return { ok: false, error: "unknown_option" };
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true, epoch: epoch, value: el.value };
+  }
+  function scrollToUid(uid) {
+    var r = resolve(uid);
+    if (!r.ok) return r;
+    if (r.el.scrollIntoView) r.el.scrollIntoView({ block: "center", inline: "nearest" });
+    return { ok: true, epoch: epoch };
+  }
+  function scrollByDelta(dx, dy) {
+    window.scrollBy(dx || 0, dy || 0);
+    return { ok: true, x: window.scrollX, y: window.scrollY };
+  }
+  function pressKey(key, uid) {
+    var target = document.activeElement || document.body;
+    if (uid) {
+      var r = resolve(uid);
+      if (!r.ok) return r;
+      target = r.el;
+      if (target.focus) target.focus();
+    }
+    var opts = { key: key, code: key, bubbles: true, cancelable: true, composed: true };
+    target.dispatchEvent(new KeyboardEvent("keydown", opts));
+    target.dispatchEvent(new KeyboardEvent("keypress", opts));
+    if (key === "Enter" && target.form && typeof target.form.requestSubmit === "function") {
+      /* don't auto-submit; the page handler decides */
+    }
+    target.dispatchEvent(new KeyboardEvent("keyup", opts));
+    return { ok: true, epoch: epoch };
+  }
+  function markFileInput(uid) {
+    var r = resolve(uid);
+    if (!r.ok) return r;
+    var el = r.el;
+    if (el.tagName !== "INPUT" || String(el.type).toLowerCase() !== "file") {
+      return { ok: false, error: "not_file_input" };
+    }
+    el.setAttribute("data-turbo-file-target", "1");
+    return { ok: true };
+  }
+  function pageText() {
+    var main =
+      document.querySelector("main, [role=main], article, [role=article]") || document.body;
+    if (!main) return "";
+    return ((main.innerText || main.textContent || "") + "").replace(/\s+/g, " ").trim().slice(0, 4000);
+  }
+  function pageContains(text) {
+    if (!text) return true;
+    var hay = ((document.body && (document.body.innerText || document.body.textContent)) || "")
+      .toLowerCase();
+    return hay.indexOf(String(text).toLowerCase()) >= 0;
   }
   function collect(cap) {
     cap = cap || 200;
     var els = tag(cap);
     var out = [];
     var ae = document.activeElement;
+    var overlay = false;
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
+      if (isOverlay(el)) overlay = true;
       out.push({
         // The uid we just minted, not a read-back of the page-writable
         // attribute, so a page cannot influence what the snapshot reports.
@@ -234,7 +490,7 @@
         focused: el === ae,
       });
     }
-    return { epoch: epoch, nodes: out };
+    return { epoch: epoch, nodes: out, overlay: overlay };
   }
   var api = {
     tag: tag,
@@ -242,6 +498,14 @@
     lookup: lookup,
     click: click,
     fill: fill,
+    hover: hover,
+    select: selectOption,
+    scrollTo: scrollToUid,
+    scrollBy: scrollByDelta,
+    pressKey: pressKey,
+    markFileInput: markFileInput,
+    pageText: pageText,
+    pageContains: pageContains,
     // Handed to the next injection so uid identity survives re-inject. Only
     // reachable from the isolated world; `window` here is not the page's.
     registry: registry,

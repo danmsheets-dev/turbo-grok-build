@@ -25,7 +25,8 @@ use tracing::warn;
 use xai_tool_protocol::{
     JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, Method,
     ResponseOutcome, SessionId, ToolCallId, ToolCallParams, ToolCallProgressFrame, ToolCallResult,
-    ToolCapabilities, ToolErrorWire, ToolId, ToolOutputWire, UserId, WORKSPACE_UNAVAILABLE_SUBCODE,
+    ToolCallerRole, ToolCapabilities, ToolErrorWire, ToolId, ToolOutputWire, UserId,
+    WORKSPACE_UNAVAILABLE_SUBCODE,
 };
 use xai_tool_runtime::{
     BehaviorVersion, ContentBlock, Cwd, ListToolsContext, ToolCallContext,
@@ -237,6 +238,7 @@ async fn dispatch_via_connection(
         cwd,
         // The ctx `TraceContext` extension is receive-side state.
         trace_context: None,
+        caller_role: ctx.extensions.get::<ToolCallerRole>().map(|role| *role),
     };
 
     let request = JsonRpcRequest {

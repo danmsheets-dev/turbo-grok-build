@@ -2503,8 +2503,16 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         if let Some(warning) = launch_yolo.blocked_warning {
             eprintln!("grok: {warning}");
         }
-        let json_schema = args
-            .json_schema
+        let json_schema_input = match args.json_schema_file.as_deref() {
+            Some(path) => Some(std::fs::read_to_string(path).map_err(|error| {
+                anyhow::anyhow!(
+                    "--json-schema-file {}: cannot read UTF-8 schema: {error}",
+                    path.display()
+                )
+            })?),
+            None => args.json_schema.clone(),
+        };
+        let json_schema = json_schema_input
             .as_deref()
             .map(xai_grok_pager::headless::parse_json_schema)
             .transpose()?;
@@ -2966,7 +2974,12 @@ mod tests {
         let payload = version_json_payload();
         assert_eq!(payload["cliFamily"], "grok-build");
         assert_eq!(payload["agentCompatible"], true);
-        assert!(payload["currentVersion"].as_str().unwrap().contains("1.0.0"));
+        assert!(
+            payload["currentVersion"]
+                .as_str()
+                .unwrap()
+                .contains("1.0.0")
+        );
         assert_eq!(payload["features"]["confine"], true);
         assert_eq!(payload["features"]["headless"], true);
         let prefixes = payload["permissionToolPrefixes"].as_array().unwrap();

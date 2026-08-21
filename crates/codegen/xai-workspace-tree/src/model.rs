@@ -415,4 +415,3 @@ pub fn to_posix_rel(path: &std::path::Path) -> String {
         .collect::<Vec<_>>()
         .join("/")
 }
-

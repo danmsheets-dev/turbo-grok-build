@@ -32,8 +32,9 @@ use url::Url;
 use xai_tool_protocol::{
     ConnectionKind, HookEvent, HookFrame, HookReplyFrame, JsonRpcError, JsonRpcId,
     JsonRpcNotification, JsonRpcResponse, JsonRpcVersion, Method, ResponseOutcome, SessionId,
-    ToolCallId, ToolCallParams, ToolCallProgressFrame, ToolCallResult, ToolErrorWire, ToolId,
-    ToolOutputWire, ToolServerEvictParams, error_codes,
+    ToolCallId, ToolCallParams, ToolCallProgressFrame, ToolCallResult, ToolCallerRole,
+    ToolCapabilities, ToolErrorWire, ToolId, ToolOutputWire, ToolScope, ToolServerEvictParams,
+    error_codes,
 };
 use xai_tool_runtime::{
     BehaviorVersion, Cancellation, Cwd, ToolCallContext, ToolError, ToolProgress, ToolStream,
@@ -168,6 +169,11 @@ pub trait ToolServerHandler: Send + Sync + 'static {
     /// schema independent of the description.
     fn input_schema(&self) -> Option<Value> {
         None
+    }
+
+    /// Per-tool capabilities used for server-side authorization and admission.
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities::default()
     }
 
     /// Execute one tool call.
@@ -2111,6 +2117,22 @@ async fn execute_call(
         .await;
         return;
     };
+
+    let scope = handler.capabilities().tool_scope.unwrap_or(ToolScope::Read);
+    if scope == ToolScope::Write && params.caller_role != Some(ToolCallerRole::Leader) {
+        send_error(
+            connection,
+            json_id,
+            session_id.clone(),
+            -32003,
+            &format!(
+                "tool {} requires leader role for write scope",
+                params.tool_id
+            ),
+        )
+        .await;
+        return;
+    }
 
     // Admission held for the handler's lifetime; overload -> -32016 reply.
     let _guard = match admission.admit(session_id).await {

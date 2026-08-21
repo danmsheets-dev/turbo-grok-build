@@ -1151,8 +1151,7 @@ impl AgentView {
                             return InputOutcome::Changed;
                         }
                     }
-                    KeyCode::BackTab
-                    | KeyCode::Tab
+                    KeyCode::BackTab | KeyCode::Tab
                         if key.modifiers.contains(KeyModifiers::SHIFT) =>
                     {
                         if self.game_mode.focus_prev_desk() {

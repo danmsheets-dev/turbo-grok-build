@@ -34,27 +34,27 @@ mod store;
 mod walk;
 
 pub use config::{
-    default_hard_exclude_exts, default_hard_exclude_names, effective_hard_exclude_names,
     CollapseConfig, InjectConfig, InjectMode, WalkConfig, WorkspaceTreeConfig,
+    default_hard_exclude_exts, default_hard_exclude_names, effective_hard_exclude_names,
 };
 pub use error::{Error, Result};
 pub use identity::{
-    canonicalize_root, default_store_root, path_to_identity_key, resolve_grok_home,
-    workspace_id_for_canonical, workspace_id_for_path, WORKSPACE_ID_PREFIX,
+    WORKSPACE_ID_PREFIX, canonicalize_root, default_store_root, path_to_identity_key,
+    resolve_grok_home, workspace_id_for_canonical, workspace_id_for_path,
 };
 pub use inject::{inject_building_notice, inject_card, inject_disabled_notice};
 pub use model::{
-    detect_workspace_profile, extension_of, role_tags_for, to_posix_rel, BuildInfo, Freshness,
-    FreshnessState, GitInfo, Meta, NodeKind, Stats, TreeIndex, TreeNode, TreePayload,
-    SCHEMA_VERSION,
+    BuildInfo, Freshness, FreshnessState, GitInfo, Meta, NodeKind, SCHEMA_VERSION, Stats,
+    TreeIndex, TreeNode, TreePayload, detect_workspace_profile, extension_of, role_tags_for,
+    to_posix_rel,
 };
 pub use query::{
-    find_node, list, resolve_path, search, summary, ListEntry, ListResult, QueryMeta, ResolveHit,
-    ResolveResult, SearchHit, SearchResult, SummaryResult,
+    ListEntry, ListResult, QueryMeta, ResolveHit, ResolveResult, SearchHit, SearchResult,
+    SummaryResult, find_node, list, resolve_path, search, summary,
 };
 pub use store::{
-    build_and_save, dir_size_bytes, load_index, load_index_for_root, load_index_from_dir,
-    load_or_build, prune_store, save_index, store_disk_usage, store_root, workspace_store_dir,
-    write_atomically, PruneReport,
+    PruneReport, build_and_save, dir_size_bytes, load_index, load_index_for_root,
+    load_index_from_dir, load_or_build, prune_store, save_index, store_disk_usage, store_root,
+    workspace_store_dir, write_atomically,
 };
 pub use walk::{build_index, path_matches_glob, reassess_freshness};

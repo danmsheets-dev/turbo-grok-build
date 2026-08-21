@@ -456,6 +456,104 @@ fn agent_opts_from_map(prompt: Option<&str>, map: rhai::Map) -> ScriptResult<Age
     Ok(opts)
 }
 
+fn task_result_summary(value: Dynamic) -> Option<String> {
+    let value = dynamic_to_value(value);
+    if value.is_null() {
+        return None;
+    }
+    let summary = match value {
+        serde_json::Value::String(value) => value,
+        value => value.to_string(),
+    };
+    let mut end = summary.len().min(crate::MAX_TASK_RESULT_SUMMARY_LEN);
+    while end > 0 && !summary.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(summary[..end].to_owned())
+}
+
+fn task_call(
+    ctx: &Rc<RefCell<Ctx>>,
+    kind: &'static str,
+    payload: serde_json::Value,
+    build: impl FnOnce(oneshot::Sender<Result<crate::TaskQueueState, HostError>>) -> WorkflowHostRequest,
+) -> ScriptResult<Dynamic> {
+    // Task mutations are persisted by the host tracker rather than journaled as
+    // result-bearing calls. This lets a resumed script re-issue idempotent task
+    // transitions while the durable task queue remains the source of truth.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    ctx.borrow()
+        .host_tx
+        .send(build(reply_tx))
+        .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
+    let queue = match reply_rx
+        .blocking_recv()
+        .map_err(|_| terminated(ControlToken::Fatal("workflow host dropped reply".into())))?
+    {
+        Ok(queue) => queue,
+        Err(HostError::Cancelled) => return Err(terminated(ControlToken::Cancelled)),
+        Err(HostError::BudgetExceeded) => {
+            return Err(terminated(ControlToken::Budget(
+                "workflow agent budget exceeded".into(),
+            )));
+        }
+        Err(HostError::AgentCallQuotaExceeded { requested, maximum }) => {
+            return Err(terminated(ControlToken::Budget(format!(
+                "workflow agent budget exceeded: requested {requested}, maximum {maximum}"
+            ))));
+        }
+        Err(HostError::Unsupported(message) | HostError::Failed(message)) => {
+            return Err(runtime_error(format!("{kind}: {message}")));
+        }
+    };
+    if kind == "task_fail"
+        && payload
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|task_id| {
+                queue
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .map(|task| task.status == crate::TaskStatus::Pending)
+            })
+            .unwrap_or(false)
+    {
+        let mut ctx_mut = ctx.borrow_mut();
+        if ctx_mut
+            .journal
+            .prune_trailing_failed_agent()
+            .map_err(journal_fatal)?
+        {
+            ctx_mut.seq = ctx_mut.journal.len() as u64;
+        }
+    }
+    if kind == "task_fail"
+        && payload
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|task_id| {
+                queue
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .filter(|task| task.status == crate::TaskStatus::Failed)
+                    .map(|task| {
+                        format!(
+                            "task {task_id} exhausted all {} attempts",
+                            task.max_attempts
+                        )
+                    })
+            })
+            .is_some()
+    {
+        return Err(runtime_error(
+            "workflow task failed after exhausting its retry budget",
+        ));
+    }
+    value_to_dynamic(&serde_json::to_value(queue).unwrap_or(serde_json::Value::Null))
+}
+
 fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
     let c = ctx.clone();
     engine.register_fn("agent", move |prompt: &str| -> ScriptResult<Dynamic> {
@@ -590,9 +688,19 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                         reply_rx,
                     } => {
                         let value = match reply_rx.blocking_recv() {
-                            Ok(Ok(result)) => {
-                                serde_json::to_value(result).unwrap_or(serde_json::Value::Null)
-                            }
+                            Ok(Ok(result)) => match serde_json::to_value(result) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    terminal_error.get_or_insert_with(|| {
+                                        runtime_error(format!(
+                                            "parallel agent result conversion failed: {error}"
+                                        ))
+                                    });
+                                    host_error_sentinel(&format!(
+                                        "parallel agent result conversion failed: {error}"
+                                    ))
+                                }
+                            },
                             Ok(Err(HostError::BudgetExceeded)) => {
                                 terminal_kind.get_or_insert_with(|| TERMINAL_BUDGET.to_string());
                                 resumable_terminal = true;
@@ -608,11 +716,19 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                                     .get_or_insert_with(|| TERMINAL_DROPPED_REPLY.to_string());
                                 host_terminal_sentinel(TERMINAL_DROPPED_REPLY)
                             }
+                            Ok(Err(HostError::AgentCallQuotaExceeded { requested, maximum })) => {
+                                terminal_kind.get_or_insert_with(|| TERMINAL_BUDGET.to_string());
+                                resumable_terminal = true;
+                                let _ = (requested, maximum);
+                                host_terminal_sentinel(TERMINAL_BUDGET)
+                            }
                             Ok(Err(
-                                HostError::AgentCallQuotaExceeded { .. }
-                                | HostError::Unsupported(_)
-                                | HostError::Failed(_),
-                            )) => serde_json::Value::Null,
+                                HostError::Unsupported(message) | HostError::Failed(message),
+                            )) => {
+                                terminal_error
+                                    .get_or_insert_with(|| runtime_error(message.clone()));
+                                host_error_sentinel(&message)
+                            }
                         };
                         resolved.push((Some((seq, hash)), value));
                     }
@@ -703,6 +819,98 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
             Ok(())
         },
     );
+
+    let c = ctx.clone();
+    engine.register_fn(
+        "task_start",
+        move |task_id: &str| -> ScriptResult<Dynamic> {
+            let task_id = task_id.to_string();
+            task_call(
+                &c,
+                "task_start",
+                serde_json::json!({"task_id": task_id}),
+                |reply| WorkflowHostRequest::TaskStart { task_id, reply },
+            )
+        },
+    );
+
+    let c = ctx.clone();
+    engine.register_fn(
+        "task_complete",
+        move |task_id: &str| -> ScriptResult<Dynamic> {
+            let task_id = task_id.to_string();
+            task_call(
+                &c,
+                "task_complete",
+                serde_json::json!({"task_id": task_id, "result_summary": null}),
+                |reply| WorkflowHostRequest::TaskComplete {
+                    task_id,
+                    result_summary: None,
+                    reply,
+                },
+            )
+        },
+    );
+
+    let c = ctx.clone();
+    engine.register_fn(
+        "task_complete",
+        move |task_id: &str, result: Dynamic| -> ScriptResult<Dynamic> {
+            let task_id = task_id.to_string();
+            let result_summary = task_result_summary(result);
+            task_call(
+                &c,
+                "task_complete",
+                serde_json::json!({"task_id": task_id, "result_summary": result_summary}),
+                |reply| WorkflowHostRequest::TaskComplete {
+                    task_id,
+                    result_summary,
+                    reply,
+                },
+            )
+        },
+    );
+
+    let c = ctx.clone();
+    engine.register_fn("task_fail", move |task_id: &str| -> ScriptResult<Dynamic> {
+        let task_id = task_id.to_string();
+        task_call(
+            &c,
+            "task_fail",
+            serde_json::json!({"task_id": task_id, "result_summary": null}),
+            |reply| WorkflowHostRequest::TaskFail {
+                task_id,
+                result_summary: None,
+                reply,
+            },
+        )
+    });
+
+    let c = ctx.clone();
+    engine.register_fn(
+        "task_fail",
+        move |task_id: &str, result: Dynamic| -> ScriptResult<Dynamic> {
+            let task_id = task_id.to_string();
+            let result_summary = task_result_summary(result);
+            task_call(
+                &c,
+                "task_fail",
+                serde_json::json!({"task_id": task_id, "result_summary": result_summary}),
+                |reply| WorkflowHostRequest::TaskFail {
+                    task_id,
+                    result_summary,
+                    reply,
+                },
+            )
+        },
+    );
+
+    let c = ctx.clone();
+    engine.register_fn("task_queue", move || -> ScriptResult<Dynamic> {
+        task_call(&c, "task_queue", serde_json::Value::Null, |reply| {
+            WorkflowHostRequest::TaskQueue { reply }
+        })
+    });
 
     engine.register_fn("complete", move |value: Dynamic| -> ScriptResult<()> {
         Err(terminated(ControlToken::Complete(dynamic_to_value(value))))
@@ -1004,6 +1212,65 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn task_dsl_drives_a_persisted_style_queue_without_journaling_transitions() {
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::TaskQueueState::from_definitions(&[crate::TaskDefinition {
+                id: "one".into(),
+                description: "Run one".into(),
+                depends_on: Vec::new(),
+                max_attempts: 1,
+            }])
+            .unwrap(),
+        ));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host_queue = queue.clone();
+        let host = spawn_mock_host(rx, move |req| {
+            let reply = match req {
+                WorkflowHostRequest::TaskStart { task_id, reply } => {
+                    let result = host_queue
+                        .lock()
+                        .unwrap()
+                        .start(&task_id)
+                        .map_err(|error| HostError::Failed(error.to_string()));
+                    let _ = reply.send(result);
+                    return;
+                }
+                WorkflowHostRequest::TaskComplete {
+                    task_id,
+                    result_summary,
+                    reply,
+                } => {
+                    let result = host_queue
+                        .lock()
+                        .unwrap()
+                        .complete(&task_id, result_summary)
+                        .map_err(|error| HostError::Failed(error.to_string()));
+                    let _ = reply.send(result);
+                    return;
+                }
+                WorkflowHostRequest::TaskFail { reply, .. }
+                | WorkflowHostRequest::TaskQueue { reply } => reply,
+                other => panic!("unexpected request: {other:?}"),
+            };
+            let _ = reply.send(Err(HostError::Failed("unexpected task request".into())));
+        });
+        let outcome = run_workflow(params(
+            r#"
+            let meta = #{ name: "task-dsl", description: "d" };
+            task_start("one");
+            task_complete("one", "done");
+            complete("ok");
+            "#,
+            Journal::new(None),
+            tx,
+        ));
+        drop(host);
+        assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
+        let queue = queue.lock().unwrap();
+        assert_eq!(queue.tasks[0].status, crate::TaskStatus::Completed);
     }
 
     #[test]
@@ -1539,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_journals_soft_failure_null_and_later_success() {
+    fn parallel_journals_failure_and_later_success_for_deterministic_replay() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
         let (tx, rx) = mpsc::unbounded_channel();
@@ -1561,13 +1828,19 @@ mod tests {
         "#;
         let outcome = run_workflow(params(script, Journal::new(Some(journal_path.clone())), tx));
         drop(host);
-        assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
+        assert!(matches!(
+            outcome,
+            WorkflowOutcome::Failed { ref error } if error.contains("boom")
+        ));
         let journal = Journal::load(journal_path).unwrap();
         assert_eq!(journal.len(), 2);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let replay = run_workflow(params(script, journal, tx));
-        assert!(matches!(replay, WorkflowOutcome::Completed { .. }));
+        assert!(matches!(
+            replay,
+            WorkflowOutcome::Failed { ref error } if error.contains("boom")
+        ));
         assert!(
             rx.try_recv().is_err(),
             "dense soft-failure replay must not reexecute either sibling"
@@ -1613,7 +1886,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_preserves_order_and_nulls_failures() {
+    fn parallel_propagates_failures_without_false_success() {
         let (tx, rx) = mpsc::unbounded_channel();
         let host = spawn_mock_host(rx, |req| {
             if let WorkflowHostRequest::SpawnAgent { opts, reply } = req {
@@ -1627,24 +1900,21 @@ mod tests {
         let outcome = run_workflow(params(
             r#"
             let meta = #{ name: "t", description: "d" };
-            let results = parallel([
+            parallel([
                 #{ prompt: "a" },
                 #{ prompt: "fail-b" },
                 #{ prompt: "c" },
             ]);
-            let summary = results.map(|r| if r == () { "null" } else { r.output });
-            complete(summary);
+            complete("unreachable");
             "#,
             Journal::new(None),
             tx,
         ));
         drop(host);
-        match outcome {
-            WorkflowOutcome::Completed { result } => {
-                assert_eq!(result, serde_json::json!(["ok:a", "null", "ok:c"]));
-            }
-            other => panic!("expected Completed, got {other:?}"),
-        }
+        assert!(matches!(
+            outcome,
+            WorkflowOutcome::Failed { ref error } if error.contains("boom")
+        ));
     }
 
     #[test]

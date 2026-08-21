@@ -689,8 +689,7 @@ mod tests {
 
         // Single Add → Edit(path)
         let add = ToolInput::ApplyPatch(ApplyPatchInput {
-            patch: "*** Begin Patch\n*** Add File: src/new.rs\n+fn x() {}\n*** End Patch\n"
-                .into(),
+            patch: "*** Begin Patch\n*** Add File: src/new.rs\n+fn x() {}\n*** End Patch\n".into(),
         });
         match AccessKind::from(&add) {
             AccessKind::Edit(p) => assert_eq!(p, "src/new.rs"),

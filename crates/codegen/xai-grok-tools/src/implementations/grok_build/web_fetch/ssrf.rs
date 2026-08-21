@@ -97,8 +97,16 @@ fn is_non_public_ipv6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
-        || ipv6_in_prefix(ip, [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 32)
-        || ipv6_in_prefix(ip, [0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 64)
+        || ipv6_in_prefix(
+            ip,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            32,
+        )
+        || ipv6_in_prefix(
+            ip,
+            [0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            64,
+        )
 }
 
 fn ipv6_in_prefix(ip: Ipv6Addr, base: [u8; 16], prefix_bits: u8) -> bool {

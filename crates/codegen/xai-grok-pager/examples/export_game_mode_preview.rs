@@ -14,13 +14,7 @@ use xai_grok_pager::views::game_mode::{
     load_office_background, scale_bg_to_cells,
 };
 
-fn snap(
-    id: &str,
-    label: &str,
-    ty: &str,
-    running: bool,
-    activity: &str,
-) -> DeskAgentSnapshot {
+fn snap(id: &str, label: &str, ty: &str, running: bool, activity: &str) -> DeskAgentSnapshot {
     DeskAgentSnapshot {
         child_session_id: id.into(),
         label: label.into(),
@@ -68,8 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let frame = compose_cell_frame(&bg_scaled, &state, state.tick);
     let png = encode_png(&frame)?;
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/game-mode-preview.png");
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/game-mode-preview.png");
     let out = out.canonicalize().unwrap_or(out);
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -78,6 +71,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = PathBuf::from("target/game-mode-preview.png");
     std::fs::create_dir_all("target")?;
     std::fs::write(&out, &png)?;
-    println!("wrote {} ({} bytes, {}x{})", out.display(), png.len(), frame.width(), frame.height());
+    println!(
+        "wrote {} ({} bytes, {}x{})",
+        out.display(),
+        png.len(),
+        frame.width(),
+        frame.height()
+    );
     Ok(())
 }

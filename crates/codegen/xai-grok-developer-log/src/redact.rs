@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::schema::{Evidence, Incident, Repro, ReportRequest};
+use crate::schema::{Evidence, Incident, ReportRequest, Repro};
 
 /// Redact secrets and user home paths in a free-form string.
 pub fn redact_text(input: &str) -> String {

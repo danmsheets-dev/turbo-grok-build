@@ -510,10 +510,7 @@ async fn provider_args_run_without_a_shell() {
     );
     let tok = provider.ensure_fresh_token(None).await.rotated();
     // `cmd /C echo` may append CRLF; trim for comparison.
-    assert_eq!(
-        tok.as_deref().map(str::trim),
-        Some("tok-$HOME;42"),
-    );
+    assert_eq!(tok.as_deref().map(str::trim), Some("tok-$HOME;42"),);
 }
 
 #[tokio::test]

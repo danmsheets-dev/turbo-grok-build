@@ -47,13 +47,7 @@ impl ConfinedFs {
         let path_s = path.display().to_string();
         let canon = crate::types::resources::canonicalize_for_permission(path);
         let resolved = canon.display.to_string_lossy().into_owned();
-        emit_confine_violation(
-            op,
-            &path_s,
-            &resolved,
-            &root_s,
-            "fs-write-chokepoint",
-        );
+        emit_confine_violation(op, &path_s, &resolved, &root_s, "fs-write-chokepoint");
         Err(ComputerError::io_with_kind(
             format!(
                 "Denied by confine root: `{path_s}` is outside `{root_s}` \
@@ -68,6 +62,31 @@ impl ConfinedFs {
 impl AsyncFileSystem for ConfinedFs {
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, ComputerError> {
         self.inner.read_file(path).await
+    }
+
+    async fn read_file_prefix(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        self.inner.read_file_prefix(path, max_bytes).await
+    }
+
+    async fn read_file_line_count(&self, path: &Path) -> Result<usize, ComputerError> {
+        self.inner.read_file_line_count(path).await
+    }
+
+    async fn read_file_lines(
+        &self,
+        path: &Path,
+        start_line: usize,
+        limit: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        self.inner.read_file_lines(path, start_line, limit).await
+    }
+
+    async fn read_file_ends_with_newline(&self, path: &Path) -> Result<bool, ComputerError> {
+        self.inner.read_file_ends_with_newline(path).await
     }
 
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
@@ -151,10 +170,8 @@ mod tests {
         let root_path = dunce::canonicalize(root.path()).unwrap();
         let fs = ConfinedFs::new(Arc::new(LocalFs), root_path);
         // Absolute path outside the worktree (drive-letter form).
-        let outside = std::env::temp_dir().join(format!(
-            "hyper-confine-escape-{}.txt",
-            std::process::id()
-        ));
+        let outside =
+            std::env::temp_dir().join(format!("hyper-confine-escape-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&outside);
         let err = fs
             .write_file(&outside, b"pwned")

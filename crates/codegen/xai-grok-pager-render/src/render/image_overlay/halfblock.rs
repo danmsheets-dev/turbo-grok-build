@@ -174,11 +174,8 @@ mod tests {
     fn solid_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
         let img: RgbaImage = ImageBuffer::from_pixel(width, height, Rgba(color));
         let mut buf = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut buf),
-            image::ImageFormat::Png,
-        )
-        .expect("encode png");
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode png");
         buf
     }
 
@@ -212,11 +209,7 @@ mod tests {
     fn paints_half_block_glyph_with_solid_color() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
         let png = solid_png(8, 8, [200, 50, 25, 255]);
-        assert!(paint_halfblock_image(
-            &mut buf,
-            Rect::new(0, 0, 4, 2),
-            &png
-        ));
+        assert!(paint_halfblock_image(&mut buf, Rect::new(0, 0, 4, 2), &png));
         let cell = buf.cell((0, 0)).expect("cell");
         assert_eq!(cell.symbol(), HALF_BLOCK);
         assert_eq!(cell.fg, Color::Rgb(200, 50, 25));
@@ -263,11 +256,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         // 50% red over black => ~half intensity.
         let png = solid_png(2, 2, [255, 0, 0, 128]);
-        assert!(paint_halfblock_image(
-            &mut buf,
-            Rect::new(0, 0, 1, 1),
-            &png
-        ));
+        assert!(paint_halfblock_image(&mut buf, Rect::new(0, 0, 1, 1), &png));
         let cell = buf.cell((0, 0)).expect("cell");
         match cell.fg {
             Color::Rgb(r, g, b) => {

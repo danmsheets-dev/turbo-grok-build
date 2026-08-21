@@ -10,9 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use xai_workspace_tree::{
-    inject_building_notice, inject_card, InjectMode, WorkspaceTreeConfig,
-};
+use xai_workspace_tree::{InjectMode, WorkspaceTreeConfig, inject_building_notice, inject_card};
 
 use super::context::{PromptAudience, PromptContext};
 
@@ -59,9 +57,8 @@ pub fn render_workspace_tree_card(ctx: &PromptContext) -> Option<String> {
     let root = inject_root_for_context(ctx);
 
     // Never block prompt build on a walk: process cache → durable store only.
-    let index = xai_grok_tools::util::workspace_tree_try_get(&root).or_else(|| {
-        xai_grok_tools::util::workspace_tree_try_load_cached(&root, &inject_cfg)
-    });
+    let index = xai_grok_tools::util::workspace_tree_try_get(&root)
+        .or_else(|| xai_grok_tools::util::workspace_tree_try_load_cached(&root, &inject_cfg));
 
     let body = match index {
         Some(idx) => {

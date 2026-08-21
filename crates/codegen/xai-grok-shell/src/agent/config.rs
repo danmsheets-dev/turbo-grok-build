@@ -4268,8 +4268,9 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 IndexMap::new()
             },
             use_concise: false,
-            // EOL / withdrawn catalog rows stay hidden even after credentials.
-            hidden: !builtin.catalog_available,
+            // EOL / withdrawn rows and runtime-only aliases stay hidden from
+            // the picker even when their routing credentials are available.
+            hidden: !builtin.catalog_available || !builtin.picker_visible,
             supported_in_api: builtin.supported_in_api,
             reasoning_effort,
             supports_reasoning_effort,
@@ -8444,11 +8445,13 @@ reasoning_effort = "low"
             .get("grok-4.5")
             .expect("compiled catalog must keep grok-4.5 selectable");
         assert!(!grok45.info().supports_backend_search);
-        assert!(!grok45
-            .info()
-            .reasoning_efforts
-            .iter()
-            .any(|o| o.value.as_str() == "xhigh"));
+        assert!(
+            !grok45
+                .info()
+                .reasoning_efforts
+                .iter()
+                .any(|o| o.value.as_str() == "xhigh")
+        );
         assert_eq!(crate::models::default_model(), "grok-4.6");
     }
     #[test]

@@ -185,12 +185,11 @@ impl ParentAnchor {
             source,
         })?;
         #[cfg(windows)]
-        let identity = FileIdentity::from_file(&directory).map_err(|source| {
-            ManagedConfigError::Read {
+        let identity =
+            FileIdentity::from_file(&directory).map_err(|source| ManagedConfigError::Read {
                 path: path.to_path_buf(),
                 source,
-            }
-        })?;
+            })?;
         #[cfg(not(windows))]
         let identity = FileIdentity::from_metadata(&metadata);
         Ok(Self {
@@ -284,7 +283,7 @@ impl FileIdentity {
         use std::mem::MaybeUninit;
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
         };
         // SAFETY: valid process-owned file handle; info filled by Win32.
         unsafe {
@@ -486,12 +485,13 @@ pub(super) fn read_source(path: &Path) -> Result<SourceState, ManagedConfigError
         });
     }
     #[cfg(windows)]
-    let identity = Some(FileIdentity::from_path(path).map_err(|source| {
-        ManagedConfigError::Read {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?);
+    let identity =
+        Some(
+            FileIdentity::from_path(path).map_err(|source| ManagedConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?,
+        );
     #[cfg(not(windows))]
     let identity = Some(FileIdentity::from_metadata(&metadata));
     Ok(SourceState {

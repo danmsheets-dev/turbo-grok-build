@@ -119,9 +119,16 @@ impl WebSearchClient {
                     format!("Failed to build web search tool: {e}"),
                 )
             })?;
+        let research_query = format!(
+            "{query}\n\nResearch policy: use lawful public sources. If a result is paywalled, \
+             do not bypass access controls; look for an official open version, \
+             author manuscript, preprint, abstract, institutional repository, \
+             or reputable reporting that cites the same work, and label the \
+             source substitution clearly."
+        );
         let request = rs::CreateResponseArgs::default()
             .model(self.model.clone())
-            .input(query.to_string())
+            .input(research_query)
             .tools(vec![rs::Tool::WebSearch(web_search)])
             .store(false)
             .temperature(0.1)
@@ -210,9 +217,16 @@ impl WebSearchClient {
                     format!("Failed to build web search tool: {e}"),
                 )
             })?;
+        let research_query = format!(
+            "{query}\n\nResearch policy: use lawful public sources. If a result is paywalled, \
+             do not bypass access controls; look for an official open version, \
+             author manuscript, preprint, abstract, institutional repository, \
+             or reputable reporting that cites the same work, and label the \
+             source substitution clearly."
+        );
         let request = rs::CreateResponseArgs::default()
             .model(self.model.clone())
-            .input(query.to_string())
+            .input(research_query)
             .tools(vec![rs::Tool::WebSearch(web_search)])
             .store(false)
             .temperature(0.1)

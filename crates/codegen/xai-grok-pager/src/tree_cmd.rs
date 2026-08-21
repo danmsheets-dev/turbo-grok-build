@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use std::path::PathBuf;
 use xai_workspace_tree::{
-    inject_building_notice, inject_card, inject_disabled_notice, load_index_for_root, prune_store,
-    store_disk_usage, summary, workspace_id_for_path, workspace_store_dir, InjectMode,
-    WorkspaceTreeConfig,
+    InjectMode, WorkspaceTreeConfig, inject_building_notice, inject_card, inject_disabled_notice,
+    load_index_for_root, prune_store, store_disk_usage, summary, workspace_id_for_path,
+    workspace_store_dir,
 };
 
 #[derive(Debug, clap::Args, Clone)]
@@ -118,11 +118,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
             let root = resolve_root(root)?;
             resolve_cmd(&root, &config, &name, hint.as_deref(), limit)
         }
-        TreeCommand::Search {
-            query,
-            root,
-            limit,
-        } => {
+        TreeCommand::Search { query, root, limit } => {
             let root = resolve_root(root)?;
             search_cmd(&root, &config, &query, limit)
         }
@@ -227,10 +223,7 @@ fn doctor(root: &std::path::Path, config: &WorkspaceTreeConfig) -> Result<()> {
     println!("  walk max_files: {}", config.walk.max_files);
     println!("  walk max_depth: {}", config.walk.max_depth);
     println!("  use_gitignore:  {}", config.walk.use_gitignore);
-    println!(
-        "  collapse names: {}",
-        config.collapse.names.join(", ")
-    );
+    println!("  collapse names: {}", config.collapse.names.join(", "));
 
     if !config.enabled {
         println!("  note: master switch is off — tools return disabled.");
@@ -259,9 +252,7 @@ fn doctor(root: &std::path::Path, config: &WorkspaceTreeConfig) -> Result<()> {
             if let Some(ref basis) = index.meta.freshness.basis {
                 println!("  basis:       {basis}");
             }
-            println!(
-                "  note: load reassesses git HEAD; stale indexes rebuild automatically."
-            );
+            println!("  note: load reassesses git HEAD; stale indexes rebuild automatically.");
             if index.meta.git.present && index.meta.git.head.is_none() {
                 println!("  warn: git present but HEAD sha not read (permissions / worktree?)");
             }
@@ -345,12 +336,7 @@ fn search_cmd(
         println!("No hits for `{query}`");
     } else {
         for (i, h) in result.hits.iter().enumerate() {
-            println!(
-                "{}. {}  (score {:.2})",
-                i + 1,
-                h.rel_path,
-                h.score
-            );
+            println!("{}. {}  (score {:.2})", i + 1, h.rel_path, h.score);
         }
     }
     Ok(())
@@ -399,9 +385,7 @@ mod tests {
         let cli = TreeCli::try_parse_from(["tree", "prune", "--execute"]).expect("parse");
         match cli.command {
             TreeCommand::Prune {
-                execute,
-                dry_run,
-                ..
+                execute, dry_run, ..
             } => {
                 assert!(execute);
                 assert!(!dry_run);
@@ -414,7 +398,9 @@ mod tests {
     fn prune_default_is_not_execute() {
         let cli = TreeCli::try_parse_from(["tree", "prune"]).expect("parse");
         match cli.command {
-            TreeCommand::Prune { execute, dry_run, .. } => {
+            TreeCommand::Prune {
+                execute, dry_run, ..
+            } => {
                 assert!(!execute);
                 assert!(!dry_run);
             }

@@ -2812,12 +2812,9 @@ mod tests {
         let mut ctx = xai_tool_runtime::ToolCallContext::default();
         ctx.extensions.insert(resources.into_shared());
         let tool = BashTool;
-        let mut stream = xai_tool_runtime::Tool::execute(
-            &tool,
-            ctx,
-            make_input(&drip_cmd("chunk_", 3, 100)),
-        )
-        .await;
+        let mut stream =
+            xai_tool_runtime::Tool::execute(&tool, ctx, make_input(&drip_cmd("chunk_", 3, 100)))
+                .await;
 
         let mut progress = 0usize;
         let mut terminal: Option<Result<BashToolOutput, xai_tool_runtime::ToolError>> = None;

@@ -66,6 +66,8 @@ impl WorkflowBlock {
                     let mark = match p.state.as_str() {
                         "done" => "✓",
                         "active" => "●",
+                        "failed" => "✗",
+                        "blocked" => "⊘",
                         _ => "○",
                     };
                     format!("{} {mark}", p.title)

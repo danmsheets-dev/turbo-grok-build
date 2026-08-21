@@ -169,9 +169,7 @@ pub fn rg_path() -> PathBuf {
             {
                 resolve_bundled_rg()
                     .map(ensure_windows_exe_suffix)
-                    .unwrap_or_else(|_| {
-                        find_vendor_rg().unwrap_or_else(|| PathBuf::from("rg"))
-                    })
+                    .unwrap_or_else(|_| find_vendor_rg().unwrap_or_else(|| PathBuf::from("rg")))
             }
             #[cfg(not(bundle_rg))]
             {

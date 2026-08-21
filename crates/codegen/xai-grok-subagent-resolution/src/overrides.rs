@@ -725,7 +725,10 @@ mod tests {
     #[test]
     fn resolve_default_isolation_read_only_capability_is_none() {
         assert_eq!(
-            resolve_default_isolation(Some("general-purpose"), Some(SubagentCapabilityMode::ReadOnly)),
+            resolve_default_isolation(
+                Some("general-purpose"),
+                Some(SubagentCapabilityMode::ReadOnly)
+            ),
             SubagentIsolationMode::None
         );
         assert_eq!(
@@ -741,10 +744,7 @@ mod tests {
             SubagentIsolationMode::Worktree
         );
         assert_eq!(
-            resolve_default_isolation(
-                Some("general-purpose"),
-                Some(SubagentCapabilityMode::All)
-            ),
+            resolve_default_isolation(Some("general-purpose"), Some(SubagentCapabilityMode::All)),
             SubagentIsolationMode::Worktree
         );
         assert_eq!(

@@ -22,6 +22,17 @@ mod builtin_tests {
     }
 
     #[test]
+    fn continuous_improve_requires_positive_verification() {
+        let script = super::registry::BUILTIN_WORKFLOWS
+            .iter()
+            .find(|builtin| builtin.name == "continuous-improve")
+            .map(|builtin| builtin.script)
+            .expect("continuous-improve builtin registered");
+        assert!(script.contains("verify.output.ok != true"));
+        assert!(script.contains("Verifier rejected the implementation"));
+    }
+
+    #[test]
     fn deep_research_binds_shards_and_renders_verified_claims() {
         let script = super::registry::BUILTIN_WORKFLOWS
             .iter()

@@ -726,6 +726,10 @@ const MIN_SUMMARY_SEED_CHARS: usize = 500;
 /// task state of the conversation it would replace. Callers should
 /// retry like a transient failure.
 pub fn is_degenerate_summary(raw_summary: &str) -> bool {
+    let raw = raw_summary.trim();
+    if raw.contains("<summary>") && !raw.contains("</summary>") {
+        return true;
+    }
     format_compact_summary(raw_summary).chars().count() < MIN_SUMMARY_SEED_CHARS
 }
 /// Cap (in `char`s) for the rejected-summary text captured on

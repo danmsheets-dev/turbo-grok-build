@@ -712,6 +712,14 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::BrowserEvalTool>();
         b.register::<grok_build::BrowserScreenshotTool>();
         b.register::<grok_build::BrowserTabsTool>();
+        b.register::<grok_build::BrowserDownloadsTool>();
+        b.register::<grok_build::BrowserWaitTool>();
+        b.register::<grok_build::BrowserScrollTool>();
+        b.register::<grok_build::BrowserPressKeyTool>();
+        b.register::<grok_build::BrowserSelectTool>();
+        b.register::<grok_build::BrowserHoverTool>();
+        b.register::<grok_build::BrowserSetFileTool>();
+        b.register::<grok_build::BrowserRaiseTool>();
         b.register::<grok_build::LspTool>();
         b.register::<grok_build::ImageGenTool>();
         b.register::<grok_build::ImageEditTool>();

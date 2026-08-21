@@ -1346,9 +1346,19 @@ pub(crate) async fn spawn_session_actor(
             persistence.tx.clone(),
             persisted_workflow_runs,
         );
-    let workflow_tracker = Arc::new(parking_lot::Mutex::new(
-        crate::session::workflow::tracker::WorkflowTracker::from_snapshot(workflow_snapshots),
-    ));
+    let restored_tracker =
+        crate::session::workflow::tracker::WorkflowTracker::from_snapshot_with_queues(
+            workflow_snapshots,
+            workflow_store.task_queues_snapshot(),
+        );
+    // Active runs are recovered by resetting their interrupted task to a
+    // retryable state. Publish that authoritative queue back to the store
+    // before the initial notification so a subsequent resume cannot restore
+    // the stale `running` snapshot from disk.
+    for (run_id, task_queue) in restored_tracker.task_queues_snapshot() {
+        workflow_store.set_task_queue(&run_id, task_queue);
+    }
+    let workflow_tracker = Arc::new(parking_lot::Mutex::new(restored_tracker));
     let workflow_notify = crate::session::workflow::notify::WorkflowNotifySender::new(
         session_info.id.clone(),
         gateway.clone(),
@@ -1486,6 +1496,7 @@ pub(crate) async fn spawn_session_actor(
                             Ok(Ok(report)) => WorkflowLaunchAck::Validated {
                                 name: report.name,
                                 phases: report.phases,
+                                tasks: report.tasks,
                                 summary: report.outcome_summary,
                             },
                             Ok(Err(e)) => WorkflowLaunchAck::Rejected {

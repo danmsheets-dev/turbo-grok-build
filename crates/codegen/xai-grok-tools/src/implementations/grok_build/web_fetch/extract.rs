@@ -135,7 +135,9 @@ pub fn extract_link_summary_budgeted(
         };
         // Prefer navigable http(s) links; skip assets.
         let lower = abs.to_ascii_lowercase();
-        if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with('/'))
+        if !(lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with('/'))
         {
             continue;
         }
@@ -258,7 +260,8 @@ pub fn looks_like_spa_shell(html: &str) -> bool {
     let text_estimate = text_len_estimate(html);
 
     // Classic empty-root SPA shells.
-    let empty_root = (lower.contains("id=\"root\"") || lower.contains("id='root'")
+    let empty_root = (lower.contains("id=\"root\"")
+        || lower.contains("id='root'")
         || lower.contains("id=\"app\"")
         || lower.contains("id='app'"))
         && text_estimate < 400
@@ -274,11 +277,7 @@ pub fn looks_like_spa_shell(html: &str) -> bool {
 
 /// True when markdown after conversion is still suspiciously empty for an SPA.
 pub fn markdown_looks_empty(md: &str) -> bool {
-    let trimmed: String = md
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .take(80)
-        .collect();
+    let trimmed: String = md.chars().filter(|c| !c.is_whitespace()).take(80).collect();
     trimmed.len() < 40
 }
 

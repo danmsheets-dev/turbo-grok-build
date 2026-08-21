@@ -32,6 +32,58 @@ pub struct JsonlStorageAdapter {
 }
 #[cfg(test)]
 type AppendProbe = dyn Fn(AppendDurability) -> io::Result<()> + Send + Sync;
+
+pub(crate) fn write_workflow_manifest_sync(
+    target: &Path,
+    run_id: &str,
+    revision: u64,
+    version: u8,
+    json: &[u8],
+) -> io::Result<()> {
+    super::with_workflow_state_write_lock(|| {
+        crate::session::workflow::store::reject_reparse_components(target)?;
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+            if parent.join("cleared").is_file() {
+                return Ok(());
+            }
+        }
+        if target.is_file()
+            && let Ok(existing) = std::fs::read(target)
+            && let Ok(on_disk) = serde_json::from_slice::<
+                crate::session::workflow::store::WorkflowRunManifest,
+            >(&existing)
+            && on_disk.state.run_id == run_id
+            && (on_disk.state.revision > revision
+                || (on_disk.state.revision == revision && on_disk.version == version))
+        {
+            tracing::debug!(
+                run_id,
+                on_disk_revision = on_disk.state.revision,
+                incoming_revision = revision,
+                "skipping stale workflow manifest write"
+            );
+            return Ok(());
+        }
+        let tmp = target.with_extension(format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            file.write_all(json)?;
+            file.sync_all()?;
+            drop(file);
+            super::replace_file_atomic(&tmp, target)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
+    })
+}
+
 impl Default for JsonlStorageAdapter {
     fn default() -> Self {
         Self::new()
@@ -659,10 +711,13 @@ impl JsonlStorageAdapter {
         info: &Info,
     ) -> io::Result<Vec<crate::session::workflow::store::RestoredWorkflowRun>> {
         use crate::session::workflow::store::{
-            MAX_RESTORED_WORKFLOW_RUNS, MAX_WORKFLOW_ARGS_BYTES, MAX_WORKFLOW_MANIFEST_BYTES,
-            read_bounded_nofollow,
+            MAX_RESTORED_WORKFLOW_RUNS, MAX_SCANNED_WORKFLOW_ENTRIES, MAX_WORKFLOW_ARGS_BYTES,
+            MAX_WORKFLOW_MANIFEST_BYTES, read_bounded_nofollow, reject_reparse_components,
         };
         let workflows_dir = self.workflows_dir(info);
+        if reject_reparse_components(&workflows_dir).is_err() {
+            return Ok(Vec::new());
+        }
         match std::fs::symlink_metadata(&workflows_dir) {
             Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
                 return Ok(Vec::new());
@@ -676,26 +731,36 @@ impl JsonlStorageAdapter {
         let mut entries: Vec<_> = std::fs::read_dir(&workflows_dir)?
             .filter_map(Result::ok)
             .collect();
-        // Sort BEFORE truncating so the cap drops a deterministic tail (and an
-        // attacker can't wedge a symlink into the first MAX slots via filesystem
-        // read order — `read_dir` order is unspecified and varies by FS).
+        // Sort before applying the scan cap for deterministic, bounded work.
+        // The valid-run cap is applied only after each entry has passed all
+        // restore checks, so malformed or cleared entries cannot suppress real
+        // runs.
         entries.sort_by_key(|entry| entry.file_name());
-        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
-        entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
+        let entries_truncated = entries.len() > MAX_SCANNED_WORKFLOW_ENTRIES;
+        entries.truncate(MAX_SCANNED_WORKFLOW_ENTRIES);
         if entries_truncated {
             tracing::warn!(
                 path = %workflows_dir.display(),
-                limit = MAX_RESTORED_WORKFLOW_RUNS,
-                "workflow restore run-count cap reached; ignoring remaining entries"
+                limit = MAX_SCANNED_WORKFLOW_ENTRIES,
+                "workflow restore scan cap reached; ignoring remaining entries"
             );
         }
         let mut restored = Vec::new();
         for entry in entries {
+            if restored.len() >= MAX_RESTORED_WORKFLOW_RUNS {
+                break;
+            }
             let run_dir = entry.path();
+            if reject_reparse_components(&run_dir).is_err() {
+                continue;
+            }
             let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {
                 continue;
             };
             if run_meta.file_type().is_symlink() || !run_meta.is_dir() {
+                continue;
+            }
+            if reject_reparse_components(&run_dir.join("cleared")).is_err() {
                 continue;
             }
             if std::fs::symlink_metadata(run_dir.join("cleared"))
@@ -1206,49 +1271,24 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if json.len() as u64 > crate::session::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "workflow manifest exceeds {} bytes",
+                    crate::session::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES
+                ),
+            ));
+        }
         let target = self.workflow_run_state_file(info, &manifest.state.run_id)?;
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-            if parent.join("cleared").is_file() {
-                return Ok(());
-            }
-        }
-        if target.is_file()
-            && let Ok(existing) = tokio::fs::read(&target).await
-            && let Ok(on_disk) = serde_json::from_slice::<
-                crate::session::workflow::store::WorkflowRunManifest,
-            >(&existing)
-            && on_disk.state.run_id == manifest.state.run_id
-            && on_disk.state.revision > manifest.state.revision
-        {
-            tracing::debug!(
-                run_id = %manifest.state.run_id,
-                on_disk_revision = on_disk.state.revision,
-                incoming_revision = manifest.state.revision,
-                "skipping stale workflow manifest write"
-            );
-            return Ok(());
-        }
-        let tmp = target.with_extension(format!(
-            "json.{}.{}.tmp",
-            std::process::id(),
-            uuid::Uuid::now_v7().simple()
-        ));
-        tokio::fs::write(&tmp, json).await?;
-        #[cfg(windows)]
-        match tokio::fs::remove_file(&target).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Err(error);
-            }
-        }
-        if let Err(error) = tokio::fs::rename(&tmp, &target).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(error);
-        }
-        Ok(())
+        let run_id = manifest.state.run_id.clone();
+        let revision = manifest.state.revision;
+        let version = manifest.version;
+        tokio::task::spawn_blocking(move || {
+            write_workflow_manifest_sync(&target, &run_id, revision, version, &json)
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("workflow persistence panicked: {error}")))?
     }
     async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()> {
         let target = self.workflow_run_state_file(info, run_id)?;

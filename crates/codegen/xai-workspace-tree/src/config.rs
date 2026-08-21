@@ -96,10 +96,7 @@ impl WorkspaceTreeConfig {
             }
         }
 
-        if let Some(v) = env_first(&[
-            "GROK_WORKSPACE_TREE_STORE_DIR",
-            "TURBO_TREE_STORE_DIR",
-        ]) {
+        if let Some(v) = env_first(&["GROK_WORKSPACE_TREE_STORE_DIR", "TURBO_TREE_STORE_DIR"]) {
             let p = v.trim();
             if !p.is_empty() {
                 cfg.store_dir = Some(PathBuf::from(p));

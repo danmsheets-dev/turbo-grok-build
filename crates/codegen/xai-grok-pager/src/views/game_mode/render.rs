@@ -328,10 +328,7 @@ fn mcp_rack_popup_lines(state: &GameModeState) -> Vec<(String, Style)> {
         // implying the agent has no servers.
         lines.push((
             if info.init_active || info.init_total > 0 {
-                format!(
-                    " connecting {}/{}",
-                    info.init_connected, info.init_total
-                )
+                format!(" connecting {}/{}", info.init_connected, info.init_total)
             } else {
                 " no servers reported".to_string()
             },
@@ -435,10 +432,9 @@ fn paint_popup(buf: &mut Buffer, area: Rect, anchor: PopupAnchor, lines: &[(Stri
     let max_y = bottom.saturating_sub(height.saturating_add(1)).max(area.y);
 
     // Prefer near cursor; fall back to above the subject.
-    let (mut x, mut y) = anchor.cursor.unwrap_or((
-        anchor.subject.x,
-        anchor.subject.y.saturating_sub(height),
-    ));
+    let (mut x, mut y) = anchor
+        .cursor
+        .unwrap_or((anchor.subject.x, anchor.subject.y.saturating_sub(height)));
     y = y.saturating_sub(height.saturating_add(1));
     x = x.clamp(area.x, max_x);
     if y < area.y {
@@ -649,14 +645,7 @@ fn paint_wall_display(
     } else {
         title.to_string()
     };
-    put_line_centered(
-        buf,
-        area.x,
-        area.y,
-        area.width,
-        &title_line,
-        style,
-    );
+    put_line_centered(buf, area.x, area.y, area.width, &title_line, style);
     if area.height >= 2 {
         put_line_right(
             buf,
@@ -767,7 +756,10 @@ fn paint_handoff_zone(buf: &mut Buffer, area: Rect, state: &GameModeState) {
             let x_off = ((area.width.saturating_sub(4) as f32) * t) as u16;
             let sub = Rect {
                 x: area.x.saturating_add(x_off),
-                y: area.y.saturating_add(1).min(area.y.saturating_add(area.height.saturating_sub(1))),
+                y: area
+                    .y
+                    .saturating_add(1)
+                    .min(area.y.saturating_add(area.height.saturating_sub(1))),
                 width: 6.min(area.width),
                 height: area.height.saturating_sub(1).max(1),
             };
@@ -813,10 +805,7 @@ fn paint_desk(buf: &mut Buffer, area: Rect, desk: &DeskSlot, set: SpriteSet, tic
             x: area.x,
             y: y_cursor.min(area.y.saturating_add(area.height.saturating_sub(1))),
             width: area.width,
-            height: area
-                .height
-                .saturating_sub(mon_rect.height)
-                .max(1),
+            height: area.height.saturating_sub(mon_rect.height).max(1),
         };
         // Spawn: slide in from left
         if desk.phase == ActorPhase::SpawnWalk {
@@ -962,7 +951,14 @@ fn put_line(buf: &mut Buffer, x: u16, y: u16, max_w: u16, text: &str, style: Sty
 fn put_line_centered(buf: &mut Buffer, x: u16, y: u16, max_w: u16, text: &str, style: Style) {
     let tw = UnicodeWidthStr::width(text) as u16;
     let start = x.saturating_add(max_w.saturating_sub(tw) / 2);
-    put_line(buf, start, y, max_w.saturating_sub(start.saturating_sub(x)), text, style);
+    put_line(
+        buf,
+        start,
+        y,
+        max_w.saturating_sub(start.saturating_sub(x)),
+        text,
+        style,
+    );
 }
 
 fn put_line_right(buf: &mut Buffer, x: u16, y: u16, max_w: u16, text: &str, style: Style) {
@@ -1110,7 +1106,12 @@ mod tests {
     #[test]
     fn supervisor_tooltip_renders_the_snapshot() {
         let game = Rect::new(2, 3, 100, 24);
-        let mut buf = Buffer::empty(Rect::new(0, 0, game.x + game.width + 4, game.y + game.height + 4));
+        let mut buf = Buffer::empty(Rect::new(
+            0,
+            0,
+            game.x + game.width + 4,
+            game.y + game.height + 4,
+        ));
         let mut state = GameModeState::new();
         state.pixel_mode = false;
         state.open = true;

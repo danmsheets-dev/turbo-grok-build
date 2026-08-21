@@ -97,8 +97,8 @@ impl xai_tool_runtime::Tool for WriteTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: WriteInput,
     ) -> Result<WriteOutput, xai_tool_runtime::ToolError> {
-        use crate::types::tool_metadata::shared_resources;
         use crate::types::resources::{AllowedWritePaths, enforce_allowed_write_paths};
+        use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
         let (cwd, display_cwd, fs, notification_handle, confine_root, allowed_paths) = {
@@ -140,8 +140,7 @@ impl xai_tool_runtime::Tool for WriteTool {
 
         // Spawn allowed_paths: fail closed at write time (not only land).
         if let Some(ref prefixes) = allowed_paths {
-            enforce_allowed_write_paths(&cwd, &path, prefixes)
-                .map_err(|e| e.into_tool_error())?;
+            enforce_allowed_write_paths(&cwd, &path, prefixes).map_err(|e| e.into_tool_error())?;
         }
 
         // ── Check if file exists and read old content ────────────

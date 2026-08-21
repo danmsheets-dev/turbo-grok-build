@@ -44,6 +44,7 @@ pub fn compute_fingerprint(req: &ReportRequest) -> String {
     if matches!(
         req.error_class,
         ErrorClass::Provider400
+            | ErrorClass::Provider429
             | ErrorClass::ProviderAuth
             | ErrorClass::ProtocolDeser
             | ErrorClass::CatalogStale

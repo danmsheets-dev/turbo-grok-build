@@ -662,8 +662,21 @@ pub struct PagerArgs {
     /// JSON Schema for structured output. When set, the model is constrained to
     /// produce JSON matching this schema. Implies --output-format json.
     /// Example: --json-schema '{"type":"object","properties":{"name":{"type":"string"}}}'
-    #[clap(long = "json-schema", value_name = "SCHEMA")]
+    #[clap(
+        long = "json-schema",
+        value_name = "SCHEMA",
+        conflicts_with = "json_schema_file"
+    )]
     pub json_schema: Option<String>,
+    /// Read the structured-output JSON Schema from a UTF-8 file.
+    /// This avoids PowerShell quoting and escaping issues with inline JSON.
+    #[clap(
+        long = "json-schema-file",
+        value_name = "PATH",
+        value_hint = ValueHint::FilePath,
+        conflicts_with = "json_schema"
+    )]
+    pub json_schema_file: Option<PathBuf>,
     /// Model ID to use.
     #[clap(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
@@ -1269,6 +1282,22 @@ mod tests {
         }
     }
     #[test]
+    fn json_schema_file_is_shell_safe_and_conflicts_with_inline_schema() {
+        let args = PagerArgs::try_parse_from(["grok", "--json-schema-file", "schema.json"])
+            .expect("file-based schema flag parses");
+        assert_eq!(args.json_schema_file, Some(PathBuf::from("schema.json")));
+        assert!(
+            PagerArgs::try_parse_from([
+                "grok",
+                "--json-schema",
+                "{}",
+                "--json-schema-file",
+                "schema.json"
+            ])
+            .is_err()
+        );
+    }
+
     fn ordinary_and_doctor_parsing_do_not_set_version_intent() {
         assert!(!PagerArgs::try_parse_from(["grok"]).unwrap().version);
         assert!(

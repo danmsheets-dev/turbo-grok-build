@@ -50,24 +50,13 @@ pub fn inject_card(index: &TreeIndex, config: &WorkspaceTreeConfig) -> String {
     }
 
     if index.meta.git.present {
-        let branch = index
-            .meta
-            .git
-            .branch
-            .as_deref()
-            .unwrap_or("?");
+        let branch = index.meta.git.branch.as_deref().unwrap_or("?");
         let head = index
             .meta
             .git
             .head
             .as_deref()
-            .map(|h| {
-                if h.len() > 8 {
-                    &h[..8]
-                } else {
-                    h
-                }
-            })
+            .map(|h| if h.len() > 8 { &h[..8] } else { h })
             .unwrap_or("?");
         lines.push(format!("Git: {branch}@{head}"));
     }
@@ -171,15 +160,15 @@ fn source_map_lines(root: &TreeNode, limit: usize) -> Vec<String> {
     };
 
     // Prefer source-ish dirs.
-    let mut candidates: Vec<&TreeNode> = children
-        .iter()
-        .filter(|c| c.is_dir_like())
-        .collect();
+    let mut candidates: Vec<&TreeNode> = children.iter().filter(|c| c.is_dir_like()).collect();
     candidates.sort_by_key(|c| {
         let source_boost = c
             .role_tags
             .as_ref()
-            .map(|t| t.iter().any(|x| x == "source" || x == "scene" || x == "docs"))
+            .map(|t| {
+                t.iter()
+                    .any(|x| x == "source" || x == "scene" || x == "docs")
+            })
             .unwrap_or(false);
         (!source_boost, std::cmp::Reverse(c.file_count.unwrap_or(0)))
     });
@@ -268,14 +257,19 @@ fn hot_path_lines(root: &TreeNode, canonical_root: &str) -> Vec<String> {
             if name_l == "version" && !n.rel_path.contains('/') && !n.rel_path.contains('\\') {
                 *version = Some(n.rel_path.clone());
             }
-            if (name_l.contains("smoke") || name_l.contains("handoff") || name_l.contains("install"))
+            if (name_l.contains("smoke")
+                || name_l.contains("handoff")
+                || name_l.contains("install"))
                 && (rel_l.starts_with("docs/") || rel_l.contains("/docs/"))
                 && (name_l.ends_with(".md") || name_l.ends_with(".txt"))
             {
                 docs_smoke.push(n.rel_path.clone());
             }
             if rel_l.contains("target/release-dist/")
-                && (name_l == "turbo" || name_l == "turbo.exe" || name_l == "hyper" || name_l == "hyper.exe")
+                && (name_l == "turbo"
+                    || name_l == "turbo.exe"
+                    || name_l == "hyper"
+                    || name_l == "hyper.exe")
             {
                 *release_dist = Some(n.rel_path.clone());
             }
@@ -300,7 +294,9 @@ fn hot_path_lines(root: &TreeNode, canonical_root: &str) -> Vec<String> {
         out.push(format!("  binary: {b} (path-qualified; prefer over PATH)"));
     } else {
         // Hint even when index collapsed target/ (common for large monorepos).
-        let hint = std::path::Path::new(canonical_root).join("target").join("release-dist");
+        let hint = std::path::Path::new(canonical_root)
+            .join("target")
+            .join("release-dist");
         if hint.is_dir() {
             out.push(format!(
                 "  binary dir: {} (check turbo.exe / hyper.exe)",
@@ -344,4 +340,3 @@ fn entrypoints(root: &TreeNode) -> Vec<String> {
     }
     out
 }
-

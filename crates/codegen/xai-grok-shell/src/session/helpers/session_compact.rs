@@ -79,9 +79,9 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
                     && *status != StatusCode::TOO_MANY_REQUESTS)
         }
         SamplingError::MaxTokensTruncation => true,
+        SamplingError::StreamError { message, .. } => is_context_length_error(message),
         SamplingError::Http(_)
         | SamplingError::EventStreamError(_)
-        | SamplingError::StreamError { .. }
         | SamplingError::EmptyResponse { .. }
         | SamplingError::DoomLoopDetected { .. } => false,
     };
@@ -809,7 +809,9 @@ pub(crate) async fn generate_session_compact(
                 itl_max_ms: timing.itl_max_ms(),
             }
         }
-        ApiBackend::GoogleGenerateContent | ApiBackend::BedrockConverseStream | ApiBackend::PiMessages => {
+        ApiBackend::GoogleGenerateContent
+        | ApiBackend::BedrockConverseStream
+        | ApiBackend::PiMessages => {
             let request = ConversationRequest {
                 items: chat_history,
                 tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
@@ -898,6 +900,12 @@ mod classify_tests {
             SamplingError::StreamError {
                 error_type: "overloaded_error".into(),
                 message: "try again".into(),
+            }
+        )));
+        assert!(is_det(&classify_sampling_error(
+            SamplingError::StreamError {
+                error_type: "invalid_request_error".into(),
+                message: "prompt is too long for this model's context window".into(),
             }
         )));
     }

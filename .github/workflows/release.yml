@@ -113,7 +113,12 @@ jobs:
         shell: pwsh
         run: |
           $url = "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip"
+          $expectedSha256 = "57ea59e9f551ad8d71ffaa9b5cfbe0ca1f4e720972a1db7ec2d12ab44bff9383"
           Invoke-WebRequest -Uri $url -OutFile protoc.zip
+          $actualSha256 = (Get-FileHash protoc.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "protoc.zip SHA256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
           Expand-Archive protoc.zip -DestinationPath "$env:USERPROFILE\protoc" -Force
           $protoc = Join-Path $env:USERPROFILE "protoc\bin\protoc.exe"
           if (-not (Test-Path $protoc)) { throw "protoc.exe missing at $protoc" }
@@ -129,8 +134,15 @@ jobs:
         run: |
           RG_VER=14.1.1
           mkdir -p tmp/rg
-          curl -fsSL -o tmp/rg.zip \
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 \
+            -o tmp/rg.zip \
             "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VER}/ripgrep-${RG_VER}-x86_64-pc-windows-msvc.zip"
+          expected_rg_sha256=d0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1
+          actual_rg_sha256=$(sha256sum tmp/rg.zip | awk '{print $1}')
+          if [ "$actual_rg_sha256" != "$expected_rg_sha256" ]; then
+            echo "ripgrep archive SHA256 mismatch: expected $expected_rg_sha256, got $actual_rg_sha256" >&2
+            exit 1
+          fi
           # zip layout: ripgrep-<ver>-.../rg.exe
           python3 - <<'PY'
           import zipfile, pathlib
@@ -169,6 +181,16 @@ jobs:
           else
             cargo build "${common[@]}" --target "${{ matrix.target }}"
           fi
+
+      # Windows release coverage must execute before packaging. The selected
+      # targets include workspace libraries, binaries, integration tests, and
+      # examples while avoiding benchmark harness argument mismatches.
+      - name: Run Windows test suite
+        if: runner.os == 'Windows'
+        env:
+          GROK_VERSION: ${{ env.GROK_VERSION }}
+        shell: pwsh
+        run: cargo test --workspace --lib --bins --tests --examples --locked -- --test-threads=4
 
       - name: Verify stripped release binary
         shell: bash

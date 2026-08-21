@@ -326,7 +326,16 @@ mod tests {
             // Fullwidth solidus normalises to `/` in some contexts.
             "a\u{ff0f}b",
             // Metacharacters that would leak into globs, shells or URLs.
-            "id*", "id?", "id|x", "id<y", "id>z", "id\"q", "a;b", "a&b", "a$b", "id%2f",
+            "id*",
+            "id?",
+            "id|x",
+            "id<y",
+            "id>z",
+            "id\"q",
+            "a;b",
+            "a&b",
+            "a$b",
+            "id%2f",
         ] {
             assert!(!is_safe_path_segment(bad), "{bad:?} should be rejected");
             assert!(!is_safe_task_id(bad), "{bad:?} should be rejected");

@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 
 use xai_grok_tools::types::resources::{
-    ENV_GROK_CONFINE, ENV_GROK_CONFINE_INHERIT, path_is_under_confine_root,
-    process_confine_root, set_process_confine_root,
+    ENV_GROK_CONFINE, ENV_GROK_CONFINE_INHERIT, path_is_under_confine_root, process_confine_root,
+    set_process_confine_root,
 };
 
 /// Whether this process currently has a confine root stamped (CLI `--confine`

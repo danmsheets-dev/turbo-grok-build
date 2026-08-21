@@ -56,30 +56,20 @@ pub enum FeaturesCommand {
         request_class: Option<String>,
     },
     /// Mark a request shipped
-    Ship {
-        id: String,
-    },
+    Ship { id: String },
     /// Mark a request acknowledged
-    Ack {
-        id: String,
-    },
+    Ack { id: String },
     /// Mark a request planned (roadmap)
-    Plan {
-        id: String,
-    },
+    Plan { id: String },
     /// Mark a request declined
-    Decline {
-        id: String,
-    },
+    Decline { id: String },
     /// Print the feature-request-log root path
     Path {
         #[arg(long)]
         json: bool,
     },
     /// Persist where Feature Request Log entries are stored
-    SetDir {
-        dir: std::path::PathBuf,
-    },
+    SetDir { dir: std::path::PathBuf },
     /// Clear a custom log dir and revert to `$GROK_HOME/feature-request-log`
     ClearDir,
     /// File a feature request from the CLI
@@ -321,11 +311,8 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
             workaround,
             proposed_behavior,
         } => {
-            let request_class =
-                RequestClass::parse(&request_class).unwrap_or(RequestClass::Other);
-            let priority = priority
-                .as_deref()
-                .and_then(RequestPriority::parse);
+            let request_class = RequestClass::parse(&request_class).unwrap_or(RequestClass::Other);
+            let priority = priority.as_deref().and_then(RequestPriority::parse);
             let req = FeatureRequestReport {
                 title,
                 summary,
@@ -369,8 +356,11 @@ fn parse_priorities(raw: &[String]) -> Result<Option<Vec<RequestPriority>>> {
     }
     let mut out = Vec::new();
     for s in raw {
-        let p = RequestPriority::parse(s)
-            .ok_or_else(|| anyhow::anyhow!("invalid priority `{s}` (use must_have|should_have|nice_to_have|exploratory)"))?;
+        let p = RequestPriority::parse(s).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid priority `{s}` (use must_have|should_have|nice_to_have|exploratory)"
+            )
+        })?;
         out.push(p);
     }
     if out.is_empty() {

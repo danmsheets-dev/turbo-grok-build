@@ -12,13 +12,19 @@ use std::process::Child;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use xai_tty_utils::{ProcessGroup, global_process_scope};
+
 use xai_grok_browser::{BrowserClient, pipe_name};
 #[cfg(windows)]
 use xai_grok_tools::implementations::grok_build::browser::WEBVIEW2_RUNTIME_HELP;
 use xai_grok_tools::implementations::grok_build::browser::set_browser_ensure;
 
 /// How long [`ensure_browser_host`] waits for the named pipe.
-pub const ENSURE_TIMEOUT: Duration = Duration::from_secs(15);
+///
+/// WebView2 environment/controller create is unbounded on a cold Evergreen
+/// install; the pipe now binds before that work, but 45s still covers a
+/// slow first paint so we do not kill a host that is about to come up.
+pub const ENSURE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Sidecar is Windows-only in v1; mock tool tests still run everywhere.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -40,8 +46,14 @@ pub struct BrowserHostHandle {
     pub already_running: bool,
 }
 
-fn children() -> &'static Mutex<HashMap<String, Child>> {
-    static CHILDREN: OnceLock<Mutex<HashMap<String, Child>>> = OnceLock::new();
+struct TrackedHost {
+    child: Child,
+    /// Job Object / process group so leftover msedgewebview2.exe dies with us.
+    _group: Option<Arc<ProcessGroup>>,
+}
+
+fn children() -> &'static Mutex<HashMap<String, TrackedHost>> {
+    static CHILDREN: OnceLock<Mutex<HashMap<String, TrackedHost>>> = OnceLock::new();
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -61,21 +73,30 @@ fn ensure_lock_for(session_id: &str) -> Arc<Mutex<()>> {
     )
 }
 
-fn lock_map() -> std::sync::MutexGuard<'static, HashMap<String, Child>> {
+fn lock_map() -> std::sync::MutexGuard<'static, HashMap<String, TrackedHost>> {
     children().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn take_child(session_id: &str) -> Option<Child> {
-    lock_map().remove(session_id)
+    lock_map().remove(session_id).map(|tracked| tracked.child)
 }
 
 #[cfg(windows)]
-fn store_child(session_id: &str, child: Child) {
-    lock_map().insert(session_id.to_owned(), child);
+fn store_child(session_id: &str, child: Child, group: Option<Arc<ProcessGroup>>) {
+    lock_map().insert(
+        session_id.to_owned(),
+        TrackedHost {
+            child,
+            _group: group,
+        },
+    );
 }
 
 /// Argv after `current_exe()` for the sidecar (no program name).
-pub fn browser_host_argv(session_id: &str, session_folder: Option<&std::path::Path>) -> Vec<String> {
+pub fn browser_host_argv(
+    session_id: &str,
+    session_folder: Option<&std::path::Path>,
+) -> Vec<String> {
     let mut argv = vec![
         "browser-host".to_owned(),
         "--session-id".to_owned(),
@@ -90,10 +111,10 @@ pub fn browser_host_argv(session_id: &str, session_folder: Option<&std::path::Pa
     argv
 }
 
-/// Product-facing timeout text (always 15s, even if a test uses a shorter wait).
+/// Product-facing timeout text (always 45s, even if a test uses a shorter wait).
 pub fn ensure_timeout_message(session_id: &str) -> String {
     format!(
-        "browser host did not become ready within 15s (pipe {})",
+        "browser host did not become ready within 45s (pipe {})",
         pipe_name(session_id)
     )
 }
@@ -168,6 +189,13 @@ pub fn inject_browser_tools(config: &mut xai_grok_tools::registry::types::ToolSe
         ToolConfig::from(&gb::BrowserEvalTool),
         ToolConfig::from(&gb::BrowserScreenshotTool),
         ToolConfig::from(&gb::BrowserTabsTool),
+        ToolConfig::from(&gb::BrowserWaitTool),
+        ToolConfig::from(&gb::BrowserScrollTool),
+        ToolConfig::from(&gb::BrowserPressKeyTool),
+        ToolConfig::from(&gb::BrowserSelectTool),
+        ToolConfig::from(&gb::BrowserHoverTool),
+        ToolConfig::from(&gb::BrowserSetFileTool),
+        ToolConfig::from(&gb::BrowserRaiseTool),
     ];
     for extra in extras {
         if !config.tools.iter().any(|tool| tool.id == extra.id) {
@@ -187,8 +215,10 @@ pub fn install_browser_ensure_hook() {
 
 /// Spawn `turbo browser-host` if the session pipe is not already up.
 ///
-/// Waits up to 15s for the named pipe. Children inherit the parent Job Object
-/// (no breakaway). Non-Windows: [`AgentBrowserError::WindowsOnly`].
+/// Waits up to 45s for the named pipe. The child is enrolled in
+/// [`xai_tty_utils::ProcessGroup`] / the global process scope so leftover
+/// `msedgewebview2.exe` dies with the pager. Non-Windows:
+/// [`AgentBrowserError::WindowsOnly`].
 pub fn ensure_browser_host(session_id: &str) -> Result<BrowserHostHandle, AgentBrowserError> {
     ensure_browser_host_in(session_id, None)
 }
@@ -239,6 +269,18 @@ pub fn ensure_browser_host_in(
         let mut child = cmd
             .spawn()
             .map_err(|e| AgentBrowserError::Failed(format!("spawn browser-host: {e}")))?;
+        let group = ProcessGroup::new()
+            .and_then(|mut g| {
+                g.attach_std(&child)?;
+                let g = Arc::new(g);
+                if !global_process_scope().register(&g) {
+                    return Err(std::io::Error::other(
+                        "process scope already closed; browser-host killed",
+                    ));
+                }
+                Ok(g)
+            })
+            .ok();
 
         let deadline = Instant::now() + ENSURE_TIMEOUT;
         loop {
@@ -259,7 +301,7 @@ pub fn ensure_browser_host_in(
                             }
                         });
                 }
-                store_child(session_id, child);
+                store_child(session_id, child, group);
                 return Ok(BrowserHostHandle {
                     session_id: session_id.to_owned(),
                     already_running: false,
@@ -333,7 +375,7 @@ mod tests {
         let ids: Vec<_> = config.tools.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(
             ids.iter().filter(|id| id.contains("browser_")).count(),
-            7,
+            14,
             "{ids:?}"
         );
         assert!(ids.contains(&"GrokBuild:browser_navigate"));
@@ -364,9 +406,9 @@ mod tests {
     }
 
     #[test]
-    fn timeout_error_message_mentions_15s_and_pipe() {
+    fn timeout_error_message_mentions_45s_and_pipe() {
         let msg = ensure_timeout_message("abc");
-        assert!(msg.contains("15s"), "{msg}");
+        assert!(msg.contains("45s"), "{msg}");
         assert!(msg.contains(r"\\.\pipe\turbo-browser-abc"), "{msg}");
     }
 

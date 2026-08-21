@@ -259,6 +259,7 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
         version: WORKFLOW_RUN_MANIFEST_VERSION,
         state,
         script_revision: 0,
+        task_queue: Default::default(),
     };
     adapter.write_workflow_run_state(&info, &manifest).await.unwrap();
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
@@ -609,6 +610,11 @@ async fn test_subagent_notifications_round_trip() {
                 finalize_grace_secs: Some(30),
             }),
             workflow_run_id: None,
+            child_cwd: Some("/tmp/wt/subagent-child-001".into()),
+            display_cwd: Some("/workspace".into()),
+            worktree_path: Some("/tmp/wt/subagent-child-001".into()),
+            isolation_requested: Some("worktree".into()),
+            isolation_fallback: false,
         },
         meta: None,
     };
@@ -752,6 +758,11 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             resumed_from: Some("source-agent-id".to_string()),
             budget: None,
             workflow_run_id: None,
+            child_cwd: None,
+            display_cwd: None,
+            worktree_path: None,
+            isolation_requested: Some("none".into()),
+            isolation_fallback: false,
         },
         meta: None,
     };

@@ -408,18 +408,21 @@ fn append_isolation_honesty_tags(
     worktree_path: Option<&str>,
     worktree_state: Option<&str>,
 ) {
-    let effective = isolation
-        .or(if worktree_path.is_some()
+    let effective = isolation.or(
+        if worktree_path.is_some()
             || matches!(worktree_state, Some("preserved" | "cleaned" | "live"))
         {
             Some("worktree")
         } else {
             None
-        });
+        },
+    );
     let Some(iso) = effective else {
         // No signal at all — still prefer an explicit none when request is known.
         if let Some(req) = isolation_requested {
-            out.push_str(&format!("\n<isolation_requested>{req}</isolation_requested>"));
+            out.push_str(&format!(
+                "\n<isolation_requested>{req}</isolation_requested>"
+            ));
             out.push_str("\n<isolation>none</isolation>");
         }
         return;
@@ -430,7 +433,9 @@ fn append_isolation_honesty_tags(
         out.push_str(" (NOT isolated — ran on parent workspace)");
     }
     if let Some(req) = isolation_requested {
-        out.push_str(&format!("\n<isolation_requested>{req}</isolation_requested>"));
+        out.push_str(&format!(
+            "\n<isolation_requested>{req}</isolation_requested>"
+        ));
     }
     if let Some(wt) = worktree_path {
         out.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));

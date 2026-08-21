@@ -33,7 +33,7 @@ fn notification(output: &str) -> SessionNotification {
                 is_backgrounded: true,
             },
             will_wake: false,
-            },
+        },
         meta: None,
     }
 }

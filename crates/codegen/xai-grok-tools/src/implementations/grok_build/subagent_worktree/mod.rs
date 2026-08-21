@@ -108,7 +108,9 @@ pub struct ResolvedSubagentWork {
 ///
 /// Tool default is **merge** (fail closed on conflict). Workspace wire default
 /// remains overwrite; land tools intentionally diverge for safety.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LandMode {
     /// Three-way style merge: only apply when parent file matches the spawn
@@ -153,7 +155,7 @@ pub fn to_apply_mode(mode: LandMode) -> xai_grok_workspace_types::rpc::worktree:
 /// When absent, land falls back to in-process git/fs apply that mirrors the
 /// same Merge/Overwrite semantics.
 pub struct LiveWorktreeApplyBackend(
-    pub std::sync::Arc<
+    pub  std::sync::Arc<
         dyn Fn(
                 String,
                 xai_grok_workspace_types::rpc::worktree::ApplyMode,
@@ -462,7 +464,10 @@ pub async fn git_capture(cwd: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Like [`git_capture`] but returns Ok with stdout even on non-zero exit
 /// (caller inspects status via the second return value when needed).
-pub async fn git_capture_status(cwd: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
+pub async fn git_capture_status(
+    cwd: &Path,
+    args: &[&str],
+) -> Result<(bool, String, String), String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -587,7 +592,10 @@ pub async fn apply_file_content_with_union(
             let data: Vec<u8> = if let Some(key) = union_merge_key_for_path(rel, union_key) {
                 match (
                     std::str::from_utf8(data).ok(),
-                    tokio::fs::read(&dest).await.ok().and_then(|b| String::from_utf8(b).ok()),
+                    tokio::fs::read(&dest)
+                        .await
+                        .ok()
+                        .and_then(|b| String::from_utf8(b).ok()),
                 ) {
                     (None, _) => {
                         return Err(format!(
@@ -888,6 +896,9 @@ pub fn path_is_allowed(path: &str, allowed: &[String]) -> bool {
     let Some(norm) = normalize_allowlist_path(path) else {
         return false;
     };
+    if crate::types::resources::is_root_metadata_rel(&norm) {
+        return true;
+    }
     for pref in allowed {
         let Some(p) = normalize_allowlist_path(pref) else {
             continue;
@@ -915,10 +926,7 @@ pub fn path_matches_allowlist_prefix(path: &str, prefix: &str) -> bool {
 
 /// Partition paths into (allowed, denied) under the given allowlist.
 /// When `allowed` is empty, every path is allowed.
-pub fn partition_by_allowlist(
-    paths: &[String],
-    allowed: &[String],
-) -> (Vec<String>, Vec<String>) {
+pub fn partition_by_allowlist(paths: &[String], allowed: &[String]) -> (Vec<String>, Vec<String>) {
     if allowed.is_empty() {
         return (paths.to_vec(), Vec::new());
     }
@@ -1062,6 +1070,11 @@ mod manifest_merge_tests {
             "src/main.rs".into(),
         ];
         assert!(refuse_land_outside_allowlist(&meta, &bad).is_err());
+        let only_harness = vec![".grok-subagent-live".into(), ".grok/notes.txt".into()];
+        assert!(
+            refuse_land_outside_allowlist(&meta, &only_harness).is_ok(),
+            "harness-only delta must not fail-close allowed_paths"
+        );
     }
 }
 
@@ -1104,6 +1117,10 @@ mod allowlist_tests {
         assert!(path_is_allowed("crates/foo", &allowed));
         assert!(!path_is_allowed("crates/foobar/x.rs", &allowed));
         assert!(!path_is_allowed("docs/a.md", &allowed));
+        assert!(
+            path_is_allowed(".gitattributes", &allowed),
+            "root .gitattributes is always landable"
+        );
     }
 
     #[test]
@@ -1159,7 +1176,6 @@ mod allowlist_tests {
     }
 }
 
-
 #[cfg(test)]
 mod subagent_id_guard_tests {
     use super::*;
@@ -1195,7 +1211,14 @@ mod subagent_id_guard_tests {
         // trailing dot/space — each of these either escapes the subagents dir
         // or silently aliases onto a different one under Win32.
         for bad in [
-            "C:", "C:\\Windows", "\\\\server\\share", "id:stream", "con", "NUL", "com1", "id.",
+            "C:",
+            "C:\\Windows",
+            "\\\\server\\share",
+            "id:stream",
+            "con",
+            "NUL",
+            "com1",
+            "id.",
             "id ",
         ] {
             assert!(

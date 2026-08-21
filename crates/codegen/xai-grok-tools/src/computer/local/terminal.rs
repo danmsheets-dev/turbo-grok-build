@@ -252,6 +252,8 @@ struct ProcessState {
     truncated: bool,
     /// Total bytes written to file (before truncation)
     total_bytes: usize,
+    /// Hard per-process output-file cap shared by every drain path.
+    output_file_cap: u64,
     lifecycle: Lifecycle,
     /// Whether process was backgrounded and how
     bg_status: BackgroundStatus,
@@ -1105,6 +1107,7 @@ impl LocalTerminalActor {
             front_buffer: None,
             truncated: false,
             total_bytes: 0,
+            output_file_cap: self.output_file_cap,
             lifecycle: Lifecycle::Running,
             bg_status: BackgroundStatus::Foreground {
                 auto_bg_on_timeout: request.auto_background_on_timeout,
@@ -1235,6 +1238,7 @@ impl LocalTerminalActor {
             front_buffer: None,
             truncated: false,
             total_bytes: 0,
+            output_file_cap: self.output_file_cap,
             lifecycle: Lifecycle::Running,
             bg_status: BackgroundStatus::Backgrounded {
                 reason: BackgroundReason::Explicit,
@@ -1422,7 +1426,7 @@ impl LocalTerminalActor {
         let size_exceeded: Vec<String> = self
             .processes
             .iter()
-            .filter(|(_, p)| !p.lifecycle.has_exited() && p.total_bytes as u64 > output_cap)
+            .filter(|(_, p)| !p.lifecycle.has_exited() && p.total_bytes as u64 >= output_cap)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -1730,47 +1734,57 @@ impl LocalTerminalActor {
         // to the output file in a single batch + flush at the end.
 
         let mut new_bytes: Vec<u8> = Vec::new();
+        let mut bytes_remaining = process
+            .output_file_cap
+            .saturating_sub(process.total_bytes as u64)
+            .min(usize::MAX as u64) as usize;
 
-        // Read all available stdout (non-blocking)
+        // Read available stdout/stderr under one shared byte budget. The old
+        // loops drained both pipes completely before the next cap check, so a
+        // noisy process could overshoot the file cap by an unbounded amount in
+        // one actor tick.
         let mut stdout_eof = false;
         if let Some(stdout) = process.child.stdout.as_mut() {
-            loop {
+            while bytes_remaining > 0 {
                 let mut buf = [0u8; READ_BUFFER_SIZE];
-                match try_read_nonblocking(stdout, &mut buf) {
+                let read_size = bytes_remaining.min(READ_BUFFER_SIZE);
+                match try_read_nonblocking(stdout, &mut buf[..read_size]) {
                     Some(Ok(0)) => {
                         stdout_eof = true;
                         break;
                     }
                     Some(Ok(n)) => {
                         new_bytes.extend_from_slice(&buf[..n]);
+                        bytes_remaining = bytes_remaining.saturating_sub(n);
                     }
                     Some(Err(_)) => {
                         stdout_eof = true;
                         break;
                     }
-                    None => break, // No data available right now — move on
+                    None => break,
                 }
             }
         }
 
-        // Read all available stderr (non-blocking)
         let mut stderr_eof = false;
         if let Some(stderr) = process.child.stderr.as_mut() {
-            loop {
+            while bytes_remaining > 0 {
                 let mut buf = [0u8; READ_BUFFER_SIZE];
-                match try_read_nonblocking(stderr, &mut buf) {
+                let read_size = bytes_remaining.min(READ_BUFFER_SIZE);
+                match try_read_nonblocking(stderr, &mut buf[..read_size]) {
                     Some(Ok(0)) => {
                         stderr_eof = true;
                         break;
                     }
                     Some(Ok(n)) => {
                         new_bytes.extend_from_slice(&buf[..n]);
+                        bytes_remaining = bytes_remaining.saturating_sub(n);
                     }
                     Some(Err(_)) => {
                         stderr_eof = true;
                         break;
                     }
-                    None => break, // No data available right now — move on
+                    None => break,
                 }
             }
         }
@@ -2725,14 +2739,21 @@ fn send_sigkill_to_group(process: &mut ProcessState) {
 /// pipe open cannot block the actor loop indefinitely.
 async fn drain_remaining_output(process: &mut ProcessState) {
     let timed_out = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        let mut bytes_remaining = process
+            .output_file_cap
+            .saturating_sub(process.total_bytes as u64)
+            .min(usize::MAX as u64) as usize;
+
         if let Some(stdout) = process.child.stdout.as_mut() {
-            let mut buf = [0u8; READ_BUFFER_SIZE];
-            loop {
-                match stdout.read(&mut buf).await {
+            while bytes_remaining > 0 {
+                let mut buf = [0u8; READ_BUFFER_SIZE];
+                let read_size = bytes_remaining.min(READ_BUFFER_SIZE);
+                match stdout.read(&mut buf[..read_size]).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         process.output_buffer.extend_from_slice(&buf[..n]);
                         process.total_bytes += n;
+                        bytes_remaining = bytes_remaining.saturating_sub(n);
                         if let Some(ref mut file) = process.file_handle {
                             let _ = file.write_all(&buf[..n]).await;
                         }
@@ -2742,13 +2763,15 @@ async fn drain_remaining_output(process: &mut ProcessState) {
         }
 
         if let Some(stderr) = process.child.stderr.as_mut() {
-            let mut buf = [0u8; READ_BUFFER_SIZE];
-            loop {
-                match stderr.read(&mut buf).await {
+            while bytes_remaining > 0 {
+                let mut buf = [0u8; READ_BUFFER_SIZE];
+                let read_size = bytes_remaining.min(READ_BUFFER_SIZE);
+                match stderr.read(&mut buf[..read_size]).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         process.output_buffer.extend_from_slice(&buf[..n]);
                         process.total_bytes += n;
+                        bytes_remaining = bytes_remaining.saturating_sub(n);
                         if let Some(ref mut file) = process.file_handle {
                             let _ = file.write_all(&buf[..n]).await;
                         }
@@ -2780,11 +2803,16 @@ async fn drain_remaining_output(process: &mut ProcessState) {
 /// full drain timeout, so this is safe on a process that is still running.
 async fn take_available_output(process: &mut ProcessState) {
     let mut collected = Vec::new();
+    let remaining = process
+        .output_file_cap
+        .saturating_sub(process.total_bytes as u64)
+        .min(usize::MAX as u64) as usize;
     if let Some(stdout) = process.child.stdout.as_mut() {
-        read_available(stdout, &mut collected);
+        read_available(stdout, &mut collected, remaining);
     }
     if let Some(stderr) = process.child.stderr.as_mut() {
-        read_available(stderr, &mut collected);
+        let remaining = remaining.saturating_sub(collected.len());
+        read_available(stderr, &mut collected, remaining);
     }
     process.child.stdout.take();
     process.child.stderr.take();
@@ -2800,10 +2828,15 @@ async fn take_available_output(process: &mut ProcessState) {
     process.maybe_truncate();
 }
 
-fn read_available(reader: &mut (impl tokio::io::AsyncRead + Unpin), out: &mut Vec<u8>) {
-    let mut buf = [0u8; READ_BUFFER_SIZE];
-    loop {
-        match try_read_nonblocking(reader, &mut buf) {
+fn read_available(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    out: &mut Vec<u8>,
+    max_bytes: usize,
+) {
+    while out.len() < max_bytes {
+        let mut buf = [0u8; READ_BUFFER_SIZE];
+        let read_size = (max_bytes - out.len()).min(READ_BUFFER_SIZE);
+        match try_read_nonblocking(reader, &mut buf[..read_size]) {
             Some(Ok(0)) | Some(Err(_)) | None => return,
             Some(Ok(n)) => out.extend_from_slice(&buf[..n]),
         }
@@ -4055,7 +4088,10 @@ mod tests {
         let backend = LocalTerminalBackend::new();
 
         let result1 = backend.run(make_request(&echo_cmd("first"))).await.unwrap();
-        let result2 = backend.run(make_request(&echo_cmd("second"))).await.unwrap();
+        let result2 = backend
+            .run(make_request(&echo_cmd("second")))
+            .await
+            .unwrap();
 
         assert_eq!(result1.combined_output.trim(), "first");
         assert_eq!(result2.combined_output.trim(), "second");

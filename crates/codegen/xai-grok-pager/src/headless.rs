@@ -234,10 +234,7 @@ impl HeadlessAskAnswers {
                     ordered,
                 })
             }
-            other => anyhow::bail!(
-                "ask-answers JSON must be an object or array, got {}",
-                other
-            ),
+            other => anyhow::bail!("ask-answers JSON must be an object or array, got {}", other),
         }
     }
 
@@ -262,23 +259,19 @@ fn labels_from_value(v: &serde_json::Value) -> Result<Vec<String>> {
             for item in arr {
                 match item {
                     serde_json::Value::String(s) => out.push(s.clone()),
-                    other => anyhow::bail!(
-                        "ask-answers array entries must be strings, got {other}"
-                    ),
+                    other => {
+                        anyhow::bail!("ask-answers array entries must be strings, got {other}")
+                    }
                 }
             }
             Ok(out)
         }
-        other => anyhow::bail!(
-            "ask-answers value must be a string or string array, got {other}"
-        ),
+        other => anyhow::bail!("ask-answers value must be a string or string array, got {other}"),
     }
 }
 
 /// Load headless ask answers from CLI file and/or env.
-pub fn load_headless_ask_answers(
-    file: Option<&Path>,
-) -> Result<Option<HeadlessAskAnswers>> {
+pub fn load_headless_ask_answers(file: Option<&Path>) -> Result<Option<HeadlessAskAnswers>> {
     if let Some(path) = file {
         let raw = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!("failed to read --ask-answers-file {}: {e}", path.display())
@@ -758,7 +751,11 @@ impl HeadlessEmitter {
     fn tool_name_for_event(tc: &acp::ToolCall) -> String {
         if let Some(raw) = tc.raw_input.as_ref() {
             for key in ["name", "tool_name", "variant", "toolName"] {
-                if let Some(n) = raw.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                if let Some(n) = raw
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     return n.to_string();
                 }
             }
@@ -1130,9 +1127,7 @@ impl HeadlessEmitter {
             .map(|v| !v.is_empty())
             .unwrap_or(false);
         let confine_shell = if confine.is_some() {
-            Some(
-                xai_grok_tools::types::resources::confine_shell_enforcement().as_str(),
-            )
+            Some(xai_grok_tools::types::resources::confine_shell_enforcement().as_str())
         } else {
             None
         };
@@ -1318,9 +1313,7 @@ fn headless_deny_permission(
          Re-run with --always-approve, or add an --allow rule."
     );
     emitter.on_tool_denied(tool_name, &reason);
-    if let Some(resp) =
-        auto_respond_to_permissions(req, &[acp::PermissionOptionKind::RejectOnce])
-    {
+    if let Some(resp) = auto_respond_to_permissions(req, &[acp::PermissionOptionKind::RejectOnce]) {
         return resp;
     }
     acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
@@ -1506,7 +1499,9 @@ fn folder_trust_start_snapshot(cwd: &Path, trusted_via_flag: bool) -> serde_json
     };
     let dropped_agents_n = if dropped_agents > 0 {
         dropped_agents
-    } else if kinds.iter().any(|k| k.contains("agent") || k.contains("role") || k.contains("persona"))
+    } else if kinds
+        .iter()
+        .any(|k| k.contains("agent") || k.contains("role") || k.contains("persona"))
     {
         1
     } else {
@@ -1661,8 +1656,7 @@ async fn open_session(
     }
 
     // Session meta (not only Initialize) gates ask_user_question in the shell.
-    let session_meta =
-        serde_json::json!({ "askUserQuestion": allow_interactive_questions });
+    let session_meta = serde_json::json!({ "askUserQuestion": allow_interactive_questions });
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
@@ -2183,10 +2177,7 @@ pub async fn run_single_turn(
             new_session_id,
             ..
         } => {
-            let load_cwd = parent_cwd
-                .as_deref()
-                .unwrap_or(cwd.as_path())
-                .to_path_buf();
+            let load_cwd = parent_cwd.as_deref().unwrap_or(cwd.as_path()).to_path_buf();
             let opened = fork_then_open(
                 &acp_tx,
                 &cwd,
@@ -2284,10 +2275,7 @@ pub async fn run_single_turn(
         } else {
             "default"
         });
-    let served = session_models
-        .current
-        .as_ref()
-        .map(|m| m.0.to_string());
+    let served = session_models.current.as_ref().map(|m| m.0.to_string());
     // Prefer the session cwd for trust reporting when it diverges (resume).
     let folder_trust = if session_cwd != cwd {
         folder_trust_start_snapshot(&session_cwd, options.trust)
@@ -2418,10 +2406,8 @@ pub async fn run_single_turn(
             completed_before_bg.clear();
         }
 
-        let request =
-            acp::PromptRequest::new(session_id.clone(), prompt_blocks.clone()).meta(Some(
-                prompt_meta_base.clone(),
-            ));
+        let request = acp::PromptRequest::new(session_id.clone(), prompt_blocks.clone())
+            .meta(Some(prompt_meta_base.clone()));
         let t_prompt = Instant::now();
         let mut ttf_logged = false;
         let mut prompt_fut = Box::pin(acp_send(request, &acp_tx));
@@ -2640,8 +2626,7 @@ pub async fn run_single_turn(
             // --require-changes: treat a productive stop with zero agent
             // tool edits as NoChanges so harnesses can key on stopReason.
             let no_changes = options.require_changes && emitter.files_changed.is_empty();
-            let subagent_failed =
-                options.require_subagent_success && emitter.subagents.failed > 0;
+            let subagent_failed = options.require_subagent_success && emitter.subagents.failed > 0;
             if awaiting_user_input {
                 // Distinct terminal signal: the run only asked a question
                 // (even after one auto-continue). filesChanged.count stays 0.
@@ -3316,11 +3301,9 @@ fn handle_ext_notification(
     };
 
     // Try the shell's typed SessionUpdate first (full subagent payload).
-    if let Ok(su) =
-        serde_json::from_value::<xai_grok_shell::extensions::notification::SessionUpdate>(
-            raw.update.clone(),
-        )
-    {
+    if let Ok(su) = serde_json::from_value::<xai_grok_shell::extensions::notification::SessionUpdate>(
+        raw.update.clone(),
+    ) {
         use xai_grok_shell::extensions::notification::SessionUpdate as ShellUpdate;
         match su {
             ShellUpdate::SubagentSpawned {
@@ -3907,7 +3890,8 @@ mod tests {
 
     #[test]
     fn streaming_json_structured_output_emits_from_meta() {
-        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, true, StreamToolIo::Truncated);
+        let mut emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, true, StreamToolIo::Truncated);
         emitter.on_text_chunk(r#"{"name":"#);
         emitter.on_text_chunk(r#""bob"}"#);
         assert_eq!(emitter.text_buffer, r#"{"name":"bob"}"#);
@@ -3941,7 +3925,8 @@ mod tests {
 
     #[test]
     fn files_changed_json_counts_and_lists_paths() {
-        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
+        let mut emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         emitter.files_changed.insert("src/a.rs".into());
         emitter.files_changed.insert("src/b.rs".into());
         let v = emitter.files_changed_json();
@@ -3955,7 +3940,8 @@ mod tests {
 
     #[test]
     fn files_changed_json_empty_when_no_edits() {
-        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
+        let emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         let v = emitter.files_changed_json();
         assert_eq!(v["count"], 0);
         assert_eq!(v["truncated"], false);
@@ -3964,7 +3950,8 @@ mod tests {
 
     #[test]
     fn files_changed_json_truncates_path_list() {
-        let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
+        let mut emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         for i in 0..(FILES_CHANGED_MAX_PATHS + 5) {
             emitter.files_changed.insert(format!("f{i}.rs"));
         }
@@ -3980,11 +3967,13 @@ mod tests {
     #[test]
     fn require_changes_flag_detects_empty_set() {
         // Mirrors the headless exit gate: require_changes && no edit paths.
-        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
+        let emitter =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         assert!(emitter.files_changed.is_empty());
         let require_changes = true;
         assert!(require_changes && emitter.files_changed.is_empty());
-        let mut emitter2 = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
+        let mut emitter2 =
+            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         emitter2.files_changed.insert("x.rs".into());
         assert!(!(require_changes && emitter2.files_changed.is_empty()));
     }
@@ -4140,10 +4129,8 @@ mod tests {
 
     #[test]
     fn stream_tool_io_none_omits_raw_input() {
-        let emitter =
-            HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::None);
-        let (v, truncated) =
-            emitter.maybe_stream_tool_value(Some(&serde_json::json!({"a": 1})));
+        let emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::None);
+        let (v, truncated) = emitter.maybe_stream_tool_value(Some(&serde_json::json!({"a": 1})));
         assert!(v.is_none());
         assert!(!truncated);
     }
@@ -4153,8 +4140,7 @@ mod tests {
         let emitter =
             HeadlessEmitter::new(OutputFormat::StreamingJson, false, StreamToolIo::Truncated);
         let big = "x".repeat(STREAM_TOOL_IO_TRUNCATED_BYTES + 100);
-        let (v, truncated) =
-            emitter.maybe_stream_tool_value(Some(&serde_json::Value::String(big)));
+        let (v, truncated) = emitter.maybe_stream_tool_value(Some(&serde_json::Value::String(big)));
         assert!(truncated);
         assert!(v.is_some());
     }
@@ -4213,10 +4199,9 @@ mod tests {
 
     #[test]
     fn headless_ask_answers_map_and_ordered() {
-        let map = HeadlessAskAnswers::parse_json(
-            r#"{"Which approach?": "A", "Deploy?": ["Yes", "No"]}"#,
-        )
-        .expect("map form");
+        let map =
+            HeadlessAskAnswers::parse_json(r#"{"Which approach?": "A", "Deploy?": ["Yes", "No"]}"#)
+                .expect("map form");
         assert_eq!(
             map.resolve("Which approach?", 0).as_deref(),
             Some(&["A".to_string()][..])
@@ -4300,7 +4285,9 @@ mod tests {
         assert!(!looks_like_user_question(
             "Is the bug in foo? Yes — I fixed it in src/main.rs and re-ran tests."
         ));
-        assert!(!looks_like_user_question("I edited src/main.rs and ran tests."));
+        assert!(!looks_like_user_question(
+            "I edited src/main.rs and ran tests."
+        ));
         assert!(!looks_like_user_question(""));
         assert!(!looks_like_user_question("   \n  "));
     }
@@ -4339,7 +4326,11 @@ Want to try it? (Requires opening a local URL)";
         ));
         // Not a normal end.
         assert!(!should_auto_continue_headless_question(
-            "Cancelled", 0, q, false, false
+            "Cancelled",
+            0,
+            q,
+            false,
+            false
         ));
         // Not a question.
         assert!(!should_auto_continue_headless_question(
@@ -4353,7 +4344,10 @@ Want to try it? (Requires opening a local URL)";
         let meta = req.meta.as_ref().expect("meta");
         assert_eq!(meta["startupHints"]["nonInteractive"], true);
         assert!(meta.get("allowInteractiveQuestions").is_none());
-        assert_eq!(meta["askUserQuestion"], false, "default-disable ask tool headlessly");
+        assert_eq!(
+            meta["askUserQuestion"], false,
+            "default-disable ask tool headlessly"
+        );
         assert_eq!(meta["rules"], "be brief");
 
         let req2 = build_headless_init_request(None, None, true);

@@ -61,6 +61,8 @@ pub enum RuntimeError {
     },
     #[error("wasm module error: {0}")]
     Module(String),
+    #[error("wasm artifact is missing or not a regular file: {path}")]
+    MissingArtifact { path: PathBuf },
     #[error("guest trap or call failed: {0}")]
     Trap(String),
     #[error("guest call timed out after {0:?}")]
@@ -430,6 +432,12 @@ impl ExtensionRuntime {
             self.metrics.loads_failed.fetch_add(1, Ordering::Relaxed);
             return Err(ContractError::NotTrusted.into());
         }
+        if !spec.wasm_path.is_file() {
+            self.metrics.loads_failed.fetch_add(1, Ordering::Relaxed);
+            return Err(RuntimeError::MissingArtifact {
+                path: spec.wasm_path.clone(),
+            });
+        }
         #[cfg(feature = "wasm")]
         {
             match WasmGuest::load(&spec.wasm_path) {
@@ -686,9 +694,7 @@ impl ExtensionRuntime {
                 );
             results.push((name.clone(), r));
             if denied || failed_closed {
-                self.metrics
-                    .pre_tool_denies
-                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.pre_tool_denies.fetch_add(1, Ordering::Relaxed);
                 let reason = if !host_out.gate_reason.is_empty() {
                     host_out.gate_reason
                 } else if failed_closed {
@@ -845,7 +851,9 @@ impl ExtensionRuntime {
                 .guests
                 .iter()
                 .find(|g| g.name == extension)
-                .ok_or_else(|| RuntimeError::Module(format!("extension not loaded: {extension}")))?;
+                .ok_or_else(|| {
+                    RuntimeError::Module(format!("extension not loaded: {extension}"))
+                })?;
             if !guest.capabilities.contains(&Capability::RegisterTool) {
                 return Err(RuntimeError::Module(format!(
                     "extension `{extension}` lacks register_tool capability"
@@ -978,11 +986,7 @@ impl ExtensionRuntime {
 }
 
 fn non_empty(s: String) -> Option<String> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn tag_extension_out(mut out: BeforeAgentStartOut, name: &str) -> BeforeAgentStartOut {
@@ -1018,13 +1022,22 @@ pub enum GuestCallResult {
         /// Guest `hyper_host.log` lines from this call (capped).
         logs: Vec<GuestLogLine>,
     },
-    SkippedExport { extension: String, export: &'static str },
+    SkippedExport {
+        extension: String,
+        export: &'static str,
+    },
     SkippedCapability {
         extension: String,
         capability: Capability,
     },
-    Failed { extension: String, error: String },
-    Timeout { extension: String, limit: Duration },
+    Failed {
+        extension: String,
+        error: String,
+    },
+    Timeout {
+        extension: String,
+        limit: Duration,
+    },
 }
 
 impl GuestCallResult {
@@ -1973,9 +1986,7 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
         .func_wrap(
             "hyper_host",
             "tool_name_len",
-            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
-                caller.data().tool_name.len() as i32
-            },
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 { caller.data().tool_name.len() as i32 },
         )
         .map_err(|e| RuntimeError::Module(e.to_string()))?;
     linker
@@ -2009,9 +2020,7 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
         .func_wrap(
             "hyper_host",
             "prompt_len",
-            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
-                caller.data().prompt.len() as i32
-            },
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 { caller.data().prompt.len() as i32 },
         )
         .map_err(|e| RuntimeError::Module(e.to_string()))?;
     linker
@@ -2431,12 +2440,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_wasm(&dir, "deny.wasm", DENY_WITH_REASON);
         let mut rt = ExtensionRuntime::new();
-        rt.load(&trusted_spec(
-            "pol",
-            path,
-            vec![Capability::PreToolGate],
-        ))
-        .unwrap();
+        rt.load(&trusted_spec("pol", path, vec![Capability::PreToolGate]))
+            .unwrap();
         let d = rt
             .dispatch_pre_tool_use(&PreToolIn {
                 tool_name: "run_terminal_command".into(),
@@ -2456,12 +2461,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_wasm(&dir, "trap-tool.wasm", TRAP_ON_PRE_TOOL);
         let mut rt = ExtensionRuntime::new().with_gate_fail(GateFailMode::Closed);
-        rt.load(&trusted_spec(
-            "trap",
-            path,
-            vec![Capability::PreToolGate],
-        ))
-        .unwrap();
+        rt.load(&trusted_spec("trap", path, vec![Capability::PreToolGate]))
+            .unwrap();
         let d = rt
             .dispatch_pre_tool_use(&PreToolIn {
                 tool_name: "x".into(),
@@ -2476,12 +2477,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_wasm(&dir, "trap-tool2.wasm", TRAP_ON_PRE_TOOL);
         let mut rt = ExtensionRuntime::new().with_gate_fail(GateFailMode::Open);
-        rt.load(&trusted_spec(
-            "trap",
-            path,
-            vec![Capability::PreToolGate],
-        ))
-        .unwrap();
+        rt.load(&trusted_spec("trap", path, vec![Capability::PreToolGate]))
+            .unwrap();
         let d = rt
             .dispatch_pre_tool_use(&PreToolIn {
                 tool_name: "x".into(),
@@ -2736,8 +2733,7 @@ mod tests {
         let path = write_wasm(&dir, "safe.wasm", SAFE_SHELL_GUEST);
         let mut rt = ExtensionRuntime::new();
         // Module can deny, but capability not granted → skipped → allow.
-        rt.load(&trusted_spec("safe-shell", path, vec![]))
-            .unwrap();
+        rt.load(&trusted_spec("safe-shell", path, vec![])).unwrap();
         let d = rt
             .dispatch_pre_tool_use(&PreToolIn {
                 tool_name: "run_terminal_command".into(),
@@ -2929,14 +2925,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_wasm(&dir, "bad-tool.wasm", BAD_TOOL_NAME_GUEST);
         let mut rt = ExtensionRuntime::new();
-        rt.load(&trusted_spec(
-            "bad",
-            path,
-            vec![Capability::RegisterTool],
-        ))
-        .unwrap();
+        rt.load(&trusted_spec("bad", path, vec![Capability::RegisterTool]))
+            .unwrap();
         let tools = rt.collect_registered_tools().await;
-        assert!(tools.is_empty(), "invalid tool should be skipped: {tools:?}");
+        assert!(
+            tools.is_empty(),
+            "invalid tool should be skipped: {tools:?}"
+        );
     }
 
     /// Busy loop until fuel/epoch kills it (no host imports).
@@ -3595,12 +3590,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_wasm(&dir, "trap-m.wasm", TRAP_ON_PRE_TOOL);
         let mut rt = ExtensionRuntime::new().with_gate_fail(GateFailMode::Closed);
-        rt.load(&trusted_spec(
-            "trap",
-            path,
-            vec![Capability::PreToolGate],
-        ))
-        .unwrap();
+        rt.load(&trusted_spec("trap", path, vec![Capability::PreToolGate]))
+            .unwrap();
         assert_eq!(rt.metrics().loads_ok, 1);
         let _ = rt
             .dispatch_pre_tool_use(&PreToolIn {
@@ -3648,8 +3639,6 @@ mod tests {
             start_elapsed < Duration::from_secs(5),
             "session_start×5 took {start_elapsed:?} (budget 5s debug)"
         );
-        eprintln!(
-            "bench load_five: load={load_elapsed:?} session_start={start_elapsed:?}"
-        );
+        eprintln!("bench load_five: load={load_elapsed:?} session_start={start_elapsed:?}");
     }
 }

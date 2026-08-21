@@ -344,6 +344,7 @@ fn resumed_from_field_in_meta_roundtrips() {
         persona: None,
         resumed_from: Some("prev-subagent-id".into()),
         child_cwd: None,
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -401,6 +402,7 @@ fn resumed_from_none_not_serialized_in_meta() {
         persona: None,
         resumed_from: None,
         child_cwd: None,
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -458,6 +460,7 @@ fn snapshot_ref_field_in_meta_roundtrips() {
         persona: None,
         resumed_from: None,
         child_cwd: None,
+        display_cwd: None,
         worktree_path: Some("/tmp/grok-wt/sa-snap".into()),
         snapshot_ref: Some("refs/grok/subagent-snapshots/sa-snap".into()),
         baseline_ref: None,
@@ -518,6 +521,7 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         persona: None,
         resumed_from: None,
         child_cwd: None,
+        display_cwd: None,
         worktree_path: Some("/tmp/grok-wt/subagent-x".into()),
         snapshot_ref: None,
         baseline_ref: None,
@@ -798,6 +802,7 @@ fn subagent_session_metadata_roundtrip() {
         persona: Some("reviewer".into()),
         resumed_from: None,
         child_cwd: None,
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -868,6 +873,7 @@ fn subagent_session_metadata_non_forked() {
         persona: Some("implementer".into()),
         resumed_from: None,
         child_cwd: None,
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -942,6 +948,7 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         persona: Some("implementer".into()),
         resumed_from: None,
         child_cwd: None,
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -1035,6 +1042,7 @@ fn upload_lifecycle_failure_preserves_error() {
         persona: None,
         resumed_from: None,
         child_cwd: None,
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -1093,6 +1101,7 @@ fn session_metadata_session_kind_for_resumed() {
         persona: None,
         resumed_from: Some("prev-id".into()),
         child_cwd: None,
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -1486,6 +1495,7 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         persona: Some("implementer".into()),
         resumed_from: None,
         child_cwd: Some("/workspace/project".into()),
+        display_cwd: None,
         worktree_path: Some("/tmp/grok-wt/sa-dur".into()),
         snapshot_ref: None,
         baseline_ref: None,
@@ -1535,6 +1545,7 @@ fn durable_fallback_rejects_running_status() {
         persona: None,
         resumed_from: None,
         child_cwd: Some("/workspace".into()),
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -1627,6 +1638,7 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
         persona: None,
         resumed_from: None,
         child_cwd: Some("/workspace".into()),
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -1917,6 +1929,7 @@ fn durable_meta_roundtrips_effective_model_id() {
         persona: None,
         resumed_from: None,
         child_cwd: Some("/workspace".into()),
+        display_cwd: None,
         worktree_path: None,
         snapshot_ref: None,
         baseline_ref: None,
@@ -1998,12 +2011,24 @@ fn notification_subagent_spawned_includes_resumed_from() {
         resumed_from: Some("prev-agent-id".into()),
         budget: None,
         workflow_run_id: None,
+        child_cwd: Some("/home/u/.grok/worktrees/repo/subagent-sa-resumed".into()),
+        display_cwd: Some("/workspace".into()),
+        worktree_path: Some("/home/u/.grok/worktrees/repo/subagent-sa-resumed".into()),
+        isolation_requested: Some("worktree".into()),
+        isolation_fallback: false,
     };
     let json = serde_json::to_value(&notification).unwrap();
     assert_eq!(json["resumed_from"], "prev-agent-id");
     assert_eq!(json["effective_context_source"], "resumed");
     assert_eq!(json["role"], serde_json::Value::Null);
     assert_eq!(json["model"], serde_json::Value::Null);
+    assert_eq!(
+        json["child_cwd"],
+        "/home/u/.grok/worktrees/repo/subagent-sa-resumed"
+    );
+    assert_eq!(json["display_cwd"], "/workspace");
+    assert_eq!(json["isolation_requested"], "worktree");
+    assert!(json.get("isolation_fallback").is_none());
     let fresh = SessionUpdate::SubagentSpawned {
         subagent_id: "sa-fresh".into(),
         parent_session_id: "p".into(),
@@ -2020,6 +2045,11 @@ fn notification_subagent_spawned_includes_resumed_from() {
         resumed_from: None,
         budget: None,
         workflow_run_id: None,
+        child_cwd: None,
+        display_cwd: None,
+        worktree_path: None,
+        isolation_requested: Some("none".into()),
+        isolation_fallback: false,
     };
     let json = serde_json::to_value(&fresh).unwrap();
     assert!(json.get("resumed_from").is_none());

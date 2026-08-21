@@ -724,7 +724,9 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 output.push_str("\n<isolation_fallback>true</isolation_fallback>");
             }
             if let Some(req) = &isolation_requested {
-                output.push_str(&format!("\n<isolation_requested>{req}</isolation_requested>"));
+                output.push_str(&format!(
+                    "\n<isolation_requested>{req}</isolation_requested>"
+                ));
             }
             if let Some(wt) = &worktree_path {
                 output.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
@@ -2190,11 +2192,11 @@ mod tests {
                         tool_calls: 5,
                         turns: 2,
                         worktree_path: None,
-            isolation: None,
-            isolation_fallback: false,
-            worktree_state: None,
-            isolation_requested: None,
-        },
+                        isolation: None,
+                        isolation_fallback: false,
+                        worktree_state: None,
+                        isolation_requested: None,
+                    },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 1500,
                     persona: None,

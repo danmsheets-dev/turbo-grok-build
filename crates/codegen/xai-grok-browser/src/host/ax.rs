@@ -569,7 +569,7 @@ mod tests {
     fn turbo_ax_js_is_small_and_carries_its_guards() {
         let injected = turbo_ax_js_injected();
         assert!(
-            injected.len() < 10_240,
+            injected.len() < 24_576,
             "keep turbo_ax.js small ({})",
             injected.len()
         );
@@ -584,6 +584,18 @@ mod tests {
         assert!(
             injected.contains("getOwnPropertyDescriptor"),
             "React value-setter path must survive"
+        );
+        assert!(
+            injected.contains("insertText"),
+            "contenteditable insertText path must survive"
+        );
+        assert!(
+            injected.contains("role=option"),
+            "listbox/option collection must survive"
+        );
+        assert!(
+            injected.contains("pageContains"),
+            "wait helper must survive"
         );
         assert!(
             injected.contains("one-time-code"),

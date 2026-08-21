@@ -122,9 +122,7 @@ pub fn resolve_grok_home() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .or_else(|| dirs::home_dir())
         .unwrap_or_else(|| PathBuf::from("."));
-    dunce::canonicalize(&home)
-        .unwrap_or(home)
-        .join(".grok")
+    dunce::canonicalize(&home).unwrap_or(home).join(".grok")
 }
 
 /// Default durable store root: `~/.grok/workspace-trees`.

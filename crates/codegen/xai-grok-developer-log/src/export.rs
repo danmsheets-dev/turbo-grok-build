@@ -37,11 +37,9 @@ pub fn export_pack(
 ) -> Result<ExportResult, StoreError> {
     let entries = store.list(&options.filter)?;
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let out_dir = options.out_dir.unwrap_or_else(|| {
-        store
-            .bundles_dir()
-            .join(format!("export-{stamp}"))
-    });
+    let out_dir = options
+        .out_dir
+        .unwrap_or_else(|| store.bundles_dir().join(format!("export-{stamp}")));
     fs::create_dir_all(&out_dir)?;
     let evidence_dir = out_dir.join("evidence");
     fs::create_dir_all(&evidence_dir)?;
@@ -113,10 +111,7 @@ pub fn export_pack(
         ]
     });
     let manifest_path = out_dir.join("manifest.json");
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&manifest)?,
-    )?;
+    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
 
     Ok(ExportResult {
         out_dir,
@@ -154,11 +149,7 @@ fn csv_escape(s: &str) -> String {
     s.replace('"', "\"\"")
 }
 
-fn render_summary_md(
-    incidents: &[Incident],
-    entries: &[IndexEntry],
-    skipped: &[String],
-) -> String {
+fn render_summary_md(incidents: &[Incident], entries: &[IndexEntry], skipped: &[String]) -> String {
     let mut p0 = 0u32;
     let mut p1 = 0u32;
     let mut p2 = 0u32;
@@ -174,10 +165,7 @@ fn render_summary_md(
 
     let mut out = String::new();
     out.push_str("# Turbo Auto Developer Log — Export Summary\n\n");
-    out.push_str(&format!(
-        "- **Exported at:** {}\n",
-        Utc::now().to_rfc3339()
-    ));
+    out.push_str(&format!("- **Exported at:** {}\n", Utc::now().to_rfc3339()));
     out.push_str(&format!(
         "- **Turbo version:** {}\n",
         xai_grok_version::installed()

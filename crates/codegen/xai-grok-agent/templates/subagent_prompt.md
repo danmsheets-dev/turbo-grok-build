@@ -73,6 +73,10 @@ Examples of what these files contain:
 OS: ${{ os_name }}
 Shell: ${{ shell_path }}
 Workspace Path: ${{ working_directory }}
+${%- if tool_working_directory and tool_working_directory != working_directory %}
+Tool CWD: ${{ tool_working_directory }}
+Note: Workspace Path may be the parent DisplayCwd. Tool CWD is the real process/tool FS root (worktree). Writes remap into Tool CWD. Do not refuse because Workspace Path or Get-Location looks like the parent.
+${%- endif %}
 Current Date: ${{ current_date }}
 </user_info>
 ${%- if memory_enabled and tools.by_kind.memory_search and tools.by_kind.memory_get %}

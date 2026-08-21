@@ -297,7 +297,10 @@ impl FeatureRequestStore {
     }
 
     /// Report a feature request; merges by fingerprint when one already exists.
-    pub fn report(&self, request: FeatureRequestReport) -> Result<FeatureRequestResult, FrStoreError> {
+    pub fn report(
+        &self,
+        request: FeatureRequestReport,
+    ) -> Result<FeatureRequestResult, FrStoreError> {
         if !fr_is_enabled() {
             return Err(FrStoreError::Disabled);
         }
@@ -644,10 +647,7 @@ impl FrListFilter {
             return false;
         }
         if let Some(ref comp) = self.component
-            && !e
-                .component
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(comp))
+            && !e.component.iter().any(|c| c.eq_ignore_ascii_case(comp))
         {
             return false;
         }

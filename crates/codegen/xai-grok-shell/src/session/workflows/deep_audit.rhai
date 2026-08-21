@@ -7,6 +7,12 @@ let meta = #{
         #{ title: "Verify", detail: "Independently confirm or refute each candidate claim" },
         #{ title: "Report", detail: "Markdown report of confirmed findings only plus unverified appendix" },
     ],
+    tasks: [
+        #{ id: "scope", description: "Define audit scope and targets", max_attempts: 2 },
+        #{ id: "investigate", description: "Collect evidence-backed findings", max_attempts: 2 },
+        #{ id: "verify", description: "Independently verify findings", max_attempts: 2 },
+        #{ id: "report", description: "Write the audit report", max_attempts: 2 },
+    ],
 };
 
 // Rhai string::trim() mutates in place and returns (); return the string.
@@ -173,6 +179,7 @@ if planned_agents > 25 {
 }
 
 // ── Scope ─────────────────────────────────────────────────────────────
+task_start("scope");
 phase("Scope");
 let plan_schema = #{
     "type": "object",
@@ -277,6 +284,8 @@ if targets.len() == 0 {
     }];
 }
 log("audit plan: " + targets.len().to_string() + " investigation target(s); " + scope_summary);
+task_complete("scope", "Audit targets defined");
+task_start("investigate");
 
 // ── Investigate ───────────────────────────────────────────────────────
 phase("Investigate");
@@ -411,6 +420,7 @@ if dropped_claims > 0 {
 if successful_finders < targets.len() {
     partial = true;
 }
+task_complete("investigate", "Evidence-backed findings collected");
 if candidate_claims.len() == 0 {
     partial = true;
     coverage_notes.push("No finding had both a concrete claim and inspectable evidence.");
@@ -422,11 +432,16 @@ if candidate_claims.len() == 0 {
         report += "- " + json_encode(note) + "\n";
     }
     let path = write_scratch_file("audit-report.md", report);
+    task_start("verify");
+    task_complete("verify", "No findings required verification");
+    task_start("report");
+    task_complete("report", "Partial audit report written");
     complete(#{ path: path, report: report, status: "partial", verified_claim_ids: [] });
 }
 log("investigate complete: " + candidate_claims.len().to_string() + " candidate finding(s) require verification");
 
 // ── Verify ────────────────────────────────────────────────────────────
+task_start("verify");
 phase("Verify");
 if candidate_claims.len() < verifier_count {
     verifier_count = candidate_claims.len();
@@ -624,6 +639,8 @@ for c in candidate_claims {
 }
 log("verification complete: " + verified_findings.len().to_string() + "/"
     + candidate_claims.len().to_string() + " findings confirmed");
+task_complete("verify", "Findings independently verified");
+task_start("report");
 
 // ── Report ────────────────────────────────────────────────────────────
 phase("Report");
@@ -727,6 +744,7 @@ if sorted.len() == 0 && unverified_findings.len() > 0 {
 }
 
 let path = write_scratch_file("audit-report.md", full_report);
+task_complete("report", "Audit report written");
 complete(#{
     path: path,
     report: chat_report,

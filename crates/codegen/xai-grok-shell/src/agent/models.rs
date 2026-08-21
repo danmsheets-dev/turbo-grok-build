@@ -97,18 +97,23 @@ pub(crate) fn task_model_error_for_catalog(
 /// - Luna: `openai/gpt-5.6-luna` → `openai-codex/gpt-5.6-luna`
 /// - Lightning: `nvidia/nemotron-3.5-lightning-30b-a3b` →
 ///   `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b`
+/// - Muse Glimmer / Laguna XS / Mistral-Nemotron NVIDIA Integrate ids
 fn task_model_aliases(requested: &str) -> Vec<String> {
     let requested = requested.trim();
     let lower = requested.to_ascii_lowercase();
     let mut out = Vec::new();
 
-    const LUNA: &[(&str, &str)] = &[
+    const CODEX_FAMILY: &[(&str, &str)] = &[
         ("openai/gpt-5.6-luna", "openai-codex/gpt-5.6-luna"),
         ("openai/gpt-5.6-luna-pro", "openai-codex/gpt-5.6-luna-pro"),
         ("gpt-5.6-luna", "openai-codex/gpt-5.6-luna"),
         ("gpt-5.6-luna-pro", "openai-codex/gpt-5.6-luna-pro"),
+        ("openai/gpt-5.6-sol", "openai-codex/gpt-5.6-sol"),
+        ("openai/gpt-5.6-sol-pro", "openai-codex/gpt-5.6-sol-pro"),
+        ("gpt-5.6-sol", "openai-codex/gpt-5.6-sol"),
+        ("gpt-5.6-sol-pro", "openai-codex/gpt-5.6-sol-pro"),
     ];
-    for (from, to) in LUNA {
+    for (from, to) in CODEX_FAMILY {
         if lower == *from || lower.ends_with(&format!("/{from}")) {
             out.push((*to).to_string());
         }
@@ -120,6 +125,18 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
     {
         out.push("nvidia/nvidia/nemotron-3.5-lightning-30b-a3b".into());
         out.push("nvidia/nemotron-3.5-lightning-30b-a3b".into());
+    }
+    if lower.contains("muse-glimmer") {
+        out.push("nvidia/meta/muse-glimmer-30b".into());
+        out.push("nvidia/muse-glimmer-30b".into());
+    }
+    if lower.contains("laguna-xs-2.1") || lower.ends_with("laguna-xs") {
+        out.push("nvidia/poolside/laguna-xs-2.1".into());
+        out.push("nvidia/laguna-xs-2.1".into());
+    }
+    if lower.contains("mistral-nemotron") {
+        out.push("nvidia/mistralai/mistral-nemotron".into());
+        out.push("nvidia/mistral-nemotron".into());
     }
     out
 }

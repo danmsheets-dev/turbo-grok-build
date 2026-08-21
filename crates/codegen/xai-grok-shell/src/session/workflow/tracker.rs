@@ -1,7 +1,9 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use xai_workflow::{PauseKind, PhaseMeta, WorkflowOutcome};
+use xai_workflow::{
+    PauseKind, PhaseMeta, TaskDefinition, TaskQueueError, TaskQueueState, WorkflowOutcome,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +128,8 @@ pub struct WorkflowAgentRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub state: String,
     #[serde(default)]
@@ -204,6 +208,7 @@ pub(crate) struct WorkflowTracker {
 #[derive(Debug)]
 struct TrackedRun {
     state: WorkflowRunState,
+    task_queue: TaskQueueState,
     active_since: Option<Instant>,
     execution_epoch: u64,
 }
@@ -215,6 +220,27 @@ impl WorkflowTracker {
         name: String,
         objective: String,
         phases: Vec<PhaseMeta>,
+        agent_budget: Option<u64>,
+        journal_path: Option<String>,
+    ) -> WorkflowRunState {
+        self.start_run_with_tasks(
+            run_id,
+            name,
+            objective,
+            phases,
+            Vec::new(),
+            agent_budget,
+            journal_path,
+        )
+    }
+
+    pub(crate) fn start_run_with_tasks(
+        &mut self,
+        run_id: String,
+        name: String,
+        objective: String,
+        phases: Vec<PhaseMeta>,
+        task_definitions: Vec<TaskDefinition>,
         agent_budget: Option<u64>,
         journal_path: Option<String>,
     ) -> WorkflowRunState {
@@ -233,6 +259,8 @@ impl WorkflowTracker {
                 }
             }
         };
+        let task_queue = TaskQueueState::from_definitions(&task_definitions)
+            .expect("workflow task definitions must be validated before tracker initialization");
         let mut state = WorkflowRunState {
             run_id,
             revision: 0,
@@ -255,6 +283,7 @@ impl WorkflowTracker {
         state.record_event("workflow_started", None);
         self.runs.push(TrackedRun {
             state: state.clone(),
+            task_queue,
             active_since: Some(Instant::now()),
             execution_epoch: 0,
         });
@@ -267,7 +296,13 @@ impl WorkflowTracker {
         new_agent_budget: Option<u64>,
     ) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
-        if !run.state.status.is_resumable() {
+        if !run.state.status.is_resumable()
+            || run
+                .task_queue
+                .tasks
+                .iter()
+                .any(|task| task.status == xai_workflow::TaskStatus::Failed)
+        {
             return None;
         }
         let candidate_budget = match new_agent_budget {
@@ -308,6 +343,113 @@ impl WorkflowTracker {
                 .record_event("phase_entered", Some(title.to_string()));
         }
         Some(run.state.clone())
+    }
+
+    pub(crate) fn task_queue(&self, run_id: &str) -> Option<TaskQueueState> {
+        self.runs
+            .iter()
+            .find(|run| run.state.run_id == run_id)
+            .map(|run| run.task_queue.clone())
+    }
+
+    pub(crate) fn task_queues_snapshot(&self) -> std::collections::HashMap<String, TaskQueueState> {
+        self.runs
+            .iter()
+            .map(|run| (run.state.run_id.clone(), run.task_queue.clone()))
+            .collect()
+    }
+
+    pub(crate) fn restore_task_queue(
+        &mut self,
+        run_id: &str,
+        task_queue: TaskQueueState,
+    ) -> Option<WorkflowRunState> {
+        let run = self.run_mut(run_id)?;
+        if run.task_queue != task_queue {
+            run.task_queue = task_queue;
+            run.state.record_event("workflow_tasks_restored", None);
+        }
+        Some(run.state.clone())
+    }
+
+    pub(crate) fn task_mutation_snapshot(
+        &self,
+        run_id: &str,
+    ) -> Option<(WorkflowRunState, TaskQueueState)> {
+        self.runs
+            .iter()
+            .find(|run| run.state.run_id == run_id)
+            .map(|run| (run.state.clone(), run.task_queue.clone()))
+    }
+
+    pub(crate) fn restore_task_mutation(
+        &mut self,
+        run_id: &str,
+        state: WorkflowRunState,
+        task_queue: TaskQueueState,
+    ) -> bool {
+        let Some(run) = self.run_mut(run_id) else {
+            return false;
+        };
+        run.state = state;
+        run.task_queue = task_queue;
+        true
+    }
+
+    pub(crate) fn task_start(
+        &mut self,
+        run_id: &str,
+        task_id: &str,
+    ) -> Result<WorkflowRunState, TaskQueueError> {
+        self.mutate_task_queue(run_id, task_id, "task_started", |queue| {
+            queue.start(task_id)
+        })
+    }
+
+    pub(crate) fn task_complete(
+        &mut self,
+        run_id: &str,
+        task_id: &str,
+        result_summary: Option<String>,
+    ) -> Result<WorkflowRunState, TaskQueueError> {
+        self.mutate_task_queue(run_id, task_id, "task_completed", |queue| {
+            queue.complete(task_id, result_summary)
+        })
+    }
+
+    pub(crate) fn task_fail(
+        &mut self,
+        run_id: &str,
+        task_id: &str,
+        result_summary: Option<String>,
+    ) -> Result<WorkflowRunState, TaskQueueError> {
+        self.mutate_task_queue(run_id, task_id, "task_failed", |queue| {
+            queue.fail(task_id, result_summary)
+        })
+    }
+
+    fn mutate_task_queue(
+        &mut self,
+        run_id: &str,
+        task_id: &str,
+        event: &str,
+        mutate: impl FnOnce(&mut TaskQueueState) -> Result<TaskQueueState, TaskQueueError>,
+    ) -> Result<WorkflowRunState, TaskQueueError> {
+        let run = self
+            .run_mut(run_id)
+            .ok_or_else(|| TaskQueueError::NotFound(run_id.to_string()))?;
+        let before = run.task_queue.clone();
+        let next = mutate(&mut run.task_queue)?;
+        if before == next {
+            return Ok(run.state.clone());
+        }
+        let next_current = next.current_task.clone().unwrap_or_default();
+        run.task_queue = next;
+        run.state.record_event(
+            event,
+            Some(format!("task_id={task_id};current_task={next_current}")),
+        );
+        Ok(run.state.clone())
     }
 
     #[cfg(test)]
@@ -405,6 +547,9 @@ impl WorkflowTracker {
         };
         if row.phase.is_none() {
             row.phase = run.state.current_phase.clone();
+        }
+        if row.task_id.is_none() {
+            row.task_id = run.task_queue.current_task.clone();
         }
         if row.label.is_empty() {
             row.label = default_label_for(&run.state.agents, row.phase.as_deref());
@@ -516,9 +661,28 @@ impl WorkflowTracker {
         }
         match outcome {
             WorkflowOutcome::Completed { result } => {
-                run.state.status = WorkflowRunStatus::Complete;
-                run.state.result_summary = Some(summarize_result(result));
-                run.state.record_event("workflow_completed", None);
+                let incomplete: Vec<String> = run
+                    .task_queue
+                    .tasks
+                    .iter()
+                    .filter(|task| task.status != xai_workflow::TaskStatus::Completed)
+                    .map(|task| format!("{} ({})", task.id, task.status.as_str()))
+                    .collect();
+                if incomplete.is_empty() {
+                    run.state.status = WorkflowRunStatus::Complete;
+                    run.state.result_summary = Some(summarize_result(result));
+                    run.state.record_event("workflow_completed", None);
+                } else {
+                    let detail = format!(
+                        "workflow completion rejected; unfinished tasks: {}",
+                        incomplete.join(", ")
+                    );
+                    run.state.status = WorkflowRunStatus::Failed;
+                    run.state.pause_message = Some(detail.clone());
+                    run.state.result_summary = None;
+                    run.state
+                        .record_event("workflow_completion_rejected", Some(detail));
+                }
             }
             WorkflowOutcome::Paused { kind, message } => {
                 run.state.status = WorkflowRunStatus::from_pause(*kind);
@@ -580,9 +744,17 @@ impl WorkflowTracker {
     }
 
     pub(crate) fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Self {
+        Self::from_snapshot_with_queues(snapshots, std::collections::HashMap::new())
+    }
+
+    pub(crate) fn from_snapshot_with_queues(
+        snapshots: Vec<WorkflowRunState>,
+        task_queues: std::collections::HashMap<String, TaskQueueState>,
+    ) -> Self {
         let runs = snapshots
             .into_iter()
             .map(|mut state| {
+                let mut task_queue = task_queues.get(&state.run_id).cloned().unwrap_or_default();
                 if !state.token_leases.is_empty() {
                     let charge = state
                         .token_leases
@@ -596,15 +768,42 @@ impl WorkflowTracker {
                     );
                 }
                 if state.status == WorkflowRunStatus::Active {
-                    state.status = WorkflowRunStatus::Interrupted;
-                    state.pause_message = Some(
-                        "the session ended while this workflow was active; start a new run"
-                            .to_string(),
-                    );
-                    state.record_event(
-                        "workflow_interrupted",
-                        Some("restored_without_stable_operation_identity".into()),
-                    );
+                    if task_queue.tasks.is_empty() {
+                        state.status = WorkflowRunStatus::Interrupted;
+                        state.pause_message = Some(
+                            "the session ended while this workflow was active; start a new run"
+                                .to_string(),
+                        );
+                        state.record_event(
+                            "workflow_interrupted",
+                            Some("restored_without_stable_operation_identity".into()),
+                        );
+                    } else {
+                        let recovered = task_queue.recover_after_interruption();
+                        if task_queue
+                            .tasks
+                            .iter()
+                            .any(|task| task.status == xai_workflow::TaskStatus::Failed)
+                        {
+                            state.status = WorkflowRunStatus::Failed;
+                            state.pause_message = Some(
+                                "the session ended after this workflow task exhausted its retry budget"
+                                    .to_string(),
+                            );
+                        } else {
+                            state.status = WorkflowRunStatus::InfraPaused;
+                            state.pause_message = Some(
+                                "the session ended while this workflow was active; resume to retry the interrupted task"
+                                    .to_string(),
+                            );
+                        }
+                        if recovered {
+                            state.record_event(
+                                "workflow_interrupted",
+                                Some("running_task_reset_for_resume".into()),
+                            );
+                        }
+                    }
                 }
                 let mut cancelled_ghost = false;
                 for agent in &mut state.agents {
@@ -618,6 +817,7 @@ impl WorkflowTracker {
                 }
                 TrackedRun {
                     state,
+                    task_queue,
                     active_since: None,
                     execution_epoch: 0,
                 }
@@ -819,6 +1019,7 @@ mod tests {
                 agent_id: "child-attempt-1".into(),
                 label: "worker".into(),
                 phase: None,
+                task_id: None,
                 model: None,
                 state: "running".into(),
                 tokens_used: 0,
@@ -856,6 +1057,7 @@ mod tests {
                 agent_id: "child".into(),
                 label: "worker".into(),
                 phase: None,
+                task_id: None,
                 model: None,
                 state: "running".into(),
                 tokens_used: 0,
@@ -901,6 +1103,7 @@ mod tests {
                 agent_id: "child".into(),
                 label: "worker".into(),
                 phase: None,
+                task_id: None,
                 model: None,
                 state: "running".into(),
                 tokens_used: 0,
@@ -1286,6 +1489,7 @@ mod tests {
                 agent_id: "child-1".into(),
                 label: "scanner".into(),
                 phase: None,
+                task_id: None,
                 model: None,
                 state: "running".into(),
                 tokens_used: 0,

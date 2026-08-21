@@ -33,6 +33,13 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
+        || m.contains("context length exceeded")
+        || m.contains("context window")
+        || m.contains("token limit")
+        || m.contains("too many tokens")
+        || m.contains("input too long")
+        || m.contains("reduce the length")
+        || m.contains("max_tokens") && m.contains("exceed")
         || (m.contains("current message") && m.contains("exceeds budget"))
 }
 
@@ -107,6 +114,21 @@ mod tests {
         assert!(!det_status(500));
         assert!(!det_status(502));
         assert!(!det_status(503));
+    }
+
+    #[test]
+    fn context_length_synonyms_are_detected() {
+        for msg in [
+            "context window exceeded",
+            "token limit reached",
+            "too many tokens in the request",
+            "input too long for the model",
+            "please reduce the length of the messages",
+            "max_tokens exceeded for this request",
+        ] {
+            assert!(is_context_length_error(msg), "{msg}");
+        }
+        assert!(!is_context_length_error("rate limit exceeded"));
     }
 
     #[test]

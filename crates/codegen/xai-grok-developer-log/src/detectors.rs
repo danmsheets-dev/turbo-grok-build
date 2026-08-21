@@ -1,8 +1,8 @@
 //! Runtime auto-detectors that file structured product incidents.
 
 use crate::schema::{
-    Environment, ErrorClass, Evidence, IncidentKind, Repro, ReproConfidence, ReportRequest,
-    ReportResult, ReporterKind, Severity, Source,
+    Environment, ErrorClass, Evidence, IncidentKind, ReportRequest, ReportResult, ReporterKind,
+    Repro, ReproConfidence, Severity, Source,
 };
 use crate::store::{DeveloperLogStore, report_best_effort};
 
@@ -165,10 +165,13 @@ pub fn detect_provider_failure(signal: &ProviderFailureSignal) -> Option<ReportR
         "{}|{}|{}",
         class.as_str(),
         signal.provider.as_deref().unwrap_or("unknown"),
-        signal
-            .fingerprint_extra
-            .as_deref()
-            .unwrap_or(signal.status_code.map(|c| c.to_string()).as_deref().unwrap_or("x"))
+        signal.fingerprint_extra.as_deref().unwrap_or(
+            signal
+                .status_code
+                .map(|c| c.to_string())
+                .as_deref()
+                .unwrap_or("x")
+        )
     );
     let req = ReportRequest {
         title: title.into(),

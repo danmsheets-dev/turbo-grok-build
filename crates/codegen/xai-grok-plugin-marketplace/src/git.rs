@@ -565,8 +565,15 @@ mod tests {
 
     #[test]
     fn run_git_timed_kills_hung_process() {
-        let mut cmd = Command::new("sleep");
-        cmd.arg("30");
+        let mut cmd = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping", "-n", "31", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            command
+        };
         let start = Instant::now();
         let err = run_git_timed(&mut cmd, "sleep", Duration::from_millis(200)).unwrap_err();
         assert!(err.contains("timed out"), "{err}");

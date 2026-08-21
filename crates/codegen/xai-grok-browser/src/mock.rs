@@ -11,9 +11,9 @@ use serde_json::Value;
 
 use crate::client::{BrowserClientError, BrowserTransport};
 use crate::protocol::{
-    AxNode, BrowserRequest, JsonRpcId, JsonRpcRequest, JsonRpcVersion, NavigateResult,
-    ScreenshotResult, SnapshotResult, TabInfo, TabsResult, check_eval_result, check_fill,
-    check_url,
+    AxNode, BrowserRequest, ClickResult, DownloadsResult, JsonRpcId, JsonRpcRequest,
+    JsonRpcVersion, NavigateResult, ScreenshotResult, SnapshotResult, TabInfo, TabsResult,
+    WaitResult, check_eval_result, check_fill, check_url,
 };
 
 /// Recorded click/fill from the mock host.
@@ -179,16 +179,27 @@ fn dispatch(
             apply_navigate(&mut state, "about:blank".into());
             Ok(empty_object())
         }
-        BrowserRequest::Snapshot { verbose: _ } => to_value(SnapshotResult {
-            url: state.url.clone(),
-            title: state.title.clone(),
-            source: crate::protocol::SnapshotSource::Dom,
-            nodes: state.nodes.clone(),
-        }),
+        BrowserRequest::Snapshot {
+            verbose: _,
+            include_text,
+        } => {
+            let text = include_text.then(|| "Example Domain".to_owned());
+            to_value(SnapshotResult {
+                url: state.url.clone(),
+                title: state.title.clone(),
+                source: crate::protocol::SnapshotSource::Dom,
+                nodes: state.nodes.clone(),
+                overlay: None,
+                text,
+            })
+        }
         BrowserRequest::Click { uid } => {
             find_node(&state.nodes, &uid)?;
             state.last_action = Some(MockAction::Click { uid });
-            Ok(empty_object())
+            to_value(ClickResult {
+                url: state.url.clone(),
+                title: state.title.clone(),
+            })
         }
         BrowserRequest::Fill { uid, value } => {
             let field_name = find_node(&state.nodes, &uid)?.name.clone();
@@ -199,7 +210,10 @@ fn dispatch(
             state.last_action = Some(MockAction::Fill { uid, value });
             Ok(empty_object())
         }
-        BrowserRequest::Eval { function: _ } => {
+        BrowserRequest::Eval {
+            function: _,
+            confirm: _,
+        } => {
             let payload = serde_json::json!({ "title": state.title });
             let serialized =
                 serde_json::to_string(&payload).map_err(BrowserClientError::from_json)?;
@@ -211,9 +225,36 @@ fn dispatch(
             width: 1280,
             height: 800,
         }),
+        BrowserRequest::Downloads {} => to_value(DownloadsResult::default()),
         BrowserRequest::Raise {} => Ok(empty_object()),
         BrowserRequest::Shutdown {} => {
             state.shutdown = true;
+            Ok(empty_object())
+        }
+        BrowserRequest::Wait {
+            text: _,
+            url_substring,
+            timeout_ms: _,
+        } => {
+            if let Some(sub) = url_substring {
+                if !state.url.contains(&sub) {
+                    return Err(BrowserClientError::Rpc {
+                        code: -32000,
+                        message: format!("wait timed out for url containing {sub:?}"),
+                    });
+                }
+            }
+            to_value(WaitResult {
+                url: state.url.clone(),
+                title: state.title.clone(),
+            })
+        }
+        BrowserRequest::Scroll { .. }
+        | BrowserRequest::PressKey { .. }
+        | BrowserRequest::Hover { .. }
+        | BrowserRequest::SetFile { .. } => Ok(empty_object()),
+        BrowserRequest::Select { uid, value: _ } => {
+            find_node(&state.nodes, &uid)?;
             Ok(empty_object())
         }
     }

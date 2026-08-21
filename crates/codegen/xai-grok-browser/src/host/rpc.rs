@@ -235,7 +235,9 @@ const REPLY_BUDGET: std::time::Duration =
 /// Request id and a human label for one decoded call, taken *before* the job is
 /// handed to the UI thread — once `call` moves into the `UiJob` the id is gone,
 /// and a timeout still has to answer on the caller's own id.
-fn describe_call(call: &Result<(JsonRpcId, HostCall), DecodedRpcError>) -> (JsonRpcId, &'static str) {
+fn describe_call(
+    call: &Result<(JsonRpcId, HostCall), DecodedRpcError>,
+) -> (JsonRpcId, &'static str) {
     match call {
         Ok((id, host_call)) => (id.clone(), method_label(host_call)),
         Err(err) => (
@@ -250,12 +252,19 @@ fn method_label(call: &HostCall) -> &'static str {
         HostCall::Navigate { .. } => "browser.navigate",
         HostCall::Screenshot => "browser.screenshot",
         HostCall::Tabs => "browser.tabs",
+        HostCall::Downloads => "browser.downloads",
         HostCall::Raise => "browser.raise",
         HostCall::Shutdown => "browser.shutdown",
         HostCall::Snapshot { .. } => "browser.snapshot",
         HostCall::Click { .. } => "browser.click",
         HostCall::Fill { .. } => "browser.fill",
         HostCall::Eval { .. } => "browser.eval",
+        HostCall::Wait { .. } => "browser.wait",
+        HostCall::Scroll { .. } => "browser.scroll",
+        HostCall::PressKey { .. } => "browser.press_key",
+        HostCall::Select { .. } => "browser.select",
+        HostCall::Hover { .. } => "browser.hover",
+        HostCall::SetFile { .. } => "browser.set_file",
     }
 }
 
@@ -382,7 +391,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             decode_host_call(&snap, None).unwrap().1,
-            HostCall::Snapshot { verbose: false }
+            HostCall::Snapshot {
+                verbose: false,
+                include_text: false,
+            }
         ));
 
         let eval = encode_rpc_request(
@@ -392,7 +404,10 @@ mod tests {
         )
         .unwrap();
         match decode_host_call(&eval, None).unwrap().1 {
-            HostCall::Eval { function } => assert_eq!(function, "() => 1"),
+            HostCall::Eval { function, confirm } => {
+                assert_eq!(function, "() => 1");
+                assert!(!confirm);
+            }
             other => panic!("{other:?}"),
         }
 
@@ -432,12 +447,18 @@ mod pipe_concurrency_tests {
             "browser.navigate",
             std::time::Duration::from_secs(66),
         );
-        assert!(line.ends_with('\n'), "responses are newline framed: {line:?}");
+        assert!(
+            line.ends_with('\n'),
+            "responses are newline framed: {line:?}"
+        );
         let v: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
         assert_eq!(v["id"], 7, "must answer on the caller's id");
         assert_eq!(v["error"]["code"], RPC_HOST_ERROR);
         assert!(
-            v["error"]["message"].as_str().unwrap().contains("browser.navigate"),
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("browser.navigate"),
             "the agent must be told which call failed: {v}"
         );
     }
@@ -498,8 +519,8 @@ mod pipe_concurrency_tests {
             }
         });
 
-        let server = spawn_pipe_thread(pipe.clone(), ui_thread_id, tx, None)
-            .expect("pipe thread must bind");
+        let server =
+            spawn_pipe_thread(pipe.clone(), ui_thread_id, tx, None).expect("pipe thread must bind");
 
         // More clients than there are instances, so every slot is exercised and
         // re-armed at least once.

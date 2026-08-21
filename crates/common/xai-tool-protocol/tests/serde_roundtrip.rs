@@ -17,7 +17,7 @@ use xai_tool_protocol::{
     SessionBindServerResult, SessionCloseParams, SessionEvent, SessionId, SessionOpenParams,
     SessionPhase, SessionUnbindServerParams, StreamingSpec, SubscribeAck,
     SubscribeNotificationsParams, SubscribeOutcome, ToolCallId, ToolCallOutcome, ToolCallParams,
-    ToolCallProgressFrame, ToolCallResult, ToolCapabilities, ToolDefinitionMode,
+    ToolCallProgressFrame, ToolCallResult, ToolCallerRole, ToolCapabilities, ToolDefinitionMode,
     ToolDescriptionWithSchema, ToolErrorWire, ToolId, ToolNotificationFrame, ToolOutputWire,
     ToolRegistration, ToolScope, ToolSearchResult, ToolServerRegistration, ToolsChanged,
     ToolsListParams, ToolsListResult, ToolsSearchParams, ToolsSearchResultBody, TransportKind,
@@ -736,6 +736,7 @@ fn tool_call_params_round_trips_and_omits_optionals_when_none() {
         behavior_version: None,
         cwd: None,
         trace_context: None,
+        caller_role: None,
     };
     let v = roundtrip(&p);
     let obj = v.as_object().unwrap();
@@ -752,6 +753,7 @@ fn tool_call_params_round_trips_and_omits_optionals_when_none() {
         behavior_version: Some("v1".to_owned()),
         cwd: Some("/work".to_owned()),
         trace_context: Some("00-trace-span-01".to_owned()),
+        caller_role: Some(ToolCallerRole::Leader),
     };
     let v = roundtrip(&full);
     assert_eq!(v["deadline_ms"], json!(60_000));

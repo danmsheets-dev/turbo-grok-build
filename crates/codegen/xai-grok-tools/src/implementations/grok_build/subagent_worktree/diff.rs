@@ -6,8 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    effective_allowed_paths, git_capture, git_capture_status, parse_name_status,
-    partition_by_allowlist, path_is_allowed, resolve_subagent_work, truncate_diff_text,
+    effective_allowed_paths, filter_harness_land_paths, git_capture, git_capture_status,
+    is_harness_land_path, parse_name_status, partition_by_allowlist, path_is_allowed,
+    resolve_subagent_work, truncate_diff_text,
 };
 use crate::implementations::grok_build::task::TaskTool;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -92,7 +93,7 @@ Resolves `subagents/<subagent_id>/meta.json` and diffs in priority order:
 
 Returns unified diff text plus a file list. Use this before `land_subagent` to review multi-agent work without git archaeology. Read-only — does not modify the parent tree.
 
-When the subagent was spawned with `allowed_paths`, only in-allowlist paths are listed and shown in the diff (out-of-allowlist paths are filtered, with a count note)."#
+When the subagent was spawned with `allowed_paths`, only in-allowlist paths are listed and shown in the diff (out-of-allowlist paths are filtered, with a count note). Harness markers (`.grok-subagent-live`, `.grok/`) are never listed as user changes."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -172,21 +173,14 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                     })?;
                 let all_files = parse_name_status(&name_status);
                 let allow = effective_allowed_paths(&work.meta);
-                let (files, filtered_out) = match &allow {
-                    Some(prefixes) => {
-                        let (ok, denied) = partition_by_allowlist(&all_files, prefixes);
-                        (ok, denied.len())
-                    }
-                    None => (all_files, 0),
-                };
-                let mut raw_diff = git_capture(parent, &["diff", base, snap])
-                    .await
-                    .map_err(|e| {
-                        xai_tool_runtime::ToolError::custom("git_error", format!("diff: {e}"))
-                    })?;
-                if let Some(ref prefixes) = allow {
-                    raw_diff = filter_unified_diff_by_allowlist(&raw_diff, prefixes);
-                }
+                let (files, filtered_out) = partition_payload_files(&all_files, allow.as_deref());
+                let mut raw_diff =
+                    git_capture(parent, &["diff", base, snap])
+                        .await
+                        .map_err(|e| {
+                            xai_tool_runtime::ToolError::custom("git_error", format!("diff: {e}"))
+                        })?;
+                raw_diff = filter_unified_diff_payload(&raw_diff, allow.as_deref());
                 let (diff, truncated) = truncate_diff_text(&raw_diff);
                 let mut message = format!(
                     "Diff for subagent `{}` agent-only (`{base}`..`{snap}`, {} file(s)).",
@@ -221,12 +215,9 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 })?;
             let parent_head = parent_head.trim().to_owned();
 
-            let name_status = git_capture(
-                wt,
-                &["diff", "--name-status", &parent_head],
-            )
-            .await
-            .unwrap_or_default();
+            let name_status = git_capture(wt, &["diff", "--name-status", &parent_head])
+                .await
+                .unwrap_or_default();
             let mut files = parse_name_status(&name_status);
 
             // Untracked files in the worktree (not in name-status against parent_head)
@@ -244,13 +235,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
             files.dedup();
 
             let allow = effective_allowed_paths(&work.meta);
-            let (files, filtered_out) = match &allow {
-                Some(prefixes) => {
-                    let (ok, denied) = partition_by_allowlist(&files, prefixes);
-                    (ok, denied.len())
-                }
-                None => (files, 0),
-            };
+            let (files, filtered_out) = partition_payload_files(&files, allow.as_deref());
 
             let mut diff = git_capture(wt, &["diff", &parent_head])
                 .await
@@ -262,6 +247,9 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 for line in untracked.lines() {
                     let p = line.trim();
                     if p.is_empty() {
+                        continue;
+                    }
+                    if is_harness_land_path(p) {
                         continue;
                     }
                     if let Some(ref prefixes) = allow {
@@ -289,9 +277,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 }
             }
 
-            if let Some(ref prefixes) = allow {
-                diff = filter_unified_diff_by_allowlist(&diff, prefixes);
-            }
+            diff = filter_unified_diff_payload(&diff, allow.as_deref());
 
             let (diff, truncated) = truncate_diff_text(&diff);
             let mut message = format!(
@@ -310,10 +296,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 source: "live_worktree".into(),
                 snapshot_ref: work.snapshot_ref,
                 worktree_path: Some(wt.display().to_string()),
-                patch_path: work
-                    .patch_path
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
+                patch_path: work.patch_path.as_ref().map(|p| p.display().to_string()),
                 files,
                 diff,
                 truncated,
@@ -352,21 +335,13 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 })?;
             let all_files = parse_name_status(&name_status);
             let allow = effective_allowed_paths(&work.meta);
-            let (files, filtered_out) = match &allow {
-                Some(prefixes) => {
-                    let (ok, denied) = partition_by_allowlist(&all_files, prefixes);
-                    (ok, denied.len())
-                }
-                None => (all_files, 0),
-            };
+            let (files, filtered_out) = partition_payload_files(&all_files, allow.as_deref());
             let mut raw_diff = git_capture(parent, &["diff", base, snap])
                 .await
                 .map_err(|e| {
                     xai_tool_runtime::ToolError::custom("git_error", format!("diff: {e}"))
                 })?;
-            if let Some(ref prefixes) = allow {
-                raw_diff = filter_unified_diff_by_allowlist(&raw_diff, prefixes);
-            }
+            raw_diff = filter_unified_diff_payload(&raw_diff, allow.as_deref());
             let (diff, truncated) = truncate_diff_text(&raw_diff);
             let mut message = format!(
                 "Diff for subagent `{}` from snapshot_ref `{snap}` ({} file(s) vs `{base}`).",
@@ -383,10 +358,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
                 source: "snapshot_ref".into(),
                 snapshot_ref: Some(snap.clone()),
                 worktree_path: work.meta.worktree_path.clone(),
-                patch_path: work
-                    .patch_path
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
+                patch_path: work.patch_path.as_ref().map(|p| p.display().to_string()),
                 files,
                 diff,
                 truncated,
@@ -404,13 +376,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
             })?;
             let all_files = files_from_patch(&raw);
             let allow = effective_allowed_paths(&work.meta);
-            let (files, filtered_out) = match &allow {
-                Some(prefixes) => {
-                    let (ok, denied) = partition_by_allowlist(&all_files, prefixes);
-                    (ok, denied.len())
-                }
-                None => (all_files, 0),
-            };
+            let (files, filtered_out) = partition_payload_files(&all_files, allow.as_deref());
             // Optional: check whether patch still applies cleanly (informational)
             let (_ok, _stdout, check_err) = git_capture_status(
                 parent,
@@ -423,10 +389,7 @@ impl xai_tool_runtime::Tool for DiffSubagentTool {
             )
             .await
             .unwrap_or((false, String::new(), String::new()));
-            let filtered_raw = match &allow {
-                Some(prefixes) => filter_unified_diff_by_allowlist(&raw, prefixes),
-                None => raw,
-            };
+            let filtered_raw = filter_unified_diff_payload(&raw, allow.as_deref());
             let (diff, truncated) = truncate_diff_text(&filtered_raw);
             let mut message = format!(
                 "Diff for subagent `{}` from patch {} ({} file(s)).",
@@ -491,6 +454,42 @@ pub(crate) fn files_from_patch(patch: &str) -> Vec<String> {
     files
 }
 
+/// Payload files only: drop harness markers, then optional allowlist.
+fn partition_payload_files(paths: &[String], allow: Option<&[String]>) -> (Vec<String>, usize) {
+    let payload = filter_harness_land_paths(paths);
+    match allow {
+        Some(prefixes) if !prefixes.is_empty() => {
+            let (ok, denied) = partition_by_allowlist(&payload, prefixes);
+            (ok, denied.len())
+        }
+        _ => (payload, 0),
+    }
+}
+
+fn filter_unified_diff_payload(diff: &str, allow: Option<&[String]>) -> String {
+    let mut keep_harness_out = String::new();
+    let mut keep = true;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            let path = line
+                .strip_prefix("diff --git ")
+                .and_then(|rest| rest.find(" b/").map(|i| &rest[i + 3..]))
+                .unwrap_or("");
+            keep = !is_harness_land_path(path);
+        }
+        if keep {
+            keep_harness_out.push_str(line);
+            keep_harness_out.push('\n');
+        }
+    }
+    match allow {
+        Some(prefixes) if !prefixes.is_empty() => {
+            filter_unified_diff_by_allowlist(&keep_harness_out, prefixes)
+        }
+        _ => keep_harness_out,
+    }
+}
+
 /// Keep only unified-diff file sections whose `b/` path is under `allowed`.
 fn filter_unified_diff_by_allowlist(diff: &str, allowed: &[String]) -> String {
     if allowed.is_empty() {
@@ -547,5 +546,47 @@ new file mode 100644
 ";
         let files = files_from_patch(patch);
         assert_eq!(files, vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]);
+    }
+
+    #[test]
+    fn payload_partition_drops_live_marker() {
+        let paths = vec![
+            ".grok-subagent-live".into(),
+            "tools/blender/build.py".into(),
+            "src/main.rs".into(),
+        ];
+        let (files, filtered) = partition_payload_files(&paths, Some(&["tools/blender/".into()]));
+        assert_eq!(files, vec!["tools/blender/build.py".to_owned()]);
+        assert_eq!(filtered, 1, "src/main.rs is outside allowlist");
+        let (all, none) = partition_payload_files(&paths, None);
+        assert_eq!(
+            all,
+            vec![
+                "tools/blender/build.py".to_owned(),
+                "src/main.rs".to_owned()
+            ]
+        );
+        assert_eq!(none, 0);
+    }
+
+    #[test]
+    fn unified_diff_payload_strips_harness_hunk() {
+        let diff = "\
+diff --git a/.grok-subagent-live b/.grok-subagent-live
+new file mode 100644
+--- /dev/null
++++ b/.grok-subagent-live
+@@ -0,0 +1 @@
++pid
+diff --git a/tools/blender/build.py b/tools/blender/build.py
+--- a/tools/blender/build.py
++++ b/tools/blender/build.py
+@@ -1 +1 @@
+-old
++new
+";
+        let out = filter_unified_diff_payload(diff, None);
+        assert!(!out.contains(".grok-subagent-live"));
+        assert!(out.contains("tools/blender/build.py"));
     }
 }

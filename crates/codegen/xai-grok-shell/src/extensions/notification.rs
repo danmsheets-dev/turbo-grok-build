@@ -21,11 +21,30 @@ pub struct WorkflowPhaseInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowTaskInfo {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub max_attempts: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowAgentInfo {
     pub agent_id: String,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub state: String,
@@ -743,6 +762,21 @@ pub enum SessionUpdate {
         budget: Option<SubagentBudgetInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_run_id: Option<String>,
+        /// Real tool/process CWD (worktree path when isolation=worktree).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_cwd: Option<String>,
+        /// Model-facing DisplayCwd (often the parent repo under isolation=worktree).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_cwd: Option<String>,
+        /// Isolated worktree directory when created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_path: Option<String>,
+        /// `worktree` or `none`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        isolation_requested: Option<String>,
+        /// True when the child is sharing the parent tree.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        isolation_fallback: bool,
     },
     /// Periodic progress update for a running subagent.
     ///
@@ -966,8 +1000,12 @@ pub enum SessionUpdate {
         foreground: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         phases: Vec<WorkflowPhaseInfo>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tasks: Vec<WorkflowTaskInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         current_phase: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_task_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_budget: Option<u64>,
         #[serde(default)]
@@ -1777,6 +1815,11 @@ mod tests {
             resumed_from: None,
             budget: None,
             workflow_run_id: None,
+            child_cwd: None,
+            display_cwd: None,
+            worktree_path: None,
+            isolation_requested: None,
+            isolation_fallback: false,
         })
         .unwrap();
         let progress = serde_json::to_value(SessionUpdate::SubagentProgress {
@@ -1808,13 +1851,13 @@ mod tests {
             tokens_used: 50_000,
             output: None,
             will_wake: false,
-                isolation: None,
-                isolation_effective: None,
-                isolation_requested: None,
-                isolation_fallback: false,
-                worktree_path: None,
-                worktree_state: None,
-            })
+            isolation: None,
+            isolation_effective: None,
+            isolation_requested: None,
+            isolation_fallback: false,
+            worktree_path: None,
+            worktree_state: None,
+        })
         .unwrap();
         // All three should have distinct tags
         assert_eq!(spawned["sessionUpdate"], "subagent_spawned");
@@ -1868,13 +1911,13 @@ mod tests {
             tokens_used: 75_000,
             output: Some("done".into()),
             will_wake: false,
-                isolation: None,
-                isolation_effective: None,
-                isolation_requested: None,
-                isolation_fallback: false,
-                worktree_path: None,
-                worktree_state: None,
-            };
+            isolation: None,
+            isolation_effective: None,
+            isolation_requested: None,
+            isolation_fallback: false,
+            worktree_path: None,
+            worktree_state: None,
+        };
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(update, parsed);
@@ -1906,9 +1949,15 @@ mod tests {
                 finalize_grace_secs: Some(30),
             }),
             workflow_run_id: None,
+            child_cwd: None,
+            display_cwd: None,
+            worktree_path: None,
+            isolation_requested: None,
+            isolation_fallback: false,
         };
         let spawned_json = serde_json::to_value(&spawned).unwrap();
         assert_eq!(spawned_json["budget"]["maxToolCalls"], 40);
+        assert!(spawned_json.get("isolation_fallback").is_none());
         assert_eq!(
             serde_json::from_value::<SessionUpdate>(spawned_json).unwrap(),
             spawned
@@ -1937,13 +1986,13 @@ mod tests {
             tokens_used: 1_100,
             output: Some("recommendation".into()),
             will_wake: false,
-                isolation: None,
-                isolation_effective: None,
-                isolation_requested: None,
-                isolation_fallback: false,
-                worktree_path: None,
-                worktree_state: None,
-            };
+            isolation: None,
+            isolation_effective: None,
+            isolation_requested: None,
+            isolation_fallback: false,
+            worktree_path: None,
+            worktree_state: None,
+        };
         let finished_json = serde_json::to_value(&finished).unwrap();
         assert_eq!(
             finished_json["termination_reason"],

@@ -20,7 +20,7 @@
 4. **Full control = CDP + script injection**, not “navigate and hope.” Snapshot uses Accessibility.getFullAXTree (or a compact injected uid map). Click/fill use those uids. `browser_eval` is JSON-only (no arbitrary DOM dumps).
 5. **No password / 2FA automation.** Tools refuse inputs that look like passwords, OTP, or recovery codes. Human signs in *in the agent window* if a site needs a session.
 6. **Windows v1.** Other OS: compile the protocol + tools; host is `cfg(windows)`.
-7. **Package-scoped tests.** `cargo test -p xai-grok-browser --lib`. Host UI tests are `#[ignore]` unless `TURBO_WEBVIEW_IT=1`.
+7. **Package-scoped tests.** `cargo test -p xai-grok-browser --lib` covers protocol/client/mock/policy/unit behavior. `cargo test -p xai-grok-browser` also runs integration tests; host UI tests are `#[ignore]` unless `TURBO_WEBVIEW_IT=1`. On Windows, run both commands when validating WebView changes.
 
 ---
 

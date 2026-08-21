@@ -185,10 +185,7 @@ impl RequestStatus {
     }
 
     pub fn is_openish(self) -> bool {
-        matches!(
-            self,
-            Self::Open | Self::Acknowledged | Self::Planned
-        )
+        matches!(self, Self::Open | Self::Acknowledged | Self::Planned)
     }
 }
 

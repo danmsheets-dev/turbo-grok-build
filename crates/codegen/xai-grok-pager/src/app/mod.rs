@@ -486,8 +486,7 @@ pub fn resolve_use_leader(
     eligible: bool,
     requested_confinement: Option<&str>,
 ) -> (bool, Option<&'static str>) {
-    let process_confine_active =
-        xai_grok_tools::types::resources::process_confine_root().is_some();
+    let process_confine_active = xai_grok_tools::types::resources::process_confine_root().is_some();
     let resolved = resolve_leader_mode(
         leader_flag,
         no_leader_flag,
@@ -671,8 +670,7 @@ pub async fn run(
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let prefetch_elapsed = startup_start.elapsed();
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
-    let process_confine_active =
-        xai_grok_tools::types::resources::process_confine_root().is_some();
+    let process_confine_active = xai_grok_tools::types::resources::process_confine_root().is_some();
     let LeaderMode {
         use_leader,
         policy_disable_reason,
@@ -1932,8 +1930,7 @@ mod tests {
             ("--leader", true, &empty_config()),
             ("--leader over config off", true, &off),
         ] {
-            let resolved =
-                resolve_leader_mode(leader_flag, false, cfg, None, true, sandbox, false);
+            let resolved = resolve_leader_mode(leader_flag, false, cfg, None, true, sandbox, false);
             assert!(!resolved.use_leader, "{label}: leader must be vetoed");
             assert_eq!(
                 resolved.disabled_by_confinement,

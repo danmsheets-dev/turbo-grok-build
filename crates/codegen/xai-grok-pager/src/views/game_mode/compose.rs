@@ -4,8 +4,8 @@
 //! - Floor clears use SNES carpet tiles (no diagonal green mask)
 //! - Smaller desk sprites relative to the room
 
-use image::imageops::FilterType;
 use image::RgbaImage;
+use image::imageops::FilterType;
 
 use super::sprites_pixel::{
     DevPalette, blit, celebrate_frame_key, dev_at_desk_frame_key, fail_frame_key,
@@ -207,11 +207,8 @@ pub fn scale_bg_to_cells_with_scale(
 
 pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut buf),
-        image::ImageFormat::Png,
-    )
-    .map_err(|e| format!("encode png: {e}"))?;
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .map_err(|e| format!("encode png: {e}"))?;
     Ok(buf)
 }
 
@@ -815,10 +812,10 @@ fn paint_fx_success_wave(canvas: &mut RgbaImage, t: f32, w: u32) {
 /// resolution and a heavy wash turns the carpet to mud; the point is that the
 /// room *reads* different at 2am than at 2pm, not that it is hard to see.
 const HOUR_TINTS: [([u8; 3], i32); 4] = [
-    ([0, 0, 0], 0),          // 09–16 working day: untinted
-    ([255, 214, 170], 10),   // 05–08 dawn: pale warm
-    ([255, 160, 88], 14),    // 17–19 evening: low sun
-    ([80, 112, 190], 20),    // 20–04 night: cool moonlight
+    ([0, 0, 0], 0),        // 09–16 working day: untinted
+    ([255, 214, 170], 10), // 05–08 dawn: pale warm
+    ([255, 160, 88], 14),  // 17–19 evening: low sun
+    ([80, 112, 190], 20),  // 20–04 night: cool moonlight
 ];
 
 /// Which [`HOUR_TINTS`] band a local hour falls in (RC2 §4 #12).
@@ -1016,8 +1013,7 @@ pub(super) fn rack_hit_rect(stage: ratatui::layout::Rect) -> ratatui::layout::Re
     if stage.width == 0 || stage.height == 0 {
         return ratatui::layout::Rect::default();
     }
-    let (x, y, cover_w, cover_h) =
-        rack_cover_px(u32::from(stage.width), u32::from(stage.height));
+    let (x, y, cover_w, cover_h) = rack_cover_px(u32::from(stage.width), u32::from(stage.height));
     let cover_w = cover_w.round().max(1.0);
     let cover_h = cover_h.round().max(1.0);
     let x = x.max(0.0) as u16;
@@ -1257,8 +1253,8 @@ pub fn compose_cell_frame_into_at(
             clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
             let spr = cached_empty_desk(sc.max(1));
             blit(
-            canvas,
-            spr.as_ref(),
+                canvas,
+                spr.as_ref(),
                 cx - spr.width() as i32 / 2,
                 cy - spr.height() as i32 / 2,
             );
@@ -1270,21 +1266,19 @@ pub fn compose_cell_frame_into_at(
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 let empty = cached_empty_desk(sc.max(1));
                 blit(
-            canvas,
-            empty.as_ref(),
+                    canvas,
+                    empty.as_ref(),
                     cx - empty.width() as i32 / 2,
                     cy - empty.height() as i32 / 2,
                 );
                 // Packet baked into walk sprite — no second packet blit (double handoff fix).
-                let with_packet = matches!(
-                    desk.phase,
-                    ActorPhase::WalkToBoss | ActorPhase::Handoff
-                );
+                let with_packet =
+                    matches!(desk.phase, ActorPhase::WalkToBoss | ActorPhase::Handoff);
                 let walker = cached_walk(desk.skin, frame, with_packet, walk_sc.max(1));
                 let (x, y) = walk_position(desk.phase, desk.anim_t, cx, cy, w, h);
                 blit(
-            canvas,
-            walker.as_ref(),
+                    canvas,
+                    walker.as_ref(),
                     x as i32 - walker.width() as i32 / 2,
                     y as i32 - walker.height() as i32 / 2,
                 );
@@ -1296,14 +1290,11 @@ pub fn compose_cell_frame_into_at(
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 // Pose off `anim_t`, not the sprite bucket — see
                 // [`celebrate_pose_frame`] for why the bucket is too coarse here.
-                let spr = cached_dev_celebrate(
-                    desk.skin,
-                    celebrate_pose_frame(desk.anim_t),
-                    sc.max(1),
-                );
+                let spr =
+                    cached_dev_celebrate(desk.skin, celebrate_pose_frame(desk.anim_t), sc.max(1));
                 blit(
-            canvas,
-            spr.as_ref(),
+                    canvas,
+                    spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
@@ -1317,8 +1308,8 @@ pub fn compose_cell_frame_into_at(
                 clear_desk_area(canvas, bg_scaled, cx, cy, w, h);
                 let spr = cached_dev_fail(desk.skin, frame, sc.max(1));
                 blit(
-            canvas,
-            spr.as_ref(),
+                    canvas,
+                    spr.as_ref(),
                     cx - spr.width() as i32 / 2,
                     cy - spr.height() as i32 / 2,
                 );
@@ -1522,8 +1513,14 @@ mod tests {
             let cy = f32::from(stage.y) + f32::from(stage.height) * SUPERVISOR_ANCHOR.1;
             let rcx = f32::from(r.x) + f32::from(r.width) / 2.0;
             let rcy = f32::from(r.y) + f32::from(r.height) / 2.0;
-            assert!((rcx - cx).abs() <= 1.0, "{r:?} off-centre in x for {stage:?}");
-            assert!((rcy - cy).abs() <= 1.0, "{r:?} off-centre in y for {stage:?}");
+            assert!(
+                (rcx - cx).abs() <= 1.0,
+                "{r:?} off-centre in x for {stage:?}"
+            );
+            assert!(
+                (rcy - cy).abs() <= 1.0,
+                "{r:?} off-centre in y for {stage:?}"
+            );
         }
         assert_eq!(
             supervisor_hit_rect(Rect::new(0, 0, 0, 0)),
@@ -1557,8 +1554,14 @@ mod tests {
             let cy = f32::from(stage.y) + f32::from(stage.height) * RACK_ANCHOR.1;
             let rcx = f32::from(r.x) + f32::from(r.width) / 2.0;
             let rcy = f32::from(r.y) + f32::from(r.height) / 2.0;
-            assert!((rcx - cx).abs() <= 1.0, "{r:?} off-centre in x for {stage:?}");
-            assert!((rcy - cy).abs() <= 1.0, "{r:?} off-centre in y for {stage:?}");
+            assert!(
+                (rcx - cx).abs() <= 1.0,
+                "{r:?} off-centre in x for {stage:?}"
+            );
+            assert!(
+                (rcy - cy).abs() <= 1.0,
+                "{r:?} off-centre in y for {stage:?}"
+            );
         }
         assert_eq!(
             rack_hit_rect(Rect::new(0, 0, 0, 0)),
@@ -1774,7 +1777,10 @@ mod tests {
             let frames: Vec<u8> = (0..6).map(|i| desk_frame(bucket, i)).collect();
             assert!(frames.iter().all(|f| *f < 4), "{frames:?} left the domain");
             assert_eq!(
-                frames.iter().collect::<std::collections::HashSet<_>>().len(),
+                frames
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
                 4,
                 "bucket {bucket}: six desks must cover all four frames, got {frames:?}"
             );
@@ -1863,7 +1869,10 @@ mod tests {
             let bucket = (t * 20.0) as u8;
             let pose = celebrate_pose_frame(t);
             if let Some(prev) = per_bucket.insert(bucket, pose) {
-                assert_eq!(prev, pose, "bucket {bucket} disagrees about the pose at t={t}");
+                assert_eq!(
+                    prev, pose,
+                    "bucket {bucket} disagrees about the pose at t={t}"
+                );
             }
         }
         // ...and the pose really does pump across the phase, which is the whole
@@ -1900,7 +1909,10 @@ mod tests {
         let early = render(0.25);
         assert!(early.iter().any(|b| *b != 0), "the burst must draw pieces");
         assert_ne!(early, render(0.6), "the fall must advance with anim_t");
-        assert!(render(0.0).iter().all(|b| *b == 0), "nothing before release");
+        assert!(
+            render(0.0).iter().all(|b| *b == 0),
+            "nothing before release"
+        );
         assert!(render(1.0).iter().all(|b| *b == 0), "all pieces must land");
 
         // Multi-colour by construction: a single-colour burst is just sparkles.
@@ -1908,21 +1920,24 @@ mod tests {
         paint_fx_confetti(&mut c, 32, 32, 0.5, 64, 48);
         let colors: std::collections::HashSet<[u8; 4]> =
             c.pixels().map(|p| p.0).filter(|p| p[3] != 0).collect();
-        assert!(colors.len() >= 3, "confetti must be multi-colour, got {colors:?}");
+        assert!(
+            colors.len() >= 3,
+            "confetti must be multi-colour, got {colors:?}"
+        );
     }
 
     /// Canvas sizes the pixel office really paints at, one per tier plus the
     /// awkward aspect ratios: `(cell_w, cell_h)` → `(canvas_w, canvas_h)`.
     fn tier_canvases() -> Vec<(u32, u32)> {
         [
-            (72u16, 18u16),  // Normal, smallest stage the pixel path accepts
-            (80, 24),        // Normal
-            (100, 30),       // Normal
-            (120, 34),       // Comfort
-            (160, 44),       // Wide
-            (200, 60),       // Wide, adaptive scale 2
-            (240, 20),       // very wide and short
-            (72, 50),        // narrow and tall
+            (72u16, 18u16), // Normal, smallest stage the pixel path accepts
+            (80, 24),       // Normal
+            (100, 30),      // Normal
+            (120, 34),      // Comfort
+            (160, 44),      // Wide
+            (200, 60),      // Wide, adaptive scale 2
+            (240, 20),      // very wide and short
+            (72, 50),       // narrow and tall
         ]
         .iter()
         .map(|(cw, ch)| {

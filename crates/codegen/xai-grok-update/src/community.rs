@@ -209,8 +209,8 @@ fn move_active_aside(path: &Path, suffix: &str) -> Result<Option<PathBuf>> {
 
 pub(crate) fn turbo_home() -> PathBuf {
     // Prefer Turbo env; accept legacy Hyper env during migration.
-    if let Some(path) = std::env::var_os("TURBO_SHARE_DIR")
-        .or_else(|| std::env::var_os("HYPER_SHARE_DIR"))
+    if let Some(path) =
+        std::env::var_os("TURBO_SHARE_DIR").or_else(|| std::env::var_os("HYPER_SHARE_DIR"))
     {
         return PathBuf::from(path);
     }
@@ -493,7 +493,9 @@ fn platform() -> Result<Platform> {
 }
 
 fn update_source() -> Result<UpdateSource> {
-    let Some(override_base) = std::env::var_os("TURBO_UPDATE_BASE_URL").or_else(|| std::env::var_os("HYPER_UPDATE_BASE_URL")) else {
+    let Some(override_base) = std::env::var_os("TURBO_UPDATE_BASE_URL")
+        .or_else(|| std::env::var_os("HYPER_UPDATE_BASE_URL"))
+    else {
         return Ok(UpdateSource {
             api_base: RELEASE_API_BASE.to_string(),
             allow_insecure_local: false,
@@ -504,7 +506,9 @@ fn update_source() -> Result<UpdateSource> {
     // override exists only for hermetic debug/integration tests and requires a
     // second, explicit opt-in so an accidental environment leak fails closed.
     if !cfg!(debug_assertions)
-        || std::env::var_os("TURBO_ALLOW_INSECURE_UPDATE_BASE").or_else(|| std::env::var_os("HYPER_ALLOW_INSECURE_UPDATE_BASE")).as_deref()
+        || std::env::var_os("TURBO_ALLOW_INSECURE_UPDATE_BASE")
+            .or_else(|| std::env::var_os("HYPER_ALLOW_INSECURE_UPDATE_BASE"))
+            .as_deref()
             != Some(std::ffi::OsStr::new("1"))
     {
         bail!(
@@ -670,6 +674,45 @@ fn parse_manifest_checksum(manifest: &str, asset_name: &str) -> Result<String> {
         }
     }
     found.ok_or_else(|| anyhow::anyhow!("SHA256SUMS has no entry for {asset_name}"))
+}
+
+/// Resolve only the release metadata version. Version checks must not depend
+/// on a platform asset being present; a stale/missing asset is an installability
+/// problem, not evidence that the release catalog has no latest version.
+async fn resolve_latest_release_version() -> Result<String> {
+    let source = update_source()?;
+    let client = http_client(&source)?;
+    let endpoint = format!("{}/latest", source.api_base);
+    let mut request = client
+        .get(&endpoint)
+        .header("Accept", "application/vnd.github+json");
+    if !source.allow_insecure_local
+        && let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.trim().is_empty()
+    {
+        request = request.bearer_auth(token.trim());
+    }
+    let response = checked_response(
+        request.send().await?,
+        "Turbo latest release metadata request",
+    )
+    .await?;
+    let release_bytes = response_bytes_limited(response, MAX_MANIFEST_BYTES).await?;
+    let release: ReleaseMetadata =
+        serde_json::from_slice(&release_bytes).context("invalid Turbo release metadata")?;
+    if release.draft {
+        bail!("latest Turbo release is a draft");
+    }
+    if release.prerelease {
+        bail!("latest Turbo release endpoint returned a prerelease");
+    }
+    let version = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name);
+    semver::Version::parse(version)
+        .with_context(|| format!("release tag {} is not valid semver", release.tag_name))?;
+    Ok(version.to_owned())
 }
 
 async fn resolve_candidate(pinned_version: Option<&str>) -> Result<Candidate> {
@@ -2319,12 +2362,26 @@ async fn converge(force: bool, pinned_version: Option<&str>) -> Result<ConvergeO
 }
 
 pub(crate) async fn latest_version() -> Result<String> {
-    Ok(resolve_candidate(None).await?.version)
+    resolve_latest_release_version().await
 }
 
 pub(crate) async fn check_update_status() -> UpdateStatus {
     let current_version = xai_grok_version::installed();
     let current_config = xai_grok_shell::util::config::load_config().await;
+    let latest_version = match resolve_latest_release_version().await {
+        Ok(version) => version,
+        Err(error) => {
+            return UpdateStatus {
+                current_version,
+                latest_version: None,
+                update_available: false,
+                installer: Some(INSTALLER_NAME.to_string()),
+                channel: "stable".to_string(),
+                auto_update: current_config.cli.auto_update,
+                error: Some(error.to_string()),
+            };
+        }
+    };
     match resolve_candidate(None).await {
         Ok(candidate) => {
             let state = load_state();
@@ -2333,7 +2390,7 @@ pub(crate) async fn check_update_status() -> UpdateStatus {
                 candidate_requires_install(&candidate, active.as_ref(), &state).unwrap_or(false);
             UpdateStatus {
                 current_version,
-                latest_version: Some(candidate.version),
+                latest_version: Some(latest_version),
                 update_available,
                 installer: Some(INSTALLER_NAME.to_string()),
                 channel: "stable".to_string(),
@@ -2343,12 +2400,14 @@ pub(crate) async fn check_update_status() -> UpdateStatus {
         }
         Err(error) => UpdateStatus {
             current_version,
-            latest_version: None,
+            latest_version: Some(latest_version),
             update_available: false,
             installer: Some(INSTALLER_NAME.to_string()),
             channel: "stable".to_string(),
             auto_update: current_config.cli.auto_update,
-            error: Some(error.to_string()),
+            error: Some(format!(
+                "latest release is known but not installable on this platform: {error}"
+            )),
         },
     }
 }

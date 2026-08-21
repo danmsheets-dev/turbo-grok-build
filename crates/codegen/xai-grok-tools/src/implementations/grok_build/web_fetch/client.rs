@@ -68,9 +68,7 @@ impl WebFetchClient {
                 .build(),
         );
 
-        let domain_matcher = params
-            .domain_allowlist()
-            .map(DomainMatcher::new);
+        let domain_matcher = params.domain_allowlist().map(DomainMatcher::new);
 
         Ok(Self {
             // Reqwest client can fail to build.
@@ -408,14 +406,13 @@ impl WebFetchClient {
         // Reserve room for the status header inside the overflow budget so
         // long URLs cannot push output past the documented cap.
         // Keep status header short enough to leave room for body under the cap.
-        let mut header = format!("Status: {status_code} | extract={meta_mode} | url={final_url}\n\n");
+        let mut header =
+            format!("Status: {status_code} | extract={meta_mode} | url={final_url}\n\n");
         let hard_cap = self.params.max_markdown_length().max(64);
         if header.len() > hard_cap / 2 {
             let room = (hard_cap / 2).saturating_sub(40);
             let short_url: String = final_url.chars().take(room).collect();
-            header = format!(
-                "Status: {status_code} | extract={meta_mode} | url={short_url}…\n\n"
-            );
+            header = format!("Status: {status_code} | extract={meta_mode} | url={short_url}…\n\n");
         }
         let mut budget = inline_budget(
             self.params.context_window_tokens(),
@@ -674,12 +671,12 @@ async fn read_body_bounded(
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        let next_len = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or(WebFetchError::ResponseTooLarge {
-                max: max_content_length,
-            })?;
+        let next_len =
+            body.len()
+                .checked_add(chunk.len())
+                .ok_or(WebFetchError::ResponseTooLarge {
+                    max: max_content_length,
+                })?;
         if next_len > max_content_length {
             return Err(WebFetchError::ResponseTooLarge {
                 max: max_content_length,
@@ -708,10 +705,12 @@ fn is_www_apex_equivalent(a: &Url, b: &Url) -> bool {
     // Never equate IP literals via www logic.
     if ha.parse::<std::net::IpAddr>().is_ok()
         || hb.parse::<std::net::IpAddr>().is_ok()
-        || ha.trim_matches(|c| c == '[' || c == ']')
+        || ha
+            .trim_matches(|c| c == '[' || c == ']')
             .parse::<std::net::IpAddr>()
             .is_ok()
-        || hb.trim_matches(|c| c == '[' || c == ']')
+        || hb
+            .trim_matches(|c| c == '[' || c == ']')
             .parse::<std::net::IpAddr>()
             .is_ok()
     {
@@ -804,9 +803,7 @@ fn apply_text_window(text: &str, start_offset: usize, max_chars: Option<usize>) 
         return if start == 0 {
             sliced
         } else {
-            format!(
-                "{sliced}\n\n[web_fetch window: offset={start} of {total} chars]"
-            )
+            format!("{sliced}\n\n[web_fetch window: offset={start} of {total} chars]")
         };
     };
     let taken: String = sliced.chars().take(max).collect();
@@ -884,10 +881,7 @@ fn parse_charset(content_type: &str) -> Option<String> {
         if !key.eq_ignore_ascii_case("charset") {
             continue;
         }
-        let val = part[eq + 1..]
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'');
+        let val = part[eq + 1..].trim().trim_matches('"').trim_matches('\'');
         if !val.is_empty() {
             return Some(val.to_string());
         }
@@ -900,9 +894,7 @@ fn error_body_preview(body: &[u8], content_type: &str) -> String {
     let text = if is_html(content_type) {
         // Prefer a little cleaned text over raw tags in error messages.
         let (prepared, _, _) = extract::prepare_html(&text, ExtractMode::Full);
-        self_converter()
-            .convert(&prepared)
-            .unwrap_or(text)
+        self_converter().convert(&prepared).unwrap_or(text)
     } else {
         text
     };
@@ -924,7 +916,9 @@ fn self_converter() -> htmd::HtmlToMarkdown {
 }
 
 fn is_pdf(content_type: &str) -> bool {
-    content_type.to_ascii_lowercase().contains("application/pdf")
+    content_type
+        .to_ascii_lowercase()
+        .contains("application/pdf")
 }
 
 /// Returns `true` for image content types, excluding SVG (which can contain
@@ -1384,10 +1378,7 @@ mod tests {
     #[test]
     fn sniff_meta_charset() {
         let html = br#"<html><head><meta charset="iso-8859-1"></head><body>x</body></html>"#;
-        assert_eq!(
-            sniff_html_meta_charset(html).as_deref(),
-            Some("iso-8859-1")
-        );
+        assert_eq!(sniff_html_meta_charset(html).as_deref(), Some("iso-8859-1"));
     }
 
     #[test]

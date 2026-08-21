@@ -37,8 +37,7 @@ async fn connect_or_spawn_refuses_when_process_confine_root_set() {
     match err {
         ConnectionError::ProcessConfinement(path) => {
             assert!(
-                path.contains(&root.display().to_string())
-                    || path_is_same_root(&path, &root),
+                path.contains(&root.display().to_string()) || path_is_same_root(&path, &root),
                 "error must name the confine root, got: {path}"
             );
         }

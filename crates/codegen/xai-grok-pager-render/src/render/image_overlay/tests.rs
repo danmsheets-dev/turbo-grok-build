@@ -160,14 +160,10 @@ fn paint_metadata_with_path_shows_all_fields() {
 
 fn solid_test_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
     use image::{ImageBuffer, Rgba};
-    let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(width, height, Rgba(rgba));
+    let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_pixel(width, height, Rgba(rgba));
     let mut buf = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut buf),
-        image::ImageFormat::Png,
-    )
-    .expect("encode png");
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .expect("encode png");
     buf
 }
 
@@ -176,8 +172,7 @@ fn paint_halfblock_on_protocol_none_with_prepared_bytes() {
     let _guard = set_protocol_for_test(GraphicsProtocol::None);
     crate::terminal::overlay::reset_owner();
     let png = solid_test_png(16, 12, [10, 200, 40, 255]);
-    let preview =
-        crate::prompt_images::PromptImagePreview::ready_for_test(png.clone(), (16, 12));
+    let preview = crate::prompt_images::PromptImagePreview::ready_for_test(png.clone(), (16, 12));
     let image = PastedImage {
         element_id: xai_ratatui_textarea::ElementId::from_raw(1),
         display_number: 1,
@@ -215,7 +210,10 @@ fn preparation_none_protocol_marks_ready_with_source_bytes() {
     };
     let img = crate::prompt_images::from_clipboard_data(&data);
     img.preview_preparation().unwrap().run();
-    let (bytes, dims) = img.preview.prepared().expect("None protocol keeps source ready");
+    let (bytes, dims) = img
+        .preview
+        .prepared()
+        .expect("None protocol keeps source ready");
     assert_eq!(dims, (8, 6));
     assert_eq!(bytes, png.as_slice());
 }

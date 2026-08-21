@@ -176,7 +176,7 @@ async fn create_test_actor(
         git_head_enabled: false,
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
-                allowed_write_paths: parking_lot::Mutex::new(None),
+        allowed_write_paths: parking_lot::Mutex::new(None),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
@@ -642,7 +642,7 @@ async fn create_test_actor_with_memory(
         git_head_enabled: false,
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
-                allowed_write_paths: parking_lot::Mutex::new(None),
+        allowed_write_paths: parking_lot::Mutex::new(None),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
@@ -1208,8 +1208,7 @@ async fn test_compact_on_error_triggers_when_tokens_exceed_new_window() {
         })
         .await;
 }
-/// When tracked tokens are within the new limit, the error was not a context
-/// overflow — do not compact.
+/// A generic (non-CLE) error inside the advertised window is not overflow.
 #[tokio::test(flavor = "current_thread")]
 async fn test_compact_on_error_no_trigger_when_tokens_within_new_window() {
     let local = tokio::task::LocalSet::new();
@@ -1218,7 +1217,8 @@ async fn test_compact_on_error_no_trigger_when_tokens_within_new_window() {
             let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(150_000, 1_000_000, 85, gateway_tx, persistence_tx).await;
-            let err = api_error_with_context_window(200_000);
+            let mut err = api_error_with_context_window(200_000);
+            err.message = "invalid request: bad schema".into();
             assert!(!actor.should_compact_on_error(&err).await);
         })
         .await;
@@ -1498,10 +1498,10 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-        extension_runtime: std::cell::RefCell::new(
-            xai_grok_extension_runtime::ExtensionRuntime::new(),
-        ),
-        wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
+                extension_runtime: std::cell::RefCell::new(
+                    xai_grok_extension_runtime::ExtensionRuntime::new(),
+                ),
+                wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
                 events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),
@@ -1573,8 +1573,8 @@ async fn test_idle_resume_noop_when_not_idle_enough() {
         })
         .await;
 }
-/// If the proxy hasn't been updated yet, model_metadata is None — must be
-/// a no-op for backwards compatibility.
+/// Generic errors without model_metadata stay a no-op. Known CLE text
+/// recovers even when the stream omitted metadata.
 #[tokio::test(flavor = "current_thread")]
 async fn test_compact_on_error_noop_without_model_metadata() {
     let local = tokio::task::LocalSet::new();
@@ -1583,10 +1583,10 @@ async fn test_compact_on_error_noop_without_model_metadata() {
             let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
-            let err = xai_grok_sampler::SamplingErrorInfo {
+            let mut err = xai_grok_sampler::SamplingErrorInfo {
                 kind: xai_grok_sampler::SamplingErrorKind::Api,
                 status_code: Some(400),
-                message: "prompt is too long".into(),
+                message: "invalid request: bad schema".into(),
                 is_retryable: false,
                 retry_after_secs: None,
                 should_retry: None,
@@ -1597,6 +1597,8 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 credential: xai_grok_sampling_types::SentCredential::Unknown,
             };
             assert!(!actor.should_compact_on_error(&err).await);
+            err.message = "prompt is too long".into();
+            assert!(actor.should_compact_on_error(&err).await);
         })
         .await;
 }

@@ -32,46 +32,9 @@ pub struct BrowserEvalInput {
     pub confirm: bool,
 }
 
-/// Page-mutating constructs: anything that acts rather than reads.
-const MUTATING: &[&str] = &[
-    ".click(",
-    ".submit(",
-    ".focus(",
-    "location =",
-    "location=",
-    "location.href",
-    "location.replace",
-    "location.assign",
-    "window.open",
-    ".value =",
-    ".value=",
-    "setAttribute",
-    "removeAttribute",
-    "innerHTML",
-    "outerHTML",
-    "innerText =",
-    "textContent =",
-    ".remove(",
-    ".appendChild",
-    ".insertAdjacent",
-    "dispatchEvent",
-    "requestSubmit",
-    "fetch(",
-    "XMLHttpRequest",
-    "navigator.sendBeacon",
-    "localStorage",
-    "sessionStorage",
-    "document.cookie",
-    "history.pushState",
-    "history.replaceState",
-];
-
 /// Whether `function` looks like it changes page state rather than reading it.
 pub fn mutates_page(function: &str) -> bool {
-    let f = function.to_ascii_lowercase();
-    MUTATING
-        .iter()
-        .any(|needle| f.contains(&needle.to_ascii_lowercase()))
+    xai_grok_browser::eval_looks_mutating(function)
 }
 
 /// Require `confirm` for an expression that acts on the page.
@@ -102,6 +65,7 @@ mod policy_tests {
             "() => document.querySelectorAll('a').length",
             "() => [...document.querySelectorAll('h2')].map(h => h.textContent)",
             "() => window.scrollY",
+            "() => ({ url: location.href, title: document.title })",
             "async () => (await window.__ready)",
         ] {
             assert!(check_eval_is_read_only(f, false).is_ok(), "must allow {f}");

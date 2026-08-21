@@ -599,6 +599,13 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
+        || m.contains("context length exceeded")
+        || m.contains("context window")
+        || m.contains("token limit")
+        || m.contains("too many tokens")
+        || m.contains("input too long")
+        || m.contains("reduce the length")
+        || (m.contains("max_tokens") && m.contains("exceed"))
         || (m.contains("current message") && m.contains("exceeds budget"))
 }
 

@@ -5054,8 +5054,7 @@ impl AppView {
                                 && !privacy_banner
                                 && self.tip.is_some()
                                 && agent.should_show_tip();
-                            let has_mode_banner =
-                                !game_mode && agent.mode_switch_banner.is_some();
+                            let has_mode_banner = !game_mode && agent.mode_switch_banner.is_some();
                             let banner_height = if game_mode {
                                 0
                             } else if privacy_banner {
@@ -5783,11 +5782,12 @@ impl AppView {
         if let Some((agent_id, session_id)) = game_mode_mcps_fetch
             && !crate::app::acp_handler::agent_has_pending_mcps_fetch(self, agent_id)
         {
-            self.pending_effects.push(crate::app::actions::Effect::FetchMcpsList {
-                agent_id,
-                session_id,
-                cache: true,
-            });
+            self.pending_effects
+                .push(crate::app::actions::Effect::FetchMcpsList {
+                    agent_id,
+                    session_id,
+                    cache: true,
+                });
             if let Some(agent) = self.agents.get_mut(&agent_id) {
                 crate::views::game_mode::mark_mcp_list_fetch_dispatched(agent);
             }
@@ -7237,7 +7237,11 @@ pub(crate) mod tests {
         );
 
         // What `render::render_game_mode` publishes after a pixel paint.
-        app.agents.get_mut(&id).unwrap().game_mode.last_pixel_painted = true;
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .game_mode
+            .last_pixel_painted = true;
         assert_eq!(
             app.tick_demand(),
             TickDemand::Ambient,
@@ -11049,11 +11053,14 @@ pub(crate) mod tests {
                 management_available: true,
                 builtin: false,
                 phases: vec![("Research".to_owned(), "active".to_owned())],
+                tasks: Vec::new(),
                 current_phase: Some("Research".to_owned()),
+                current_task_id: None,
                 agents: vec![crate::views::workflows::WorkflowAgentRowView {
                     agent_id: child_sid.to_owned(),
                     label: "researcher".to_owned(),
                     phase: Some("Research".to_owned()),
+                    task_id: None,
                     model: None,
                     state: "running".to_owned(),
                     tokens_used: 0,

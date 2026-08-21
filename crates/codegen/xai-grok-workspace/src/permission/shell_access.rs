@@ -442,6 +442,20 @@ fn analyse_shell_tree(root: Node<'_>, src: &str) -> ConfineShellAnalysis {
             continue;
         };
         let program = normalize_program_name(raw);
+        if invocation
+            .words
+            .iter()
+            .any(|word| matches!(word, InvocationWord::Untrusted))
+        {
+            match powershell_expansion_operands(invocation, src) {
+                Some(Ok(_)) => {}
+                Some(Err(())) | None => {
+                    return ConfineShellAnalysis::Unmodelled {
+                        program: "shell-expansion".to_owned(),
+                    };
+                }
+            }
+        }
         if !shell_program_is_modelled_for_confine(&program, &words) {
             return ConfineShellAnalysis::Unmodelled { program };
         }
@@ -470,6 +484,14 @@ fn shell_confine_operands_from_tree(root: Node<'_>, src: &str) -> Vec<String> {
             words: &invocation.words,
         }
         .literal_words();
+        if invocation
+            .words
+            .iter()
+            .any(|word| matches!(word, InvocationWord::Untrusted))
+            && let Some(Ok(operands)) = powershell_expansion_operands(&invocation, src)
+        {
+            out.extend(operands);
+        }
         let Some(program) = words.first().map(|w| normalize_program_name(w)) else {
             continue;
         };
@@ -485,6 +507,35 @@ fn shell_confine_operands_from_tree(root: Node<'_>, src: &str) -> Vec<String> {
         // git write destinations (clone target, worktree add path, …).
         if program == "git" {
             out.extend(git_write_path_operands(&words));
+        }
+        if matches!(program.as_str(), "cargo") {
+            out.extend(cargo_write_path_operands(&words));
+        }
+        if program == "rustup"
+            && words.get(1).is_some_and(|s| s == "run")
+            && words.len() > 3
+            && normalize_program_name(&words[3]) == "cargo"
+        {
+            out.extend(cargo_write_path_operands(&words[3..]));
+        }
+        if program == "rustc" {
+            out.extend(
+                special_file_operands("rustc", &words)
+                    .into_iter()
+                    .filter_map(|(p, mode)| matches!(mode, ShellFileMode::Write).then_some(p)),
+            );
+        }
+        if program == "rustfmt" {
+            let files = special_file_operands("rustfmt", &words);
+            if files.is_empty() {
+                out.push(".".to_owned());
+            } else {
+                out.extend(
+                    files
+                        .into_iter()
+                        .filter_map(|(p, mode)| matches!(mode, ShellFileMode::Write).then_some(p)),
+                );
+            }
         }
         // Densify engines + PowerShell -File script paths (reads + export outs).
         if densify_engine_is_modelled(&program) || configured_densify_engine_basename(&program) {
@@ -638,6 +689,95 @@ fn peel_powershell_expression(seg: &str) -> &str {
         }
     }
     s
+}
+
+/// Recover the one environment-backed PowerShell writer form used by the
+/// Godot import probe. The expanded temp path remains an absolute operand so
+/// confine can deny it when it is outside the workspace.
+fn powershell_expansion_operands(
+    invocation: &ShellInvocation,
+    src: &str,
+) -> Option<Result<Vec<String>, ()>> {
+    if !invocation
+        .words
+        .iter()
+        .any(|word| matches!(word, InvocationWord::Untrusted))
+    {
+        return None;
+    }
+    let end = invocation.scope.end.min(src.len());
+    let start = invocation.start_byte.min(end);
+    let mut words = tokenize_windows_cmdline(&src[start..end]);
+    if words.first().is_some_and(|word| word == "&") {
+        words.remove(0);
+    }
+    if words
+        .first()
+        .map(|word| normalize_program_name(word))
+        .as_deref()
+        != Some("tee-object")
+    {
+        return Some(Err(()));
+    }
+
+    let mut file_path_values = Vec::new();
+    let mut late_expansion_indices = Vec::new();
+    let mut i = 1usize;
+    while i < words.len() {
+        if token_has_late_expansion(&words[i]) {
+            late_expansion_indices.push(i);
+        }
+        if words[i].eq_ignore_ascii_case("-filepath") {
+            let Some(value) = words.get(i + 1) else {
+                return Some(Err(()));
+            };
+            if token_has_late_expansion(value) {
+                file_path_values.push(value.as_str());
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    if file_path_values.is_empty()
+        || late_expansion_indices.iter().any(|index| {
+            !words
+                .get(*index)
+                .is_some_and(|value| file_path_values.contains(&value.as_str()))
+        })
+    {
+        return Some(Err(()));
+    }
+
+    let mut operands = Vec::with_capacity(file_path_values.len());
+    for value in file_path_values {
+        let Some(path) = powershell_temp_path_operand(value) else {
+            return Some(Err(()));
+        };
+        operands.push(path);
+    }
+    Some(Ok(operands))
+}
+
+fn powershell_temp_path_operand(value: &str) -> Option<String> {
+    const PREFIX: &str = "$env:TEMP";
+    if value.len() <= PREFIX.len()
+        || !value[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        || !matches!(value.as_bytes().get(PREFIX.len()), Some(b'\\' | b'/'))
+    {
+        return None;
+    }
+    let suffix = &value[PREFIX.len()..];
+    if suffix
+        .chars()
+        .any(|ch| matches!(ch, '$' | '%' | '`' | '&' | '|' | ';' | '^'))
+    {
+        return None;
+    }
+    let temp = std::env::var_os("TEMP")
+        .or_else(|| std::env::var_os("TMP"))
+        .map(PathBuf::from)?;
+    Some(format!("{}{}", temp.to_string_lossy(), suffix))
 }
 
 /// Recover PowerShell / cmd invocations of densify engines that the bash
@@ -976,6 +1116,16 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
     if program == "git" {
         return git_is_modelled_for_confine(words);
     }
+    // Package-scoped cargo / rustc / rustfmt: implicit `target/` plus flag
+    // operands (`--target-dir`, `-o`, file args). Worktree children need
+    // `cargo test -p …` under confine; `cargo install` still names ~/.cargo
+    // so writes outside the root stay denied.
+    if matches!(program, "cargo" | "rustc" | "rustfmt" | "rustdoc") {
+        return true;
+    }
+    if program == "rustup" {
+        return rustup_is_modelled_for_confine(words);
+    }
     // Densify tools: headless Blender / Godot (CLI path operands checked; bpy /
     // GDScript-internal writes remain residual shell≠OS-jail risk).
     if densify_engine_is_modelled(program) || configured_densify_engine_basename(program) {
@@ -1125,10 +1275,7 @@ fn densify_engine_path_operands(program: &str, words: &[String]) -> Vec<String> 
             "--write-movie",
         ];
         // `--export-release Preset path` takes two values after the flag.
-        if matches!(
-            w,
-            "--export-release" | "--export-debug" | "--export-pack"
-        ) {
+        if matches!(w, "--export-release" | "--export-debug" | "--export-pack") {
             // preset name then path
             if let Some(path) = words.get(i + 2) {
                 out.push(path.clone());
@@ -1266,6 +1413,111 @@ fn git_subcommand(words: &[String]) -> Option<&str> {
     None
 }
 
+/// `rustup run <toolchain> <cmd>` peels to the inner program; show/which are
+/// read-only. `rustup install` / `update` write outside the worktree and stay
+/// unmodelled.
+fn rustup_is_modelled_for_confine(words: &[String]) -> bool {
+    let mut i = 1usize;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return match w {
+            "run" => words.get(i + 2).is_some_and(|inner| {
+                let program = normalize_program_name(inner);
+                shell_program_is_modelled_for_confine(&program, &words[i + 2..])
+            }),
+            "show" | "which" | "help" => true,
+            _ => false,
+        };
+    }
+    true
+}
+
+/// Write destinations cargo may touch: `--target-dir` / `--out-dir` / `--root`
+/// / `--manifest-path`, implicit `target/` for build/test, `.` for fmt/fix,
+/// and cargo-home for `install` (so confine denies ~/.cargo).
+fn cargo_write_path_operands(words: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for flag in ["--target-dir", "--out-dir", "--manifest-path", "--root"] {
+        for value in value_flag_values(words, flag) {
+            out.push(value.to_owned());
+        }
+    }
+    let has_target_dir = !value_flag_values(words, "--target-dir").is_empty();
+    let sub = cargo_subcommand(words).unwrap_or("");
+    match sub {
+        "fmt" | "fix" => out.push(".".to_owned()),
+        "install" => {
+            if value_flag_values(words, "--root").is_empty() {
+                if let Ok(home) = std::env::var("CARGO_HOME") {
+                    out.push(home);
+                } else if let Ok(user) =
+                    std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+                {
+                    out.push(format!("{user}/.cargo"));
+                } else {
+                    out.push(".cargo".to_owned());
+                }
+            }
+        }
+        "login" | "logout" | "search" | "info" | "tree" | "metadata" | "version" | "help" => {}
+        _ if !has_target_dir => out.push("target".to_owned()),
+        _ => {}
+    }
+    out
+}
+
+fn cargo_subcommand(words: &[String]) -> Option<&str> {
+    let mut skip_next = false;
+    for w in words.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if w == "--" {
+            return None;
+        }
+        if w.starts_with('-') {
+            if !w.contains('=') && cargo_flag_takes_value(w) {
+                skip_next = true;
+            }
+            continue;
+        }
+        return Some(w.as_str());
+    }
+    None
+}
+
+fn cargo_flag_takes_value(w: &str) -> bool {
+    matches!(
+        w,
+        "--target-dir"
+            | "--manifest-path"
+            | "--out-dir"
+            | "--root"
+            | "--color"
+            | "--config"
+            | "-C"
+            | "--target"
+            | "--features"
+            | "-F"
+            | "-p"
+            | "--package"
+            | "-Z"
+            | "--profile"
+            | "--message-format"
+            | "--example"
+            | "--bin"
+            | "--bench"
+            | "--test"
+            | "--jobs"
+            | "-j"
+    )
+}
+
 /// git is modelled when its subcommand is a known reader, or a known writer
 /// whose destinations we extract. Unknown / dangerous subcommands (e.g.
 /// `config --global`, arbitrary plumbing) fail closed.
@@ -1332,10 +1584,8 @@ fn git_is_modelled_for_confine(words: &[String]) -> bool {
 fn git_config_is_global(words: &[String]) -> bool {
     git_subcommand(words).is_some_and(|s| s.eq_ignore_ascii_case("config"))
         && words.iter().any(|w| {
-            matches!(
-                w.as_str(),
-                "--global" | "--system" | "--file" | "--blob"
-            ) || w.starts_with("--file=")
+            matches!(w.as_str(), "--global" | "--system" | "--file" | "--blob")
+                || w.starts_with("--file=")
         })
 }
 
@@ -2528,7 +2778,6 @@ mod tests {
             r#"python3 -c "print(1)""#,
             r#"node -e "require('fs').writeFileSync('C:/x','p')""#,
             r#"perl -e 'print 1'"#,
-            "cargo build",
             "powershell -Command \"Set-Content C:\\x p\"",
             "pwsh -c \"echo hi\"",
         ] {
@@ -2569,6 +2818,14 @@ mod tests {
             "godot --headless --path . --import",
             "powershell -File tools/verify_asset_kit.ps1",
             "pwsh -NoProfile -File tools/verify_asset_kit.ps1",
+            "cargo test -p xai-grok-browser --lib",
+            "cargo check -p xai-grok-pager --lib",
+            "cargo fmt -- --check",
+            "rustc --version",
+            "rustfmt src/lib.rs",
+            "rustup show",
+            "rustup which rustc",
+            "rustup run stable cargo test -p xai-grok-browser --lib",
         ] {
             assert_eq!(
                 shell_unmodelled_program_for_confine(cmd),
@@ -2576,6 +2833,41 @@ mod tests {
                 "expected modelled for `{cmd}`"
             );
         }
+    }
+
+    #[test]
+    fn cargo_write_operands_include_target_and_flag_dirs() {
+        match analyse_shell_for_confine("cargo test -p xai-grok-browser --lib") {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p == "target"),
+                    "expected implicit target operand, got {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled cargo test, got {other:?}"),
+        }
+        match analyse_shell_for_confine("cargo check --target-dir C:/outside/target") {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p.contains("outside")),
+                    "expected --target-dir operand, got {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled cargo --target-dir, got {other:?}"),
+        }
+        match analyse_shell_for_confine("cargo fmt") {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p == "."),
+                    "expected fmt package operand, got {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled cargo fmt, got {other:?}"),
+        }
+        assert_eq!(
+            shell_unmodelled_program_for_confine("rustup install nightly"),
+            Some("rustup".into())
+        );
     }
 
     /// Regression: the `cmd /c <engine>` peel used to hand the WHOLE compound
@@ -2676,8 +2968,10 @@ mod tests {
                 ConfineShellAnalysis::Modelled { operands } => {
                     // Allowed only if the real target is a checkable operand.
                     assert!(
-                        operands.iter().any(|p| std::path::Path::new(p).is_absolute()
-                            && p.contains("pwned.txt")),
+                        operands
+                            .iter()
+                            .any(|p| std::path::Path::new(p).is_absolute()
+                                && p.contains("pwned.txt")),
                         "redirect target must be a checkable absolute operand: {cmd}\n{operands:?}"
                     );
                 }
@@ -2688,7 +2982,9 @@ mod tests {
 
     #[test]
     fn token_hides_absolute_path_discriminates() {
-        assert!(token_hides_absolute_path(r"Set-Content C:\outside\pwn.ps1 x"));
+        assert!(token_hides_absolute_path(
+            r"Set-Content C:\outside\pwn.ps1 x"
+        ));
         assert!(token_hides_absolute_path(r">C:\Users\Public\pwned.txt"));
         assert!(token_hides_absolute_path(r">\\server\share\x"));
         assert!(token_hides_absolute_path("cat /etc/shadow"));
@@ -2755,7 +3051,8 @@ mod tests {
 
     #[test]
     fn densify_blender_extracts_python_and_output_operands() {
-        let cmd = r#"blender --background --python tools/blender/build_x.py -o assets/models/out####"#;
+        let cmd =
+            r#"blender --background --python tools/blender/build_x.py -o assets/models/out####"#;
         match analyse_shell_for_confine(cmd) {
             ConfineShellAnalysis::Modelled { operands } => {
                 assert!(
@@ -2789,6 +3086,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn powershell_godot_import_pipeline_models_temp_write_operand() {
+        let cmd = r#"& "C:\Program Files\Godot\godot.exe" --headless --path . --import 2>&1 | Tee-Object -FilePath $env:TEMP\godot-import.log | Select-String -Pattern "ERROR|WARNING""#;
+        match analyse_shell_for_confine(cmd) {
+            ConfineShellAnalysis::Modelled { operands } => {
+                assert!(
+                    operands.iter().any(|p| p == "."),
+                    "Godot project path operand missing: {operands:?}"
+                );
+                let temp_log = std::env::temp_dir()
+                    .join("godot-import.log")
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(
+                    operands.iter().any(|p| p == &temp_log),
+                    "external temp write operand missing: {operands:?}"
+                );
+            }
+            other => panic!("expected Modelled PowerShell Godot pipeline, got {other:?}"),
+        }
+    }
+
     /// R7-7b: compound `;` / `|` / PowerShell parenthesised expressions with
     /// every operand inside the root must not emit a confine violation, and
     /// must never treat the raw command string as a path operand.
@@ -2796,9 +3115,7 @@ mod tests {
     fn compound_readonly_commands_are_modelled_with_real_operands_only() {
         // Observed false-positive shape #1: cd to root + git show.
         let root = r#"H:\gb-work\gb\w\d52412a3"#;
-        let cmd = format!(
-            r#"cd "{root}" ; git show 835f16d --stat ; git log --oneline -3"#
-        );
+        let cmd = format!(r#"cd "{root}" ; git show 835f16d --stat ; git log --oneline -3"#);
         match analyse_shell_for_confine(&cmd) {
             ConfineShellAnalysis::Modelled { operands } => {
                 // cd target is a path operand; no write outside.
@@ -2868,8 +3185,8 @@ mod tests {
 
     #[test]
     fn shell_confine_operands_extracts_redirects_and_cd() {
-        let writes = shell_confine_operands("echo hi > /tmp/out.txt")
-            .expect("plain redirect must parse");
+        let writes =
+            shell_confine_operands("echo hi > /tmp/out.txt").expect("plain redirect must parse");
         assert!(
             writes.iter().any(|p| p.contains("out.txt")),
             "redirect target missing: {writes:?}"
@@ -2878,7 +3195,8 @@ mod tests {
         let cds = shell_confine_operands("cd /outside/main && echo x > f.txt")
             .expect("cd+redirect must parse");
         assert!(
-            cds.iter().any(|p| p.contains("outside") || p == "/outside/main"),
+            cds.iter()
+                .any(|p| p.contains("outside") || p == "/outside/main"),
             "cd destination missing: {cds:?}"
         );
         assert!(
@@ -2888,7 +3206,10 @@ mod tests {
 
         // Known-safe non-writer with no redirects → empty operand list, not None.
         let empty = shell_confine_operands("echo hello").expect("echo must parse");
-        assert!(empty.is_empty(), "echo should have no write/cd operands: {empty:?}");
+        assert!(
+            empty.is_empty(),
+            "echo should have no write/cd operands: {empty:?}"
+        );
     }
 
     #[test]

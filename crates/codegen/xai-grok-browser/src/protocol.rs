@@ -21,6 +21,8 @@ pub const METHOD_EVENT: &str = "browser.event";
 pub const METHOD_NAVIGATE: &str = "browser.navigate";
 /// `browser.tabs`
 pub const METHOD_TABS: &str = "browser.tabs";
+/// `browser.downloads`
+pub const METHOD_DOWNLOADS: &str = "browser.downloads";
 /// `browser.new_tab`
 pub const METHOD_NEW_TAB: &str = "browser.new_tab";
 /// `browser.select_tab`
@@ -41,6 +43,18 @@ pub const METHOD_SCREENSHOT: &str = "browser.screenshot";
 pub const METHOD_RAISE: &str = "browser.raise";
 /// `browser.shutdown`
 pub const METHOD_SHUTDOWN: &str = "browser.shutdown";
+/// `browser.wait`
+pub const METHOD_WAIT: &str = "browser.wait";
+/// `browser.scroll`
+pub const METHOD_SCROLL: &str = "browser.scroll";
+/// `browser.press_key`
+pub const METHOD_PRESS_KEY: &str = "browser.press_key";
+/// `browser.select`
+pub const METHOD_SELECT: &str = "browser.select";
+/// `browser.hover`
+pub const METHOD_HOVER: &str = "browser.hover";
+/// `browser.set_file`
+pub const METHOD_SET_FILE: &str = "browser.set_file";
 
 /// Cap on `browser.eval` JSON result size (bytes), same order as MCP output.
 pub const EVAL_RESULT_MAX_BYTES: usize = 20_000;
@@ -178,6 +192,8 @@ pub enum BrowserMethod {
     Navigate,
     /// List tabs.
     Tabs,
+    /// List brokered downloads in the session folder.
+    Downloads,
     /// Open a tab.
     NewTab,
     /// Focus a tab.
@@ -198,6 +214,18 @@ pub enum BrowserMethod {
     Raise,
     /// Shut down the host.
     Shutdown,
+    /// Wait for text or a URL substring.
+    Wait,
+    /// Scroll the page or a uid into view.
+    Scroll,
+    /// Dispatch a key.
+    PressKey,
+    /// Choose a `<select>` option.
+    Select,
+    /// Hover a uid.
+    Hover,
+    /// Set a file input from the session folder.
+    SetFile,
 }
 
 impl BrowserMethod {
@@ -206,6 +234,7 @@ impl BrowserMethod {
         match self {
             Self::Navigate => METHOD_NAVIGATE,
             Self::Tabs => METHOD_TABS,
+            Self::Downloads => METHOD_DOWNLOADS,
             Self::NewTab => METHOD_NEW_TAB,
             Self::SelectTab => METHOD_SELECT_TAB,
             Self::CloseTab => METHOD_CLOSE_TAB,
@@ -216,6 +245,12 @@ impl BrowserMethod {
             Self::Screenshot => METHOD_SCREENSHOT,
             Self::Raise => METHOD_RAISE,
             Self::Shutdown => METHOD_SHUTDOWN,
+            Self::Wait => METHOD_WAIT,
+            Self::Scroll => METHOD_SCROLL,
+            Self::PressKey => METHOD_PRESS_KEY,
+            Self::Select => METHOD_SELECT,
+            Self::Hover => METHOD_HOVER,
+            Self::SetFile => METHOD_SET_FILE,
         }
     }
 }
@@ -227,6 +262,7 @@ impl FromStr for BrowserMethod {
         match s {
             METHOD_NAVIGATE => Ok(Self::Navigate),
             METHOD_TABS => Ok(Self::Tabs),
+            METHOD_DOWNLOADS => Ok(Self::Downloads),
             METHOD_NEW_TAB => Ok(Self::NewTab),
             METHOD_SELECT_TAB => Ok(Self::SelectTab),
             METHOD_CLOSE_TAB => Ok(Self::CloseTab),
@@ -237,6 +273,12 @@ impl FromStr for BrowserMethod {
             METHOD_SCREENSHOT => Ok(Self::Screenshot),
             METHOD_RAISE => Ok(Self::Raise),
             METHOD_SHUTDOWN => Ok(Self::Shutdown),
+            METHOD_WAIT => Ok(Self::Wait),
+            METHOD_SCROLL => Ok(Self::Scroll),
+            METHOD_PRESS_KEY => Ok(Self::PressKey),
+            METHOD_SELECT => Ok(Self::Select),
+            METHOD_HOVER => Ok(Self::Hover),
+            METHOD_SET_FILE => Ok(Self::SetFile),
             other => Err(ProtocolError::UnknownMethod(other.to_owned())),
         }
     }
@@ -252,6 +294,9 @@ pub enum BrowserRequest {
     /// `browser.tabs`
     #[serde(rename = "browser.tabs")]
     Tabs {},
+    /// `browser.downloads`
+    #[serde(rename = "browser.downloads")]
+    Downloads {},
     /// `browser.new_tab`
     #[serde(rename = "browser.new_tab")]
     NewTab {
@@ -269,6 +314,9 @@ pub enum BrowserRequest {
     Snapshot {
         #[serde(default)]
         verbose: bool,
+        /// Include truncated main-landmark text.
+        #[serde(default)]
+        include_text: bool,
     },
     /// `browser.click`
     #[serde(rename = "browser.click")]
@@ -278,7 +326,11 @@ pub enum BrowserRequest {
     Fill { uid: String, value: String },
     /// `browser.eval`
     #[serde(rename = "browser.eval")]
-    Eval { function: String },
+    Eval {
+        function: String,
+        #[serde(default)]
+        confirm: bool,
+    },
     /// `browser.screenshot`
     #[serde(rename = "browser.screenshot")]
     Screenshot {},
@@ -288,6 +340,42 @@ pub enum BrowserRequest {
     /// `browser.shutdown`
     #[serde(rename = "browser.shutdown")]
     Shutdown {},
+    /// `browser.wait`
+    #[serde(rename = "browser.wait")]
+    Wait {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        url_substring: Option<String>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    /// `browser.scroll`
+    #[serde(rename = "browser.scroll")]
+    Scroll {
+        #[serde(default)]
+        uid: Option<String>,
+        #[serde(default)]
+        dx: Option<i32>,
+        #[serde(default)]
+        dy: Option<i32>,
+    },
+    /// `browser.press_key`
+    #[serde(rename = "browser.press_key")]
+    PressKey {
+        key: String,
+        #[serde(default)]
+        uid: Option<String>,
+    },
+    /// `browser.select`
+    #[serde(rename = "browser.select")]
+    Select { uid: String, value: String },
+    /// `browser.hover`
+    #[serde(rename = "browser.hover")]
+    Hover { uid: String },
+    /// `browser.set_file`
+    #[serde(rename = "browser.set_file")]
+    SetFile { uid: String, path: String },
 }
 
 /// Result of `browser.navigate`.
@@ -337,7 +425,7 @@ impl SnapshotSource {
 }
 
 /// Result of `browser.snapshot`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotResult {
     /// Page URL.
     pub url: String,
@@ -348,6 +436,50 @@ pub struct SnapshotResult {
     pub source: SnapshotSource,
     /// Compact AX nodes.
     pub nodes: Vec<AxNode>,
+    /// True when a dialog / modal overlay is in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<bool>,
+    /// Truncated main-landmark text when `include_text` was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// Result of `browser.click`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClickResult {
+    /// Page URL after the click (and any committed navigation).
+    pub url: String,
+    /// Document title after the click.
+    pub title: String,
+}
+
+/// Result of `browser.wait`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitResult {
+    /// Page URL when the wait succeeded.
+    pub url: String,
+    /// Document title when the wait succeeded.
+    pub title: String,
+}
+
+/// One file in the session-scoped brokered download directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadInfo {
+    /// Sanitized file name.
+    pub name: String,
+    /// Absolute path assigned by the browser host.
+    pub path: String,
+    /// Current file size in bytes.
+    pub bytes: u64,
+    /// True when the file is a regular completed file visible to the host.
+    pub completed: bool,
+}
+
+/// Result of `browser.downloads`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadsResult {
+    /// Session-scoped files under `<session>/downloads`.
+    pub downloads: Vec<DownloadInfo>,
 }
 
 /// Result of `browser.screenshot`.
@@ -561,6 +693,75 @@ pub fn check_eval_result_len(len: usize) -> Result<(), EvalPolicyError> {
     } else {
         Ok(())
     }
+}
+
+/// OAuth / Google Identity Services popup URLs that must not replace the only tab.
+pub fn is_oauth_popup_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("accounts.google.com/gsi")
+        || lower.contains("accounts.google.com/o/oauth2")
+        || lower.contains("accounts.google.com/signin/oauth")
+        || lower.contains("ux_mode=popup")
+        || lower.contains("login.microsoftonline.com")
+        || lower.contains("login.live.com")
+        || lower.contains("appleid.apple.com")
+        || lower.contains("/oauth/authorize")
+        || lower.contains("/o/oauth2/v2/auth")
+        || lower.contains("oauth2/authorize")
+}
+
+/// Whether a `browser.eval` function expression looks like it mutates the page.
+///
+/// Assignment / call forms only: a read of `location.href` is not a write.
+pub fn eval_looks_mutating(function: &str) -> bool {
+    let f = function.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        ".click(",
+        ".click (",
+        "['click']",
+        "[\"click\"]",
+        ".submit(",
+        ".submit (",
+        ".focus(",
+        "location =",
+        "location=",
+        "location.href=",
+        "location.href =",
+        "location.replace",
+        "location.assign",
+        "window.open",
+        ".value =",
+        ".value=",
+        ".value+=",
+        ".value +=",
+        ".src=",
+        ".src =",
+        "setattribute",
+        "removeattribute",
+        "innerhtml",
+        "outerhtml",
+        "innertext =",
+        "textcontent =",
+        ".remove(",
+        ".appendchild",
+        ".insertadjacent",
+        "dispatchevent",
+        "requestsubmit",
+        "fetch(",
+        "xmlhttprequest",
+        "navigator.sendbeacon",
+        "localstorage",
+        "sessionstorage",
+        "document.cookie",
+        "document.write",
+        "history.pushstate",
+        "history.replacestate",
+        "new function",
+        "function(\"",
+        "function('",
+        "function(`",
+    ];
+    NEEDLES.iter().any(|needle| f.contains(needle))
 }
 
 fn split_scheme(url: &str) -> Option<(&str, &str)> {
@@ -1296,10 +1497,23 @@ mod tests {
                 value: None,
                 focused: false,
             }],
+            ..Default::default()
         };
         let v = serde_json::to_value(&snap).unwrap();
         let back: SnapshotResult = serde_json::from_value(v).unwrap();
         assert_eq!(back.nodes[0].uid, "1-1");
+
+        let downloads = DownloadsResult {
+            downloads: vec![DownloadInfo {
+                name: "report.pdf".into(),
+                path: "downloads/report.pdf".into(),
+                bytes: 12,
+                completed: true,
+            }],
+        };
+        let v = serde_json::to_value(&downloads).unwrap();
+        let back: DownloadsResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.downloads[0].name, "report.pdf");
 
         let shot = ScreenshotResult {
             path: "images/browser-1.png".into(),
@@ -1318,6 +1532,7 @@ mod tests {
                 serde_json::json!({"url": "https://example.com/"}),
             ),
             ("browser.tabs", serde_json::json!({})),
+            ("browser.downloads", serde_json::json!({})),
             ("browser.new_tab", serde_json::json!({"url": null})),
             ("browser.select_tab", serde_json::json!({"tab_id": 1})),
             ("browser.close_tab", serde_json::json!({"tab_id": 1})),
@@ -1334,6 +1549,21 @@ mod tests {
             ("browser.screenshot", serde_json::json!({})),
             ("browser.raise", serde_json::json!({})),
             ("browser.shutdown", serde_json::json!({})),
+            (
+                "browser.wait",
+                serde_json::json!({"text": "jobs", "timeout_ms": 5000}),
+            ),
+            ("browser.scroll", serde_json::json!({"dy": 400})),
+            ("browser.press_key", serde_json::json!({"key": "Enter"})),
+            (
+                "browser.select",
+                serde_json::json!({"uid": "1-1", "value": "Remote"}),
+            ),
+            ("browser.hover", serde_json::json!({"uid": "1-1"})),
+            (
+                "browser.set_file",
+                serde_json::json!({"uid": "1-2", "path": "resume.pdf"}),
+            ),
         ];
         for (method, params) in cases {
             let env = JsonRpcRequest {
@@ -1373,5 +1603,45 @@ mod tests {
             empty.browser_request().unwrap(),
             BrowserRequest::NewTab { url: None }
         );
+    }
+
+    #[test]
+    fn location_href_read_is_not_mutating() {
+        assert!(!eval_looks_mutating(
+            "() => ({ url: location.href, title: document.title })"
+        ));
+        assert!(!eval_looks_mutating("() => location.href"));
+        assert!(eval_looks_mutating(
+            "() => location.href = 'https://evil.test'"
+        ));
+        assert!(eval_looks_mutating(
+            "() => location.href='https://evil.test'"
+        ));
+        assert!(eval_looks_mutating(
+            "() => location.replace('https://evil.test')"
+        ));
+        assert!(eval_looks_mutating("() => el['click']()"));
+        assert!(eval_looks_mutating("() => document.write('x')"));
+        assert!(eval_looks_mutating(
+            "() => img.src = 'https://evil.test/x.png'"
+        ));
+        assert!(!eval_looks_mutating(
+            "() => document.querySelectorAll('a').length"
+        ));
+    }
+
+    #[test]
+    fn oauth_popup_urls_are_detected() {
+        assert!(is_oauth_popup_url(
+            "https://accounts.google.com/gsi/select?ux_mode=popup&origin=https://www.linkedin.com/"
+        ));
+        assert!(is_oauth_popup_url(
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=1"
+        ));
+        assert!(is_oauth_popup_url(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        ));
+        assert!(!is_oauth_popup_url("https://www.linkedin.com/login"));
+        assert!(!is_oauth_popup_url("https://www.indeed.com/"));
     }
 }

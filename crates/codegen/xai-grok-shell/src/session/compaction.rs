@@ -1681,12 +1681,6 @@ impl SessionActor {
         self.persist_compaction_segment(&segment_messages, &generate_session_compact);
         self.chat_state_handle
             .record_compaction_at(prompt_index_at_compaction);
-        self.persist_compaction_checkpoint(
-            &compacted_history,
-            prompt_index_at_compaction,
-            auto_continue,
-            original_user_info,
-        );
         let prefix_len = if self
             .compaction
             .prefix_released
@@ -1707,6 +1701,18 @@ impl SessionActor {
             )
             .await
         };
+        // Checkpoint the history we are about to apply (post-fork), and do not
+        // write the jsonl marker unless the checkpoint file was queued. Replay
+        // aborts if the marker exists without the file.
+        if !self.persist_compaction_checkpoint(
+            &compacted_history,
+            prompt_index_at_compaction,
+            auto_continue,
+            original_user_info,
+        ) {
+            return Err(acp::Error::internal_error()
+                .data("compaction checkpoint persist failed; live history not replaced"));
+        }
         let new_len = compacted_history.len();
         self.chat_state_handle
             .replace_conversation_for_compaction(compacted_history);
@@ -1843,9 +1849,12 @@ impl SessionActor {
         }
     }
     /// Returns true if the error response indicates tokens exceed the
-    /// model's context window. Inspects only the model-metadata
-    /// portion of the [`SamplingErrorInfo`] (the `context_window`
-    /// field) against the session's tracked token estimate.
+    /// model's context window.
+    ///
+    /// Stream-delivered size overflows often omit `model_metadata`, and the
+    /// session estimate can sit under the advertised window (byte/4, tools
+    /// not in the count). Known context-length messages therefore trigger
+    /// recovery even when metadata is missing or the estimate looks fine.
     ///
     /// Called from `handle_sampling_failure` with the
     /// `SamplingErrorInfo` the sampler hands back.
@@ -1860,6 +1869,9 @@ impl SessionActor {
             != SUPPRESS_NONE
         {
             return false;
+        }
+        if xai_grok_sampling_types::is_context_length_error(&err.message) {
+            return true;
         }
         let Some(ref metadata) = err.model_metadata else {
             return false;
@@ -2195,13 +2207,15 @@ impl SessionActor {
     ///
     /// `auto_continue` should be `Some` when this compaction was triggered by auto-compact
     /// and an auto-continue prompt will follow.
+    /// Returns `false` when the checkpoint file could not be queued. Callers
+    /// must not write the jsonl marker or replace live history in that case.
     fn persist_compaction_checkpoint(
         &self,
         compacted_history: &[ConversationItem],
         prompt_index_at_compaction: usize,
         auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
         original_user_info: Option<String>,
-    ) {
+    ) -> bool {
         use crate::extensions::notification::{
             CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as XaiSessionUpdate,
         };
@@ -2224,6 +2238,7 @@ impl SessionActor {
             .is_err()
         {
             tracing::warn!("Failed to send compaction checkpoint file to persistence channel");
+            return false;
         }
         let info = CompactionCheckpointInfo {
             checkpoint_id,
@@ -2238,6 +2253,7 @@ impl SessionActor {
             prompt_index_at_compaction,
             "Persisted compaction checkpoint"
         );
+        true
     }
 }
 #[cfg(test)]
@@ -2422,7 +2438,7 @@ mod inline_auto_compact_flow_tests {
             git_head_enabled: false,
             models_manager: Default::default(),
             display_cwd: std::sync::OnceLock::new(),
-                allowed_write_paths: parking_lot::Mutex::new(None),
+            allowed_write_paths: parking_lot::Mutex::new(None),
             active_agent_type: parking_lot::Mutex::new(None),
             queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
@@ -2490,10 +2506,10 @@ mod inline_auto_compact_flow_tests {
             hook_load_errors: std::cell::RefCell::new(Vec::new()),
             plugin_registry: std::cell::RefCell::new(None),
             plugin_registry_handle: None,
-        extension_runtime: std::cell::RefCell::new(
-            xai_grok_extension_runtime::ExtensionRuntime::new(),
-        ),
-        wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
+            extension_runtime: std::cell::RefCell::new(
+                xai_grok_extension_runtime::ExtensionRuntime::new(),
+            ),
+            wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
             events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
             observability_bridge: noop_observability_bridge(),
             current_turn_number: std::cell::Cell::new(0),
@@ -3802,8 +3818,7 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    /// When tracked tokens are within the new limit, the error was not a context
-    /// overflow — do not compact.
+    /// A generic (non-CLE) error inside the advertised window is not overflow.
     #[tokio::test(flavor = "current_thread")]
     async fn test_compact_on_error_no_trigger_when_tokens_within_new_window() {
         let local = tokio::task::LocalSet::new();
@@ -3813,13 +3828,31 @@ mod inline_auto_compact_flow_tests {
                 let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor =
                     create_test_actor(150_000, 1_000_000, 85, gateway_tx, persistence_tx).await;
-                let err = api_error_with_context_window(200_000);
+                let mut err = api_error_with_context_window(200_000);
+                err.message = "invalid request: bad schema".to_string();
                 assert!(!actor.should_compact_on_error(&err).await);
             })
             .await;
     }
-    /// If the proxy hasn't been updated yet, model_metadata is None — must be
-    /// a no-op for backwards compatibility.
+
+    /// CLE text recovers even when the estimate sits under the advertised window
+    /// (tools / byte-estimate undercount).
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_compact_on_error_triggers_on_cle_text_within_estimate() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor =
+                    create_test_actor(150_000, 1_000_000, 85, gateway_tx, persistence_tx).await;
+                let err = api_error_with_context_window(200_000);
+                assert!(actor.should_compact_on_error(&err).await);
+            })
+            .await;
+    }
+    /// Generic errors without model_metadata stay a no-op. Known CLE text
+    /// recovers even when the stream omitted metadata.
     #[tokio::test(flavor = "current_thread")]
     async fn test_compact_on_error_noop_without_model_metadata() {
         let local = tokio::task::LocalSet::new();
@@ -3829,10 +3862,10 @@ mod inline_auto_compact_flow_tests {
                 let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor =
                     create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
-                let err = xai_grok_sampler::SamplingErrorInfo {
+                let mut err = xai_grok_sampler::SamplingErrorInfo {
                     kind: xai_grok_sampler::SamplingErrorKind::Api,
                     status_code: Some(400),
-                    message: "prompt is too long".to_string(),
+                    message: "invalid request: bad schema".to_string(),
                     is_retryable: false,
                     retry_after_secs: None,
                     should_retry: None,
@@ -3843,6 +3876,8 @@ mod inline_auto_compact_flow_tests {
                     credential: xai_grok_sampling_types::SentCredential::Unknown,
                 };
                 assert!(!actor.should_compact_on_error(&err).await);
+                err.message = "prompt is too long".to_string();
+                assert!(actor.should_compact_on_error(&err).await);
             })
             .await;
     }

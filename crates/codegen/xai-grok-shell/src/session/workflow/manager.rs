@@ -160,6 +160,10 @@ impl WorkflowManager {
                 execution_script = self.store.script_for(run_id).ok_or_else(|| {
                     LaunchError::Store("immutable workflow script is missing".into())
                 })?;
+                let stored_meta =
+                    xai_workflow::extract_meta(&execution_script).map_err(|error| {
+                        LaunchError::Store(format!("invalid stored workflow script: {error}"))
+                    })?;
                 let mut journal = match existing
                     .journal_path
                     .as_ref()
@@ -182,8 +186,38 @@ impl WorkflowManager {
                         .prune_trailing_host_error(existing.pause_message.as_deref().unwrap_or(""))
                         .map_err(|e| LaunchError::Journal(e.to_string()))?;
                 }
+                let queue_initialized = self.store.task_queue_is_initialized(run_id);
+                let persisted_queue = self.store.task_queue_for(run_id);
+                let task_queue = if !queue_initialized && !stored_meta.tasks.is_empty() {
+                    xai_workflow::TaskQueueState::from_definitions(&stored_meta.tasks).map_err(
+                        |error| LaunchError::Store(format!("invalid workflow tasks: {error}")),
+                    )?
+                } else {
+                    persisted_queue
+                };
+                if existing.status.is_resumable()
+                    && task_queue.tasks.iter().any(|task| {
+                        task.status == xai_workflow::TaskStatus::Pending && task.attempts > 0
+                    })
+                {
+                    journal
+                        .prune_trailing_failed_agent()
+                        .map_err(|e| LaunchError::Journal(e.to_string()))?;
+                }
+                task_queue.validate().map_err(|error| {
+                    LaunchError::Store(format!("invalid persisted task queue: {error}"))
+                })?;
+                if !task_queue.matches_definitions(&stored_meta.tasks) {
+                    return Err(LaunchError::Store(
+                        "persisted task queue does not match workflow task definitions".into(),
+                    ));
+                }
+                if !queue_initialized {
+                    self.store.set_task_queue(run_id, task_queue.clone());
+                }
                 let state = {
                     let mut tracker = self.tracker.lock();
+                    tracker.restore_task_queue(run_id, task_queue);
                     tracker.reconcile_agents_used(run_id, journal.agent_reservation_count());
                     tracker.resume_run(run_id, spec.agent_budget)
                 }
@@ -208,14 +242,21 @@ impl WorkflowManager {
                 self.store
                     .register(&run_id, &execution_script, &spec.args)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
+                let task_definitions = resolved.meta.tasks.clone();
+                let task_queue = xai_workflow::TaskQueueState::from_definitions(&task_definitions)
+                    .map_err(|error| {
+                        LaunchError::Store(format!("invalid workflow tasks: {error}"))
+                    })?;
+                self.store.set_task_queue(&run_id, task_queue);
                 let journal_rel = format!("workflows/{run_id}/journal.jsonl");
                 let journal_path = self.session_dir.as_ref().map(|d| d.join(&journal_rel));
                 let journal = Journal::new(journal_path);
-                let state = self.tracker.lock().start_run(
+                let state = self.tracker.lock().start_run_with_tasks(
                     run_id.clone(),
                     resolved.meta.name,
                     spec.objective.clone(),
                     resolved.meta.phases,
+                    task_definitions,
                     Some(agent_budget),
                     self.session_dir.as_ref().map(|_| journal_rel),
                 );

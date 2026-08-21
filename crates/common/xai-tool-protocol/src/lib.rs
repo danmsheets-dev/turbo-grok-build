@@ -25,7 +25,9 @@ mod registry_error;
 pub mod session_event;
 pub mod turn_hook;
 
-pub use capabilities::{HookKind, NotificationSchemas, StreamingSpec, ToolCapabilities, ToolScope};
+pub use capabilities::{
+    HookKind, NotificationSchemas, StreamingSpec, ToolCallerRole, ToolCapabilities, ToolScope,
+};
 pub use connection::{ConnectionKind, ToolDefinitionMode};
 pub use envelope::{
     JsonRpcError, JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,

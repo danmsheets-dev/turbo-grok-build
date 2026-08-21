@@ -280,8 +280,7 @@ pub fn build_request(
                 });
                 entry.parts.push(function_response);
             }
-            ConversationItem::Reasoning(_)
-            | ConversationItem::BackendToolCall(_) => {}
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
         }
     }
     flush_pending(&mut pending_function_responses, &mut contents);

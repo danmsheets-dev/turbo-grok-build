@@ -247,7 +247,8 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub limit_behavior: Option<String>,
     #[serde(default)]
-    pub workflow_max_concurrent: Option<i64>,    /// Per-subagent model ID overrides.
+    pub workflow_max_concurrent: Option<i64>,
+    /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.
     ///
@@ -496,17 +497,22 @@ impl SubagentsConfig {
     pub const ENV_MAX_CONCURRENT: &'static str = "GROK_MAX_CONCURRENT_SUBAGENTS";
     pub const ENV_LIMIT_BEHAVIOR: &'static str = "GROK_SUBAGENT_LIMIT_BEHAVIOR";
     pub const ENV_WORKFLOW_MAX_CONCURRENT: &'static str = "GROK_WORKFLOW_MAX_CONCURRENT_AGENTS";
-    pub const DEFAULT_MAX_DEPTH: u32 = 1;
+    /// Default allows one nested spawn (parent → child → grandchild).
+    /// Depth 0 is the top-level session; spawn is stripped when `depth >= max`.
+    pub const DEFAULT_MAX_DEPTH: u32 = 2;
+    /// Absolute floor. Independent of [`Self::DEFAULT_MAX_DEPTH`] so operators
+    /// can still set `1` (top-level only) after the default moved to 2.
+    pub const MIN_MAX_DEPTH: u32 = 1;
     /// Clamp to `1..=u32::MAX`. Values below 1 (including 0 / negatives) warn
     /// and become 1 so nesting is never accidentally disabled.
     pub(crate) fn clamp_max_depth(raw: i64, source: &str) -> u32 {
-        if raw < i64::from(Self::DEFAULT_MAX_DEPTH) {
+        if raw < i64::from(Self::MIN_MAX_DEPTH) {
             tracing::warn!(
                 source,
                 value = raw,
                 "subagents max_depth < 1; clamping to 1"
             );
-            Self::DEFAULT_MAX_DEPTH
+            Self::MIN_MAX_DEPTH
         } else if raw > i64::from(u32::MAX) {
             tracing::warn!(
                 source,

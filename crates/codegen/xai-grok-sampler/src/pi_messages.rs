@@ -239,8 +239,7 @@ pub fn build_request(req: &ConversationRequest, model: &str) -> Result<PiMessage
                 added_tool_names: Vec::new(),
                 timestamp: 0,
             }),
-            ConversationItem::Reasoning(_)
-            | ConversationItem::BackendToolCall(_) => {}
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
         }
     }
     context.tools = req

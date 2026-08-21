@@ -13,6 +13,27 @@ use crate::types::tool_index::ToolIndex;
 
 pub const MCP_SERVER_HEALTH_TOOL_NAME: &str = "mcp_server_health";
 
+fn failure_diagnostic(reason: &str) -> &'static str {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("docker") {
+        "Start Docker Desktop or configure the server to use a reachable non-Docker transport."
+    } else if reason.contains("auth") || reason.contains("401") || reason.contains("unauthorized") {
+        "Configure the server credential in the session environment; never place tokens in the MCP URL."
+    } else if reason.contains("placeholder")
+        || reason.contains("unresolved")
+        || reason.contains("sourcegraph")
+    {
+        "Replace the placeholder endpoint with a concrete HTTPS MCP URL before connecting."
+    } else if reason.contains("193")
+        || reason.contains("not executable")
+        || reason.contains("enoent")
+    {
+        "Use an executable Windows command or wrapper (not a Unix script/launcher) and verify it is on PATH."
+    } else {
+        "Inspect the MCP server stderr and configuration, then retry the connection."
+    }
+}
+
 /// Input for `mcp_server_health` (no required parameters).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct McpServerHealthInput {}
@@ -37,7 +58,7 @@ impl crate::types::tool_metadata::ToolMetadata for McpServerHealthTool {
          (`ready` | `partial` | `unknown`). Overall status is `ready` when the \
          tool index is fully initialized, else `partial`.\n\n\
          Note: failed handshakes may only appear in system-reminders; use \
-         `search_tool` to discover tools. This tool does not call MCP servers."
+         `search_tool` to discover tools. Failed servers include a remediation hint. This tool does not call MCP servers."
     }
 
     fn is_read_only(&self) -> bool {
@@ -136,6 +157,7 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
                     "tool_count": 0,
                     "status": "failed",
                     "reason": failed.reason,
+                    "diagnostic": failure_diagnostic(&failed.reason),
                 }));
             }
         }
@@ -147,6 +169,7 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
                 serde_json::json!({
                     "name": f.name,
                     "reason": f.reason,
+                    "diagnostic": failure_diagnostic(&f.reason),
                 })
             })
             .collect();
@@ -173,9 +196,8 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
                 .map(|f| format!("{} ({})", f.name, f.reason))
                 .collect::<Vec<_>>()
                 .join("; ");
-            let extra = format!(
-                "Failed MCP servers: {failed_line}. Run `grok mcp doctor` or check /mcps."
-            );
+            let extra =
+                format!("Failed MCP servers: {failed_line}. Run `grok mcp doctor` or check /mcps.");
             note = Some(match note {
                 Some(n) => format!("{n} {extra}"),
                 None => extra,
@@ -216,6 +238,14 @@ mod tests {
         fn list_server_summaries(&self) -> Vec<ServerSummary> {
             self.servers.clone()
         }
+    }
+
+    #[test]
+    fn failure_diagnostics_cover_common_connection_failures() {
+        assert!(failure_diagnostic("Docker daemon unavailable").contains("Docker"));
+        assert!(failure_diagnostic("401 Unauthorized").contains("credential"));
+        assert!(failure_diagnostic("endpoint placeholder unresolved").contains("placeholder"));
+        assert!(failure_diagnostic("os error 193: not executable").contains("Windows"));
     }
 
     #[tokio::test]

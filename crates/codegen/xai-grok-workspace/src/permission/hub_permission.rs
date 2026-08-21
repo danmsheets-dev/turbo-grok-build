@@ -269,10 +269,7 @@ pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessK
             ))
         }
         "apply_patch" => {
-            let patch = args
-                .get("patch")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let patch = args.get("patch").and_then(Value::as_str).unwrap_or("");
             // Reuse the same real-path extraction as ToolInput::ApplyPatch so
             // hub and native paths cannot drift on the placeholder escape.
             Some(AccessKind::from(

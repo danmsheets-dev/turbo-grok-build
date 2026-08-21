@@ -43,8 +43,8 @@ use xai_tool_protocol::session_event::{SessionEvent, ToolCallOutcome};
 use xai_tool_protocol::{
     ConnectionKind, JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
     JsonRpcVersion, Method, RequestId, ResponseOutcome, SessionId, ToolCallId, ToolCallParams,
-    ToolCallProgressFrame, ToolId, ToolNotificationFrame, ToolServerLifecycleStatus,
-    WorkspaceGonePhase, WorkspaceGoneReason, workspace_unavailable_wire,
+    ToolCallProgressFrame, ToolCallerRole, ToolId, ToolNotificationFrame,
+    ToolServerLifecycleStatus, WorkspaceGonePhase, WorkspaceGoneReason, workspace_unavailable_wire,
 };
 use xai_tool_runtime::{
     BehaviorVersion, Cwd, ListToolsContext, Tool, ToolCallContext, ToolError, ToolStream,
@@ -1306,6 +1306,20 @@ impl ToolHarness {
 
         let raw_stream: ToolStream<xai_tool_runtime::TypedToolOutput> =
             if let Some(handle) = self.inner.local_registry.find(&tool_id) {
+                let scope = handle
+                    .capabilities()
+                    .tool_scope
+                    .unwrap_or(xai_tool_protocol::ToolScope::Read);
+                let authorized = scope != xai_tool_protocol::ToolScope::Write
+                    || ctx
+                        .extensions
+                        .get::<ToolCallerRole>()
+                        .is_some_and(|role| *role == ToolCallerRole::Leader);
+                if !authorized {
+                    return terminal_only(Err(ToolError::permission_denied(format!(
+                        "tool {tool_id} requires leader role for write scope"
+                    ))));
+                }
                 handle.execute(ctx, args).await
             } else if let Some(ref borrow) = self.inner.borrow {
                 let start = std::time::Instant::now();
@@ -2031,6 +2045,7 @@ async fn dispatch_remote(
         behavior_version,
         cwd,
         trace_context,
+        caller_role: ctx.extensions.get::<ToolCallerRole>().map(|role| *role),
     };
     // Serialize params to a Value first so the wire shape and THIS step's
     // `request_encoding` subcode stay unchanged. The envelope `to_string`

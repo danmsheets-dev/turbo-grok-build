@@ -274,8 +274,6 @@ fn atlas_resolve_hints(path: &Path, cwd: &Path) -> Vec<AtlasPathHint> {
     hits
 }
 
-
-
 /// Detect the "dropped repo folder" pattern.
 ///
 /// If the model asks for `/parent/foo` but cwd is `/parent/repo`, check
@@ -550,4 +548,3 @@ mod tests {
         assert!(output.contains("Note: your current working directory is /project"));
     }
 }
-

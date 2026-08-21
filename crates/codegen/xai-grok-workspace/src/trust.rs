@@ -456,7 +456,10 @@ fn path_is_under_key(path: &Path, prefix: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        let p = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let p = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
         let pre = prefix
             .to_string_lossy()
             .replace('\\', "/")
@@ -620,8 +623,17 @@ mod tests {
 
         TrustStore::persist_doc(&link, &TrustDocument::default()).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert!(std::fs::read_to_string(&target).unwrap().contains("version"));
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(&target)
+                .unwrap()
+                .contains("version")
+        );
     }
 
     #[test]

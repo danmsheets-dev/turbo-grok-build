@@ -243,10 +243,7 @@ fn list_tools(json: bool, require: &[String], preset: &str, cwd: Option<&Path>) 
     }
 
     if !missing.is_empty() {
-        bail!(
-            "required tool(s) not registered: {}",
-            missing.join(", ")
-        );
+        bail!("required tool(s) not registered: {}", missing.join(", "));
     }
     Ok(())
 }

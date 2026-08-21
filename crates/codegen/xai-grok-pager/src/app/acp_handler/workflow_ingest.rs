@@ -90,7 +90,9 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: XaiSessionUp
         status,
         foreground: _,
         phases,
+        tasks,
         current_phase,
+        current_task_id,
         agent_budget,
         agents_used,
         agents_reserved,
@@ -148,13 +150,28 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: XaiSessionUp
                 .iter()
                 .map(|p| (p.title.clone(), p.state.clone()))
                 .collect(),
+            tasks: tasks
+                .iter()
+                .map(|task| crate::views::workflows::WorkflowTaskRowView {
+                    id: task.id.clone(),
+                    title: task.title.clone(),
+                    description: task.description.clone(),
+                    status: task.status.clone(),
+                    attempts: task.attempts,
+                    max_attempts: task.max_attempts,
+                    depends_on: task.depends_on.clone(),
+                    result_summary: task.result_summary.clone(),
+                })
+                .collect(),
             current_phase: current_phase.clone(),
+            current_task_id: current_task_id.clone(),
             agents: agents
                 .iter()
                 .map(|a| crate::views::workflows::WorkflowAgentRowView {
                     agent_id: a.agent_id.clone(),
                     label: a.label.clone(),
                     phase: a.phase.clone(),
+                    task_id: a.task_id.clone(),
                     model: a.model.clone(),
                     state: a.state.clone(),
                     tokens_used: a.tokens_used,
@@ -182,14 +199,37 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: XaiSessionUp
         }
     }
     let active = agents.iter().filter(|a| a.state == "running").count() as u32;
+    let block_phases = if tasks.is_empty() {
+        phases.clone()
+    } else {
+        tasks
+            .iter()
+            .map(
+                |task| xai_grok_shell::extensions::notification::WorkflowPhaseInfo {
+                    title: task.title.clone(),
+                    state: match task.status.as_str() {
+                        "completed" => "done".into(),
+                        "in_progress" => "active".into(),
+                        "failed" => "failed".into(),
+                        "blocked" => "blocked".into(),
+                        _ => "pending".into(),
+                    },
+                },
+            )
+            .collect()
+    };
     upsert_workflow_block(
         agent,
         &run_id,
         &name,
         &objective,
         &status,
-        &phases,
-        current_phase.as_deref(),
+        &block_phases,
+        if tasks.is_empty() {
+            current_phase.as_deref()
+        } else {
+            current_task_id.as_deref()
+        },
         active,
         elapsed_ms,
     );

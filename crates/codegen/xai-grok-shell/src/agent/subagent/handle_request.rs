@@ -55,6 +55,22 @@ pub(super) fn task_model_override_error(
     crate::agent::models::task_model_error_for_catalog(requested, available, is_session_auth)
 }
 
+/// Pin cargo's native target dir to the real worktree path.
+///
+/// Inherited `CARGO_TARGET_DIR` (or DisplayCwd remapping onto the parent
+/// `H:\…\target`) mixes CMake's worktree path with MSBuild FileTracker tlogs
+/// under the parent target and fails FTK1011 on Windows. Always overwrite —
+/// the child must not share the parent's target.
+pub(super) fn inject_worktree_cargo_env(
+    env: &mut std::collections::HashMap<String, String>,
+    worktree: &std::path::Path,
+) {
+    let target = worktree.join("target");
+    let target_s = target.to_string_lossy().into_owned();
+    env.insert("CARGO_TARGET_DIR".into(), target_s.clone());
+    env.insert("GROK_WORKTREE_CARGO_TARGET".into(), target_s);
+}
+
 /// Ensure densify engines (Blender / Godot) resolve on Windows for confined
 /// worktree children. Does not override values already present in the env map
 /// or process environment (parent wins).
@@ -76,10 +92,7 @@ pub(super) fn inject_densify_engine_env(env: &mut std::collections::HashMap<Stri
     }
 }
 
-fn env_map_or_process_has(
-    env: &std::collections::HashMap<String, String>,
-    keys: &[&str],
-) -> bool {
+fn env_map_or_process_has(env: &std::collections::HashMap<String, String>, keys: &[&str]) -> bool {
     keys.iter().any(|k| {
         env.get(*k).is_some_and(|v| !v.trim().is_empty())
             || std::env::var(k).is_ok_and(|v| !v.trim().is_empty())
@@ -440,7 +453,8 @@ pub(crate) async fn run_shell_child(
                     }
                     ResumeWorktreeAction::Rehydrate => {
                         let snapshot_ref = source.snapshot_ref.clone().unwrap_or_default();
-                        let source_repo = resolve_subagent_source_repo(&ctx);
+                        let source_repo =
+                            resolve_subagent_source_repo(&ctx, request.cwd.as_deref());
                         match crate::session::worktree::rehydrate_subagent_worktree(
                             dest,
                             &source_repo,
@@ -553,7 +567,7 @@ pub(crate) async fn run_shell_child(
             }
         }
     } else if isolation_requested {
-        let source_cwd = parent_source_cwd(&ctx);
+        let source_cwd = parent_source_cwd(&ctx, request.cwd.as_deref());
         let dest = match crate::session::worktree::worktree_base_dir_for_source(&source_cwd) {
             Ok(base) => base.join(format!("subagent-{}", request.id)),
             Err(e) => {
@@ -576,10 +590,7 @@ pub(crate) async fn run_shell_child(
             if ensure_min_free_space_for_worktree(parent_base).is_err() {
                 let keep = soft_preserve_keep_n();
                 if keep == 0 {
-                    prune_soft_preserved_worktrees_by_age(
-                        parent_base,
-                        soft_preserve_max_age() / 2,
-                    );
+                    prune_soft_preserved_worktrees_by_age(parent_base, soft_preserve_max_age() / 2);
                 } else {
                     prune_soft_preserved_worktrees_with_cap(parent_base, (keep / 2).max(1));
                 }
@@ -591,11 +602,7 @@ pub(crate) async fn run_shell_child(
                         error = %msg,
                         "Pre-spawn disk guard refused worktree create"
                     );
-                    return child_run_output(
-                        failure_result(&request, &msg),
-                        completion_data,
-                        None,
-                    );
+                    return child_run_output(failure_result(&request, &msg), completion_data, None);
                 }
                 isolation_fallback = true;
                 skip_worktree_create = true;
@@ -650,9 +657,8 @@ pub(crate) async fn run_shell_child(
                 );
                 // Capture spawn baseline (full tree after create, before agent edits)
                 // so diff/land are agent-only even when the parent was dirty.
-                let baseline_ref_name =
-                    format!("refs/grok/subagent-baselines/{}", request.id);
-                let source_repo = resolve_subagent_source_repo(&ctx);
+                let baseline_ref_name = format!("refs/grok/subagent-baselines/{}", request.id);
+                let source_repo = resolve_subagent_source_repo(&ctx, request.cwd.as_deref());
                 match crate::session::worktree::snapshot_subagent_worktree(
                     &report.worktree_path,
                     &source_repo,
@@ -768,11 +774,7 @@ pub(crate) async fn run_shell_child(
                         error = %e,
                         "Worktree creation failed; refusing shared-workspace fallback"
                     );
-                    return child_run_output(
-                        failure_result(&request, &msg),
-                        completion_data,
-                        None,
-                    );
+                    return child_run_output(failure_result(&request, &msg), completion_data, None);
                 }
                 isolation_fallback = true;
                 tracing::warn!(
@@ -795,11 +797,7 @@ pub(crate) async fn run_shell_child(
                         error = %e,
                         "Worktree creation panicked; refusing shared-workspace fallback"
                     );
-                    return child_run_output(
-                        failure_result(&request, &msg),
-                        completion_data,
-                        None,
-                    );
+                    return child_run_output(failure_result(&request, &msg), completion_data, None);
                 }
                 isolation_fallback = true;
                 tracing::warn!(
@@ -878,7 +876,7 @@ pub(crate) async fn run_shell_child(
     if resume_source.is_some() && spawn_baseline_ref.is_none() {
         if let Some(ref wt) = worktree_path {
             let baseline_ref_name = format!("refs/grok/subagent-baselines/{}", request.id);
-            let source_repo = resolve_subagent_source_repo(&ctx);
+            let source_repo = resolve_subagent_source_repo(&ctx, request.cwd.as_deref());
             match crate::session::worktree::snapshot_subagent_worktree(
                 wt,
                 &source_repo,
@@ -1063,8 +1061,8 @@ pub(crate) async fn run_shell_child(
         }
     }
     // Wall-clock / tool / stall budget AFTER model resolve so NVIDIA platform
-    // defaults (10 min timeout, 3 min stall) apply when spawn omits timeout_ms.
-    // Order: explicit timeout_ms > agent-def timeout_secs > NVIDIA 600s > none.
+    // defaults (1h timeout, 30 min stall) apply when spawn omits timeout_ms.
+    // Order: explicit timeout_ms > agent-def timeout_secs > NVIDIA 3600s > none.
     let execution_budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
         &definition,
         ctx.parent_max_turns,
@@ -1199,6 +1197,9 @@ pub(crate) async fn run_shell_child(
         persona: effective_runtime.persona.clone(),
         resumed_from: request.resume_from.clone(),
         child_cwd: Some(child_session_info.cwd.clone()),
+        display_cwd: worktree_path
+            .as_ref()
+            .map(|_| ctx.parent_cwd.to_string_lossy().into_owned()),
         worktree_path: worktree_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
@@ -1253,12 +1254,8 @@ pub(crate) async fn run_shell_child(
         worktree_seed: worktree_seed.map(|s| s.to_string()).or_else(|| {
             // Resume: inherit source seed from durable meta when present.
             resume_source.as_ref().and_then(|src| {
-                durable_subagent_meta(
-                    &src.subagent_id,
-                    &ctx.parent_session_id,
-                    &ctx.parent_cwd,
-                )
-                .and_then(|m| m.worktree_seed)
+                durable_subagent_meta(&src.subagent_id, &ctx.parent_session_id, &ctx.parent_cwd)
+                    .and_then(|m| m.worktree_seed)
             })
         }),
         effective_model_id: Some(effective_model_id.0.to_string()),
@@ -1343,6 +1340,19 @@ pub(crate) async fn run_shell_child(
             resumed_from: request.resume_from.clone(),
             budget: execution_budget.wire(),
             workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
+            child_cwd: Some(child_session_info.cwd.clone()),
+            display_cwd: worktree_path
+                .as_ref()
+                .map(|_| ctx.parent_cwd.to_string_lossy().into_owned()),
+            worktree_path: worktree_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            isolation_requested: Some(if isolation_requested {
+                "worktree".to_string()
+            } else {
+                "none".to_string()
+            }),
+            isolation_fallback,
         },
         ctx.parent_cmd_tx.as_ref(),
     );
@@ -1414,6 +1424,9 @@ pub(crate) async fn run_shell_child(
     // children even when the binary lives outside the worktree (Program Files).
     let mut child_session_env = (*ctx.session_env).clone();
     inject_densify_engine_env(&mut child_session_env);
+    if let Some(ref wt) = worktree_path {
+        inject_worktree_cargo_env(&mut child_session_env, wt);
+    }
     let mut tool_ctx = ToolContext::with_preloaded_env(
         child_cwd_abs,
         Some(gateway.clone()),
@@ -1836,11 +1849,9 @@ pub(crate) async fn run_shell_child(
         ctx.client_hooks.clone(),
         // Isolation: model sees parent project path; tools rewrite abs paths onto
         // the worktree via DisplayCwd (prevents parent-tree writes via absolute paths).
-        worktree_path.as_ref().map(|_| {
-            ctx.parent_cwd
-                .to_string_lossy()
-                .into_owned()
-        }),
+        worktree_path
+            .as_ref()
+            .map(|_| ctx.parent_cwd.to_string_lossy().into_owned()),
         std::collections::HashMap::new(),
         Vec::new(),
         xai_grok_agent::prompt::context::PromptAudience::Subagent,
@@ -2095,7 +2106,7 @@ pub(crate) async fn run_shell_child(
                             .map(|p| p.to_string_lossy().to_string()),
                         snapshot_ref: None,
                         worktree_state: None,
-                    patch_path: None,
+                        patch_path: None,
                         diffstat: None,
                         changed_paths: None,
                         baseline_ref: None,
@@ -2610,7 +2621,7 @@ pub(crate) async fn run_shell_child(
     if let Some(ref wt_path) = worktree_path {
         if snapshot_dispose_enabled {
             let ref_name = format!("refs/grok/subagents/{}", request.id);
-            let source_repo = resolve_subagent_source_repo(&ctx);
+            let source_repo = resolve_subagent_source_repo(&ctx, request.cwd.as_deref());
             match crate::session::worktree::snapshot_subagent_worktree(
                 wt_path,
                 &source_repo,
@@ -2643,8 +2654,7 @@ pub(crate) async fn run_shell_child(
                     .await
                     {
                         Ok(exported) => {
-                            patch_path =
-                                Some(exported.patch_path.to_string_lossy().into_owned());
+                            patch_path = Some(exported.patch_path.to_string_lossy().into_owned());
                             diffstat_summary = Some(exported.diffstat_summary);
                             // Load top changed paths for completion summary.
                             if let Ok(names) =
@@ -2654,6 +2664,9 @@ pub(crate) async fn run_shell_child(
                                     .lines()
                                     .map(str::trim)
                                     .filter(|s| !s.is_empty())
+                                    .filter(|s| {
+                                        !xai_grok_tools::implementations::grok_build::subagent_worktree::is_harness_land_path(s)
+                                    })
                                     .take(20)
                                     .map(str::to_string)
                                     .collect();
@@ -2742,8 +2755,7 @@ pub(crate) async fn run_shell_child(
                                 }
                             }
                         } else {
-                            match crate::session::worktree::remove_subagent_worktree(wt_path)
-                                .await
+                            match crate::session::worktree::remove_subagent_worktree(wt_path).await
                             {
                                 Ok(()) => {
                                     worktree_removed = true;
@@ -2888,3 +2900,28 @@ pub(crate) async fn run_shell_child(
 
 // Soft-preserve keep-N + free-space helpers live in `super` (mod.rs) so unit
 // tests can exercise live-marker protection without async spawn.
+
+#[cfg(test)]
+mod cargo_env_tests {
+    use super::inject_worktree_cargo_env;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn worktree_cargo_env_overwrites_parent_target_dir() {
+        let mut env = HashMap::new();
+        env.insert(
+            "CARGO_TARGET_DIR".into(),
+            r"H:\Apps\grok build\turbo-grok-build\target".into(),
+        );
+        let wt = PathBuf::from(r"C:\Users\x\.grok\worktrees\repo\subagent-01abc");
+        inject_worktree_cargo_env(&mut env, &wt);
+        let pinned = env.get("CARGO_TARGET_DIR").unwrap();
+        assert!(
+            pinned.contains("subagent-01abc"),
+            "expected worktree target, got {pinned}"
+        );
+        assert!(!pinned.contains(r"H:\Apps"));
+        assert_eq!(env.get("GROK_WORKTREE_CARGO_TARGET"), Some(pinned));
+    }
+}

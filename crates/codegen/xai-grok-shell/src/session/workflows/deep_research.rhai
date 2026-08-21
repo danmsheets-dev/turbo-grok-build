@@ -7,6 +7,12 @@ let meta = #{
         #{ title: "Verify", detail: "Independently cross-check every candidate claim" },
         #{ title: "Report", detail: "Synthesize verified claims into cited prose with validated citations" },
     ],
+    tasks: [
+        #{ id: "plan", description: "Plan research questions", max_attempts: 2 },
+        #{ id: "research", description: "Collect sourced research", max_attempts: 2 },
+        #{ id: "verify", description: "Independently verify claims", max_attempts: 2 },
+        #{ id: "report", description: "Write the cited report", max_attempts: 2 },
+    ],
 };
 
 fn trimmed(s) {
@@ -30,6 +36,7 @@ if args.breadth != () && args.breadth >= 2 && args.breadth <= 6 {
     breadth = args.breadth;
 }
 
+task_start("plan");
 phase("Plan");
 let plan_schema = #{
     "type": "object",
@@ -74,7 +81,8 @@ try {
     log("The planner failed; researching the original query as one question: " + e);
 }
 log("research plan: " + questions.len().to_string() + " question(s), capped at " + breadth.to_string());
-
+task_complete("plan", "Research plan created");
+task_start("research");
 phase("Research");
 let research_schema = #{
     "type": "object",
@@ -199,6 +207,7 @@ if dropped_claims > 0 {
 if successful_questions < questions.len() {
     partial = true;
 }
+task_complete("research", "Sourced research collected");
 if candidate_claims.len() == 0 {
     partial = true;
     coverage_notes.push("No factual claim had both traceable evidence and a precise source locator.");
@@ -207,10 +216,15 @@ if candidate_claims.len() == 0 {
         report += "- " + json_encode(note) + "\n";
     }
     let path = write_scratch_file("report.md", report);
+    task_start("verify");
+    task_complete("verify", "No claims required verification");
+    task_start("report");
+    task_complete("report", "Partial report written");
     complete(#{ path: path, report: report, status: "partial", verified_claim_ids: [] });
 }
 log("research complete: " + candidate_claims.len().to_string() + " candidate claim(s) require verification");
 
+task_start("verify");
 phase("Verify");
 let verifier_count = 2;
 if candidate_claims.len() < verifier_count {
@@ -374,6 +388,7 @@ for c in candidate_claims {
     claim_idx += 1;
 }
 log("verification complete: " + verified_claims.len().to_string() + "/" + candidate_claims.len().to_string() + " claims retained");
+task_complete("verify", "Claims independently verified");
 if verified_claims.len() == 0 {
     partial = true;
     coverage_notes.push("No candidate claim survived its assigned verifier shard.");
@@ -382,9 +397,14 @@ if verified_claims.len() == 0 {
         report += "- " + json_encode(note) + "\n";
     }
     let path = write_scratch_file("report.md", report);
+    task_start("verify");
+    task_complete("verify", "No claims required verification");
+    task_start("report");
+    task_complete("report", "Partial report written");
     complete(#{ path: path, report: report, status: "partial", verified_claim_ids: [] });
 }
 
+task_start("report");
 phase("Report");
 let status = if partial { "partial" } else { "verified" };
 let status_label = if partial { "Partial" } else { "Verified" };
@@ -576,6 +596,7 @@ if coverage_notes.len() == 0 {
 }
 
 let path = write_scratch_file("report.md", full_report);
+task_complete("report", "Cited report written");
 complete(#{
     path: path,
     report: chat_report,

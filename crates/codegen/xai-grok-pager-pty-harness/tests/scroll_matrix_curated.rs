@@ -3,10 +3,11 @@
 //!
 //! Each test drives `scroll_matrix::run_cell` against the real pager binary
 //! (PAGER_BINARY / local debug build — same contract as
-//! `scroll_correctness_ptyctl.rs`, and like it NOT `#[ignore]`d). Cells are
-//! host-paced PTY sessions, so a process-wide lock serializes them: the
-//! default in-process test parallelism would stretch gesture gaps and stack
-//! eight pagers onto one machine.
+//! `scroll_correctness_ptyctl.rs`). On Unix they run in CI. On Windows ConPTY
+//! the SGR-wheel cells do not finalize (no GROK_SCROLL_LOG records) and the
+//! spawn_blocking + `Handle::block_on` pairing can sit past `CELL_HARD_CAP`,
+//! wedging the workspace suite. Windows scroll gate: `scroll_correctness_ptyctl`.
+//! Cells are host-paced PTY sessions, so a process-wide lock serializes them.
 //!
 //! Artifacts (recorder captures + per-cell report.json rows) land under
 //! `$TMPDIR/scroll-matrix-curated/` and are kept for post-mortems.
@@ -65,36 +66,64 @@ async fn assert_cell_passes(cell_id: &str) {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_auto_g3_flood_speed100() {
     assert_cell_passes("c1_auto_g3_flood_speed100").await;
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_auto_g3_flood_speed100() {
     assert_cell_passes("c2_auto_g3_flood_speed100").await;
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c3_wheel_lines1_g1() {
     assert_cell_passes("c3_wheel_lines1_g1").await;
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c4_auto_g10_ambiguous() {
     assert_cell_passes("c4_auto_g10_ambiguous").await;
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c5_tmux_g9a() {
     assert_cell_passes("c5_tmux_g9a").await;
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c5_tmux_g9b() {
     assert_cell_passes("c5_tmux_g9b").await;
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_auto_g8_midstream() {
     assert_cell_passes("c1_auto_g8_midstream").await;
@@ -105,6 +134,10 @@ async fn c1_auto_g8_midstream() {
 /// tapered cap) and I-NO-DROP (finalize discards nothing) moved from the
 /// xfail set to ordinary pass rows. The cell id keeps its historical name
 /// for artifact continuity.
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY SGR-wheel cells hang past CELL_HARD_CAP; Windows gate is scroll_correctness_ptyctl"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_auto_g4_jerk_xfail() {
     assert_cell_passes("c1_auto_g4_jerk_xfail").await;

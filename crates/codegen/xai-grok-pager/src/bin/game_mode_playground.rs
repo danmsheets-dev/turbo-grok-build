@@ -16,8 +16,8 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Paragraph;
 use xai_grok_pager::views::game_mode::{
-    ActorPhase, DeskAgentSnapshot, GameModeState, GameTier, compose_cell_frame, load_office_background,
-    scale_bg_to_cells,
+    ActorPhase, DeskAgentSnapshot, GameModeState, GameTier, compose_cell_frame,
+    load_office_background, scale_bg_to_cells,
 };
 use xai_grok_pager_render::render::image_overlay::paint_halfblock_rgba;
 
@@ -63,12 +63,54 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "Full office: 6 workers + Supervisor",
             agents: vec![
-                snap("a", "explore", "explore", true, false, 45, 12_400, 7, "Reading…"),
-                snap("b", "plan", "plan", true, false, 120, 88_000, 14, "Thinking"),
-                snap("c", "test", "general", true, false, 30, 4_200, 3, "cargo test"),
-                snap("d", "review", "code-reviewer", true, false, 60, 22_000, 9, "Reviewing"),
+                snap(
+                    "a",
+                    "explore",
+                    "explore",
+                    true,
+                    false,
+                    45,
+                    12_400,
+                    7,
+                    "Reading…",
+                ),
+                snap(
+                    "b", "plan", "plan", true, false, 120, 88_000, 14, "Thinking",
+                ),
+                snap(
+                    "c",
+                    "test",
+                    "general",
+                    true,
+                    false,
+                    30,
+                    4_200,
+                    3,
+                    "cargo test",
+                ),
+                snap(
+                    "d",
+                    "review",
+                    "code-reviewer",
+                    true,
+                    false,
+                    60,
+                    22_000,
+                    9,
+                    "Reviewing",
+                ),
                 snap("e", "fix", "general", true, false, 15, 1_800, 2, "Editing"),
-                snap("f", "docs", "general", true, false, 80, 9_500, 4, "Writing docs"),
+                snap(
+                    "f",
+                    "docs",
+                    "general",
+                    true,
+                    false,
+                    80,
+                    9_500,
+                    4,
+                    "Writing docs",
+                ),
             ],
             supervisor_working: true,
             waiting_on_user: false,
@@ -83,7 +125,17 @@ fn scenarios() -> Vec<Scenario> {
             name: "Handoff walk",
             agents: vec![
                 snap("d1", "done-job", "explore", false, false, 90, 9_000, 5, ""),
-                snap("d2", "still-going", "plan", true, false, 40, 3_000, 2, "Writing"),
+                snap(
+                    "d2",
+                    "still-going",
+                    "plan",
+                    true,
+                    false,
+                    40,
+                    3_000,
+                    2,
+                    "Writing",
+                ),
             ],
             supervisor_working: false,
             waiting_on_user: false,
@@ -92,7 +144,17 @@ fn scenarios() -> Vec<Scenario> {
             name: "Failed desk attention",
             agents: vec![
                 snap("bad", "oops", "general", false, true, 20, 1_000, 1, "panic"),
-                snap("ok", "still-going", "plan", true, false, 40, 3_000, 2, "Writing"),
+                snap(
+                    "ok",
+                    "still-going",
+                    "plan",
+                    true,
+                    false,
+                    40,
+                    3_000,
+                    2,
+                    "Writing",
+                ),
             ],
             supervisor_working: false,
             waiting_on_user: false,
@@ -197,9 +259,7 @@ fn main() -> io::Result<()> {
                 );
 
                 let stage = chunks[1];
-                let ready = app
-                    .state
-                    .ensure_pixel_frame(stage.width, stage.height);
+                let ready = app.state.ensure_pixel_frame(stage.width, stage.height);
                 if ready {
                     // Prefer terminal-res paint buffer (use_direct halfblock path).
                     if let Some(frame) = app.state.pixel_paint_frame() {

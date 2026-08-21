@@ -245,9 +245,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "deepaudit",
         description: "Deep codebase audit: investigate → verify → report (read-only, verified findings only)",
-        argument_hint: Some(
-            "<scope or topic> [--size small|medium|large] [--models m1,m2,...]",
-        ),
+        argument_hint: Some("<scope or topic> [--size small|medium|large] [--models m1,m2,...]"),
         // /ultracode and /ultra-code are slash aliases only (R5). Free-text
         // keyword auto-trigger and `/effort ultracode` session mode are RC9.
         aliases: &["deep-audit", "ultracode", "ultra-code"],
@@ -3914,14 +3912,8 @@ mod tests {
         let blocks = vec![text_block("run a deep audit on foo")];
         let mut availability = all_gated();
         availability.workflows = false;
-        let passed = resolve(
-            blocks,
-            &[],
-            availability,
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .expect("should pass through when workflows disabled");
+        let passed = resolve(blocks, &[], availability, SkillSlashRewrite::default(), &[])
+            .expect("should pass through when workflows disabled");
         assert!(matches!(passed[0], acp::ContentBlock::Text(_)));
     }
 

@@ -845,7 +845,11 @@ mod tests {
         record_crash_sample();
 
         let body = std::fs::read_to_string(&path).unwrap();
-        let event: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        let event = body
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|event| event["kind"] == "crash")
+            .expect("a crash event should be recorded");
         assert_eq!(event["kind"], "crash");
     }
 

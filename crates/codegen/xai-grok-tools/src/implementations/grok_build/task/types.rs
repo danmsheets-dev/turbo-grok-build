@@ -456,7 +456,7 @@ pub struct SubagentResult {
     /// instead of a completion. Never set for natively backgrounded subagents.
     pub backgrounded: bool,
     /// Stable snake_case error class for orchestrators (`timeout`, `stall`,
-    /// `serialize`, `provider_400`, `cancelled`, `budget`, `unknown`).
+    /// `serialize`, `provider_400`, `provider_429`, `cancelled`, `budget`, `unknown`).
     pub error_class: Option<String>,
 }
 
@@ -498,6 +498,7 @@ pub mod error_class {
     pub const STALL: &str = "stall";
     pub const SERIALIZE: &str = "serialize";
     pub const PROVIDER_400: &str = "provider_400";
+    pub const PROVIDER_429: &str = "provider_429";
     pub const CANCELLED: &str = "cancelled";
     pub const BUDGET: &str = "budget";
     pub const UNKNOWN: &str = "unknown";
@@ -550,6 +551,14 @@ pub fn error_class_from_message(error: &str) -> Option<&'static str> {
         || lower.contains("null, expected")
     {
         return Some(error_class::SERIALIZE);
+    }
+    if lower.contains("provider_429")
+        || lower.contains("status code 429")
+        || lower.contains("status: 429")
+        || lower.contains("http 429")
+        || lower.contains("too many requests")
+    {
+        return Some(error_class::PROVIDER_429);
     }
     if lower.contains("provider_400")
         || lower.contains("status code 400")
@@ -1275,6 +1284,18 @@ mod tests {
     }
 
     #[test]
+    fn provider_rate_limit_is_classified_separately_from_bad_request() {
+        assert_eq!(
+            super::error_class_from_message("HTTP 429 Too Many Requests"),
+            Some("provider_429")
+        );
+        assert_eq!(
+            super::error_class_from_message("status code 400: bad request"),
+            Some("provider_400")
+        );
+    }
+
+    #[test]
     fn read_only_filter_prunes_orphaned_background_task_tools() {
         let mut config = ToolServerConfig {
             tools: vec![
@@ -1709,11 +1730,11 @@ mod tests {
                     tool_calls: 3,
                     turns: 1,
                     worktree_path: None,
-            isolation: None,
-            isolation_fallback: false,
-            worktree_state: None,
-            isolation_requested: None,
-        },
+                    isolation: None,
+                    isolation_fallback: false,
+                    worktree_state: None,
+                    isolation_requested: None,
+                },
                 started_at_epoch_ms: 1000,
                 duration_ms: 500,
                 persona: None,

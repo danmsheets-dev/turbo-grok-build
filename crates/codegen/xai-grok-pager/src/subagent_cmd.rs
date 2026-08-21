@@ -148,11 +148,9 @@ pub fn run(args: SubagentArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("current_dir")?;
     let cwd_str = cwd.to_string_lossy().into_owned();
     match args.command {
-        SubagentCommand::List {
-            session,
-            all,
-            json,
-        } => cmd_list(&cwd_str, session.as_deref(), all, json),
+        SubagentCommand::List { session, all, json } => {
+            cmd_list(&cwd_str, session.as_deref(), all, json)
+        }
         SubagentCommand::Open {
             id,
             session,
@@ -236,8 +234,8 @@ fn resolve(cwd: &str, id: &str, session: Option<&str>) -> Result<Resolved> {
         }
         let raw = fs::read_to_string(&meta_path)
             .with_context(|| format!("read {}", meta_path.display()))?;
-        let meta: MetaView = serde_json::from_str(&raw)
-            .with_context(|| format!("parse {}", meta_path.display()))?;
+        let meta: MetaView =
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", meta_path.display()))?;
         hits.push(Resolved {
             id: id.to_string(),
             session_id: sid,
@@ -273,11 +271,7 @@ fn newest_session_dir(root: &Path) -> Option<PathBuf> {
         let path = entry.path();
         let mtime = fs::metadata(&path)
             .and_then(|m| m.modified())
-            .or_else(|_| {
-                path.join("subagents")
-                    .metadata()
-                    .and_then(|m| m.modified())
-            })
+            .or_else(|_| path.join("subagents").metadata().and_then(|m| m.modified()))
             .unwrap_or(SystemTime::UNIX_EPOCH);
         match &best {
             Some((t, _)) if *t >= mtime => {}
@@ -321,9 +315,7 @@ fn list_entries(cwd: &str, session: Option<&str>, all: bool) -> Result<Vec<Liste
         .or_else(|| std::env::var("TURBO_SESSION_ID").ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let session_dirs: Vec<PathBuf> = if let Some(sid) = session
-        .map(str::to_string)
-        .or(env_session)
+    let session_dirs: Vec<PathBuf> = if let Some(sid) = session.map(str::to_string).or(env_session)
     {
         vec![root.join(sid)]
     } else if all {
@@ -350,7 +342,8 @@ fn list_entries(cwd: &str, session: Option<&str>, all: bool) -> Result<Vec<Liste
         if !sub_root.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(&sub_root).with_context(|| format!("read {}", sub_root.display()))?
+        for entry in
+            fs::read_dir(&sub_root).with_context(|| format!("read {}", sub_root.display()))?
         {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -435,7 +428,10 @@ fn cmd_list(cwd: &str, session: Option<&str>, all: bool, json: bool) -> Result<(
             truncate(&e.session_id, 36)
         );
     }
-    println!("\n{} subagent(s). Use `turbo subagent open <id>`.", entries.len());
+    println!(
+        "\n{} subagent(s). Use `turbo subagent open <id>`.",
+        entries.len()
+    );
     Ok(())
 }
 
@@ -454,7 +450,10 @@ fn cmd_open(r: &Resolved) -> Result<()> {
     );
     if let Some(ref p) = r.meta.worktree_path {
         let live = Path::new(p).is_dir();
-        println!("worktree_path: {p} ({})", if live { "live" } else { "gone" });
+        println!(
+            "worktree_path: {p} ({})",
+            if live { "live" } else { "gone" }
+        );
     }
     if let Some(ref s) = r.meta.snapshot_ref {
         let base = r.meta.baseline_ref.as_deref().unwrap_or("HEAD");
@@ -543,7 +542,10 @@ fn cmd_restore(cwd: &Path, r: &Resolved, dest: Option<&Path>) -> Result<()> {
     }
     println!("Restored snapshot `{snap}` to {}", dest.display());
     if let Some(ref base) = r.meta.baseline_ref {
-        println!("Agent-only review: git -C {} diff {base} {snap}", dest.display());
+        println!(
+            "Agent-only review: git -C {} diff {base} {snap}",
+            dest.display()
+        );
     }
     Ok(())
 }
@@ -609,8 +611,7 @@ fn finish_cli_land(
         };
         match union_merge_json_by_key(parent_text, &child, &key) {
             Some(merged) => {
-                fs::write(&dest, merged)
-                    .with_context(|| format!("write union-merged {path}"))?;
+                fs::write(&dest, merged).with_context(|| format!("write union-merged {path}"))?;
             }
             None => {
                 let _ = fs::write(&dest, parent_text);
@@ -683,7 +684,12 @@ fn refuse_outside_allowlist(paths: &[String], allow: &[String]) -> anyhow::Resul
          Re-spawn with a wider allowlist, or omit allowed_paths for unrestricted land.",
         denied.len(),
         allow,
-        denied.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
+        denied
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
         if denied.len() > 8 {
             format!(" (+{} more)", denied.len() - 8)
         } else {
@@ -700,7 +706,12 @@ fn allowlist_pathspecs(r: &Resolved) -> Option<Vec<String>> {
         .cloned()
 }
 
-fn git_diff_range(cwd: &Path, base: &str, snap: &str, pathspecs: Option<&[String]>) -> Result<String> {
+fn git_diff_range(
+    cwd: &Path,
+    base: &str,
+    snap: &str,
+    pathspecs: Option<&[String]>,
+) -> Result<String> {
     let mut args: Vec<&str> = vec!["diff", "--no-ext-diff", "--binary", base, snap];
     let owned: Vec<String>;
     if let Some(ps) = pathspecs {
@@ -721,6 +732,7 @@ fn filter_name_list(names: &str, allowed: &[String]) -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .filter(|s| !cli_is_harness_path(s))
         .filter(|s| path_in_allowlist(s, allowed))
         .map(str::to_string)
         .collect()
@@ -781,10 +793,14 @@ fn cmd_diff(cwd: &Path, r: &Resolved) -> Result<()> {
         print_diff("patch", &text);
         return Ok(());
     }
-    bail!("no live worktree, snapshot_ref, or changes.patch for {}", r.id);
+    bail!(
+        "no live worktree, snapshot_ref, or changes.patch for {}",
+        r.id
+    );
 }
 
 fn print_diff(source: &str, text: &str) {
+    let text = xai_fast_worktree::filter_harness_from_unified_diff(text);
     println!("# source: {source}");
     if text.trim().is_empty() {
         println!("(empty diff)");
@@ -1004,12 +1020,15 @@ fn land_from_snapshot(
         })
         .collect();
 
-    let apply_specs = if landed_names.is_empty() {
-        None
-    } else {
-        Some(landed_names.as_slice())
-    };
-    let diff = git_diff_range(cwd, base, snap, apply_specs)?;
+    if landed_names.is_empty() {
+        println!(
+            "Snapshot `{snap}` has no agent payload vs `{base}` (harness markers omitted; nothing to land; source={source_label})."
+        );
+        update_land_status(&r.meta_path, "landed_empty")?;
+        return Ok(());
+    }
+    let diff = git_diff_range(cwd, base, snap, Some(landed_names.as_slice()))?;
+    let diff = xai_fast_worktree::filter_harness_from_unified_diff(&diff);
     if diff.trim().is_empty() {
         println!(
             "Snapshot `{snap}` has no agent-only diff vs `{base}` (nothing to land; source={source_label})."
@@ -1094,18 +1113,22 @@ fn land_from_patch(
     json_union_by: Option<&str>,
 ) -> Result<()> {
     let text = fs::read_to_string(patch).with_context(|| format!("read {}", patch.display()))?;
+    let text = xai_fast_worktree::filter_harness_from_unified_diff(&text);
     // Fail closed: absolute/`..` escape paths and allowlist violations (C6/C7).
     let paths = patch_changed_paths(&text);
     refuse_escape_paths(&paths)?;
     if let Some(ref allow) = allowlist_pathspecs(r) {
         refuse_outside_allowlist(&paths, allow)?;
     }
-    let payload: Vec<String> = paths
-        .iter()
-        .filter(|p| !cli_is_harness_path(p))
-        .cloned()
-        .collect();
-    let backups = backup_union_parents(cwd, &payload, json_union_by);
+    if paths.is_empty() {
+        println!(
+            "Patch {} has no agent payload after omitting harness markers; nothing to land.",
+            patch.display()
+        );
+        update_land_status(&r.meta_path, "landed_empty")?;
+        return Ok(());
+    }
+    let backups = backup_union_parents(cwd, &paths, json_union_by);
     apply_diff_text(cwd, &text, mode)?;
     finish_cli_land(cwd, &paths, &backups, json_union_by)?;
     update_land_status(&r.meta_path, "landed")?;
@@ -1226,9 +1249,7 @@ fn cmd_discard(cwd: &Path, r: &Resolved, drop_snapshot: bool) -> Result<()> {
                     println!("Removed worktree {}", wt.display());
                 }
                 Err(e) => {
-                    eprintln!(
-                        "fast-worktree remove failed ({e}); falling back to remove_dir_all"
-                    );
+                    eprintln!("fast-worktree remove failed ({e}); falling back to remove_dir_all");
                     fs::remove_dir_all(wt).with_context(|| format!("remove {}", wt.display()))?;
                     removed = true;
                     println!("Removed worktree {}", wt.display());
@@ -1244,10 +1265,7 @@ fn cmd_discard(cwd: &Path, r: &Resolved, drop_snapshot: bool) -> Result<()> {
             // Meta still lists the path but disk is already gone (prune/tombstone).
             // Count as cleaned so worktree_removed is not stuck false.
             removed = true;
-            println!(
-                "Worktree path already absent (cleaned): {}",
-                wt.display()
-            );
+            println!("Worktree path already absent (cleaned): {}", wt.display());
         }
     }
     let mut snapshot_dropped = false;
@@ -1356,9 +1374,7 @@ pub fn prune_session_meta(
         if let Some(dir) = dir {
             match fs::remove_dir_all(&dir) {
                 Ok(()) => report.deleted.push(dir.display().to_string()),
-                Err(err) => report
-                    .failed
-                    .push(format!("{}: {err}", dir.display())),
+                Err(err) => report.failed.push(format!("{}: {err}", dir.display())),
             }
         } else {
             report.failed.push(format!("{} (no dir)", c.id));
@@ -1378,10 +1394,7 @@ fn cmd_prune(cwd: &str, session: Option<&str>, older_than: &str, execute: bool) 
         report.candidates.len()
     );
     for c in &report.candidates {
-        println!(
-            "  {}  session={}  path={}",
-            c.id, c.session_id, c.path
-        );
+        println!("  {}  session={}  path={}", c.id, c.session_id, c.path);
     }
     if !execute {
         println!("Dry-run only. Re-run with --execute to delete.");
@@ -1463,9 +1476,18 @@ mod tests {
 
     #[test]
     fn parse_duration_accepts_units() {
-        assert_eq!(parse_duration("24h").unwrap(), Duration::from_secs(24 * 3600));
-        assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(7 * 86400));
-        assert_eq!(parse_duration("90").unwrap(), Duration::from_secs(90 * 3600));
+        assert_eq!(
+            parse_duration("24h").unwrap(),
+            Duration::from_secs(24 * 3600)
+        );
+        assert_eq!(
+            parse_duration("7d").unwrap(),
+            Duration::from_secs(7 * 86400)
+        );
+        assert_eq!(
+            parse_duration("90").unwrap(),
+            Duration::from_secs(90 * 3600)
+        );
     }
 
     #[test]

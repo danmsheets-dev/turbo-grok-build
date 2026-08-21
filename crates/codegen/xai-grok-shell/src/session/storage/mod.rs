@@ -38,18 +38,37 @@ pub(crate) const ANNOUNCEMENT_STATE_FILE: &str = "announcement_state.json";
 pub(crate) const CHAT_HISTORY_FILE: &str = "chat_history.jsonl";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 
+/// Serialize all workflow state writers, including the synchronous host path
+/// and the asynchronous persistence actor, so revision checks and publication
+/// are one critical section.
+pub(crate) fn with_workflow_state_write_lock<T>(
+    f: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| io::Error::other("workflow state write lock poisoned"))?;
+    f()
+}
+
 /// Write `bytes` to `path` by writing a uniquely named sibling temp file and
-/// renaming it over the target, so a crash or a concurrent writer never leaves a
-/// torn file. The temp is removed on failure.
+/// replacing the target only after the temp is durable. The temp is removed on
+/// failure.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = temp_sibling(path);
-    match std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
+    with_workflow_state_write_lock(|| {
+        let tmp = temp_sibling(path);
+        let result = (|| {
+            let mut file = std::fs::File::create(&tmp)?;
+            std::io::Write::write_all(&mut file, bytes)?;
+            file.sync_all()?;
+            replace_file_atomic(&tmp, path)
+        })();
+        if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
-            Err(e)
         }
-    }
+        result
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -85,14 +104,68 @@ pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
 /// Async sibling of [`write_bytes_atomic`].
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
     let tmp = temp_sibling(path);
-    let result = match tokio::fs::write(&tmp, bytes).await {
-        Ok(()) => tokio::fs::rename(&tmp, path).await,
-        Err(e) => Err(e),
-    };
+    let result = async {
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        with_workflow_state_write_lock(|| replace_file_atomic(&tmp, path))
+    }
+    .await;
     if result.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
     }
     result
+}
+
+#[cfg(windows)]
+pub(crate) fn replace_file_atomic(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    fn wide(path: &Path) -> io::Result<Vec<u16>> {
+        let path = std::path::absolute(path)?;
+        let mut value = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if value.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains NUL",
+            ));
+        }
+        if value.starts_with(&[92, 92, 63, 92]) {
+            value.push(0);
+            return Ok(value);
+        }
+        let unc = value.starts_with(&[92, 92]);
+        let prefix = if unc { r"\\?\UNC\" } else { r"\\?\" };
+        let mut prefixed = prefix.encode_utf16().collect::<Vec<_>>();
+        if unc {
+            prefixed.extend_from_slice(&value[2..]);
+        } else {
+            prefixed.extend_from_slice(&value);
+        }
+        prefixed.push(0);
+        Ok(prefixed)
+    }
+
+    let from = wide(from)?;
+    let to = wide(to)?;
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(io::Error::other)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn replace_file_atomic(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)
 }
 
 /// Serialize `items` to newline-delimited JSON bytes.

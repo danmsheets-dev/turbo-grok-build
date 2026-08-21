@@ -10,11 +10,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetForegroundWindow,
     GetWindowLongPtrW, GetWindowThreadProcessId, HWND_NOTOPMOST, IDC_ARROW, IsIconic, IsWindow,
     IsWindowVisible, LoadCursorW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-    ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_LONG_PTR_INDEX, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_SIZE,
-    WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_LONG_PTR_INDEX, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_SIZE, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::PCWSTR;
 
@@ -408,9 +407,10 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: L
         }
         WM_DESTROY => {
             if let Some(mut state) = take_window_state(hwnd)
-                && let Some(controller) = state.controller.take() {
-                    let _ = unsafe { controller.Close() };
-                }
+                && let Some(controller) = state.controller.take()
+            {
+                let _ = unsafe { controller.Close() };
+            }
             // SAFETY: ends the host message loop.
             unsafe {
                 PostQuitMessage(0);
@@ -500,7 +500,10 @@ mod title_tests {
     /// was indistinguishable from the live window and covered the real page.
     #[test]
     fn caption_names_the_page_host_and_the_session() {
-        let t = frame_title("019ffc2f-9daa-7e41", "https://www.betterimpact.com/volunteer");
+        let t = frame_title(
+            "019ffc2f-9daa-7e41",
+            "https://www.betterimpact.com/volunteer",
+        );
         assert!(t.starts_with(WINDOW_TITLE), "{t}");
         assert!(t.contains("www.betterimpact.com"), "{t}");
         assert!(t.contains("2f-9daa-7e41"), "session tag missing: {t}");
@@ -545,7 +548,10 @@ mod title_tests {
 
     #[test]
     fn port_and_ipv6_and_file_are_named_sensibly() {
-        assert_eq!(title_host("http://localhost:8080/x").as_deref(), Some("localhost"));
+        assert_eq!(
+            title_host("http://localhost:8080/x").as_deref(),
+            Some("localhost")
+        );
         assert_eq!(title_host("https://[::1]:443/").as_deref(), Some("::1"));
         assert_eq!(
             title_host(r"file:///C:/sessions/abc/report.html").as_deref(),

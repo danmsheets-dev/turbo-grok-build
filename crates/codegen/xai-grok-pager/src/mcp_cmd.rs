@@ -667,7 +667,9 @@ async fn run_restart(name: &str) -> Result<()> {
     println!(
         "Restarted MCP server '{name}'. Live sessions re-read config.toml args (disk wins over the session/new snapshot)."
     );
-    println!("If this chat still shows the old command line, press r in /mcps or start a new session on a build that includes the MCP merge fix.");
+    println!(
+        "If this chat still shows the old command line, press r in /mcps or start a new session on a build that includes the MCP merge fix."
+    );
     Ok(())
 }
 

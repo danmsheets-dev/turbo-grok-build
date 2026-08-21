@@ -9,10 +9,14 @@ use tokio::sync::{mpsc, oneshot};
 use crate::session::persistence::PersistenceMsg;
 
 use super::tracker::WorkflowRunState;
+use xai_workflow::TaskQueueState;
 
-pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 4;
+pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 5;
 pub(crate) const MAX_RESTORED_WORKFLOW_RUNS: usize = 128;
-pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 = 512 * 1024;
+/// Bound directory scanning separately from the valid-run cap so malformed
+/// entries cannot consume the number of runs that are actually restored.
+pub(crate) const MAX_SCANNED_WORKFLOW_ENTRIES: usize = 2_048;
+pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const MAX_WORKFLOW_ARGS_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +24,8 @@ pub struct WorkflowRunManifest {
     pub version: u8,
     pub state: WorkflowRunState,
     pub script_revision: u32,
+    #[serde(default)]
+    pub task_queue: TaskQueueState,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +47,7 @@ pub(crate) struct WorkflowRunStore {
     session_dir: Option<PathBuf>,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     sources: Arc<parking_lot::Mutex<HashMap<String, RunSource>>>,
+    task_queues: Arc<parking_lot::Mutex<HashMap<String, TaskQueueState>>>,
 }
 
 impl WorkflowRunStore {
@@ -52,6 +59,7 @@ impl WorkflowRunStore {
             session_dir,
             persistence_tx,
             sources: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            task_queues: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -88,10 +96,41 @@ impl WorkflowRunStore {
             let mut sources = store.sources.lock();
             for (run, _) in restored {
                 let run_id = run.manifest.state.run_id.clone();
+                let script = run.script;
+                let mut queue_error = None;
+                if run.manifest.version >= WORKFLOW_RUN_MANIFEST_VERSION {
+                    let mut task_queue = run.manifest.task_queue.clone();
+                    match xai_workflow::extract_meta(&script) {
+                        Ok(meta) => {
+                            if task_queue.tasks.is_empty() && !meta.tasks.is_empty() {
+                                match xai_workflow::TaskQueueState::from_definitions(&meta.tasks) {
+                                    Ok(rebuilt) => task_queue = rebuilt,
+                                    Err(error) => queue_error = Some(error.to_string()),
+                                }
+                            } else if !task_queue.matches_definitions(&meta.tasks) {
+                                queue_error = Some(
+                                    "persisted task queue does not match the stored workflow script"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            queue_error = Some(format!("invalid stored workflow script: {error}"));
+                        }
+                    }
+                    if queue_error.is_none()
+                        && let Err(error) = task_queue.validate()
+                    {
+                        queue_error = Some(format!("invalid persisted task queue: {error}"));
+                    }
+                    if queue_error.is_none() {
+                        store.task_queues.lock().insert(run_id.clone(), task_queue);
+                    }
+                }
                 sources.insert(
                     run_id,
                     RunSource {
-                        script: run.script,
+                        script,
                         args: run.args,
                         revision: run.manifest.script_revision,
                     },
@@ -109,6 +148,12 @@ impl WorkflowRunStore {
                     state.agents_used = 0;
                     state.token_leases.clear();
                     state.agent_usage_incomplete = true;
+                } else if let Some(error) = queue_error {
+                    state.status = super::tracker::WorkflowRunStatus::Interrupted;
+                    state.pause_message = Some(format!(
+                        "workflow task queue could not be restored: {error}"
+                    ));
+                    state.result_summary = None;
                 }
                 states.push(state);
             }
@@ -150,6 +195,28 @@ impl WorkflowRunStore {
         Ok(())
     }
 
+    pub(crate) fn set_task_queue(&self, run_id: &str, task_queue: TaskQueueState) {
+        self.task_queues
+            .lock()
+            .insert(run_id.to_owned(), task_queue);
+    }
+
+    pub(crate) fn task_queue_for(&self, run_id: &str) -> TaskQueueState {
+        self.task_queues
+            .lock()
+            .get(run_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn task_queue_is_initialized(&self, run_id: &str) -> bool {
+        self.task_queues.lock().contains_key(run_id)
+    }
+
+    pub(crate) fn task_queues_snapshot(&self) -> HashMap<String, TaskQueueState> {
+        self.task_queues.lock().clone()
+    }
+
     fn manifest_for(&self, state: &WorkflowRunState) -> Option<WorkflowRunManifest> {
         let revision = self
             .sources
@@ -160,6 +227,12 @@ impl WorkflowRunStore {
             version: WORKFLOW_RUN_MANIFEST_VERSION,
             state: state.clone(),
             script_revision: revision,
+            task_queue: self
+                .task_queues
+                .lock()
+                .get(&state.run_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -174,7 +247,19 @@ impl WorkflowRunStore {
             return Ok(());
         };
         let json = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
-        atomic_write_replace(&run_dir.join("state.json"), &json)
+        if json.len() as u64 > MAX_WORKFLOW_MANIFEST_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("workflow manifest exceeds {MAX_WORKFLOW_MANIFEST_BYTES} bytes"),
+            ));
+        }
+        crate::session::storage::jsonl::write_workflow_manifest_sync(
+            &run_dir.join("state.json"),
+            &manifest.state.run_id,
+            manifest.state.revision,
+            manifest.version,
+            &json,
+        )
     }
 
     pub(crate) fn persist(&self, state: &WorkflowRunState) -> io::Result<()> {
@@ -223,6 +308,7 @@ impl WorkflowRunStore {
 
     pub(crate) fn remove(&self, run_id: &str) {
         self.sources.lock().remove(run_id);
+        self.task_queues.lock().remove(run_id);
         if let Some(run_dir) = self.run_dir(run_id) {
             if let Err(error) = atomic_write_replace(&run_dir.join("cleared"), b"") {
                 tracing::warn!(run_id, %error, "failed to tombstone cleared workflow run");
@@ -287,9 +373,45 @@ pub(crate) fn script_revision_path(run_dir: &Path, revision: u32) -> PathBuf {
     run_dir.join("scripts").join(format!("{revision:04}.rhai"))
 }
 
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x0400_0000 != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+pub(crate) fn reject_reparse_components(path: &Path) -> io::Result<()> {
+    for component in path.ancestors() {
+        match std::fs::symlink_metadata(component) {
+            Ok(metadata) if metadata_is_reparse_point(&metadata) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "workflow path contains a reparse point: {}",
+                        component.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    reject_reparse_components(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -314,9 +436,16 @@ pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT prevents a symlink/reparse-point
+        // follow between metadata validation and open.
+        options.custom_flags(0x0020_0000);
+    }
     let file = options.open(path)?;
     let opened = file.metadata()?;
-    if !opened.is_file() || opened.len() > limit {
+    if metadata_is_reparse_point(&opened) || !opened.is_file() || opened.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("workflow artifact changed during open: {}", path.display()),
@@ -364,7 +493,7 @@ fn atomic_write(path: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
         std::process::id(),
         uuid::Uuid::now_v7().simple()
     ));
-    let result = (|| {
+    let result = crate::session::storage::with_workflow_state_write_lock(|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -378,16 +507,12 @@ fn atomic_write(path: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
                 format!("immutable workflow file already exists: {}", path.display()),
             ));
         }
-        #[cfg(windows)]
         if replace {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+            crate::session::storage::replace_file_atomic(&tmp, path)
+        } else {
+            std::fs::rename(&tmp, path)
         }
-        std::fs::rename(&tmp, path)
-    })();
+    });
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -469,6 +594,7 @@ mod tests {
                 version: WORKFLOW_RUN_MANIFEST_VERSION - 1,
                 state,
                 script_revision: 0,
+                task_queue: xai_workflow::TaskQueueState::default(),
             },
             script: "complete(1);".into(),
             args: serde_json::json!({}),

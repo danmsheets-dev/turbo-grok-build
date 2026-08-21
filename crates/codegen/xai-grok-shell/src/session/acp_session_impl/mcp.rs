@@ -638,8 +638,7 @@ impl SessionActor {
             server,
             crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
         )];
-        let sanitized =
-            xai_grok_mcp::servers::sanitize_mcp_name_segment(server);
+        let sanitized = xai_grok_mcp::servers::sanitize_mcp_name_segment(server);
         if sanitized != server {
             prefixes.push(format!(
                 "{}{}",
@@ -1581,16 +1580,11 @@ impl SessionActor {
                             .arm_liveness_watcher(xai_grok_mcp::liveness::DEFAULT_POLL_INTERVAL)
                             .await;
                         let mut st = mcp_state_bg.lock().await;
-                        st.owned_clients
-                            .insert(arc.server_name().to_string(), arc);
+                        st.owned_clients.insert(arc.server_name().to_string(), arc);
                     }
                 }
                 let mut mcp_state = mcp_state_bg.lock().await;
-                let inserted_names: Vec<String> = mcp_state
-                    .owned_clients
-                    .keys()
-                    .cloned()
-                    .collect();
+                let inserted_names: Vec<String> = mcp_state.owned_clients.keys().cloned().collect();
                 mcp_state.mark_all_servers_ready();
                 tracing::info!(
                     session_id = %session_id_owned,

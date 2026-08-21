@@ -92,6 +92,18 @@ pub enum ToolScope {
     Write,
 }
 
+/// Role asserted by the caller when dispatching a mutating tool.
+///
+/// The field is carried in the per-call context rather than inferred from the
+/// transport connection kind: both leader and follower agents use a harness
+/// connection, and an omitted role must fail closed for `ToolScope::Write`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallerRole {
+    Leader,
+    Follower,
+}
+
 /// Per-tool notification schemas. Keys are the notification `kind` strings
 /// the computer hub validates against.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

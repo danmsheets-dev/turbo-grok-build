@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use serde_json::Value;
 
-use crate::profile::{agent_browser_user_data_dir, pipe_name};
+use crate::profile::{agent_browser_profile_dir, pipe_name};
 use crate::protocol::{
     BrowserRequest, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
-    check_fill, check_url_in_session,
+    check_fill, check_url_in_session, eval_looks_mutating,
 };
 
 mod ax;
@@ -124,7 +124,7 @@ impl HostArgs {
             self.pipe = pipe_name(&self.session_id);
         }
         if self.user_data_dir.as_os_str().is_empty() {
-            self.user_data_dir = agent_browser_user_data_dir();
+            self.user_data_dir = agent_browser_profile_dir(&self.session_id);
         }
         self
     }
@@ -142,6 +142,8 @@ pub(crate) enum HostCall {
     Screenshot,
     /// `browser.tabs` (single-tab v1).
     Tabs,
+    /// `browser.downloads` (session-scoped broker directory).
+    Downloads,
     /// `browser.raise`
     Raise,
     /// `browser.shutdown`
@@ -150,6 +152,8 @@ pub(crate) enum HostCall {
     Snapshot {
         /// Raise node cap from 200 to 800.
         verbose: bool,
+        /// Include truncated main-landmark text.
+        include_text: bool,
     },
     /// `browser.click`
     Click {
@@ -167,6 +171,52 @@ pub(crate) enum HostCall {
     Eval {
         /// Function expression; host wraps with `JSON.stringify`.
         function: String,
+        /// Caller confirmed a mutating script.
+        confirm: bool,
+    },
+    /// `browser.wait`
+    Wait {
+        /// Visible text to wait for.
+        text: Option<String>,
+        /// URL substring to wait for.
+        url_substring: Option<String>,
+        /// Timeout in milliseconds.
+        timeout_ms: u64,
+    },
+    /// `browser.scroll`
+    Scroll {
+        /// Optional uid to scroll into view.
+        uid: Option<String>,
+        /// Horizontal delta.
+        dx: i32,
+        /// Vertical delta.
+        dy: i32,
+    },
+    /// `browser.press_key`
+    PressKey {
+        /// Key name (`Enter`, `Tab`, …).
+        key: String,
+        /// Optional uid to focus first.
+        uid: Option<String>,
+    },
+    /// `browser.select`
+    Select {
+        /// Snapshot uid of a `<select>`.
+        uid: String,
+        /// Option value or label.
+        value: String,
+    },
+    /// `browser.hover`
+    Hover {
+        /// Snapshot uid.
+        uid: String,
+    },
+    /// `browser.set_file`
+    SetFile {
+        /// Snapshot uid of a file input.
+        uid: String,
+        /// Canonical session-folder path.
+        path: String,
     },
 }
 
@@ -239,20 +289,25 @@ fn run_windows(args: HostArgs) -> Result<(), HostError> {
     webview::ensure_runtime_installed()?;
 
     let hwnd = window::create_frame_window(&args.session_id)?;
-    let mut agent = webview::AgentWebView::create(
-        hwnd,
-        &args.user_data_dir,
-        &args.session_id,
-        args.session_folder.clone(),
-    )?;
     window::show(hwnd);
 
+    // Bind the named pipe *before* WebView2 environment/controller create.
+    // Those can take tens of seconds on a cold Evergreen install; the shell's
+    // ensure() used to kill the child at 15s because the pipe did not exist
+    // until after that work finished.
     let ui_thread_id = unsafe { GetCurrentThreadId() };
     let (cmd_tx, cmd_rx) = mpsc::channel::<rpc::UiJob>();
     let pipe_thread = rpc::spawn_pipe_thread(
         args.pipe.clone(),
         ui_thread_id,
         cmd_tx,
+        args.session_folder.clone(),
+    )?;
+
+    let mut agent = webview::AgentWebView::create(
+        hwnd,
+        &args.user_data_dir,
+        &args.session_id,
         args.session_folder.clone(),
     )?;
 
@@ -299,7 +354,10 @@ fn run_windows(args: HostArgs) -> Result<(), HostError> {
     // a window that disappears is explainable instead of reading as a crash -
     // whether it went away by RPC shutdown, a dead pipe, or the job object
     // taking the host down with a restarting pager.
-    eprintln!("turbo browser-host: exiting (pump ended); session={}", args.session_id);
+    eprintln!(
+        "turbo browser-host: exiting (pump ended); session={}",
+        args.session_id
+    );
     Ok(())
 }
 
@@ -351,6 +409,17 @@ fn handle_ui_job(
                 },
             ),
         },
+        Ok((id, HostCall::Downloads)) => match agent.downloads() {
+            Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
         Ok((id, HostCall::Raise)) => {
             window::raise(hwnd);
             encode_rpc_ok(id, Value::Object(serde_json::Map::new()))
@@ -359,7 +428,13 @@ fn handle_ui_job(
             window::destroy(hwnd);
             encode_rpc_ok(id, Value::Object(serde_json::Map::new()))
         }
-        Ok((id, HostCall::Snapshot { verbose })) => match agent.snapshot(verbose) {
+        Ok((
+            id,
+            HostCall::Snapshot {
+                verbose,
+                include_text,
+            },
+        )) => match agent.snapshot(verbose, include_text) {
             Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
             Err(message) => encode_rpc_error(
                 id,
@@ -371,7 +446,7 @@ fn handle_ui_job(
             ),
         },
         Ok((id, HostCall::Click { uid })) => match agent.click(&uid) {
-            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
             Err(message) => encode_rpc_error(
                 id,
                 JsonRpcError {
@@ -392,8 +467,94 @@ fn handle_ui_job(
                 },
             ),
         },
-        Ok((id, HostCall::Eval { function })) => match agent.eval_function(&function) {
-            Ok(value) => encode_rpc_ok(id, value),
+        Ok((id, HostCall::Eval { function, confirm })) => {
+            if eval_looks_mutating(&function) && !confirm {
+                encode_rpc_error(
+                    id,
+                    JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message: "eval writes to the page; retry with confirm=true".into(),
+                        data: None,
+                    },
+                )
+            } else {
+                match agent.eval_function(&function) {
+                    Ok(value) => encode_rpc_ok(id, value),
+                    Err(message) => encode_rpc_error(
+                        id,
+                        JsonRpcError {
+                            code: RPC_HOST_ERROR,
+                            message,
+                            data: None,
+                        },
+                    ),
+                }
+            }
+        }
+        Ok((
+            id,
+            HostCall::Wait {
+                text,
+                url_substring,
+                timeout_ms,
+            },
+        )) => match agent.wait(text.as_deref(), url_substring.as_deref(), timeout_ms) {
+            Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Scroll { uid, dx, dy })) => match agent.scroll(uid.as_deref(), dx, dy) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::PressKey { key, uid })) => match agent.press_key(&key, uid.as_deref()) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Select { uid, value })) => match agent.select_option(&uid, &value) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::Hover { uid })) => match agent.hover(&uid) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::SetFile { uid, path })) => match agent.set_file(&uid, &path) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
             Err(message) => encode_rpc_error(
                 id,
                 JsonRpcError {
@@ -474,9 +635,19 @@ pub(crate) fn decode_host_call(
         }
         BrowserRequest::Screenshot {} => Ok((id, HostCall::Screenshot)),
         BrowserRequest::Tabs {} => Ok((id, HostCall::Tabs)),
+        BrowserRequest::Downloads {} => Ok((id, HostCall::Downloads)),
         BrowserRequest::Raise {} => Ok((id, HostCall::Raise)),
         BrowserRequest::Shutdown {} => Ok((id, HostCall::Shutdown)),
-        BrowserRequest::Snapshot { verbose } => Ok((id, HostCall::Snapshot { verbose })),
+        BrowserRequest::Snapshot {
+            verbose,
+            include_text,
+        } => Ok((
+            id,
+            HostCall::Snapshot {
+                verbose,
+                include_text,
+            },
+        )),
         BrowserRequest::Click { uid } => {
             if let Err(message) = ax::resolve_uid(&uid) {
                 return Err(DecodedRpcError {
@@ -513,7 +684,7 @@ pub(crate) fn decode_host_call(
             }
             Ok((id, HostCall::Fill { uid, value }))
         }
-        BrowserRequest::Eval { function } => {
+        BrowserRequest::Eval { function, confirm } => {
             if function.trim().is_empty() {
                 return Err(DecodedRpcError {
                     id: Some(id),
@@ -524,7 +695,128 @@ pub(crate) fn decode_host_call(
                     },
                 });
             }
-            Ok((id, HostCall::Eval { function }))
+            Ok((id, HostCall::Eval { function, confirm }))
+        }
+        BrowserRequest::Wait {
+            text,
+            url_substring,
+            timeout_ms,
+        } => {
+            if text.as_ref().is_none_or(|s| s.trim().is_empty())
+                && url_substring.as_ref().is_none_or(|s| s.trim().is_empty())
+            {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_INVALID_PARAMS,
+                        message: "browser.wait requires text or url_substring".into(),
+                        data: None,
+                    },
+                });
+            }
+            Ok((
+                id,
+                HostCall::Wait {
+                    text,
+                    url_substring,
+                    timeout_ms: timeout_ms.unwrap_or(15_000).min(60_000),
+                },
+            ))
+        }
+        BrowserRequest::Scroll { uid, dx, dy } => Ok((
+            id,
+            HostCall::Scroll {
+                uid,
+                dx: dx.unwrap_or(0),
+                dy: dy.unwrap_or(0),
+            },
+        )),
+        BrowserRequest::PressKey { key, uid } => {
+            if key.trim().is_empty() {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_INVALID_PARAMS,
+                        message: "browser.press_key requires key".into(),
+                        data: None,
+                    },
+                });
+            }
+            Ok((id, HostCall::PressKey { key, uid }))
+        }
+        BrowserRequest::Select { uid, value } => {
+            if let Err(message) = ax::resolve_uid(&uid) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message,
+                        data: None,
+                    },
+                });
+            }
+            Ok((id, HostCall::Select { uid, value }))
+        }
+        BrowserRequest::Hover { uid } => {
+            if let Err(message) = ax::resolve_uid(&uid) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message,
+                        data: None,
+                    },
+                });
+            }
+            Ok((id, HostCall::Hover { uid }))
+        }
+        BrowserRequest::SetFile { uid, path } => {
+            if let Err(message) = ax::resolve_uid(&uid) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message,
+                        data: None,
+                    },
+                });
+            }
+            let path = std::path::PathBuf::from(path);
+            match session_folder {
+                None => {
+                    return Err(DecodedRpcError {
+                        id: Some(id),
+                        error: JsonRpcError {
+                            code: RPC_HOST_ERROR,
+                            message: "browser.set_file requires a session folder".into(),
+                            data: None,
+                        },
+                    });
+                }
+                Some(folder) => {
+                    let canon_folder = folder
+                        .canonicalize()
+                        .unwrap_or_else(|_| folder.to_path_buf());
+                    let canon_path = path.canonicalize().unwrap_or(path);
+                    if !canon_path.starts_with(&canon_folder) {
+                        return Err(DecodedRpcError {
+                            id: Some(id),
+                            error: JsonRpcError {
+                                code: RPC_HOST_ERROR,
+                                message: "file path is not under the session folder".into(),
+                                data: None,
+                            },
+                        });
+                    }
+                    Ok((
+                        id,
+                        HostCall::SetFile {
+                            uid,
+                            path: canon_path.to_string_lossy().into_owned(),
+                        },
+                    ))
+                }
+            }
         }
         BrowserRequest::NewTab { .. }
         | BrowserRequest::SelectTab { .. }
@@ -663,7 +955,7 @@ mod tests {
         .resolve_defaults();
         assert_eq!(resolved.session_id, "abc");
         assert_eq!(resolved.pipe, pipe_name("abc"));
-        assert_eq!(resolved.user_data_dir, agent_browser_user_data_dir());
+        assert_eq!(resolved.user_data_dir, agent_browser_profile_dir("abc"));
     }
 
     #[test]
@@ -771,7 +1063,13 @@ mod tests {
         )
         .unwrap();
         match decode_host_call(&snap, None).unwrap() {
-            (JsonRpcId::Number(5), HostCall::Snapshot { verbose: true }) => {}
+            (
+                JsonRpcId::Number(5),
+                HostCall::Snapshot {
+                    verbose: true,
+                    include_text: false,
+                },
+            ) => {}
             other => panic!("{other:?}"),
         }
 
@@ -807,7 +1105,10 @@ mod tests {
         )
         .unwrap();
         match decode_host_call(&eval, None).unwrap() {
-            (_, HostCall::Eval { function }) => assert_eq!(function, "() => 1"),
+            (_, HostCall::Eval { function, confirm }) => {
+                assert_eq!(function, "() => 1");
+                assert!(!confirm);
+            }
             other => panic!("{other:?}"),
         }
     }

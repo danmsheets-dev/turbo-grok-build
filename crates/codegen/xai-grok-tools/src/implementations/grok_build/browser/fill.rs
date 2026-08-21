@@ -9,7 +9,9 @@ pub const BROWSER_FILL_TOOL_NAME: &str = "browser_fill";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BrowserFillInput {
     /// Snapshot uid from the last `browser_snapshot`.
-    #[schemars(description = "Snapshot uid from the last browser_snapshot (e.g. \"2\").")]
+    #[schemars(
+        description = "Snapshot uid from the last browser_snapshot (e.g. \"4-17\"). Epoch-index, not a positional \"2\"."
+    )]
     pub uid: String,
     /// Value to insert. OTP / password-shaped values are rejected.
     #[schemars(

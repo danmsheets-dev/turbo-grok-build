@@ -205,9 +205,9 @@ impl AgentBuilder {
             working_directory,
             prompt_working_directory: None,
             terminal_backend,
-            fs_backend: xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(
-                Arc::new(xai_grok_tools::computer::local::LocalFs),
-            ),
+            fs_backend: xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(Arc::new(
+                xai_grok_tools::computer::local::LocalFs,
+            )),
             notification_handle,
             owner_session_id: None,
             parent_scheduler_handle: None,
@@ -1215,9 +1215,7 @@ impl AgentBuilder {
             os_name: Some(std::env::consts::OS.to_string()),
             shell_path: Some(resolve_shell_for_prompt()),
             working_directory: Some(display_working_dir),
-            tool_working_directory: Some(
-                self.working_directory.to_string_lossy().into_owned(),
-            ),
+            tool_working_directory: Some(self.working_directory.to_string_lossy().into_owned()),
             current_date: Some(
                 now.with_timezone(&chrono::Local)
                     .format("%Y-%m-%d")

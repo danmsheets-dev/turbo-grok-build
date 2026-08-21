@@ -147,14 +147,15 @@ impl xai_tool_runtime::Tool for ResolvePathTool {
         let hint = input.hint_path.clone();
         let limit = input.limit.unwrap_or(8).clamp(1, 32);
 
-        let result = tokio::task::spawn_blocking(move || run_resolve(&cwd, &name, hint.as_deref(), limit))
-            .await
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::custom(
-                    "resolve_path_join",
-                    format!("resolve_path task failed: {e}"),
-                )
-            })??;
+        let result =
+            tokio::task::spawn_blocking(move || run_resolve(&cwd, &name, hint.as_deref(), limit))
+                .await
+                .map_err(|e| {
+                    xai_tool_runtime::ToolError::custom(
+                        "resolve_path_join",
+                        format!("resolve_path task failed: {e}"),
+                    )
+                })??;
 
         Ok(result)
     }
@@ -166,7 +167,7 @@ fn run_resolve(
     hint_path: Option<&str>,
     limit: usize,
 ) -> Result<ResolvePathOutput, xai_tool_runtime::ToolError> {
-    use xai_workspace_tree::{resolve_path, WorkspaceTreeConfig};
+    use xai_workspace_tree::{WorkspaceTreeConfig, resolve_path};
 
     let config = WorkspaceTreeConfig::from_env();
     if !config.enabled {
@@ -225,7 +226,10 @@ fn format_message(
         lines.push("Try workspace_tree action=search or list_dir on a known root.".to_string());
     } else {
         if let Some(best) = matches.first() {
-            lines.push(format!("Best: {}  (score {:.2}, {})", best.rel_path, best.score, best.reason));
+            lines.push(format!(
+                "Best: {}  (score {:.2}, {})",
+                best.rel_path, best.score, best.reason
+            ));
         }
         lines.push("Matches:".to_string());
         for (i, m) in matches.iter().enumerate() {
@@ -303,4 +307,3 @@ mod tests {
         );
     }
 }
-

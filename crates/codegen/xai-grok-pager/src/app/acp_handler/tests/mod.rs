@@ -1318,6 +1318,11 @@ pub(super) fn test_subagent_spawned(
         model: None,
         resumed_from: None,
         budget: None,
+        child_cwd: None,
+        display_cwd: None,
+        worktree_path: None,
+        isolation_requested: None,
+        isolation_fallback: false,
     }
 }
 pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {

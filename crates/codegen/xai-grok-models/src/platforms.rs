@@ -1262,6 +1262,10 @@ pub struct BuiltinPlatformModel {
     /// (EOL / 404 / withdrawn) and must stay hidden even after credentials
     /// stamp. Offline OAuth seeds set this `true` so login can unlock them.
     pub catalog_available: bool,
+    /// Whether this row is a user-facing picker entry. Runtime aliases stay
+    /// in the catalog for config and subagent model pins but are hidden from
+    /// normal model selection.
+    pub picker_visible: bool,
     /// Recommended `max_tokens` / max_completion_tokens (Kimi docs: 32k for
     /// coding thinking models).
     pub max_completion_tokens: Option<u32>,
@@ -1333,9 +1337,14 @@ impl BuiltinPlatformModel {
 
     /// Materialize all non-secret runtime route metadata for this model.
     pub fn resolved_runtime(&self) -> ResolvedProviderRuntime {
+        let wire_model = if self.provider.as_str() == "nvidia" {
+            nvidia_wire_model_id(&self.model)
+        } else {
+            self.model.clone()
+        };
         self.provider_spec().resolve_runtime(
             &self.raw_resolved_base_url(),
-            &self.model,
+            &wire_model,
             &self.route.query_params,
         )
     }
@@ -2135,6 +2144,7 @@ fn parse_platform_catalog(
                 // resolve — unless `catalog_available` is false (EOL).
                 supported_in_api: false,
                 catalog_available: row.supported_in_api,
+                picker_visible: true,
                 max_completion_tokens: row.max_completion_tokens,
                 api_backend,
                 base_url_override: row.base_url_override,
@@ -2189,7 +2199,8 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
             }
         }
         // NVIDIA Integrate rows that the Pi snapshot does not yet list
-        // (Nemotron 3.5 Lightning). Same request_compat as other NIM models.
+        // (Lightning, Muse Glimmer, Laguna XS 2.1, Mistral-Nemotron).
+        // Same request_compat as other NIM models.
         for m in nvidia_offline_fallbacks() {
             if let Some(idx) = existing.get(&m.catalog_key()) {
                 out[*idx] = m;
@@ -2398,6 +2409,7 @@ fn anthropic_claude_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supports_reasoning_effort: true,
                 supported_in_api: false,
                 catalog_available: true,
+                picker_visible: true,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
@@ -2454,6 +2466,7 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supports_reasoning_effort: true,
                 supported_in_api: false,
                 catalog_available: true,
+                picker_visible: true,
                 max_completion_tokens: None,
                 api_backend: PlatformApiBackend::Responses,
                 base_url_override: None,
@@ -2507,22 +2520,40 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
 
 /// NVIDIA Integrate models missing from the imported Pi snapshot.
 ///
+fn nvidia_wire_model_id(model: &str) -> String {
+    match model {
+        "muse-glimmer-30b" => "meta/muse-glimmer-30b".to_owned(),
+        "laguna-xs-2.1" => "poolside/laguna-xs-2.1".to_owned(),
+        "mistral-nemotron" => "mistralai/mistral-nemotron".to_owned(),
+        "nemotron-3.5-lightning-30b-a3b" => "nvidia/nemotron-3.5-lightning-30b-a3b".to_owned(),
+        _ => model.to_owned(),
+    }
+}
+
 /// Catalog keys follow `{provider}/{model}` so
 /// `nvidia/nemotron-3.5-lightning-30b-a3b` becomes
 /// `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` (same as Ultra/Super/Nano).
+/// Third-party NIM ids keep their publisher prefix:
+/// `meta/muse-glimmer-30b` → `nvidia/meta/muse-glimmer-30b`.
 fn nvidia_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     const CTX_1M: u64 = 1_000_000;
-    const MAX_OUT: u32 = 65_536;
-    let mk = |model: &str, name: &str, desc: &str| BuiltinPlatformModel {
+    const CTX_256K: u64 = 262_144;
+    const CTX_131K: u64 = 131_072;
+    const CTX_128K: u64 = 128_000;
+    const MAX_OUT_65K: u32 = 65_536;
+    const MAX_OUT_32K: u32 = 32_768;
+    const MAX_OUT_8K: u32 = 8_192;
+    let mk = |model: &str, name: &str, desc: &str, ctx: u64, max_out: u32| BuiltinPlatformModel {
         provider: PlatformId::Nvidia.provider_id(),
         model: model.into(),
         name: name.into(),
         description: desc.into(),
-        context_window: CTX_1M,
+        context_window: ctx,
         supports_reasoning_effort: true,
         supported_in_api: true,
         catalog_available: true,
-        max_completion_tokens: Some(MAX_OUT),
+        picker_visible: true,
+        max_completion_tokens: Some(max_out),
         api_backend: PlatformApiBackend::ChatCompletions,
         base_url_override: None,
         request_compat: fallback_request_compat(
@@ -2532,11 +2563,13 @@ fn nvidia_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
         ),
         route: fallback_route(PlatformId::Nvidia, PlatformApiBackend::ChatCompletions),
     };
-    vec![
+    let mut models = vec![
         mk(
             "nvidia/nemotron-3.5-lightning-30b-a3b",
             "Nemotron 3.5 Lightning 30B A3B",
             "Fast 30B/3B-active MoE on NVIDIA Integrate for specialized agentic tasks (1M ctx)",
+            CTX_1M,
+            MAX_OUT_65K,
         ),
         // Bare routing id so spawn_subagent(model=nvidia/nemotron-3.5-lightning-30b-a3b)
         // and [subagents.models] pins both resolve.
@@ -2544,8 +2577,65 @@ fn nvidia_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
             "nemotron-3.5-lightning-30b-a3b",
             "Nemotron 3.5 Lightning 30B A3B",
             "Fast 30B/3B-active MoE on NVIDIA Integrate for specialized agentic tasks (1M ctx)",
+            CTX_1M,
+            MAX_OUT_65K,
         ),
-    ]
+        mk(
+            "meta/muse-glimmer-30b",
+            "Muse Glimmer 30B",
+            "Meta 30B dense multimodal agent model on NVIDIA Integrate (131K ctx)",
+            CTX_131K,
+            MAX_OUT_32K,
+        ),
+        mk(
+            "muse-glimmer-30b",
+            "Muse Glimmer 30B",
+            "Meta 30B dense multimodal agent model on NVIDIA Integrate (131K ctx)",
+            CTX_131K,
+            MAX_OUT_32K,
+        ),
+        mk(
+            "poolside/laguna-xs-2.1",
+            "Poolside Laguna XS 2.1",
+            "Poolside 33B/3B-active MoE for local agentic coding on NVIDIA Integrate (256K ctx)",
+            CTX_256K,
+            MAX_OUT_32K,
+        ),
+        mk(
+            "laguna-xs-2.1",
+            "Poolside Laguna XS 2.1",
+            "Poolside 33B/3B-active MoE for local agentic coding on NVIDIA Integrate (256K ctx)",
+            CTX_256K,
+            MAX_OUT_32K,
+        ),
+        mk(
+            "mistralai/mistral-nemotron",
+            "Mistral-Nemotron",
+            "Mistral + NVIDIA agentic coding / tool-calling model on NVIDIA Integrate (128K ctx)",
+            CTX_128K,
+            MAX_OUT_8K,
+        ),
+        mk(
+            "mistral-nemotron",
+            "Mistral-Nemotron",
+            "Mistral + NVIDIA agentic coding / tool-calling model on NVIDIA Integrate (128K ctx)",
+            CTX_128K,
+            MAX_OUT_8K,
+        ),
+    ];
+    // Bare slugs are compatibility aliases for config/subagent pins. Keep
+    // them resolvable, but never present them as separate picker choices.
+    for model in &mut models {
+        if !model.model.contains('/') {
+            // Bare ids are compatibility aliases only. NVIDIA's Integrate
+            // endpoint requires the publisher-qualified id; keeping a bare
+            // alias selectable causes provider 404s and makes certification
+            // status ambiguous.
+            model.picker_visible = false;
+            model.catalog_available = false;
+        }
+    }
+    models
 }
 
 fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
@@ -2564,6 +2654,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supports_reasoning_effort: $effort,
                 supported_in_api: false,
                 catalog_available: true,
+                picker_visible: true,
                 max_completion_tokens: $max_tok,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
@@ -2626,6 +2717,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supports_reasoning_effort: $effort,
                 supported_in_api: false,
                 catalog_available: true,
+                picker_visible: true,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::ChatCompletions,
                 base_url_override: None,
@@ -4104,7 +4196,9 @@ mod tests {
         }
         let fw_flash_0731 = platform_builtin_models()
             .iter()
-            .find(|m| m.catalog_key() == "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731")
+            .find(|m| {
+                m.catalog_key() == "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731"
+            })
             .expect("fireworks deepseek-v4-flash-0731");
         assert_eq!(
             fw_flash_0731.api_backend,
@@ -4293,6 +4387,93 @@ mod tests {
         assert!(!chat.supports_prompt_cache_key);
         assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
         assert_eq!(lightning.context_window, 1_000_000);
+    }
+
+    #[test]
+    fn nvidia_integrate_muse_poolside_mistral_nemotron_are_in_builtin_catalog() {
+        let keys: std::collections::HashSet<_> = platform_builtin_models()
+            .iter()
+            .map(|m| m.catalog_key())
+            .collect();
+        for key in [
+            "nvidia/meta/muse-glimmer-30b",
+            "nvidia/muse-glimmer-30b",
+            "nvidia/poolside/laguna-xs-2.1",
+            "nvidia/laguna-xs-2.1",
+            "nvidia/mistralai/mistral-nemotron",
+            "nvidia/mistral-nemotron",
+        ] {
+            assert!(keys.contains(key), "missing NVIDIA Integrate slug {key}");
+        }
+
+        let glimmer = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/meta/muse-glimmer-30b")
+            .expect("muse glimmer");
+        let RequestCompat::ChatCompletions(chat) = &glimmer.request_compat else {
+            panic!("muse glimmer is chat completions");
+        };
+        assert!(!chat.supports_prompt_cache_key);
+        assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
+        assert_eq!(glimmer.context_window, 131_072);
+        assert_eq!(glimmer.max_completion_tokens, Some(32_768));
+
+        let laguna = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/poolside/laguna-xs-2.1")
+            .expect("laguna xs");
+        assert_eq!(laguna.context_window, 262_144);
+        assert_eq!(laguna.max_completion_tokens, Some(32_768));
+
+        let nemotron = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/mistralai/mistral-nemotron")
+            .expect("mistral-nemotron");
+        assert_eq!(nemotron.context_window, 128_000);
+        assert_eq!(nemotron.max_completion_tokens, Some(8_192));
+
+        for canonical in [
+            "nvidia/meta/muse-glimmer-30b",
+            "nvidia/poolside/laguna-xs-2.1",
+            "nvidia/mistralai/mistral-nemotron",
+        ] {
+            assert!(
+                platform_builtin_models()
+                    .iter()
+                    .find(|model| model.catalog_key() == canonical)
+                    .is_some_and(|model| model.picker_visible),
+                "canonical Nvidia row should remain picker-visible: {canonical}"
+            );
+        }
+        for alias in [
+            "nvidia/muse-glimmer-30b",
+            "nvidia/laguna-xs-2.1",
+            "nvidia/mistral-nemotron",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+        ] {
+            assert!(
+                platform_builtin_models()
+                    .iter()
+                    .find(|model| model.catalog_key() == alias)
+                    .is_some_and(|model| !model.picker_visible),
+                "Nvidia compatibility alias should be hidden: {alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn nvidia_aliases_use_canonical_wire_model_ids() {
+        for (alias, canonical) in [
+            ("nvidia/muse-glimmer-30b", "meta/muse-glimmer-30b"),
+            ("nvidia/laguna-xs-2.1", "poolside/laguna-xs-2.1"),
+            ("nvidia/mistral-nemotron", "mistralai/mistral-nemotron"),
+        ] {
+            let model = platform_builtin_models()
+                .into_iter()
+                .find(|model| model.catalog_key() == alias)
+                .expect("NVIDIA alias");
+            assert_eq!(model.resolved_runtime().wire_model_id, canonical);
+        }
     }
 
     #[test]

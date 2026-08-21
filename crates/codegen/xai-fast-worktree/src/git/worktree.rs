@@ -6,14 +6,30 @@ use anyhow::{Context, Result};
 
 use crate::git::checkout::git_command;
 
+/// Branch name attached to a subagent worktree so `git commit` is not detached.
+///
+/// Parent is usually already on the same ref, so `--detach` would leave the
+/// child unable to commit onto a named branch. `grok/<dest-basename>` is unique
+/// per child and does not move the parent's branch.
+pub(crate) fn worktree_attach_branch_name(dest: &Path) -> String {
+    let base = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("subagent");
+    format!("grok/{base}")
+}
+
 /// Create a git worktree with `--no-checkout`. Blocking.
 pub(crate) fn worktree_add_no_checkout(source: &Path, dest: &str, git_ref: &str) -> Result<()> {
+    let branch = worktree_attach_branch_name(Path::new(dest));
     let output = git_command()
         .current_dir(source)
         .args([
             "worktree",
             "add",
-            "--detach",
+            "-B",
+            &branch,
             "--no-checkout",
             dest,
             git_ref,
@@ -210,6 +226,16 @@ mod tests {
         run_git(&repo, &["add", "f.txt"]);
         run_git(&repo, &["commit", "-m", "init"]);
         (tmp, repo)
+    }
+
+    #[test]
+    fn worktree_attach_branch_name_uses_dest_basename() {
+        assert_eq!(
+            worktree_attach_branch_name(Path::new(
+                r"C:\Users\x\.grok\worktrees\repo\subagent-01abc"
+            )),
+            "grok/subagent-01abc"
+        );
     }
 
     fn add_worktree(repo: &Path, wt: &Path) {

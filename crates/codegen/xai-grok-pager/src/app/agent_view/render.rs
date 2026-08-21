@@ -3910,9 +3910,7 @@ impl AgentView {
                                     ratatui::text::Line::from(""),
                                     ratatui::text::Line::from(format!(
                                         "  {}x{} {}",
-                                        viewer.image_width,
-                                        viewer.image_height,
-                                        viewer.mime_type,
+                                        viewer.image_width, viewer.image_height, viewer.mime_type,
                                     )),
                                     ratatui::text::Line::from(""),
                                     ratatui::text::Line::from("  Press Esc to close"),

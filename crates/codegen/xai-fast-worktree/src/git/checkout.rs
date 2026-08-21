@@ -429,16 +429,77 @@ fn export_worktree_patch_between_refs_inner(
     base_ref: &str,
     head_ref: &str,
 ) -> Result<WorktreePatchExport> {
-    let patch = snapshot_git(
-        repo_path,
-        &["diff", "--binary", base_ref, head_ref],
-        &[],
-    )?;
-    let numstat = snapshot_git(
-        repo_path,
-        &["diff", "--numstat", base_ref, head_ref],
-        &[],
-    )?;
+    let patch = snapshot_git(repo_path, &["diff", "--binary", base_ref, head_ref], &[])?;
+    let numstat = snapshot_git(repo_path, &["diff", "--numstat", base_ref, head_ref], &[])?;
+    Ok(strip_harness_from_patch_export(&patch, &numstat))
+}
+
+/// Harness files written by isolation (`.grok-subagent-live`, `.grok/`,
+/// `.grok-restore/`) are not agent payload. Snapshot/diff/land must omit them
+/// or densify children fail-close `allowed_paths` on a 1-file live-marker patch.
+pub fn is_harness_snapshot_path(rel: &str) -> bool {
+    let n = rel.replace('\\', "/");
+    let n = n.trim_start_matches("./");
+    n == ".grok-subagent-live"
+        || n == ".grok"
+        || n.starts_with(".grok/")
+        || n == ".grok-restore"
+        || n.starts_with(".grok-restore/")
+}
+
+fn numstat_path(line: &str) -> Option<&str> {
+    let mut parts = line.split('\t');
+    let _add = parts.next()?;
+    let _del = parts.next()?;
+    // Rename: add, del, old, new — keep the new path.
+    let a = parts.next()?;
+    match parts.next() {
+        Some(b) => Some(b),
+        None => Some(a),
+    }
+}
+
+fn parse_numstat_counts(line: &str) -> (u32, u32) {
+    let mut parts = line.split('\t');
+    let add = parts.next().unwrap_or("0");
+    let del = parts.next().unwrap_or("0");
+    let insertions = if add == "-" {
+        0
+    } else {
+        add.parse::<u32>().unwrap_or(0)
+    };
+    let deletions = if del == "-" {
+        0
+    } else {
+        del.parse::<u32>().unwrap_or(0)
+    };
+    (insertions, deletions)
+}
+
+/// Drop harness file hunks from a unified diff.
+pub fn filter_harness_from_unified_diff(diff: &str) -> String {
+    if diff.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut keep = true;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            let path = line
+                .strip_prefix("diff --git ")
+                .and_then(|rest| rest.find(" b/").map(|i| &rest[i + 3..]))
+                .unwrap_or("");
+            keep = !is_harness_snapshot_path(path);
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn strip_harness_from_patch_export(patch: &str, numstat: &str) -> WorktreePatchExport {
     let mut files_changed = 0u32;
     let mut insertions = 0u32;
     let mut deletions = 0u32;
@@ -447,30 +508,22 @@ fn export_worktree_patch_between_refs_inner(
         if line.is_empty() {
             continue;
         }
-        let mut parts = line.split('\t');
-        let add = parts.next().unwrap_or("0");
-        let del = parts.next().unwrap_or("0");
-        // Binary files show "-" for both columns.
-        if add != "-" {
-            if let Ok(n) = add.parse::<u32>() {
-                insertions = insertions.saturating_add(n);
-            }
+        if numstat_path(line).is_some_and(is_harness_snapshot_path) {
+            continue;
         }
-        if del != "-" {
-            if let Ok(n) = del.parse::<u32>() {
-                deletions = deletions.saturating_add(n);
-            }
-        }
+        let (add, del) = parse_numstat_counts(line);
+        insertions = insertions.saturating_add(add);
+        deletions = deletions.saturating_add(del);
         files_changed = files_changed.saturating_add(1);
     }
-    Ok(WorktreePatchExport {
-        patch,
+    WorktreePatchExport {
+        patch: filter_harness_from_unified_diff(patch),
         diffstat: WorktreeDiffstat {
             files_changed,
             insertions,
             deletions,
         },
-    })
+    }
 }
 
 /// Make a snapshot `ref_name` (created by [`snapshot_worktree_to_ref`] in
@@ -731,6 +784,50 @@ mod tests {
         // Untracked files are NOT tracked changes (clean -fd handles those).
         std::fs::write(temp.path().join("new.txt"), "untracked").unwrap();
         assert!(!worktree_has_tracked_changes(temp.path()).unwrap());
+    }
+
+    #[test]
+    fn harness_snapshot_paths_detected() {
+        assert!(is_harness_snapshot_path(".grok-subagent-live"));
+        assert!(is_harness_snapshot_path("./.grok-subagent-live"));
+        assert!(is_harness_snapshot_path(".grok/meta.json"));
+        assert!(is_harness_snapshot_path(".grok-restore/id/a.rs"));
+        assert!(!is_harness_snapshot_path("tools/blender/build.py"));
+        assert!(!is_harness_snapshot_path("assets/manifest/cliff.json"));
+    }
+
+    #[test]
+    fn strip_harness_leaves_payload_and_empty_when_only_live_marker() {
+        let patch = "\
+diff --git a/.grok-subagent-live b/.grok-subagent-live
+new file mode 100644
+--- /dev/null
++++ b/.grok-subagent-live
+@@ -0,0 +1 @@
++pid=1
+diff --git a/tools/blender/build.py b/tools/blender/build.py
+new file mode 100644
+--- /dev/null
++++ b/tools/blender/build.py
+@@ -0,0 +1 @@
++print(1)
+";
+        let numstat = "\
+1\t0\t.grok-subagent-live
+1\t0\ttools/blender/build.py
+";
+        let exported = strip_harness_from_patch_export(patch, numstat);
+        assert_eq!(exported.diffstat.files_changed, 1);
+        assert_eq!(exported.diffstat.insertions, 1);
+        assert!(!exported.patch.contains(".grok-subagent-live"));
+        assert!(exported.patch.contains("tools/blender/build.py"));
+
+        let only_marker = strip_harness_from_patch_export(
+            "diff --git a/.grok-subagent-live b/.grok-subagent-live\n+++ b/.grok-subagent-live\n",
+            "1\t0\t.grok-subagent-live\n",
+        );
+        assert!(only_marker.diffstat.is_empty());
+        assert!(only_marker.patch.trim().is_empty());
     }
 
     #[test]

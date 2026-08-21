@@ -1,0 +1,80 @@
+//! `browser_press_key` — dispatch a key (Enter, Tab, Escape, …).
+
+use crate::types::output::ToolOutput;
+use crate::types::requirements::{Expr, ToolRequirement};
+use crate::types::tool::{ToolKind, ToolNamespace};
+
+pub const BROWSER_PRESS_KEY_TOOL_NAME: &str = "browser_press_key";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct BrowserPressKeyInput {
+    #[schemars(description = "Key to press, e.g. Enter, Tab, Escape, ArrowDown.")]
+    pub key: String,
+    #[serde(default)]
+    #[schemars(description = "Optional snapshot uid to focus first (e.g. \"4-17\").")]
+    pub uid: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct BrowserPressKeyTool;
+
+impl crate::types::tool_metadata::ToolMetadata for BrowserPressKeyTool {
+    fn kind(&self) -> ToolKind {
+        ToolKind::Other
+    }
+
+    fn tool_namespace(&self) -> ToolNamespace {
+        ToolNamespace::GrokBuild
+    }
+
+    fn description_template(&self) -> &str {
+        "Press a key in the Turbo Agent WebView. Use Enter after filling a combobox. Does not submit Apply/Connect — those still need browser_click with confirm."
+    }
+
+    fn requires_expr(&self) -> Expr<ToolRequirement> {
+        Expr::True
+    }
+}
+
+impl xai_tool_runtime::Tool for BrowserPressKeyTool {
+    type Args = BrowserPressKeyInput;
+    type Output = ToolOutput;
+
+    fn id(&self) -> xai_tool_protocol::ToolId {
+        xai_tool_protocol::ToolId::new(BROWSER_PRESS_KEY_TOOL_NAME).expect("valid tool id")
+    }
+
+    fn description(
+        &self,
+        _ctx: &::xai_tool_runtime::ListToolsContext,
+    ) -> xai_tool_types::ToolDescription {
+        xai_tool_types::ToolDescription::new(
+            BROWSER_PRESS_KEY_TOOL_NAME,
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
+        )
+    }
+
+    fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
+        xai_tool_protocol::ToolCapabilities {
+            is_read_only: false,
+            tool_scope: Some(xai_tool_protocol::ToolScope::Write),
+            ..Default::default()
+        }
+    }
+
+    #[tracing::instrument(name = "tool.browser_press_key", skip_all, fields(key = %input.key))]
+    async fn run(
+        &self,
+        ctx: xai_tool_runtime::ToolCallContext,
+        input: BrowserPressKeyInput,
+    ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
+        if input.key.trim().is_empty() {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "browser_press_key requires key".to_owned(),
+            ));
+        }
+        let handle = super::require_handle(&ctx).await?;
+        handle.press_key(input.key.clone(), input.uid).await?;
+        Ok(super::text_output(format!("Pressed {}", input.key)))
+    }
+}

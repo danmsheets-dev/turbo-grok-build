@@ -623,9 +623,7 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
         // `x` cannot dodge a deny keyed on any one of them. Relative globs
         // (`**/.env`) still match the raw spelling.
         AccessKind::Edit(path) => path_context_matches(path, cr, cwd),
-        AccessKind::EditMany(paths) => paths
-            .iter()
-            .any(|path| path_context_matches(path, cr, cwd)),
+        AccessKind::EditMany(paths) => paths.iter().any(|path| path_context_matches(path, cr, cwd)),
         AccessKind::Read(path) => match path {
             Some(p) => path_context_matches(p, cr, cwd),
             None => false,
@@ -705,9 +703,8 @@ fn path_glob_matches(path: &str, pattern: &str, matcher: Option<&glob::Pattern>)
     if path_glob_matches_one(path, pattern, matcher) {
         return true;
     }
-    let path_c = xai_grok_tools::types::resources::canonicalize_for_permission(
-        std::path::Path::new(path),
-    );
+    let path_c =
+        xai_grok_tools::types::resources::canonicalize_for_permission(std::path::Path::new(path));
     let path_canon = normalize_path_glob_text(&path_c.display.to_string_lossy());
     if path_canon != normalize_path_glob_text(path)
         && path_glob_matches_one(&path_canon, pattern, matcher)
@@ -793,9 +790,8 @@ fn canonicalize_path_glob_pattern(pattern: &str) -> Option<String> {
     // the directory itself; re-attach separator if the original had one.
     let trim = prefix.trim_end_matches('/');
     let trailing_sep = trim.len() != prefix.len();
-    let c = xai_grok_tools::types::resources::canonicalize_for_permission(
-        std::path::Path::new(trim),
-    );
+    let c =
+        xai_grok_tools::types::resources::canonicalize_for_permission(std::path::Path::new(trim));
     let mut rebuilt = normalize_path_glob_text(&c.display.to_string_lossy());
     if trailing_sep && !rebuilt.ends_with('/') {
         rebuilt.push('/');
@@ -1014,10 +1010,7 @@ mod tests {
         std::fs::create_dir_all(&sibling).unwrap();
         std::fs::write(sibling.join("seed.txt"), "x").unwrap();
 
-        let deny_pattern = format!(
-            "{}/**",
-            sibling.to_string_lossy().replace('\\', "/")
-        );
+        let deny_pattern = format!("{}/**", sibling.to_string_lossy().replace('\\', "/"));
         let deny = PermissionRule {
             action: RuleAction::Deny,
             tool: ToolFilter::Edit,

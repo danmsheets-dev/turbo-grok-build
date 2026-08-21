@@ -67,8 +67,8 @@ pub use discovery::{
 };
 pub use git::checkout::{
     WorktreeDiffstat, WorktreePatchExport, export_worktree_patch_against_ref,
-    export_worktree_patch_between_refs, rehydrate_worktree_from_ref, snapshot_worktree_to_ref,
-    transfer_snapshot_to_repo,
+    export_worktree_patch_between_refs, filter_harness_from_unified_diff, is_harness_snapshot_path,
+    rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
 };
 pub use git::{
     StaleWorktreeMatch, remove_stale_worktree_registration, remove_stale_worktree_registrations,

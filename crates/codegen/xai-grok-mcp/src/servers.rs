@@ -1273,9 +1273,9 @@ impl McpError {
             Self::HandshakeFailed { source, .. } => is_auth_rejection_message(&source.to_string()),
             Self::ServiceError(e) => is_auth_rejection_message(&e.to_string()),
             Self::ClientError(s) => is_auth_rejection_message(s),
-            Self::Timeout { .. }
-            | Self::SpawnFailed { .. }
-            | Self::ConfineHttpRefused { .. } => false,
+            Self::Timeout { .. } | Self::SpawnFailed { .. } | Self::ConfineHttpRefused { .. } => {
+                false
+            }
         }
     }
 }
@@ -1776,10 +1776,7 @@ impl McpErasedTool {
                 {
                     *is_timeout = true;
                 }
-                Err(xai_tool_runtime::ToolError::custom(
-                    "process_manager",
-                    msg,
-                ))
+                Err(xai_tool_runtime::ToolError::custom("process_manager", msg))
             }
             Err(_) => {
                 *is_timeout = true;
@@ -3669,12 +3666,7 @@ impl McpClient {
                 // tools are not cut short (RC12 C7). The bridge still cannot pick
                 // per-request tool names without parsing JSON-RPC; max override is
                 // the honest upper bound.
-                let max_per_tool = self
-                    .tool_timeouts
-                    .values()
-                    .copied()
-                    .max()
-                    .unwrap_or(0);
+                let max_per_tool = self.tool_timeouts.values().copied().max().unwrap_or(0);
                 let invoke_timeout = std::time::Duration::from_secs(
                     self.startup_timeout_sec
                         .max(self.tool_timeout_sec)
@@ -4432,8 +4424,8 @@ pub async fn start_mcp_server(
             // Docker + Windows named pipes: the container often exits before
             // attach, so the first initialize hits OS error 232. Wait briefly
             // and respawn once if the child is already dead.
-            let is_docker = command_str.eq_ignore_ascii_case("docker")
-                || spawn_args_look_like_docker(&args);
+            let is_docker =
+                command_str.eq_ignore_ascii_case("docker") || spawn_args_look_like_docker(&args);
             if is_docker {
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             }

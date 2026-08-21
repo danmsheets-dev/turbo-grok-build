@@ -883,10 +883,7 @@ strip = true
 "#
     );
     std::fs::write(dest.join("plugin.json"), plugin_json)?;
-    std::fs::write(
-        dest.join(".gitignore"),
-        "target/\nCargo.lock\n",
-    )?;
+    std::fs::write(dest.join(".gitignore"), "target/\nCargo.lock\n")?;
 
     println!("Created Rust WASM extension at {}", dest.display());
     println!("  name: {plugin_name}");
@@ -1032,7 +1029,10 @@ fn runtime_wasm_dest(root: &Path) -> PathBuf {
 
 fn validate_wasm_load(wasm_path: &Path) -> Result<()> {
     xai_grok_extension_runtime::ExtensionRuntime::validate_wasm_file(wasm_path).map_err(|e| {
-        anyhow::anyhow!("WASM load/ABI check failed for {}: {e}", wasm_path.display())
+        anyhow::anyhow!(
+            "WASM load/ABI check failed for {}: {e}",
+            wasm_path.display()
+        )
     })?;
     println!("  runtime load: ok (ABI + required exports)");
     Ok(())
@@ -1104,10 +1104,7 @@ fn validate_runtime_section(manifest: &PluginManifest, root: &Path, load: bool) 
     } else {
         println!(
             "    capabilities: {}",
-            caps.iter()
-                .map(|(s, _)| *s)
-                .collect::<Vec<_>>()
-                .join(", ")
+            caps.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", ")
         );
     }
     println!("  runtime validation: ok");

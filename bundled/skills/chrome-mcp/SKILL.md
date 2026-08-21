@@ -11,8 +11,10 @@ metadata:
 
 # Chrome MCP
 
-Turbo talks to **chrome-devtools MCP**, not a built-in browser. Discover tools
-with `search_tool` (`chrome-devtools`) and use the returned schemas only.
+Use **`browser_*` (Agent WebView)** unless the user asked for their **daily
+Chrome**. Discover chrome-devtools tools with `search_tool` (`chrome-devtools`)
+and use the returned schemas only. Do not prefer this MCP just because a page
+is "the web."
 
 ## Loop
 

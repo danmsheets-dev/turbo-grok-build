@@ -334,7 +334,10 @@ fn write_objects_alternates(source: &Path, worktree: &Path) {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    if !lines.iter().any(|l| l == &line || l.replace('\\', "/") == line) {
+    if !lines
+        .iter()
+        .any(|l| l == &line || l.replace('\\', "/") == line)
+    {
         lines.push(line);
     }
     let body = format!("{}\n", lines.join("\n"));
@@ -1405,9 +1408,11 @@ fn execute_git_checkout_worktree(plan: WorktreePlan) -> Result<CreateWorktreeRes
         })?;
     }
 
-    // Run `git -c checkout.workers=N worktree add --detach <dest> <ref>`.
+    // Run `git -c checkout.workers=N worktree add -B grok/<id> <dest> <ref>`.
     // checkout.workers enables parallel checkout so git populates the
-    // working tree using multiple threads.
+    // working tree using multiple threads. A named branch keeps commits
+    // attached (parent is already on `git_ref`, so --detach left detached HEAD).
+    let branch = crate::git::worktree::worktree_attach_branch_name(dest);
     let output = git::checkout::git_command()
         .current_dir(&source_root)
         .arg("-c")
@@ -1415,7 +1420,8 @@ fn execute_git_checkout_worktree(plan: WorktreePlan) -> Result<CreateWorktreeRes
         .args([
             "worktree",
             "add",
-            "--detach",
+            "-B",
+            &branch,
             &dest.to_string_lossy(),
             git_ref,
         ])
@@ -1858,8 +1864,7 @@ mod tests {
             .to_string_lossy()
             .replace('\\', "/");
         assert!(
-            body.replace('\\', "/").contains(&canon)
-                || body.contains("objects"),
+            body.replace('\\', "/").contains(&canon) || body.contains("objects"),
             "expected source objects path in alternates: {body}"
         );
     }

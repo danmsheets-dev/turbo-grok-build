@@ -1480,7 +1480,10 @@ fn resolve_child_cwd(
 /// Used as a fail-closed honesty check when isolation=worktree was requested
 /// and isolation_fallback is false — child CWD must not silently be the parent.
 pub(crate) fn path_looks_like_subagent_worktree(path: &Path) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let s = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     let has_subagent = s.contains("/subagent-");
     let under_product = s.contains("/.grok/worktrees/");
     let under_temp = s.contains("grok-subagent-worktrees");
@@ -1933,6 +1936,11 @@ struct SubagentExecutionBudget {
     first_progress_timeout_ms: Option<u64>,
 }
 
+fn agent_name_looks_like_reviewer(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("review")
+}
+
 /// True when the resolved model slug looks like NVIDIA Integrate / Nemotron.
 ///
 /// Matches catalog keys such as `nvidia/...`, `nvidia.*`, bare `nemotron-*`,
@@ -2012,13 +2020,17 @@ impl SubagentExecutionBudget {
         model_id: Option<&str>,
         allowed_paths_scoped: bool,
     ) -> Self {
-        // explicit timeout_ms > AgentDefinition.timeout_secs > NVIDIA platform default
+        let reviewer = agent_name_looks_like_reviewer(&definition.name);
+        // explicit timeout_ms > AgentDefinition.timeout_secs > reviewer 10 min
+        // > NVIDIA platform default (1h — cargo compile of tools/shell exceeds
+        // the old 10 min / 30 min budgets) > none. No upper cap on timeout_ms.
         let timeout_secs = match timeout_ms_override {
             Some(ms) if ms > 0 => Some(ms.div_ceil(1000).max(1)),
             _ => definition.timeout_secs.or_else(|| {
-                if model_is_nvidia_platform(model_id) {
-                    // RC8: NVIDIA agent path default hard wall-clock = 10 min.
+                if reviewer {
                     Some(600)
+                } else if model_is_nvidia_platform(model_id) {
+                    Some(3_600)
                 } else {
                     None
                 }
@@ -2031,17 +2043,18 @@ impl SubagentExecutionBudget {
                 .min(timeout.saturating_sub(1).max(1))
         });
         // Stall: explicit → scoped allowed_paths 3 min (finish after last tool
-        // so the parent can land) → NVIDIA / hard-budget 10 min.
+        // so the parent can land) → NVIDIA 30 min → hard-budget 10 min.
         let stall_timeout_ms = match stall_timeout_ms {
             Some(ms) if ms > 0 => Some(ms),
             _ if allowed_paths_scoped => Some(180_000),
-            _ if model_is_nvidia_platform(model_id) => Some(600_000),
+            _ if model_is_nvidia_platform(model_id) => Some(1_800_000),
             _ if timeout_secs.is_some() || definition.max_tool_calls.is_some() => Some(600_000),
             _ => None,
         };
+        let max_tool_calls = definition.max_tool_calls.or_else(|| reviewer.then_some(48));
         Self {
             max_turns: resolve_subagent_max_turns(definition.max_turns, parent_max_turns),
-            max_tool_calls: definition.max_tool_calls,
+            max_tool_calls,
             timeout_secs,
             finalize_grace_secs,
             stall_timeout_ms,
@@ -2116,6 +2129,11 @@ fn append_execution_budget_prompt(
     }
     if let Some(seconds) = budget.timeout_secs {
         limits.push(format!("{seconds} seconds total wall-clock time"));
+    }
+    if let Some(ms) = budget.stall_timeout_ms {
+        limits.push(format!(
+            "{ms}ms idle stall (pauses while a tool/shell is in flight; wall-clock timeout still applies)"
+        ));
     }
     let reminder = format!(
         "\n\n<execution_budget>\nYour execution budget is {}. Build a hypothesis, inspect only discriminating evidence, and leave enough budget to produce the required final answer. When warned that the budget is nearly exhausted, call no more tools and answer immediately from the evidence already collected.\n</execution_budget>",
@@ -2210,7 +2228,7 @@ fn budget_exhausted_message(
             budget.timeout_secs.unwrap_or_default()
         ),
         SubagentBudgetTrigger::Stall => format!(
-            "subagent stalled (no tool/token/turn progress for {}ms)",
+            "subagent stalled (no tool/token/turn progress and no in-flight tools for {}ms)",
             budget.stall_timeout_ms.unwrap_or_default()
         ),
         SubagentBudgetTrigger::FirstProgress => format!(
@@ -2220,6 +2238,50 @@ fn budget_exhausted_message(
         ),
         _ => "subagent execution budget requested finalization".to_string(),
     }
+}
+
+/// Hard budget decision used by the child watchdog.
+///
+/// In-flight tools (a running `bash` / Blender process) count as activity:
+/// first-progress and stall clocks pause until the dispatch finishes.
+/// Wall-clock `timeout_ms` still fires.
+fn evaluate_hard_budget(
+    budget: SubagentExecutionBudget,
+    elapsed: std::time::Duration,
+    last_progress_age: std::time::Duration,
+    tool_call_count: u32,
+    in_flight_tool_count: u32,
+    no_completed_progress: bool,
+) -> Option<SubagentBudgetTrigger> {
+    if budget
+        .timeout_secs
+        .is_some_and(|limit| elapsed >= std::time::Duration::from_secs(limit))
+    {
+        return Some(SubagentBudgetTrigger::Timeout);
+    }
+    let idle = in_flight_tool_count == 0;
+    if idle
+        && no_completed_progress
+        && budget
+            .first_progress_timeout_ms
+            .is_some_and(|limit| elapsed >= std::time::Duration::from_millis(limit))
+    {
+        return Some(SubagentBudgetTrigger::FirstProgress);
+    }
+    if budget
+        .max_tool_calls
+        .is_some_and(|limit| tool_call_count >= limit)
+    {
+        return Some(SubagentBudgetTrigger::MaxToolCalls);
+    }
+    if idle
+        && budget
+            .stall_timeout_ms
+            .is_some_and(|limit| last_progress_age >= std::time::Duration::from_millis(limit))
+    {
+        return Some(SubagentBudgetTrigger::Stall);
+    }
+    None
 }
 
 fn can_use_partial_budget_result(
@@ -2251,9 +2313,7 @@ fn budget_finalization_message(
         SubagentBudgetTrigger::MaxToolCalls
         | SubagentBudgetTrigger::Timeout
         | SubagentBudgetTrigger::Stall
-        | SubagentBudgetTrigger::FirstProgress => {
-            "the execution budget is exhausted".to_string()
-        }
+        | SubagentBudgetTrigger::FirstProgress => "the execution budget is exhausted".to_string(),
     };
     format!(
         "<system-reminder>\n{reason}. Stop investigating now. Do not call any more tools. Return the best answer supported by the evidence already collected, follow the required output headings, state unknowns honestly, and include exact verification steps for the working agent.\n</system-reminder>"
@@ -2306,31 +2366,19 @@ fn spawn_subagent_budget_monitor(
                 last_sig = sig;
                 last_progress = std::time::Instant::now();
             }
+            if signals.in_flight_tool_count > 0 {
+                last_progress = std::time::Instant::now();
+            }
 
-            let no_progress_yet = last_sig == (0, 0, 0);
-            let hard = if budget
-                .timeout_secs
-                .is_some_and(|limit| elapsed >= std::time::Duration::from_secs(limit))
-            {
-                Some(SubagentBudgetTrigger::Timeout)
-            } else if no_progress_yet
-                && budget.first_progress_timeout_ms.is_some_and(|limit| {
-                    elapsed >= std::time::Duration::from_millis(limit)
-                })
-            {
-                Some(SubagentBudgetTrigger::FirstProgress)
-            } else if budget
-                .max_tool_calls
-                .is_some_and(|limit| signals.tool_call_count >= limit)
-            {
-                Some(SubagentBudgetTrigger::MaxToolCalls)
-            } else if budget.stall_timeout_ms.is_some_and(|limit| {
-                last_progress.elapsed() >= std::time::Duration::from_millis(limit)
-            }) {
-                Some(SubagentBudgetTrigger::Stall)
-            } else {
-                None
-            };
+            let no_progress_yet = last_sig == (0, 0, 0) && signals.in_flight_tool_count == 0;
+            let hard = evaluate_hard_budget(
+                budget,
+                elapsed,
+                last_progress.elapsed(),
+                signals.tool_call_count,
+                signals.in_flight_tool_count,
+                no_progress_yet,
+            );
             if let Some(trigger) = hard {
                 state.store(trigger.code(), std::sync::atomic::Ordering::Release);
                 let _ = cmd_tx.send(SessionCommand::Cancel(crate::session::CancelOptions {
@@ -2448,8 +2496,7 @@ impl Drop for FreshWorktreeGuard {
 
 /// Env opt-in for the (otherwise fail-closed) shared-workspace fallback when
 /// isolation=worktree cannot be provided. See R6-10 / WP-C3.
-pub(crate) const ENV_SUBAGENT_ALLOW_SHARED_FALLBACK: &str =
-    "GROK_SUBAGENT_ALLOW_SHARED_FALLBACK";
+pub(crate) const ENV_SUBAGENT_ALLOW_SHARED_FALLBACK: &str = "GROK_SUBAGENT_ALLOW_SHARED_FALLBACK";
 
 /// Post-subagent disk reclaim policy (`GROK_POST_SUBAGENT_DISK_CLEAN`).
 ///
@@ -2536,7 +2583,8 @@ pub(crate) fn maybe_post_subagent_disk_clean() {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    match cmd.stdin(std::process::Stdio::null())
+    match cmd
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -2688,7 +2736,14 @@ pub(crate) fn validate_subagent_worktree_materialized(worktree: &Path) -> Result
     if !saw_content {
         // Fallback: `git -C worktree rev-parse --verify HEAD` and ls-tree nonempty.
         let out = std::process::Command::new("git")
-            .args(["-C", &worktree.to_string_lossy(), "ls-tree", "-r", "--name-only", "HEAD"])
+            .args([
+                "-C",
+                &worktree.to_string_lossy(),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "HEAD",
+            ])
             .output();
         match out {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
@@ -2769,10 +2824,7 @@ pub(crate) fn prune_soft_preserved_worktrees(base: &Path) {
 
 /// Delete **non-live** `subagent-*` directories older than `max_age` (mtime).
 /// Used when `GROK_SUBAGENT_KEEP_N=0`. Best-effort; never panics.
-pub(crate) fn prune_soft_preserved_worktrees_by_age(
-    base: &Path,
-    max_age: std::time::Duration,
-) {
+pub(crate) fn prune_soft_preserved_worktrees_by_age(base: &Path, max_age: std::time::Duration) {
     if !base.is_dir() {
         return;
     }
@@ -2900,14 +2952,92 @@ pub(crate) fn ensure_min_free_space_for_worktree(base: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// The parent session's working directory — the source path for a subagent
-/// worktree. Prefers the reconstructed `SessionInfo` cwd, falling back to
-/// `parent_cwd`.
-fn parent_source_cwd(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
-    ctx.parent_session_info
+/// Resolve the git tree a worktree-isolated child is created from.
+///
+/// Order (first hit wins):
+/// 1. Spawn `cwd` when it is (or is inside) a git repo — umbrella sessions
+///    pass the nested checkout here (`isolation=worktree` + `cwd`).
+/// 2. Git root of the parent session cwd.
+/// 3. `GROK_SUBAGENT_REPO_ROOT` when it is an existing directory.
+/// 4. Exactly one nested git repo directly under the parent cwd.
+/// 5. Parent cwd (worktree create then fail-closes if it is not a git repo).
+///
+/// Multiple nested git directories without an explicit `cwd` / env selection
+/// do **not** guess — isolation stays fail-closed.
+pub(crate) fn resolve_worktree_source_cwd(
+    parent_cwd: &Path,
+    spawn_cwd: Option<&str>,
+) -> PathBuf {
+    if let Some(raw) = spawn_cwd {
+        let explicit = PathBuf::from(raw.trim());
+        if explicit.is_dir() {
+            if let Ok(root) =
+                xai_grok_workspace::session::git::find_main_repo_root_from_path(&explicit)
+            {
+                return root;
+            }
+            if explicit.join(".git").exists() {
+                return explicit;
+            }
+        }
+    }
+    if let Ok(root) = xai_grok_workspace::session::git::find_main_repo_root_from_path(parent_cwd) {
+        return root;
+    }
+    if let Ok(raw) = std::env::var("GROK_SUBAGENT_REPO_ROOT") {
+        let explicit = PathBuf::from(raw.trim());
+        if explicit.is_dir() {
+            tracing::info!(
+                source = %parent_cwd.display(),
+                repo_root = %explicit.display(),
+                "Using explicit nested repository root for subagent isolation"
+            );
+            return explicit;
+        }
+        tracing::warn!(
+            repo_root = %explicit.display(),
+            "GROK_SUBAGENT_REPO_ROOT is not an existing directory; retaining parent cwd"
+        );
+    }
+    if let Some(nested) = discover_unique_nested_git(parent_cwd) {
+        tracing::info!(
+            source = %parent_cwd.display(),
+            repo_root = %nested.display(),
+            "Using unique nested git repository for subagent isolation"
+        );
+        return nested;
+    }
+    parent_cwd.to_path_buf()
+}
+
+/// Immediate child directory that contains a `.git` file or directory, only
+/// when **exactly one** such child exists.
+fn discover_unique_nested_git(parent: &Path) -> Option<PathBuf> {
+    let rd = std::fs::read_dir(parent).ok()?;
+    let mut found: Option<PathBuf> = None;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if !path.join(".git").exists() {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(path);
+    }
+    found
+}
+
+fn parent_source_cwd(ctx: &SubagentSpawnContext, spawn_cwd: Option<&str>) -> std::path::PathBuf {
+    let requested = ctx
+        .parent_session_info
         .as_ref()
         .map(|i| std::path::PathBuf::from(&i.cwd))
-        .unwrap_or_else(|| std::path::PathBuf::from(&ctx.parent_cwd))
+        .unwrap_or_else(|| std::path::PathBuf::from(&ctx.parent_cwd));
+    resolve_worktree_source_cwd(&requested, spawn_cwd)
 }
 /// Effective permission mode for a spawned subagent. Plugin agents never honor a
 /// non-default mode; under the pin, `bypassPermissions` downgrades to `Default`
@@ -2926,8 +3056,11 @@ fn resolve_subagent_permission_mode(
     requested
 }
 /// Main repo root for a subagent's source: the durable repo a completion snapshot is transferred into and the repo a resume rehydrates from — both arms MUST resolve this identically.
-fn resolve_subagent_source_repo(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
-    let source_cwd = parent_source_cwd(ctx);
+fn resolve_subagent_source_repo(
+    ctx: &SubagentSpawnContext,
+    spawn_cwd: Option<&str>,
+) -> std::path::PathBuf {
+    let source_cwd = parent_source_cwd(ctx, spawn_cwd);
     xai_grok_workspace::session::git::find_main_repo_root_from_path(&source_cwd)
         .unwrap_or(source_cwd)
 }
@@ -3144,12 +3277,13 @@ fn child_run_output(
         result.snapshot_ref = snapshot_ref.clone();
     }
     if result.error_class.is_none() {
-        result.error_class = xai_grok_tools::implementations::grok_build::task::types::classify_subagent_error_class(
-            result.success,
-            result.cancelled,
-            result.termination_reason.as_deref(),
-            result.error.as_deref(),
-        );
+        result.error_class =
+            xai_grok_tools::implementations::grok_build::task::types::classify_subagent_error_class(
+                result.success,
+                result.cancelled,
+                result.termination_reason.as_deref(),
+                result.error.as_deref(),
+            );
     }
     ChildRunOutput {
         result,
@@ -3436,6 +3570,10 @@ pub(crate) struct SubagentMeta {
     /// `resume_from` reconstruction after in-memory cache eviction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_cwd: Option<String>,
+    /// Model-facing DisplayCwd (parent path under isolation=worktree remap).
+    /// Spawn proof: compare to `child_cwd` / `worktree_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_cwd: Option<String>,
     /// Worktree path if the child used `isolation=worktree`. Persisted
     /// for durable `resume_from` reconstruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3886,7 +4024,10 @@ fn isolation_fields_from_meta(meta: &SubagentMeta) -> FinishIsolation {
     let isolation = if isolation_fallback {
         Some("shared_fallback".to_owned())
     } else if worktree_path.is_some()
-        || matches!(worktree_state.as_deref(), Some("preserved" | "cleaned" | "live"))
+        || matches!(
+            worktree_state.as_deref(),
+            Some("preserved" | "cleaned" | "live")
+        )
         || meta.baseline_ref.is_some()
         || meta.snapshot_ref.is_some()
     {

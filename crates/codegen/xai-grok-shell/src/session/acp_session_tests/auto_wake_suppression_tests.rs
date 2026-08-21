@@ -1043,7 +1043,7 @@ async fn subagent_completed_drops_matching_pending_input() {
                 isolation_fallback: false,
                 snapshot_ref: None,
                 worktree_state: None,
-                                patch_path: None,
+                patch_path: None,
                 diffstat: None,
                 changed_paths: None,
                 baseline_ref: None,
@@ -1581,7 +1581,7 @@ async fn between_turn_drain_suppresses_reserved_subagents() {
                             isolation: None,
                             worktree_path: None,
                             worktree_state: None,
-            isolation_requested: None,
+                            isolation_requested: None,
                         };
                         let mut completions = vec![mk("sa-autowake"), mk("sa-fresh")];
                         completions.retain(|c| !req.suppress_ids.contains(&c.subagent_id));

@@ -325,6 +325,82 @@ pub fn extract_file_content_lines(
         extracted_images,
     }
 }
+
+/// Format a bounded line window without requiring the caller to retain the
+/// prefix or suffix of a large file. `first_line` is the 1-based line number
+/// represented by `file_content`.
+pub fn extract_file_content_window(file_content: &str, first_line: usize) -> ExtractedContent {
+    use std::borrow::Cow;
+    use std::fmt::Write as _;
+
+    let mut content = String::new();
+    let mut concise = String::new();
+    let mut raw_output = file_content.to_owned();
+    let mut extracted_images = Vec::new();
+    let first_line = first_line.max(1);
+
+    for (index, line) in file_content.split_inclusive('\n').enumerate() {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if index > 0 {
+            content.push('\n');
+            concise.push('\n');
+        }
+        let line: Cow<'_, str> = match crate::util::base64_images::try_extract_base64_images(line) {
+            Some(result) => {
+                extracted_images.extend(result.images);
+                Cow::Owned(result.text)
+            }
+            None => Cow::Borrowed(line),
+        };
+        let line_number = first_line.saturating_add(index);
+        if index == 0 || line_number.is_multiple_of(10) {
+            _ = write!(&mut content, "{line_number}→{line}").ok();
+            _ = write!(&mut concise, "{line_number}→{line}").ok();
+        } else {
+            content.push_str(&line);
+            concise.push_str(&line);
+        }
+    }
+
+    if file_content.ends_with('\n') {
+        content.push('\n');
+        concise.push('\n');
+    }
+    if raw_output.ends_with("\r\n") {
+        raw_output.truncate(raw_output.len().saturating_sub(2));
+        raw_output.push('\n');
+    }
+
+    ExtractedContent {
+        content,
+        content_concise: concise,
+        raw_output,
+        extracted_images,
+    }
+}
+
+/// Resolve a line offset using metadata rather than the complete file body.
+fn resolve_read_start_line_from_metadata(
+    total_lines: usize,
+    ends_with_newline: bool,
+    offset: Option<i64>,
+) -> usize {
+    let offset_raw = offset.unwrap_or(1);
+    if offset_raw == 0 {
+        return 1;
+    }
+    if offset_raw > 0 {
+        return offset_raw as usize;
+    }
+    let total_fields = total_lines.saturating_add(if total_lines > 0 && !ends_with_newline {
+        1
+    } else {
+        0
+    });
+    (total_fields as i64 + offset_raw + 1).max(1) as usize
+}
+
 /// Core read-file logic shared by `ReadFileTool` and `ReadFileConciseTool`.
 ///
 /// Always uses the padded `content` field. Concise post-processing
@@ -378,7 +454,9 @@ pub(crate) async fn run_read_file(
             )));
         }
     }
-    let file_bytes = match fs.read_file(&path).await {
+    // Probe only a bounded prefix first. Special formats are re-read in full
+    // below, while ordinary text uses streaming line windows.
+    let file_probe = match fs.read_file_prefix(&path, 64 * 1024).await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::debug!(?e, "Failed to read file");
@@ -449,7 +527,29 @@ pub(crate) async fn run_read_file(
             });
         }
     };
-    if let Ok(metadata) = bytes_to_metadata(&file_bytes)
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let probe_metadata = bytes_to_metadata(&file_probe).ok();
+    let needs_full_read = is_skill_markdown
+        || extension == "pptx"
+        || is_pdf_file(&file_probe, &extension)
+        || probe_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.is_image());
+    let file_bytes = if needs_full_read {
+        fs.read_file(&path).await.map_err(|e| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("read_file").expect("valid tool id"),
+                format!("Failed to read file: {e}"),
+            )
+        })?
+    } else {
+        Vec::new()
+    };
+    if let Some(metadata) = probe_metadata
         && metadata.is_image()
     {
         return Ok(crate::implementations::read_file::image::image_read_output(
@@ -458,12 +558,7 @@ pub(crate) async fn run_read_file(
         )
         .await);
     }
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if is_pdf_file(&file_bytes, &extension) {
+    if is_pdf_file(&file_probe, &extension) {
         let mut output =
             handle_pdf(file_bytes, &path, input.pages, input.format.as_deref()).await?;
         if let ReadFileOutput::FileContent(ref mut fc) = output {
@@ -482,7 +577,7 @@ pub(crate) async fn run_read_file(
     if extension == "pptx" {
         return handle_pptx(file_bytes, &path).await;
     }
-    if crate::util::binary::is_binary(&extension, &file_bytes) {
+    if crate::util::binary::is_binary(&extension, &file_probe) {
         tracing::info!(
             path = %path.display(),
             extension = %extension,
@@ -495,8 +590,13 @@ pub(crate) async fn run_read_file(
             path.display()
         )));
     }
-    let file_content = String::from_utf8_lossy(&file_bytes).into_owned();
-    if file_content.is_empty() {
+    let total_lines = fs.read_file_line_count(&path).await.map_err(|e| {
+        xai_tool_runtime::ToolError::execution(
+            xai_tool_protocol::ToolId::new("read_file").expect("valid tool id"),
+            format!("Failed to count file lines: {e}"),
+        )
+    })?;
+    if total_lines == 0 {
         let stored_offset = stored_read_offset(input.offset);
         return Ok(ReadFileOutput::FileContent(FileContent {
             content: String::new(),
@@ -509,27 +609,37 @@ pub(crate) async fn run_read_file(
             extracted_images: Vec::new(),
         }));
     }
-    let total_lines = file_content.matches('\n').count() + 1;
     let max_lines = {
         let res = resources.lock().await;
         res.get::<TruncationCfg>()
             .map(|t| t.0.max_lines_read())
             .unwrap_or_else(|| TruncationConfig::default().max_lines_read())
     };
-    let (effective_offset, effective_limit) = if is_skill_markdown {
-        (None, None)
+    let extracted = if is_skill_markdown {
+        let file_content = String::from_utf8_lossy(&file_bytes);
+        extract_file_content_lines(&file_content, None, None, total_lines)
     } else {
-        (
-            input.offset,
-            Some(input.limit.unwrap_or(usize::MAX).min(max_lines)),
-        )
+        let ends_with_newline = fs.read_file_ends_with_newline(&path).await.map_err(|e| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("read_file").expect("valid tool id"),
+                format!("Failed to inspect file ending: {e}"),
+            )
+        })?;
+        let first_line =
+            resolve_read_start_line_from_metadata(total_lines, ends_with_newline, input.offset);
+        let limit = input.limit.unwrap_or(max_lines).min(max_lines);
+        let window = fs
+            .read_file_lines(&path, first_line, limit)
+            .await
+            .map_err(|e| {
+                xai_tool_runtime::ToolError::execution(
+                    xai_tool_protocol::ToolId::new("read_file").expect("valid tool id"),
+                    format!("Failed to read file window: {e}"),
+                )
+            })?;
+        let file_content = String::from_utf8_lossy(&window);
+        extract_file_content_window(&file_content, first_line)
     };
-    let extracted = extract_file_content_lines(
-        &file_content,
-        effective_offset,
-        effective_limit,
-        total_lines,
-    );
     let token_count = crate::util::truncate::estimate_tokens(&extracted.content);
     if !is_skill_markdown && token_count > MAX_NUM_TOKENS {
         let (grep_name, execute_name);
@@ -1294,6 +1404,19 @@ mod tests {
             other => panic!("Expected FileTooLarge, got {:?}", other),
         }
     }
+    #[test]
+    fn bounded_window_preserves_absolute_line_numbers() {
+        let extracted = extract_file_content_window("line2\nline3", 2);
+        assert_eq!(extracted.content, "2→line2\nline3");
+        assert_eq!(extracted.raw_output, "line2\nline3");
+    }
+
+    #[test]
+    fn bounded_window_does_not_add_implicit_trailing_line() {
+        let extracted = extract_file_content_window("line2\n", 2);
+        assert_eq!(extracted.content, "2→line2\n");
+    }
+
     #[test]
     fn test_extract_file_content_lines_basic() {
         let extracted = extract_file_content_lines("1\n2\r\n3\n", None, None, 4);

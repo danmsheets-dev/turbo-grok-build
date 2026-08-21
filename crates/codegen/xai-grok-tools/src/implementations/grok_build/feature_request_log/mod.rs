@@ -40,9 +40,7 @@ pub struct FeatureRequestLogInput {
     pub priority: Option<String>,
 
     #[serde(default)]
-    #[schemars(
-        description = "Product components, e.g. [\"subagent\",\"land\",\"scheduler\"]"
-    )]
+    #[schemars(description = "Product components, e.g. [\"subagent\",\"land\",\"scheduler\"]")]
     pub component: Option<Vec<String>>,
 
     #[serde(default)]
@@ -220,9 +218,9 @@ impl xai_tool_runtime::Tool for FeatureRequestLogTool {
             .and_then(xai_grok_developer_log::RequestPriority::parse);
 
         let session_id = ctx.get::<SessionContext>().map(|s| s.0.clone());
-        let cwd_hash = ctx.get::<Cwd>().map(|c| {
-            xai_grok_config::encode_cwd_dirname(&c.0.to_string_lossy())
-        });
+        let cwd_hash = ctx
+            .get::<Cwd>()
+            .map(|c| xai_grok_config::encode_cwd_dirname(&c.0.to_string_lossy()));
 
         let request = xai_grok_developer_log::FeatureRequestReport {
             title: input.title,
@@ -268,11 +266,7 @@ impl xai_tool_runtime::Tool for FeatureRequestLogTool {
             xai_tool_runtime::ToolError::custom("feature_request_log_failed", e.to_string())
         })?;
 
-        let action = if result.is_new {
-            "Created"
-        } else {
-            "Updated"
-        };
+        let action = if result.is_new { "Created" } else { "Updated" };
         let message = format!(
             "{action} Feature Request Log entry `{}` (fingerprint `{}`, occurrences={}, priority={}, class={}). Path: {}. Review with `turbo features show {}` or `turbo features export`.",
             result.request_id,

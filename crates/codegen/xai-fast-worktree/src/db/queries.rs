@@ -86,10 +86,7 @@ pub fn unregister(conn: &Connection, id: &str) -> Result<bool> {
 pub fn unregister_by_path(conn: &Connection, path: &Path) -> Result<bool> {
     let path_str = path_for_db(path).to_string_lossy().into_owned();
     let affected = conn
-        .execute(
-            "DELETE FROM worktrees WHERE path = ?1",
-            params![path_str],
-        )
+        .execute("DELETE FROM worktrees WHERE path = ?1", params![path_str])
         .context("failed to unregister worktree by path")?;
     Ok(affected > 0)
 }
@@ -139,11 +136,7 @@ pub fn get_by_label(conn: &Connection, label: &str) -> Result<Option<WorktreeRec
 
 pub fn get_by_path(conn: &Connection, path: &Path) -> Result<Option<WorktreeRecord>> {
     let path_str = path_for_db(path).to_string_lossy().into_owned();
-    get_one(
-        conn,
-        "SELECT * FROM worktrees WHERE path = ?1",
-        &path_str,
-    )
+    get_one(conn, "SELECT * FROM worktrees WHERE path = ?1", &path_str)
 }
 
 pub fn list(conn: &Connection, filter: &ListFilter) -> Result<Vec<WorktreeRecord>> {

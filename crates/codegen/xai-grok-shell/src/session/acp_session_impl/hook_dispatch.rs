@@ -384,7 +384,7 @@ mod notification_hook_filter_tests {
                 output_total_bytes: 0,
             },
             will_wake: false,
-            };
+        };
         assert!(notification_hook_for_update(&update).is_none());
     }
 }

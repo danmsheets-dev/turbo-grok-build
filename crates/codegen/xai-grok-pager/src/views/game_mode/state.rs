@@ -57,8 +57,7 @@ const SUCCESS_WAVE_BUCKETS: u64 = 10;
 /// that the wakeup tail it holds on a room that is otherwise parking stays
 /// inside ~18 Slow ticks, once per success event (see
 /// [`GameModeState::success_wave_t`]).
-const SUCCESS_WAVE: Duration =
-    Duration::from_millis(SUCCESS_WAVE_BUCKET_MS * SUCCESS_WAVE_BUCKETS);
+const SUCCESS_WAVE: Duration = Duration::from_millis(SUCCESS_WAVE_BUCKET_MS * SUCCESS_WAVE_BUCKETS);
 
 /// Minimum wall time between two token-throughput samples on one desk (§4 #9).
 ///
@@ -437,7 +436,8 @@ pub struct GameModeState {
     pub(crate) pixel_paint: Option<RgbaImage>,
     /// Precomputed halfblock cell colors for the current fingerprint (skip
     /// per-paint image sampling — triple-scan P1).
-    pub(crate) pixel_halfblock: Option<xai_grok_pager_render::render::image_overlay::HalfblockCellCache>,
+    pub(crate) pixel_halfblock:
+        Option<xai_grok_pager_render::render::image_overlay::HalfblockCellCache>,
     /// Reused high-res compose canvas (avoids full-frame alloc on every miss).
     pub(crate) pixel_compose_scratch: Option<RgbaImage>,
     /// Visual fingerprint for the cached composited frame (see [`Self::visual_fingerprint`]).
@@ -870,9 +870,7 @@ impl GameModeState {
         let now = Instant::now();
         let fp = self.visual_fingerprint(cell_w, cell_h, now);
         // Hit: terminal paint + cell cache present (high-res scratch optional).
-        if self.pixel_frame_fp == fp
-            && self.pixel_paint.is_some()
-            && self.pixel_halfblock.is_some()
+        if self.pixel_frame_fp == fp && self.pixel_paint.is_some() && self.pixel_halfblock.is_some()
         {
             return true;
         }
@@ -1299,8 +1297,11 @@ impl GameModeState {
             .collect();
 
         // Drop finished overflow IDs so +N stays accurate.
-        self.door_queue
-            .retain(|id| agents.iter().any(|a| a.child_session_id == *id && a.running));
+        self.door_queue.retain(|id| {
+            agents
+                .iter()
+                .any(|a| a.child_session_id == *id && a.running)
+        });
 
         // Arm brief attention only on **new** failed child IDs (not every sync).
         //
@@ -1456,9 +1457,7 @@ impl GameModeState {
 
         self.overflow_count = self.door_queue.len();
         self.update_supervisor(supervisor_working);
-        let attention_active = self
-            .attention_until
-            .is_some_and(|t| t > Instant::now());
+        let attention_active = self.attention_until.is_some_and(|t| t > Instant::now());
         let wall_before = self.wall;
         self.wall = super::wall::compute_wall_mode(
             agents,
@@ -1762,10 +1761,7 @@ impl GameModeState {
                             // Transition exactly once out of Celebrate.
                             if !self.handoff_queue.contains(&i)
                                 && !self.desks.iter().any(|d| {
-                                    matches!(
-                                        d.phase,
-                                        ActorPhase::WalkToBoss | ActorPhase::Handoff
-                                    )
+                                    matches!(d.phase, ActorPhase::WalkToBoss | ActorPhase::Handoff)
                                 })
                             {
                                 self.desks[i].phase = ActorPhase::WalkToBoss;
@@ -2038,10 +2034,20 @@ mod tests {
     #[test]
     fn stable_seat_map() {
         let mut s = GameModeState::new();
-        s.sync_from_snapshots(&[snap("x", true), snap("y", true)], false, GameTier::Normal, false);
+        s.sync_from_snapshots(
+            &[snap("x", true), snap("y", true)],
+            false,
+            GameTier::Normal,
+            false,
+        );
         let ix = *s.seat_map.get("x").unwrap();
         let iy = *s.seat_map.get("y").unwrap();
-        s.sync_from_snapshots(&[snap("y", true), snap("x", true)], false, GameTier::Normal, false);
+        s.sync_from_snapshots(
+            &[snap("y", true), snap("x", true)],
+            false,
+            GameTier::Normal,
+            false,
+        );
         assert_eq!(s.seat_map.get("x"), Some(&ix));
         assert_eq!(s.seat_map.get("y"), Some(&iy));
     }
@@ -2816,7 +2822,10 @@ mod tests {
         s.sync_from_snapshots(&[], false, GameTier::Compact, false);
         assert_eq!(s.wall, WallMode::WorkFinished);
         let armed = s.success_fx_until.expect("WORK FINISHED must sweep");
-        assert!(s.success_wave_t(Instant::now()).is_some(), "and it must be live");
+        assert!(
+            s.success_wave_t(Instant::now()).is_some(),
+            "and it must be live"
+        );
 
         // The wall stays on WorkFinished for the rest of the session: further
         // syncs must not push the deadline out.
@@ -2886,7 +2895,10 @@ mod tests {
             s.success_fx_until.is_none(),
             "tick_anim must consume the expiry"
         );
-        assert!(s.take_redraw_dirty(), "the un-lit room must be repainted once");
+        assert!(
+            s.take_redraw_dirty(),
+            "the un-lit room must be repainted once"
+        );
         assert!(
             !s.needs_animation_tick(),
             "and then the room must park again (PERF-1)"
@@ -2993,7 +3005,11 @@ mod tests {
         for _ in 0..5 {
             s.sync_from_snapshots(&[a.clone()], false, GameTier::Comfort, false);
         }
-        assert_eq!(s.desks[0].busy, BusyLevel::Normal, "the window is still open");
+        assert_eq!(
+            s.desks[0].busy,
+            BusyLevel::Normal,
+            "the window is still open"
+        );
 
         // ...then one sync after the window elapses reads the whole delta.
         s.desks[0].tokens_at = Instant::now() - Duration::from_secs(2);
@@ -3036,11 +3052,19 @@ mod tests {
         let mut hot = seated(BusyLevel::Hot);
         let fp0 = hot.visual_fingerprint(80, 24, Instant::now());
         hot.tick = 2;
-        assert_ne!(hot.visual_fingerprint(80, 24, Instant::now()), fp0, "hot moves at tick/2");
+        assert_ne!(
+            hot.visual_fingerprint(80, 24, Instant::now()),
+            fp0,
+            "hot moves at tick/2"
+        );
         let mut normal = seated(BusyLevel::Normal);
         let fp1 = normal.visual_fingerprint(80, 24, Instant::now());
         normal.tick = 2;
-        assert_eq!(normal.visual_fingerprint(80, 24, Instant::now()), fp1, "normal at tick/4");
+        assert_eq!(
+            normal.visual_fingerprint(80, 24, Instant::now()),
+            fp1,
+            "normal at tick/4"
+        );
 
         // The level itself is an input: same tick, different cadence bucket.
         assert_ne!(

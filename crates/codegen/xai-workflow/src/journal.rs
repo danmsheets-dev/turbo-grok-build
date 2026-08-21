@@ -48,6 +48,7 @@ pub struct Journal {
     entries: Vec<JournalEntry>,
     path: Option<PathBuf>,
     bytes: u64,
+    line_starts: Vec<u64>,
     last_line_start: Option<u64>,
 }
 
@@ -57,6 +58,7 @@ impl Journal {
             entries: Vec::new(),
             path,
             bytes: 0,
+            line_starts: Vec::new(),
             last_line_start: None,
         }
     }
@@ -77,6 +79,7 @@ impl Journal {
         let mut offset = 0usize;
         let mut line_number = 0usize;
         let mut bytes = content.len() as u64;
+        let mut line_starts = Vec::new();
         let mut last_line_start = None;
         while offset < content.len() {
             line_number += 1;
@@ -98,6 +101,7 @@ impl Journal {
                         }
                         validate_sequence(&entries, &entry)?;
                         entries.push(entry);
+                        line_starts.push(offset as u64);
                         last_line_start = Some(offset as u64);
                         terminate_line(&path)?;
                         bytes = bytes.saturating_add(1);
@@ -135,12 +139,14 @@ impl Journal {
             }
             validate_sequence(&entries, &entry)?;
             entries.push(entry);
+            line_starts.push(line_start);
             last_line_start = Some(line_start);
         }
         Ok(Self {
             entries,
             path: Some(path),
             bytes,
+            line_starts,
             last_line_start,
         })
     }
@@ -219,9 +225,39 @@ impl Journal {
             append_line(path, &line)?;
         }
         self.last_line_start = Some(self.bytes);
+        self.line_starts.push(self.bytes);
         self.bytes = self.bytes.saturating_add(line.len() as u64);
         self.entries.push(entry);
         Ok(())
+    }
+
+    /// Remove the failed child attempt and any journaled cleanup calls after
+    /// it. Task transitions are durable outside the journal, so a retry must
+    /// replay the child rather than replaying the failed result.
+    pub fn prune_trailing_failed_agent(&mut self) -> Result<bool, JournalError> {
+        let Some(index) = self.entries.iter().rposition(|entry| {
+            entry.kind == "spawn_agent"
+                && entry
+                    .result
+                    .get("success")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        }) else {
+            return Ok(false);
+        };
+        let new_len = if index == 0 {
+            0
+        } else {
+            self.line_starts[index]
+        };
+        if let Some(path) = &self.path {
+            truncate_tail(path, new_len)?;
+        }
+        self.entries.truncate(index);
+        self.line_starts.truncate(index);
+        self.bytes = new_len;
+        self.last_line_start = self.line_starts.last().copied();
+        Ok(true)
     }
 
     pub fn prune_trailing_host_error(
@@ -246,8 +282,9 @@ impl Journal {
             truncate_tail(path, new_len)?;
         }
         self.entries.pop();
+        self.line_starts.pop();
         self.bytes = new_len;
-        self.last_line_start = None;
+        self.last_line_start = self.line_starts.last().copied();
         Ok(true)
     }
 }
@@ -273,9 +310,16 @@ fn read_journal_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT prevents a symlink/reparse-point
+        // follow between metadata validation and open.
+        options.custom_flags(0x0020_0000);
+    }
     let file = options.open(path)?;
     let opened = file.metadata()?;
-    if !opened.is_file() || opened.len() > MAX_JOURNAL_BYTES {
+    if metadata_is_reparse_point(&opened) || !opened.is_file() || opened.len() > MAX_JOURNAL_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "journal changed during open",
@@ -305,14 +349,80 @@ fn validate_sequence(entries: &[JournalEntry], entry: &JournalEntry) -> Result<(
     Ok(())
 }
 
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x0400_0000 != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn reject_reparse_components(path: &Path) -> std::io::Result<()> {
+    for component in path.ancestors() {
+        match std::fs::symlink_metadata(component) {
+            Ok(metadata) if metadata_is_reparse_point(&metadata) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "journal path contains a reparse point: {}",
+                        component.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn open_journal_for_write(
+    path: &Path,
+    configure: impl FnOnce(&mut std::fs::OpenOptions),
+) -> std::io::Result<std::fs::File> {
+    reject_reparse_components(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    configure(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    if metadata_is_reparse_point(&file.metadata()?) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "journal is a reparse point",
+        ));
+    }
+    Ok(file)
+}
+
 fn truncate_tail(path: &Path, len: u64) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    let file = open_journal_for_write(path, |options| {
+        options.write(true);
+    })?;
     file.set_len(len)?;
     file.sync_data()
 }
 
 fn terminate_line(path: &Path) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    let mut file = open_journal_for_write(path, |options| {
+        options.append(true);
+    })?;
     file.write_all(b"\n")?;
     file.sync_data()
 }
@@ -321,10 +431,9 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = open_journal_for_write(path, |options| {
+        options.create(true).append(true);
+    })?;
     file.write_all(line.as_bytes())?;
     file.sync_data()
 }

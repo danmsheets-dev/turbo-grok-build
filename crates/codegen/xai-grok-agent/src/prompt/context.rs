@@ -276,6 +276,7 @@ impl PromptContext {
             "os_name": self.os_name.as_deref().unwrap_or(""),
             "shell_path": self.shell_path.as_deref().unwrap_or(""),
             "working_directory": self.working_directory.as_deref().unwrap_or(""),
+            "tool_working_directory": self.tool_working_directory.as_deref().unwrap_or(""),
             "current_date": self.current_date.as_deref().unwrap_or(""),
             "is_non_interactive": self.is_non_interactive,
             "system_prompt_label": self.system_prompt_label.as_str(),
@@ -950,6 +951,7 @@ mod tests {
             os_name => "linux",
             shell_path => "/bin/bash",
             working_directory => "/workspace",
+            tool_working_directory => "",
             current_date => "2026-03-26",
             memory_enabled => true,
             role_instructions => "",
@@ -993,9 +995,36 @@ mod tests {
             "should contain Workspace Path value"
         );
         assert!(
+            !rendered.contains("Tool CWD:"),
+            "identical DisplayCwd/tool CWD must not add a remap note"
+        );
+        assert!(
             rendered.contains("Current Date: 2026-03-26"),
             "should contain Current Date value"
         );
+    }
+    #[test]
+    fn child_user_info_proves_tool_cwd_when_display_cwd_is_parent() {
+        let ctx = minijinja::context! {
+            os_name => "windows",
+            shell_path => "powershell",
+            working_directory => r"H:\Pirates",
+            tool_working_directory => r"C:\Users\x\.grok\worktrees\pirates\subagent-1",
+            current_date => "2026-08-20",
+            memory_enabled => false,
+            role_instructions => "",
+            persona_instructions => "",
+            include_browser_verification => false,
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {}
+            },
+        };
+        let rendered = render_subagent_template(ctx);
+        assert!(rendered.contains(r"Workspace Path: H:\Pirates"));
+        assert!(rendered.contains(r"Tool CWD: C:\Users\x\.grok\worktrees\pirates\subagent-1"));
+        assert!(rendered.contains(
+            "Do not refuse because Workspace Path or Get-Location looks like the parent"
+        ));
     }
     #[test]
     fn child_rendered_prompt_includes_project_instructions_like_main_agent() {

@@ -130,7 +130,9 @@ impl SlashCommand for TreeCommand {
                 }
             }
             other => {
-                return CommandResult::Error(format!("unknown `/tree` subcommand `{other}`\n{USAGE}"));
+                return CommandResult::Error(format!(
+                    "unknown `/tree` subcommand `{other}`\n{USAGE}"
+                ));
             }
         };
 
@@ -148,8 +150,8 @@ impl SlashCommand for TreeCommand {
 fn capture_tree(args: crate::tree_cmd::TreeArgs) -> anyhow::Result<String> {
     // tree_cmd::run writes to stdout; for slash UX we call a stringy path.
     use xai_workspace_tree::{
-        inject_card, load_index_for_root, prune_store, resolve_path, search, summary,
-        workspace_id_for_path, workspace_store_dir, WorkspaceTreeConfig,
+        WorkspaceTreeConfig, inject_card, load_index_for_root, prune_store, resolve_path, search,
+        summary, workspace_id_for_path, workspace_store_dir,
     };
 
     let config = WorkspaceTreeConfig::from_env();
@@ -181,7 +183,9 @@ fn capture_tree(args: crate::tree_cmd::TreeArgs) -> anyhow::Result<String> {
                     for e in &s.top_level {
                         lines.push(format!("  {}/", e.name));
                     }
-                    lines.push("Tools: workspace_tree, resolve_path · CLI: turbo tree status".into());
+                    lines.push(
+                        "Tools: workspace_tree, resolve_path · CLI: turbo tree status".into(),
+                    );
                     Ok(lines.join("\n"))
                 }
                 Err(e) => Ok(format!(
@@ -211,7 +215,10 @@ fn capture_tree(args: crate::tree_cmd::TreeArgs) -> anyhow::Result<String> {
             Ok(out.join("\n"))
         }
         crate::tree_cmd::TreeCommand::InjectPreview {
-            root, mode, subagent, ..
+            root,
+            mode,
+            subagent,
+            ..
         } => {
             let root = root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let mut cfg = config.clone();
@@ -262,11 +269,7 @@ fn capture_tree(args: crate::tree_cmd::TreeArgs) -> anyhow::Result<String> {
                 Ok(lines.join("\n"))
             }
         }
-        crate::tree_cmd::TreeCommand::Search {
-            query,
-            root,
-            limit,
-        } => {
+        crate::tree_cmd::TreeCommand::Search { query, root, limit } => {
             let root = root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let index = xai_grok_tools::util::workspace_tree_get_or_load(&root, &config)
                 .map_err(anyhow::Error::msg)?;
@@ -299,10 +302,8 @@ fn capture_tree(args: crate::tree_cmd::TreeArgs) -> anyhow::Result<String> {
                     "prune dry-run: would drop indexes older than {max_age_days} day(s) (keep_newest={keep_newest}). Re-run with --execute to delete."
                 ));
             }
-            let max_age =
-                std::time::Duration::from_secs(max_age_days.saturating_mul(24 * 3600));
-            let report =
-                prune_store(&config, max_age, keep_newest).map_err(anyhow::Error::msg)?;
+            let max_age = std::time::Duration::from_secs(max_age_days.saturating_mul(24 * 3600));
+            let report = prune_store(&config, max_age, keep_newest).map_err(anyhow::Error::msg)?;
             Ok(format!(
                 "prune: removed {} dirs · freed {} bytes · remaining {} dirs · {} bytes",
                 report.removed_dirs,

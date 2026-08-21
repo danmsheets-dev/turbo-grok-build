@@ -230,8 +230,7 @@ impl McpBridge {
         removed.sort();
         kept.sort();
 
-        self.handlers =
-            Self::build_handlers(&self.transport, &tools, self.namespace.as_deref());
+        self.handlers = Self::build_handlers(&self.transport, &tools, self.namespace.as_deref());
         crate::metrics::mcp_tools_bridged_set(self.handlers.len() as i64);
 
         info!(

@@ -18,7 +18,11 @@ use xai_grok_shell::agent::mvp_agent::MvpAgent;
 /// Matches production's `MAX_BUFFER_SIZE` in `agent::app`.
 const DUPLEX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
-pub const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+/// Generous enough that a prompt still completes when the workspace suite is
+/// running other ACP/PTY tests in parallel. 60s timed out under Windows load
+/// (`session_churn_returns_registry_snapshot_to_baseline`); isolated re-run
+/// finished in ~68s for 15 sessions.
+pub const RPC_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Compiled into each including binary, so a client only one uses is dead code
 /// in the others.

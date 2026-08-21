@@ -14,9 +14,7 @@ use crate::notification::types::ToolNotificationHandle;
 use crate::notification::{
     DurableNotificationTargets, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved,
 };
-use crate::reminders::{
-    LoopParentStamp, format_loop_iteration_prompt_with_parent,
-};
+use crate::reminders::{LoopParentStamp, format_loop_iteration_prompt_with_parent};
 use crate::types::resources::{Cwd, SharedResources, State};
 use xai_tool_types::SubagentIsolationMode;
 
@@ -2141,11 +2139,11 @@ mod tests {
                     tool_calls: 1,
                     turns: 1,
                     worktree_path: None,
-            isolation: None,
-            isolation_fallback: false,
-            worktree_state: None,
-            isolation_requested: None,
-        },
+                    isolation: None,
+                    isolation_fallback: false,
+                    worktree_state: None,
+                    isolation_requested: None,
+                },
                 started_at_epoch_ms: 0,
                 duration_ms: 100,
                 persona: None,
@@ -2382,11 +2380,11 @@ mod tests {
                 tool_calls: 1,
                 turns: 1,
                 worktree_path: None,
-            isolation: None,
-            isolation_fallback: false,
-            worktree_state: None,
-            isolation_requested: None,
-        },
+                isolation: None,
+                isolation_fallback: false,
+                worktree_state: None,
+                isolation_requested: None,
+            },
         )
         .await;
         answer_loop_unit_active(&mut subagent_rx, true).await;

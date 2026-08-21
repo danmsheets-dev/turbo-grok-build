@@ -10,9 +10,9 @@ use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 use xai_grok_tools::implementations::codex;
 use xai_grok_tools::implementations::grok_build;
 use xai_grok_tools::implementations::grok_build_concise;
+use xai_grok_tools::implementations::mcp_server_health;
 use xai_grok_tools::implementations::memory;
 use xai_grok_tools::implementations::opencode;
-use xai_grok_tools::implementations::mcp_server_health;
 use xai_grok_tools::implementations::search_tool;
 use xai_grok_tools::implementations::use_tool;
 use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
@@ -813,7 +813,13 @@ impl BuiltinAgentName {
     }
     /// Built-in agents available as subagents via the Task tool.
     pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore, Self::Plan, Self::Oracle, Self::Xdotcom]
+        &[
+            Self::GeneralPurpose,
+            Self::Explore,
+            Self::Plan,
+            Self::Oracle,
+            Self::Xdotcom,
+        ]
     }
 }
 /// Portable agent identity — parsed from .grok/agents/*.md.
@@ -1741,6 +1747,10 @@ impl AgentDefinition {
             inherit_skills: false,
             inject_default_tools: false,
             mcp_inheritance: McpInheritance::None,
+            max_turns: Some(24),
+            max_tool_calls: Some(48),
+            timeout_secs: Some(300),
+            finalize_grace_secs: Some(30),
             ..Self::base(BuiltinAgentName::Explore, "")
         }
     }
@@ -1779,10 +1789,10 @@ impl AgentDefinition {
             inherit_skills: false,
             inject_default_tools: false,
             mcp_inheritance: McpInheritance::None,
-            max_turns: Some(12),
-            max_tool_calls: Some(40),
-            timeout_secs: Some(180),
-            finalize_grace_secs: Some(30),
+            max_turns: Some(24),
+            max_tool_calls: Some(48),
+            timeout_secs: Some(600),
+            finalize_grace_secs: Some(45),
             ..Self::base(BuiltinAgentName::Oracle, "")
         }
     }
@@ -2219,9 +2229,17 @@ Agent.
     #[test]
     fn oracle_has_bounded_execution_defaults() {
         let def = AgentDefinition::oracle();
-        assert_eq!(def.max_turns, Some(12));
-        assert_eq!(def.max_tool_calls, Some(40));
-        assert_eq!(def.timeout_secs, Some(180));
+        assert_eq!(def.max_turns, Some(24));
+        assert_eq!(def.max_tool_calls, Some(48));
+        assert_eq!(def.timeout_secs, Some(600));
+        assert_eq!(def.finalize_grace_secs, Some(45));
+    }
+    #[test]
+    fn explore_has_bounded_execution_defaults() {
+        let def = AgentDefinition::explore();
+        assert_eq!(def.max_turns, Some(24));
+        assert_eq!(def.max_tool_calls, Some(48));
+        assert_eq!(def.timeout_secs, Some(300));
         assert_eq!(def.finalize_grace_secs, Some(30));
     }
     #[test]

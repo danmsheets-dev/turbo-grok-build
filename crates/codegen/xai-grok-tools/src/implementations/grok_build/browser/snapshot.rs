@@ -14,6 +14,12 @@ pub struct BrowserSnapshotInput {
         description = "When true, raise the accessibility node cap from 200 to 800. Default false."
     )]
     pub verbose: bool,
+    /// Include truncated main-landmark / article text.
+    #[serde(default)]
+    #[schemars(
+        description = "When true, include truncated main/article text so job descriptions and profile Experience survive the node cap."
+    )]
+    pub include_text: bool,
 }
 
 #[derive(Debug, Default)]
@@ -74,18 +80,29 @@ impl xai_tool_runtime::Tool for BrowserSnapshotTool {
         input: BrowserSnapshotInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let handle = super::require_handle(&ctx).await?;
-        let result = handle.snapshot(input.verbose).await?;
+        let result = handle
+            .snapshot_ex(input.verbose, input.include_text)
+            .await?;
         let mut lines = vec![
             format!("url: {}", result.url),
             format!("title: {}", result.title),
             format!("nodes: {}", result.nodes.len()),
         ];
+        if result.overlay == Some(true) {
+            lines.push(
+                "note: a dialog/overlay is open. Click its Close uid before interacting with the page underneath."
+                    .to_owned(),
+            );
+        }
         if !result.source.uids_are_actionable() {
             lines.push(
                 "note: accessibility-tree fallback — these uids are READ-ONLY and cannot be \
                  used with browser_click or browser_fill. Snapshot again for actionable uids."
                     .to_owned(),
             );
+        }
+        if let Some(text) = result.text.as_deref().filter(|s| !s.is_empty()) {
+            lines.push(format!("text: {text}"));
         }
         for node in result.nodes {
             let mut line = format!("- uid={} role={} name={:?}", node.uid, node.role, node.name);

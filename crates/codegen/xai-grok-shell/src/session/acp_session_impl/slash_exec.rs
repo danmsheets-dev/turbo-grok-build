@@ -887,19 +887,17 @@ impl SessionActor {
                     "large" => Some(128),
                     _ => Some(48),
                 };
-                let resolved = match crate::session::workflow::registry::resolve_by_name(
-                    "deep-audit",
-                    None,
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.send_host_turn_slash_command_output(&format!(
-                            "deep-audit workflow unavailable: {e}"
-                        ))
-                        .await;
-                        return ok_end_turn(0, None);
-                    }
-                };
+                let resolved =
+                    match crate::session::workflow::registry::resolve_by_name("deep-audit", None) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            self.send_host_turn_slash_command_output(&format!(
+                                "deep-audit workflow unavailable: {e}"
+                            ))
+                            .await;
+                            return ok_end_turn(0, None);
+                        }
+                    };
                 let models_csv = models.join(",");
                 let mut args = serde_json::json!({
                     "scope": objective,
@@ -953,7 +951,11 @@ impl SessionActor {
                             .await;
                             match outcome_rx.await {
                                 Ok(outcome) => {
-                                    tracing::info!(run_id, ?outcome, "deep-audit finished (headless wait)");
+                                    tracing::info!(
+                                        run_id,
+                                        ?outcome,
+                                        "deep-audit finished (headless wait)"
+                                    );
                                     let summary = match &outcome {
                                         xai_workflow::WorkflowOutcome::Completed { result } => {
                                             format!("completed — result keys/payload: {result}")
@@ -964,10 +966,9 @@ impl SessionActor {
                                         xai_workflow::WorkflowOutcome::Cancelled => {
                                             "cancelled".to_string()
                                         }
-                                        xai_workflow::WorkflowOutcome::Paused {
-                                            kind,
-                                            message,
-                                        } => format!("paused ({kind:?}) — {message}"),
+                                        xai_workflow::WorkflowOutcome::Paused { kind, message } => {
+                                            format!("paused ({kind:?}) — {message}")
+                                        }
                                         xai_workflow::WorkflowOutcome::BudgetExceeded {
                                             message,
                                         } => format!("budget exceeded — {message}"),

@@ -1111,11 +1111,9 @@ fn confine_access_outside_root(
     match access {
         AccessKind::Edit(path) => {
             let resolved = match path_context {
-                Some(context) => resolve_model_path(
-                    &context.real_cwd,
-                    context.display_cwd.as_deref(),
-                    path,
-                ),
+                Some(context) => {
+                    resolve_model_path(&context.real_cwd, context.display_cwd.as_deref(), path)
+                }
                 None => resolve_model_path(cwd, None, path),
             };
             confine_resolved_path(path, &resolved, root, "path-outside-root")
@@ -1123,15 +1121,12 @@ fn confine_access_outside_root(
         AccessKind::EditMany(paths) => {
             for path in paths {
                 let resolved = match path_context {
-                    Some(context) => resolve_model_path(
-                        &context.real_cwd,
-                        context.display_cwd.as_deref(),
-                        path,
-                    ),
+                    Some(context) => {
+                        resolve_model_path(&context.real_cwd, context.display_cwd.as_deref(), path)
+                    }
                     None => resolve_model_path(cwd, None, path),
                 };
-                if let Some(hit) =
-                    confine_resolved_path(path, &resolved, root, "path-outside-root")
+                if let Some(hit) = confine_resolved_path(path, &resolved, root, "path-outside-root")
                 {
                     return Some(hit);
                 }
@@ -1231,9 +1226,7 @@ fn confine_access_outside_root(
             }
             None
         }
-        AccessKind::MCPTool { name, input } => {
-            confine_mcp_tool_paths(name, input, root, cwd)
-        }
+        AccessKind::MCPTool { name, input } => confine_mcp_tool_paths(name, input, root, cwd),
         // Read/Grep/Web*: confine is a write-boundary for harness isolation.
         // Managed Read deny rules still apply separately.
         _ => None,
@@ -1401,8 +1394,7 @@ fn confine_resolved_path(
     if xai_grok_tools::types::resources::path_is_under_confine_root(resolved, root) {
         return None;
     }
-    let canon =
-        xai_grok_tools::types::resources::canonicalize_for_permission(resolved);
+    let canon = xai_grok_tools::types::resources::canonicalize_for_permission(resolved);
     Some(ConfineHit {
         path: original.to_owned(),
         resolved_path: canon.display.to_string_lossy().into_owned(),
@@ -1800,10 +1792,7 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Read(_) => ("read".to_string(), None),
                         AccessKind::Grep { path, glob: _ } => ("grep".to_string(), path.clone()),
                         AccessKind::Edit(path) => ("edit".to_string(), Some(path.clone())),
-                        AccessKind::EditMany(paths) => (
-                            "edit".to_string(),
-                            Some(paths.join("\n")),
-                        ),
+                        AccessKind::EditMany(paths) => ("edit".to_string(), Some(paths.join("\n"))),
                         AccessKind::Bash(cmd) => ("bash".to_string(), Some(cmd.clone())),
                         // Carry the MCP args (truncated) so the classifier and
                         // telemetry judge the call by what it does, not just its name.
@@ -1960,19 +1949,17 @@ fn spawn_permission_manager_with_pin(
                             let resolved = resolve_model_path(cwd.as_path(), None, path);
                             edit_target_protection(&resolved)
                         }
-                        (AccessKind::EditMany(paths), ctx) => {
-                            paths.iter().find_map(|path| {
-                                let resolved = match ctx {
-                                    Some(context) => resolve_model_path(
-                                        &context.real_cwd,
-                                        context.display_cwd.as_deref(),
-                                        path,
-                                    ),
-                                    None => resolve_model_path(cwd.as_path(), None, path),
-                                };
-                                edit_target_protection(&resolved)
-                            })
-                        }
+                        (AccessKind::EditMany(paths), ctx) => paths.iter().find_map(|path| {
+                            let resolved = match ctx {
+                                Some(context) => resolve_model_path(
+                                    &context.real_cwd,
+                                    context.display_cwd.as_deref(),
+                                    path,
+                                ),
+                                None => resolve_model_path(cwd.as_path(), None, path),
+                            };
+                            edit_target_protection(&resolved)
+                        }),
                         _ => None,
                     };
 
@@ -2059,8 +2046,13 @@ fn spawn_permission_manager_with_pin(
                                 hit.rule,
                             );
                             let decision = Decision::PolicyDeny(reason);
-                            let event =
-                                emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                            let event = emit_event(
+                                &decision,
+                                false,
+                                false,
+                                None,
+                                Some(reasons::POLICY_DENY),
+                            );
                             let _ = respond_to.send(PermissionResolution {
                                 decision,
                                 event: Some(event),
@@ -9133,10 +9125,7 @@ mod tests {
             input: serde_json::json!({ "path": escape }),
         };
         let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
-        assert!(
-            hit.is_some(),
-            "MCP write outside root must deny, got None"
-        );
+        assert!(hit.is_some(), "MCP write outside root must deny, got None");
         let hit = hit.unwrap();
         assert_eq!(hit.rule, "mcp-path-outside-root");
     }
@@ -9184,10 +9173,7 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("GROK_CONFINE_SHELL_MODE", v) },
             None => unsafe { std::env::remove_var("GROK_CONFINE_SHELL_MODE") },
         }
-        assert!(
-            hit.is_some(),
-            "redirect outside root must deny, got None"
-        );
+        assert!(hit.is_some(), "redirect outside root must deny, got None");
     }
 
     #[cfg(windows)]
@@ -9196,8 +9182,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let root_path = dunce::canonicalize(root.path()).unwrap();
         // Absolute path on a temp dir that is not under root.
-        let escape = std::env::temp_dir()
-            .join(format!("hyper-mcp-escape-{}.txt", std::process::id()));
+        let escape =
+            std::env::temp_dir().join(format!("hyper-mcp-escape-{}.txt", std::process::id()));
         let access = AccessKind::MCPTool {
             name: "mcp__fs__write_file".into(),
             input: serde_json::json!({
@@ -9250,10 +9236,7 @@ mod tests {
             "path must not hold the command string: {hit:?}"
         );
         assert!(
-            hit.detail
-                .as_deref()
-                .unwrap_or("")
-                .contains("python"),
+            hit.detail.as_deref().unwrap_or("").contains("python"),
             "denial detail must name the program: {hit:?}"
         );
     }

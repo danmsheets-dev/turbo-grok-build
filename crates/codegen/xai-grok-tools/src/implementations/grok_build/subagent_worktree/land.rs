@@ -193,9 +193,8 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: LandSubagentInput,
     ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
-        let mode = LandMode::from_input(input.mode.as_deref()).map_err(|e| {
-            xai_tool_runtime::ToolError::custom("invalid_mode", e)
-        })?;
+        let mode = LandMode::from_input(input.mode.as_deref())
+            .map_err(|e| xai_tool_runtime::ToolError::custom("invalid_mode", e))?;
 
         let work = resolve_subagent_work(&ctx, &input.subagent_id).await?;
         let force = input.force.unwrap_or(false);
@@ -214,7 +213,7 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
                 work.meta
                     .changed_paths
                     .as_ref()
-                    .map(|p| p.len() as u32)
+                    .map(|p| super::filter_harness_land_paths(p).len() as u32)
             });
         super::land_size_guard(files_hint, force, super::DEFAULT_LAND_MAX_FILES)?;
         let resources = shared_resources(&ctx)?;
@@ -222,7 +221,11 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
         // Prefer agent-only snapshot (baseline..snap) over live dirty tree when
         // a spawn baseline exists — soft-preserve leaves live trees full of
         // parent dirt that would inflate land (harness QA P1).
-        let prefer_snapshot = work.meta.baseline_ref.as_ref().is_some_and(|b| !b.is_empty())
+        let prefer_snapshot = work
+            .meta
+            .baseline_ref
+            .as_ref()
+            .is_some_and(|b| !b.is_empty())
             && work.snapshot_ref.is_some();
         if prefer_snapshot {
             if let Some(ref snap) = work.snapshot_ref {
@@ -366,10 +369,7 @@ async fn map_apply_response(
                 source: source.into(),
                 snapshot_ref: work.snapshot_ref.clone(),
                 worktree_path,
-                patch_path: work
-                    .patch_path
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
+                patch_path: work.patch_path.as_ref().map(|p| p.display().to_string()),
                 message: format!(
                     "Landed subagent `{}` via {source} (mode={}) — {} file(s).",
                     work.subagent_id,
@@ -380,10 +380,7 @@ async fn map_apply_response(
                 conflicts: vec![],
             })
         }
-        ApplyWorktreeResponse::Conflicts {
-            files,
-            conflicts,
-        } => {
+        ApplyWorktreeResponse::Conflicts { files, conflicts } => {
             // Fail closed: merge apply_worktree plans first and applies only
             // when conflict-free (`files` should be empty). Keep partial note
             // only if a legacy host still returns already-written paths.
@@ -411,10 +408,7 @@ async fn map_apply_response(
                 source: source.into(),
                 snapshot_ref: work.snapshot_ref.clone(),
                 worktree_path,
-                patch_path: work
-                    .patch_path
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
+                patch_path: work.patch_path.as_ref().map(|p| p.display().to_string()),
                 files_landed: partial,
                 conflicts: conflict_paths,
                 message,
@@ -610,11 +604,7 @@ async fn land_snapshot_ref(
 
     // Agent-only base: spawn baseline when present (excludes dirty-parent bulk
     // copied into the sandbox). Fall back to merge-base(HEAD, snap) / HEAD.
-    let baseline = work
-        .meta
-        .baseline_ref
-        .as_deref()
-        .filter(|b| !b.is_empty());
+    let baseline = work.meta.baseline_ref.as_deref().filter(|b| !b.is_empty());
     let base_rev = if let Some(base) = baseline {
         if git_capture(parent, &["rev-parse", "--verify", base])
             .await
@@ -724,9 +714,7 @@ async fn land_snapshot_ref(
     for (path, theirs) in plan {
         apply_file_content_with_union(parent, &path, theirs.as_deref(), json_union_by)
             .await
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::custom("land_write_failed", e)
-            })?;
+            .map_err(|e| xai_tool_runtime::ToolError::custom("land_write_failed", e))?;
         landed.push(path);
     }
 

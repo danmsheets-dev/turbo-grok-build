@@ -10,33 +10,56 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use xai_grok_browser::{
-    BrowserClient, BrowserClientError, MockAction, MockBrowserHost, NamedPipeTransport,
-    NavigateResult, ScreenshotResult, SnapshotResult, TabsResult, check_fill, check_url_in_session,
+    BrowserClient, BrowserClientError, ClickResult, MockAction, MockBrowserHost,
+    NamedPipeTransport, NavigateResult, ScreenshotResult, SnapshotResult, TabsResult, WaitResult,
+    check_fill, check_url_in_session,
 };
 
 use crate::types::output::ToolOutput;
 use crate::types::tool_metadata::shared_resources;
 
 pub mod click;
+pub mod downloads;
 pub mod eval;
 pub mod fill;
+pub mod hover;
 pub mod navigate;
+pub mod press_key;
+pub mod raise;
 pub mod screenshot;
+pub mod scroll;
+pub mod select;
+pub mod set_file;
 pub mod snapshot;
 pub mod tabs;
+pub mod wait;
 
 pub use click::{BROWSER_CLICK_TOOL_NAME, BrowserClickInput, BrowserClickTool};
+pub use downloads::{BROWSER_DOWNLOADS_TOOL_NAME, BrowserDownloadsInput, BrowserDownloadsTool};
 pub use eval::{BROWSER_EVAL_TOOL_NAME, BrowserEvalInput, BrowserEvalTool};
 pub use fill::{BROWSER_FILL_TOOL_NAME, BrowserFillInput, BrowserFillTool};
+pub use hover::{BROWSER_HOVER_TOOL_NAME, BrowserHoverInput, BrowserHoverTool};
 pub use navigate::{BROWSER_NAVIGATE_TOOL_NAME, BrowserNavigateInput, BrowserNavigateTool};
+pub use press_key::{BROWSER_PRESS_KEY_TOOL_NAME, BrowserPressKeyInput, BrowserPressKeyTool};
+pub use raise::{BROWSER_RAISE_TOOL_NAME, BrowserRaiseInput, BrowserRaiseTool};
 pub use screenshot::{BROWSER_SCREENSHOT_TOOL_NAME, BrowserScreenshotInput, BrowserScreenshotTool};
+pub use scroll::{BROWSER_SCROLL_TOOL_NAME, BrowserScrollInput, BrowserScrollTool};
+pub use select::{BROWSER_SELECT_TOOL_NAME, BrowserSelectInput, BrowserSelectTool};
+pub use set_file::{BROWSER_SET_FILE_TOOL_NAME, BrowserSetFileInput, BrowserSetFileTool};
 pub use snapshot::{BROWSER_SNAPSHOT_TOOL_NAME, BrowserSnapshotInput, BrowserSnapshotTool};
 pub use tabs::{BROWSER_TABS_TOOL_NAME, BrowserTabsInput, BrowserTabsTool};
+pub use wait::{BROWSER_WAIT_TOOL_NAME, BrowserWaitInput, BrowserWaitTool};
 
 fn dynamic_tool_input(value: &impl serde::Serialize) -> crate::types::tool_io::ToolInput {
     crate::types::tool_io::ToolInput::Dynamic(
         serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
     )
+}
+
+impl From<BrowserDownloadsInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserDownloadsInput) -> Self {
+        dynamic_tool_input(&input)
+    }
 }
 
 impl From<BrowserNavigateInput> for crate::types::tool_io::ToolInput {
@@ -77,6 +100,48 @@ impl From<BrowserScreenshotInput> for crate::types::tool_io::ToolInput {
 
 impl From<BrowserTabsInput> for crate::types::tool_io::ToolInput {
     fn from(input: BrowserTabsInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserWaitInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserWaitInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserScrollInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserScrollInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserPressKeyInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserPressKeyInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserSelectInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserSelectInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserHoverInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserHoverInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserSetFileInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserSetFileInput) -> Self {
+        dynamic_tool_input(&input)
+    }
+}
+
+impl From<BrowserRaiseInput> for crate::types::tool_io::ToolInput {
+    fn from(input: BrowserRaiseInput) -> Self {
         dynamic_tool_input(&input)
     }
 }
@@ -125,6 +190,7 @@ pub fn installed_browser_ensure() -> Option<BrowserEnsureFn> {
 /// and the TUI mirror pane needs to read the same state without a second RPC.
 static SNAPSHOTS: OnceLock<Mutex<HashMap<String, SnapshotResult>>> = OnceLock::new();
 static HOST_READY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static WRITE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
 
 fn snapshots() -> &'static Mutex<HashMap<String, SnapshotResult>> {
     SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -132,6 +198,13 @@ fn snapshots() -> &'static Mutex<HashMap<String, SnapshotResult>> {
 
 fn host_ready() -> &'static Mutex<HashSet<String>> {
     HOST_READY.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn write_lock_for(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = lock(WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new())));
+    map.entry(session_id.to_owned())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -181,6 +254,7 @@ pub struct BrowserHandle {
     session_folder: Option<PathBuf>,
     inner: BrowserHandleInner,
     ensure: Option<BrowserEnsureFn>,
+    write: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl BrowserHandle {
@@ -190,8 +264,9 @@ impl BrowserHandle {
         Self {
             session_id: session_id.clone(),
             session_folder: None,
-            inner: BrowserHandleInner::Mock(BrowserClient::mock(session_id)),
+            inner: BrowserHandleInner::Mock(BrowserClient::mock(session_id.clone())),
             ensure: None,
+            write: write_lock_for(&session_id),
         }
     }
 
@@ -213,10 +288,11 @@ impl BrowserHandle {
             client = client.with_session_folder(folder);
         }
         Self {
-            session_id,
+            session_id: session_id.clone(),
             session_folder,
             inner: BrowserHandleInner::Pipe(client),
             ensure,
+            write: write_lock_for(&session_id),
         }
     }
 
@@ -227,6 +303,7 @@ impl BrowserHandle {
             session_folder: None,
             inner: BrowserHandleInner::Unbound,
             ensure: None,
+            write: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -265,30 +342,55 @@ impl BrowserHandle {
         lock(snapshots()).remove(&self.session_id);
     }
 
+    /// Refuse overlapping writes on a single-tab host instead of last-write-wins.
+    fn try_write(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, ToolError> {
+        self.write.try_lock().map_err(|_| {
+            ToolError::custom(
+                "browser_busy",
+                "another browser_* write is in progress on this session; \
+                 wait for it to finish (v1 is a single tab)",
+            )
+        })
+    }
+
     pub async fn navigate(&self, url: impl Into<String>) -> Result<NavigateResult, ToolError> {
         let url = url.into();
-        self.clear_snapshot();
         check_url_in_session(&url, self.session_folder.as_deref())
             .map_err(BrowserClientError::from)
             .map_err(map_browser_err)?;
-        self.ensure_if_needed().await?;
-        match &self.inner {
-            BrowserHandleInner::Unbound => Err(missing_session_error()),
-            BrowserHandleInner::Mock(c) => c.navigate(url).await.map_err(|e| self.map_err_for(e)),
-            BrowserHandleInner::Pipe(c) => c.navigate(url).await.map_err(|e| self.map_err_for(e)),
-        }
-    }
-
-    pub async fn snapshot(&self, verbose: bool) -> Result<SnapshotResult, ToolError> {
+        let _write = self.try_write()?;
         self.ensure_if_needed().await?;
         let result = match &self.inner {
             BrowserHandleInner::Unbound => Err(missing_session_error()),
-            BrowserHandleInner::Mock(c) => {
-                c.snapshot(verbose).await.map_err(|e| self.map_err_for(e))
-            }
-            BrowserHandleInner::Pipe(c) => {
-                c.snapshot(verbose).await.map_err(|e| self.map_err_for(e))
-            }
+            BrowserHandleInner::Mock(c) => c.navigate(url).await.map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Pipe(c) => c.navigate(url).await.map_err(|e| self.map_err_for(e)),
+        };
+        if result.is_ok() {
+            self.clear_snapshot();
+        }
+        result
+    }
+
+    pub async fn snapshot(&self, verbose: bool) -> Result<SnapshotResult, ToolError> {
+        self.snapshot_ex(verbose, false).await
+    }
+
+    pub async fn snapshot_ex(
+        &self,
+        verbose: bool,
+        include_text: bool,
+    ) -> Result<SnapshotResult, ToolError> {
+        self.ensure_if_needed().await?;
+        let result = match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => c
+                .snapshot_ex(verbose, include_text)
+                .await
+                .map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Pipe(c) => c
+                .snapshot_ex(verbose, include_text)
+                .await
+                .map_err(|e| self.map_err_for(e)),
         };
         if let Ok(ref snap) = result {
             self.store_snapshot(snap.clone());
@@ -296,9 +398,14 @@ impl BrowserHandle {
         result
     }
 
-    pub async fn click(&self, uid: impl Into<String>, confirm: bool) -> Result<(), ToolError> {
+    pub async fn click(
+        &self,
+        uid: impl Into<String>,
+        confirm: bool,
+    ) -> Result<ClickResult, ToolError> {
         let uid = uid.into();
         click::check_click_against_snapshot(self.cached_snapshot().as_ref(), &uid, confirm)?;
+        let _write = self.try_write()?;
         self.ensure_if_needed().await?;
         let result = match &self.inner {
             BrowserHandleInner::Unbound => Err(missing_session_error()),
@@ -331,6 +438,7 @@ impl BrowserHandle {
         check_fill(&value, field_name.as_deref())
             .map_err(BrowserClientError::from)
             .map_err(map_browser_err)?;
+        let _write = self.try_write()?;
         self.ensure_if_needed().await?;
         let result = match &self.inner {
             BrowserHandleInner::Unbound => Err(missing_session_error()),
@@ -353,16 +461,128 @@ impl BrowserHandle {
     ) -> Result<serde_json::Value, ToolError> {
         let function = function.into();
         eval::check_eval_is_read_only(&function, confirm)?;
+        let _write = if eval::mutates_page(&function) {
+            Some(self.try_write()?)
+        } else {
+            None
+        };
         self.ensure_if_needed().await?;
         let result = match &self.inner {
             BrowserHandleInner::Unbound => Err(missing_session_error()),
-            BrowserHandleInner::Mock(c) => c.eval(&function).await.map_err(|e| self.map_err_for(e)),
-            BrowserHandleInner::Pipe(c) => c.eval(&function).await.map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Mock(c) => c
+                .eval_ex(&function, confirm)
+                .await
+                .map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Pipe(c) => c
+                .eval_ex(&function, confirm)
+                .await
+                .map_err(|e| self.map_err_for(e)),
         };
         if eval::mutates_page(&function) {
             self.clear_snapshot();
         }
         result
+    }
+
+    pub async fn wait(
+        &self,
+        text: Option<String>,
+        url_substring: Option<String>,
+        timeout_ms: Option<u64>,
+    ) -> Result<WaitResult, ToolError> {
+        self.ensure_if_needed().await?;
+        match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => c
+                .wait(text, url_substring, timeout_ms)
+                .await
+                .map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Pipe(c) => c
+                .wait(text, url_substring, timeout_ms)
+                .await
+                .map_err(|e| self.map_err_for(e)),
+        }
+    }
+
+    pub async fn scroll(
+        &self,
+        uid: Option<String>,
+        dx: Option<i32>,
+        dy: Option<i32>,
+    ) -> Result<(), ToolError> {
+        let _write = self.try_write()?;
+        self.ensure_if_needed().await?;
+        match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => {
+                c.scroll(uid, dx, dy).await.map_err(|e| self.map_err_for(e))
+            }
+            BrowserHandleInner::Pipe(c) => {
+                c.scroll(uid, dx, dy).await.map_err(|e| self.map_err_for(e))
+            }
+        }
+    }
+
+    pub async fn press_key(&self, key: String, uid: Option<String>) -> Result<(), ToolError> {
+        let _write = self.try_write()?;
+        self.ensure_if_needed().await?;
+        match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => {
+                c.press_key(key, uid).await.map_err(|e| self.map_err_for(e))
+            }
+            BrowserHandleInner::Pipe(c) => {
+                c.press_key(key, uid).await.map_err(|e| self.map_err_for(e))
+            }
+        }
+    }
+
+    pub async fn select(&self, uid: String, value: String) -> Result<(), ToolError> {
+        let _write = self.try_write()?;
+        self.ensure_if_needed().await?;
+        let result = match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => {
+                c.select(uid, value).await.map_err(|e| self.map_err_for(e))
+            }
+            BrowserHandleInner::Pipe(c) => {
+                c.select(uid, value).await.map_err(|e| self.map_err_for(e))
+            }
+        };
+        self.clear_snapshot();
+        result
+    }
+
+    pub async fn hover(&self, uid: String) -> Result<(), ToolError> {
+        self.ensure_if_needed().await?;
+        match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => c.hover(uid).await.map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Pipe(c) => c.hover(uid).await.map_err(|e| self.map_err_for(e)),
+        }
+    }
+
+    pub async fn set_file(&self, uid: String, path: String) -> Result<(), ToolError> {
+        let _write = self.try_write()?;
+        self.ensure_if_needed().await?;
+        match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => {
+                c.set_file(uid, path).await.map_err(|e| self.map_err_for(e))
+            }
+            BrowserHandleInner::Pipe(c) => {
+                c.set_file(uid, path).await.map_err(|e| self.map_err_for(e))
+            }
+        }
+    }
+
+    pub async fn raise(&self) -> Result<(), ToolError> {
+        self.ensure_if_needed().await?;
+        match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => c.raise().await.map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Pipe(c) => c.raise().await.map_err(|e| self.map_err_for(e)),
+        }
     }
 
     pub async fn screenshot(&self) -> Result<ScreenshotResult, ToolError> {
@@ -371,6 +591,15 @@ impl BrowserHandle {
             BrowserHandleInner::Unbound => Err(missing_session_error()),
             BrowserHandleInner::Mock(c) => c.screenshot().await.map_err(|e| self.map_err_for(e)),
             BrowserHandleInner::Pipe(c) => c.screenshot().await.map_err(|e| self.map_err_for(e)),
+        }
+    }
+
+    pub async fn downloads(&self) -> Result<xai_grok_browser::DownloadsResult, ToolError> {
+        self.ensure_if_needed().await?;
+        match &self.inner {
+            BrowserHandleInner::Unbound => Err(missing_session_error()),
+            BrowserHandleInner::Mock(c) => c.downloads().await.map_err(|e| self.map_err_for(e)),
+            BrowserHandleInner::Pipe(c) => c.downloads().await.map_err(|e| self.map_err_for(e)),
         }
     }
 
@@ -528,11 +757,20 @@ mod tests {
         assert_eq!(BrowserEvalTool.id().as_str(), "browser_eval");
         assert_eq!(BrowserScreenshotTool.id().as_str(), "browser_screenshot");
         assert_eq!(BrowserTabsTool.id().as_str(), "browser_tabs");
+        assert_eq!(BrowserWaitTool.id().as_str(), "browser_wait");
+        assert_eq!(BrowserScrollTool.id().as_str(), "browser_scroll");
+        assert_eq!(BrowserPressKeyTool.id().as_str(), "browser_press_key");
+        assert_eq!(BrowserSelectTool.id().as_str(), "browser_select");
+        assert_eq!(BrowserHoverTool.id().as_str(), "browser_hover");
+        assert_eq!(BrowserSetFileTool.id().as_str(), "browser_set_file");
+        assert_eq!(BrowserRaiseTool.id().as_str(), "browser_raise");
     }
 
     #[tokio::test]
     async fn browser_navigate_snapshot_click_uid_1() {
-        let resources = resources_with(BrowserHandle::mock("sess-browser-navigate-snapshot-click-uid-1"));
+        let resources = resources_with(BrowserHandle::mock(
+            "sess-browser-navigate-snapshot-click-uid-1",
+        ));
         let nav = xai_tool_runtime::Tool::run(
             &BrowserNavigateTool,
             test_ctx_with_call_id(resources.clone(), "nav"),
@@ -550,7 +788,10 @@ mod tests {
         let snap = xai_tool_runtime::Tool::run(
             &BrowserSnapshotTool,
             test_ctx_with_call_id(resources.clone(), "snap"),
-            BrowserSnapshotInput { verbose: false },
+            BrowserSnapshotInput {
+                verbose: false,
+                include_text: false,
+            },
         )
         .await
         .expect("snapshot");
@@ -609,8 +850,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_denied_navigate_keeps_the_snapshot() {
+        let handle = BrowserHandle::mock("sess-denied-nav-keeps-snapshot");
+        handle.navigate("https://example.com/").await.unwrap();
+        let snap = handle.snapshot(false).await.unwrap();
+        assert_eq!(snap.nodes[0].uid, "1-1");
+        let err = handle
+            .navigate("data:text/html,hi")
+            .await
+            .expect_err("data: must be denied");
+        assert!(err.to_string().contains("not allowed") || err.to_string().contains("data"));
+        handle
+            .click("1-1", false)
+            .await
+            .expect("snapshot must still be valid after a denied navigate");
+    }
+
+    #[tokio::test]
     async fn browser_navigate_rejects_file_url() {
-        let resources = resources_with(BrowserHandle::mock("sess-browser-navigate-rejects-file-url"));
+        let resources = resources_with(BrowserHandle::mock(
+            "sess-browser-navigate-rejects-file-url",
+        ));
         let err = xai_tool_runtime::Tool::run(
             &BrowserNavigateTool,
             test_ctx_with_call_id(resources.clone(), "file"),
@@ -677,6 +937,13 @@ mod tests {
             "GrokBuild:browser_eval",
             "GrokBuild:browser_screenshot",
             "GrokBuild:browser_tabs",
+            "GrokBuild:browser_wait",
+            "GrokBuild:browser_scroll",
+            "GrokBuild:browser_press_key",
+            "GrokBuild:browser_select",
+            "GrokBuild:browser_hover",
+            "GrokBuild:browser_set_file",
+            "GrokBuild:browser_raise",
         ] {
             assert!(builder.has_tool_id(id), "missing {id}");
         }
@@ -752,9 +1019,12 @@ mod tests {
     fn browser_click_name_heuristic_matches_plan_regex() {
         assert!(!click::click_name_needs_confirm("Search"));
         assert!(!click::click_name_needs_confirm("More information"));
+        assert!(!click::click_name_needs_confirm("Sign in"));
         assert!(click::click_name_needs_confirm("Buy now"));
         assert!(click::click_name_needs_confirm("SUBMIT"));
         assert!(click::click_name_needs_confirm("Delete account"));
+        assert!(click::click_name_needs_confirm("Apply now"));
+        assert!(click::click_name_needs_confirm("Connect"));
     }
 
     #[tokio::test]

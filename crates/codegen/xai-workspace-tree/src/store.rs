@@ -3,7 +3,7 @@
 use crate::config::WorkspaceTreeConfig;
 use crate::error::{Error, Result};
 use crate::identity::{default_store_root, workspace_id_for_path};
-use crate::model::{Meta, TreeIndex, TreePayload, SCHEMA_VERSION};
+use crate::model::{Meta, SCHEMA_VERSION, TreeIndex, TreePayload};
 use crate::walk::build_index;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -18,10 +18,7 @@ const REGISTRY_FILE: &str = "index.json";
 
 /// Resolve store root from config or default.
 pub fn store_root(config: &WorkspaceTreeConfig) -> PathBuf {
-    config
-        .store_dir
-        .clone()
-        .unwrap_or_else(default_store_root)
+    config.store_dir.clone().unwrap_or_else(default_store_root)
 }
 
 /// Directory for a workspace id: `<store_root>/<workspace_id>/`.
@@ -114,10 +111,7 @@ pub fn load_index_from_dir(dir: &Path) -> Result<TreeIndex> {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            store_root: dir
-                .parent()
-                .unwrap_or(dir)
-                .to_path_buf(),
+            store_root: dir.parent().unwrap_or(dir).to_path_buf(),
         });
     }
 
@@ -311,7 +305,10 @@ pub fn prune_store(
                 if let Ok(meta) = serde_json::from_slice::<Meta>(&bytes) {
                     chrono::DateTime::parse_from_rfc3339(&meta.updated_at)
                         .ok()
-                        .map(|dt| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp().max(0) as u64))
+                        .map(|dt| {
+                            std::time::SystemTime::UNIX_EPOCH
+                                + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
+                        })
                         .unwrap_or(mtime)
                 } else {
                     mtime
@@ -376,4 +373,3 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"second");
     }
 }
-

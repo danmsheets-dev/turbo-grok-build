@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 use xai_workspace_tree::{
-    build_and_save, build_index, inject_card, list, load_index_for_root, resolve_path, search,
-    summary, CollapseConfig, InjectMode, NodeKind, WorkspaceTreeConfig,
+    CollapseConfig, InjectMode, NodeKind, WorkspaceTreeConfig, build_and_save, build_index,
+    inject_card, list, load_index_for_root, resolve_path, search, summary,
 };
 
 fn fixture_root() -> PathBuf {
@@ -40,7 +40,11 @@ fn builds_index_and_honors_hard_excludes() {
     );
 
     // Expected present dirs/files.
-    assert!(names.iter().any(|n| *n == "scripts" || *n == "src" || *n == "docs"));
+    assert!(
+        names
+            .iter()
+            .any(|n| *n == "scripts" || *n == "src" || *n == "docs")
+    );
     assert!(index.meta.workspace_profile.contains(&"godot".to_string()));
     assert!(index.meta.workspace_profile.contains(&"rust".to_string()));
     assert!(index.meta.stats.files > 0);
@@ -85,16 +89,19 @@ fn collapse_by_max_files_and_glob() {
 fn resolve_path_finds_ship_roster() {
     let root = fixture_root();
     let index = build_index(&root, &WorkspaceTreeConfig::default()).unwrap();
-    let res = resolve_path(&index, "ship_roster", Some("scripts/ship/ship_roster.gd"), 8);
+    let res = resolve_path(
+        &index,
+        "ship_roster",
+        Some("scripts/ship/ship_roster.gd"),
+        8,
+    );
     assert!(
         !res.hits.is_empty(),
         "expected hits for ship_roster, name_index keys sample: {:?}",
         index.name_index.keys().take(20).collect::<Vec<_>>()
     );
     assert!(
-        res.hits
-            .iter()
-            .any(|h| h.rel_path.contains("ship_roster")),
+        res.hits.iter().any(|h| h.rel_path.contains("ship_roster")),
         "hits={:?}",
         res.hits
     );
@@ -115,7 +122,10 @@ fn search_and_list_work() {
 
     let listed = list(&index, "scripts", 1, 50).expect("list scripts");
     assert!(
-        listed.entries.iter().any(|e| e.name == "core" || e.name.contains("ship")),
+        listed
+            .entries
+            .iter()
+            .any(|e| e.name == "core" || e.name.contains("ship")),
         "entries={:?}",
         listed.entries
     );
@@ -135,7 +145,10 @@ fn save_load_roundtrip() {
     let loaded = load_index_for_root(&root, &cfg).expect("load");
     assert_eq!(built.meta.workspace_id, loaded.meta.workspace_id);
     assert_eq!(built.meta.stats.files, loaded.meta.stats.files);
-    assert_eq!(built.root.children.as_ref().map(|c| c.len()), loaded.root.children.as_ref().map(|c| c.len()));
+    assert_eq!(
+        built.root.children.as_ref().map(|c| c.len()),
+        loaded.root.children.as_ref().map(|c| c.len())
+    );
 
     // store files exist
     let store_dir = tmp.path().join(&built.meta.workspace_id);
@@ -214,4 +227,3 @@ fn name_index_survives_display_collapse() {
 // silence unused import in some rustc versions
 #[allow(dead_code)]
 fn _collapse_type(_: CollapseConfig) {}
-

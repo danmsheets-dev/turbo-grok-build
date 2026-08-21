@@ -250,7 +250,10 @@ pub fn root_resolution_note() -> String {
             return "process override / set-dir this session".into();
         }
     }
-    if std::env::var(DIR_ENV).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+    if std::env::var(DIR_ENV)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
         return format!("env {DIR_ENV}");
     }
     if config_file_path().is_file() && read_config_dir().is_some() {
@@ -322,9 +325,7 @@ impl DeveloperLogStore {
             return Err(StoreError::Invalid("summary is required".into()));
         }
 
-        let _guard = WRITE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         self.ensure_layout()?;
         let mut req = sanitize_request(request);
@@ -334,9 +335,7 @@ impl DeveloperLogStore {
         let severity = req
             .severity
             .unwrap_or_else(|| req.error_class.default_severity());
-        let kind = req
-            .kind
-            .unwrap_or_else(|| req.error_class.default_kind());
+        let kind = req.kind.unwrap_or_else(|| req.error_class.default_kind());
 
         // Ensure environment has version/os defaults.
         fill_environment_defaults(&mut req.environment);
@@ -526,9 +525,7 @@ impl DeveloperLogStore {
         if !is_enabled() {
             return Err(StoreError::Disabled);
         }
-        let _guard = WRITE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut index = self.load_index()?;
         let entry = index
             .entries
@@ -685,7 +682,10 @@ impl ListFilter {
                 return false;
             }
         } else if !self.include_closed
-            && !matches!(e.status, IncidentStatus::Open | IncidentStatus::Acknowledged)
+            && !matches!(
+                e.status,
+                IncidentStatus::Open | IncidentStatus::Acknowledged
+            )
         {
             return false;
         }

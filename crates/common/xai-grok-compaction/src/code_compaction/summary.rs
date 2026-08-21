@@ -121,6 +121,12 @@ fn neutralize_compaction_control_tokens(text: &str) -> String {
 /// task state of the conversation it would replace. Callers should
 /// retry like a transient failure.
 pub fn is_degenerate_summary(raw_summary: &str) -> bool {
+    let raw = raw_summary.trim();
+    // A truncated stream that opened <summary> and never closed it is not a
+    // usable successor seed even if the neutralized body is long enough.
+    if raw.contains("<summary>") && !raw.contains("</summary>") {
+        return true;
+    }
     format_compact_summary(raw_summary).chars().count() < super::config::MIN_SUMMARY_SEED_CHARS
 }
 
@@ -216,6 +222,17 @@ mod tests {
             !result.contains("</summary>"),
             "live </summary>: {result:?}"
         );
+    }
+
+    #[test]
+    fn unclosed_summary_is_degenerate() {
+        let input = format!(
+            "<summary>\n1. Primary Request: do the thing\n{}\n9. Optional Next Step: continue",
+            "y".repeat(600)
+        );
+        assert!(is_degenerate_summary(&input));
+        let closed = format!("{input}\n</summary>");
+        assert!(!is_degenerate_summary(&closed));
     }
 
     #[test]

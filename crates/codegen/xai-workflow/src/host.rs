@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+use crate::TaskQueueState;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentOpts {
     #[serde(default)]
@@ -117,6 +119,23 @@ pub enum WorkflowHostRequest {
         commit: String,
         reply: oneshot::Sender<Result<String, HostError>>,
     },
+    TaskStart {
+        task_id: String,
+        reply: oneshot::Sender<Result<TaskQueueState, HostError>>,
+    },
+    TaskComplete {
+        task_id: String,
+        result_summary: Option<String>,
+        reply: oneshot::Sender<Result<TaskQueueState, HostError>>,
+    },
+    TaskFail {
+        task_id: String,
+        result_summary: Option<String>,
+        reply: oneshot::Sender<Result<TaskQueueState, HostError>>,
+    },
+    TaskQueue {
+        reply: oneshot::Sender<Result<TaskQueueState, HostError>>,
+    },
 }
 
 impl WorkflowHostRequest {
@@ -133,6 +152,10 @@ impl WorkflowHostRequest {
             Self::WriteScratchFile { .. } => "write_scratch_file",
             Self::ReadScratchFile { .. } => "read_scratch_file",
             Self::GitDiffSince { .. } => "git_diff_since",
+            Self::TaskStart { .. } => "task_start",
+            Self::TaskComplete { .. } => "task_complete",
+            Self::TaskFail { .. } => "task_fail",
+            Self::TaskQueue { .. } => "task_queue",
         }
     }
 }

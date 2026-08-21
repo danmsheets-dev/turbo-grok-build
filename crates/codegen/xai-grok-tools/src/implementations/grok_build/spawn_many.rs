@@ -14,7 +14,7 @@ use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use xai_tool_types::{
-    SubagentCapabilityMode, SubagentIsolationMode, TaskToolInput, MAX_MULTI_WAIT_IDS,
+    MAX_MULTI_WAIT_IDS, SubagentCapabilityMode, SubagentIsolationMode, TaskToolInput,
     default_subagent_type,
 };
 
@@ -241,6 +241,7 @@ impl xai_tool_runtime::Tool for SpawnManyTool {
                 resume_from: None,
                 cwd: None,
                 model: spec.model.clone(),
+                reasoning_effort: None,
                 timeout_ms: spec.timeout_ms,
                 retain_worktree: spec.retain_worktree,
                 allowed_paths: None,
@@ -291,10 +292,7 @@ impl xai_tool_runtime::Tool for SpawnManyTool {
             waited = true;
             use crate::types::tool_metadata::shared_resources;
             let resources = shared_resources(&ctx)?;
-            let barrier_ms = input
-                .timeout_ms
-                .filter(|ms| *ms > 0)
-                .unwrap_or(600_000);
+            let barrier_ms = input.timeout_ms.filter(|ms| *ms > 0).unwrap_or(600_000);
             match TaskOutputTool::run_multi_tasks(
                 &spawned_ids,
                 Some(barrier_ms),
@@ -305,9 +303,7 @@ impl xai_tool_runtime::Tool for SpawnManyTool {
             {
                 Ok(xai_tool_types::TaskOutputOutput::MultiResult(multi)) => {
                     for r in multi.results {
-                        if let Some(item) = results
-                            .iter_mut()
-                            .find(|t| t.subagent_id == r.task_id)
+                        if let Some(item) = results.iter_mut().find(|t| t.subagent_id == r.task_id)
                         {
                             item.status = r.status;
                             if !r.output.is_empty() {
@@ -317,9 +313,7 @@ impl xai_tool_runtime::Tool for SpawnManyTool {
                     }
                 }
                 Ok(xai_tool_types::TaskOutputOutput::Result(single)) => {
-                    if let Some(item) = results
-                        .iter_mut()
-                        .find(|t| t.subagent_id == single.task_id)
+                    if let Some(item) = results.iter_mut().find(|t| t.subagent_id == single.task_id)
                     {
                         item.status = single.status;
                         if !single.output.is_empty() {
@@ -352,10 +346,7 @@ impl xai_tool_runtime::Tool for SpawnManyTool {
                 .iter()
                 .filter(|t| t.status == "completed" || t.status == "failed")
                 .count();
-            message.push_str(&format!(
-                "; waited: {done}/{} terminal",
-                results.len()
-            ));
+            message.push_str(&format!("; waited: {done}/{} terminal", results.len()));
         } else {
             message.push_str(
                 "\nUse get_task_output with task_ids=[...] and timeout_ms to wait, \

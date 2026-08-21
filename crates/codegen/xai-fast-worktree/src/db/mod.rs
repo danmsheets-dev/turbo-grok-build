@@ -565,9 +565,8 @@ pub fn resolve_grok_home() -> Result<PathBuf> {
         PathBuf::from(h)
     } else {
         #[allow(deprecated)]
-        std::env::home_dir().context(
-            "neither $GROK_HOME, $HOME, nor $USERPROFILE is set and home_dir() failed",
-        )?
+        std::env::home_dir()
+            .context("neither $GROK_HOME, $HOME, nor $USERPROFILE is set and home_dir() failed")?
     };
     // Canonicalize the home dir so worktree paths share the same physical .grok
     // tree as trust/hooks even when it is symlinked. The dunce canonicalization

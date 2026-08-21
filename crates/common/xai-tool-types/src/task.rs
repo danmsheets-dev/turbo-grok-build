@@ -53,7 +53,9 @@ pub struct TaskToolInput {
     /// Isolation mode for the child's execution environment.
     ///
     /// Omitted values resolve to **worktree** (isolated git worktree). Pass
-    /// `"none"` only when the child must share the parent workspace.
+    /// `"none"` only when the child must share the parent workspace. If the
+    /// Turbo workspace root is a non-git umbrella containing a nested repo,
+    /// set `GROK_SUBAGENT_REPO_ROOT` to that repository before spawning.
     #[schemars(
         description = "Isolation mode: \"worktree\" (default, isolated git worktree) or \
             \"none\" (shared workspace). Worktree mode prevents the child's edits from \
@@ -82,15 +84,21 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_from: Option<String>,
 
-    /// Explicit working directory for the subagent. When set, the child
-    /// session operates in this directory instead of the parent's cwd.
-    /// Mutually exclusive with `isolation: "worktree"` (both set the
-    /// effective cwd — setting both is ambiguous).
+    /// Explicit working directory for the subagent.
+    ///
+    /// - `isolation=none`: the child session runs in this directory.
+    /// - `isolation=worktree`: this path is the **source git repo** to clone
+    ///   into a new worktree. The child still runs inside that worktree, never
+    ///   in `cwd` itself. Use this from a non-git umbrella to isolate against a
+    ///   nested repository (e.g. `turbo-grok-build`).
+    ///
     /// Path validation (exists, is a directory) happens at subagent launch
     /// time, not here.
     #[schemars(
         description = "Explicit working directory for the subagent. The path must exist and \
-            be a directory. Mutually exclusive with isolation=\"worktree\". \
+            be a directory. With isolation=worktree this selects the source git \
+            repo; the child still runs in a new worktree under ~/.grok/worktrees. \
+            With isolation=none the child shares this directory. \
             Ignored when resume_from is set (the resumed child inherits \
             its source's cwd/worktree)."
     )]
@@ -108,6 +116,16 @@ pub struct TaskToolInput {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+
+    /// Optional reasoning-effort pin for comparable model evaluations.
+    ///
+    /// The value is validated against the selected model's supported effort
+    /// levels during subagent resolution.
+    #[schemars(
+        description = "Optional reasoning effort: none, minimal, low, medium, high, xhigh, max, or ultra."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<SubagentReasoningEffort>,
 
     /// Hard wall-clock limit for this child in milliseconds.
     ///
@@ -363,7 +381,7 @@ pub struct SubagentCompletedOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_ref: Option<String>,
     /// Stable snake_case failure class for orchestrators when the run failed
-    /// (`timeout`, `stall`, `serialize`, `provider_400`, `cancelled`, `budget`, `unknown`).
+    /// (`timeout`, `stall`, `serialize`, `provider_400`, `provider_429`, `cancelled`, `budget`, `unknown`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_class: Option<String>,
     /// Worktree seed: `clean` (HEAD-only; parent uncommitted files absent) or
@@ -1407,7 +1425,9 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - The resumed agent must use the same subagent_type as the source.\n\
          - If the user changed that agent type's model configuration or asks for a fresh restart, do not use {resume_from_param}; start a new child and hand over the needed context in its prompt.\n\n\
          Isolation mode:\n\
-         - Use {isolation_param} to control the child's execution environment. Default is \"worktree\" for write-capable agents (isolated git worktree so edits do not touch the parent workspace; on completion the worktree is snapshotted and removed). explore/plan/oracle and capability_mode=read-only default to \"none\" (skip worktree cost for pure research). Explicit isolation is never overridden."
+         - Use {isolation_param} to control the child's execution environment. Default is \"worktree\" for write-capable agents (isolated git worktree so edits do not touch the parent workspace; on completion the worktree is snapshotted and removed). explore/plan/oracle and capability_mode=read-only default to \"none\" (skip worktree cost for pure research). Explicit isolation is never overridden.\n\
+         - With isolation=worktree, cwd selects the **source git repo** (use this from a non-git umbrella to isolate a nested checkout). The child still runs in ~/.grok/worktrees/…/subagent-…. DisplayCwd may show the parent — that is remap, not isolation_fallback.\n\
+         - Nested spawn: default max_depth is 2 (one grandchild). At max depth spawn_subagent is stripped; the child card says so."
     );
 
     out
@@ -1603,6 +1623,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn task_input_preserves_reasoning_effort_pin() {
+        let input: TaskToolInput = serde_json::from_value(serde_json::json!({
+            "prompt": "build the asset",
+            "description": "build asset",
+            "reasoning_effort": "high"
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(input).unwrap();
+        assert_eq!(encoded["reasoning_effort"], "high");
+    }
+
+    #[test]
     fn subagent_reasoning_effort_parses_and_serializes_canonical_values() {
         for (token, expected) in [
             ("none", SubagentReasoningEffort::None),
@@ -1713,6 +1745,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             timeout_ms: None,
             retain_worktree: None,
             allowed_paths: None,
@@ -1728,10 +1761,9 @@ mod tests {
             serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
         assert_eq!(omitted.retain_worktree, None);
 
-        let explicit: TaskToolInput = serde_json::from_str(
-            r#"{"description": "d", "prompt": "p", "retain_worktree": true}"#,
-        )
-        .unwrap();
+        let explicit: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p", "retain_worktree": true}"#)
+                .unwrap();
         assert_eq!(explicit.retain_worktree, Some(true));
 
         let as_string: TaskToolInput = serde_json::from_str(
@@ -1756,10 +1788,9 @@ mod tests {
             Some(["crates/foo/".to_string(), "docs".to_string()].as_slice())
         );
 
-        let empty: TaskToolInput = serde_json::from_str(
-            r#"{"description": "d", "prompt": "p", "allowed_paths": []}"#,
-        )
-        .unwrap();
+        let empty: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p", "allowed_paths": []}"#)
+                .unwrap();
         assert_eq!(empty.allowed_paths.as_deref(), Some([].as_slice()));
     }
 
@@ -1784,14 +1815,14 @@ mod tests {
             changed_paths: Some(vec!["src/lib.rs".into()]),
             baseline_ref: Some("refs/grok/subagent-baselines/sa-1".into()),
             error_class: None,
-                worktree_seed: None,
+            worktree_seed: None,
         };
         let text = output.to_model_text();
         assert!(text.contains("<worktree_state>cleaned</worktree_state>"));
         assert!(text.contains("<snapshot_ref>refs/grok/subagents/sa-1</snapshot_ref>"));
-        assert!(text.contains(
-            "<patch_path>/tmp/sessions/s/subagents/sa-1/changes.patch</patch_path>"
-        ));
+        assert!(
+            text.contains("<patch_path>/tmp/sessions/s/subagents/sa-1/changes.patch</patch_path>")
+        );
         assert!(text.contains("<diffstat>1 files, +3/-0</diffstat>"));
         assert!(text.contains("resume_from=\"sa-1\""));
     }

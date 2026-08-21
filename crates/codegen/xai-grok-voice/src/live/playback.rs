@@ -932,14 +932,7 @@ where
                     return;
                 }
                 let mut rs = resampler.lock();
-                fill_cpal_output(
-                    out,
-                    &queue,
-                    &mut rs,
-                    source_rate,
-                    stream_rate,
-                    channels,
-                );
+                fill_cpal_output(out, &queue, &mut rs, source_rate, stream_rate, channels);
             },
             |err| tracing::warn!(error = %err, "live speaker playback stream error"),
             None,
@@ -1452,14 +1445,7 @@ where
                     out.fill(T::from_sample(0.0));
                     return;
                 };
-                fill_cpal_output(
-                    out,
-                    &queue,
-                    &mut rs,
-                    source_rate,
-                    stream_rate,
-                    channels,
-                );
+                fill_cpal_output(out, &queue, &mut rs, source_rate, stream_rate, channels);
             },
             |err| tracing::warn!(error = %err, "speaker helper stream error"),
             None,
@@ -1501,7 +1487,10 @@ mod tests {
 
     #[test]
     fn speaker_helper_status_parses_ready_bare() {
-        assert_eq!(parse_speaker_helper_status_line("READY"), Some(Ok(String::new())));
+        assert_eq!(
+            parse_speaker_helper_status_line("READY"),
+            Some(Ok(String::new()))
+        );
         assert_eq!(
             parse_speaker_helper_status_line("READY\n"),
             Some(Ok(String::new()))

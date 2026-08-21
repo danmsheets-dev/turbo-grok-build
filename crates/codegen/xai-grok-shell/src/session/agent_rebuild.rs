@@ -367,9 +367,9 @@ impl AgentRebuildSpec {
                 .await;
             // Land live worktrees via workspace.apply_worktree (Merge/Overwrite).
             {
+                use crate::session::worktree::{ApplyMode, ApplyWorktreeRequest};
                 use std::sync::Arc as StdArc;
                 use xai_grok_tools::implementations::grok_build::subagent_worktree::LiveWorktreeApplyBackend;
-                use crate::session::worktree::{ApplyMode, ApplyWorktreeRequest};
                 let backend = LiveWorktreeApplyBackend(StdArc::new(
                     |worktree_path: String, mode: ApplyMode| {
                         Box::pin(async move {
@@ -411,8 +411,7 @@ impl AgentRebuildSpec {
             ))
             .await;
         // RC13 P1 F9: gate atlas walk/build on the same trust as kickoff.
-        let tree_allowed =
-            crate::agent::folder_trust::project_scope_allowed(working_directory);
+        let tree_allowed = crate::agent::folder_trust::project_scope_allowed(working_directory);
         agent
             .tool_bridge()
             .update_resource(

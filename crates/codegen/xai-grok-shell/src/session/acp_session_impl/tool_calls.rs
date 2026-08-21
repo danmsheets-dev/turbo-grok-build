@@ -526,6 +526,7 @@ impl SessionActor {
         let workspace_ops = self.workspace_ops.clone();
         let pending_interjections = self.pending_interjections.clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
+        let signals_handle = self.signals_handle();
         let dispatch_futures: Vec<_> = approved
             .iter()
             .enumerate()
@@ -537,12 +538,14 @@ impl SessionActor {
                 let session_id = session_id.clone();
                 let pending_interjections = pending_interjections.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
+                let signals_handle = signals_handle.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
                 let lock = lock_path_for_args(&prepared.parsed_args)
                     .and_then(|fp| file_locks.get(fp).cloned());
                 let tools_execute_span = tracing::Span::current();
                 async move {
+                    let _in_flight = signals_handle.begin_in_flight_tool();
                     let exec_start = std::time::Instant::now();
                     let tool_span = tool_execution_span(
                         &tools_execute_span,
@@ -1103,10 +1106,8 @@ impl SessionActor {
                 tool_input_json: raw_input.to_string(),
             };
             let wasm_result = ext_rt.dispatch_pre_tool_use(&pre_in).await;
-            if let xai_grok_extension_runtime::PreToolDecision::Deny {
-                extension,
-                reason,
-            } = wasm_result.decision
+            if let xai_grok_extension_runtime::PreToolDecision::Deny { extension, reason } =
+                wasm_result.decision
             {
                 let m = ext_rt.metrics();
                 tracing::warn!(
@@ -2885,6 +2886,7 @@ impl SessionActor {
             }
             SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
                 self.signals_handle().record_tool_call(&name);
+                self.signals_handle().mark_tool_in_flight();
                 let (title, kind, raw_input) = backend_tool_display(&name);
                 self.send_update(
                     acp::SessionUpdate::ToolCall(
@@ -2909,6 +2911,7 @@ impl SessionActor {
                 result,
                 ..
             } => {
+                self.signals_handle().end_in_flight_tool();
                 let status = backend_tool_call_status(result.as_ref());
                 if status == acp::ToolCallStatus::Failed {
                     self.signals_handle().record_tool_failure(&name);
@@ -2963,9 +2966,7 @@ impl SessionActor {
             "tool refusal reason must be non-empty"
         );
         let reason = if reason.trim().is_empty() {
-            format!(
-                "Tool was not executed: permission refused (no reason provided)"
-            )
+            format!("Tool was not executed: permission refused (no reason provided)")
         } else {
             reason
         };
@@ -3009,12 +3010,12 @@ mod headless_refusal_tests {
         assert!(msg.contains("grep"), "{msg}");
         assert!(msg.contains("headless"), "{msg}");
         assert!(msg.contains("plan"), "{msg}");
-        assert!(msg.contains("--always-approve") || msg.contains("--allow"), "{msg}");
-        // Same outer shape as the policy-deny path.
         assert!(
-            msg.starts_with("Tool `grep` was not executed:"),
+            msg.contains("--always-approve") || msg.contains("--allow"),
             "{msg}"
         );
+        // Same outer shape as the policy-deny path.
+        assert!(msg.starts_with("Tool `grep` was not executed:"), "{msg}");
     }
 }
 /// Execute tool-call display parts. The title peels a redundant leading

@@ -1,6 +1,10 @@
 use std::{future::Future, io, path::Path, time::Duration};
 
-use tokio::{fs, time::sleep};
+use tokio::{
+    fs,
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom},
+    time::sleep,
+};
 
 use crate::computer::types::{AsyncFileSystem, ComputerError};
 
@@ -170,6 +174,155 @@ impl AsyncFileSystem for LocalFs {
         }
     }
 
+    #[tracing::instrument(name = "fs.read_file_prefix", skip_all)]
+    async fn read_file_prefix(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        let mut file = match fs::File::open(path).await {
+            Ok(file) => file,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                return Err(e.into());
+            }
+        };
+        let mut bytes = vec![0u8; max_bytes];
+        let read = file.read(&mut bytes).await.map_err(|e| {
+            if is_permission_error(&e) {
+                xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+            }
+            e
+        })?;
+        bytes.truncate(read);
+        Ok(bytes)
+    }
+
+    #[tracing::instrument(name = "fs.read_file_line_count", skip_all)]
+    async fn read_file_line_count(&self, path: &Path) -> Result<usize, ComputerError> {
+        let file = match fs::File::open(path).await {
+            Ok(file) => file,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                return Err(e.into());
+            }
+        };
+        let mut reader = BufReader::new(file);
+        let mut buffer = [0u8; 64 * 1024];
+        let mut total_bytes = 0usize;
+        let mut newline_count = 0usize;
+        loop {
+            let read = reader.read(&mut buffer).await.map_err(|e| {
+                if is_permission_error(&e) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                e
+            })?;
+            if read == 0 {
+                break;
+            }
+            total_bytes = total_bytes.saturating_add(read);
+            newline_count = newline_count
+                .saturating_add(buffer[..read].iter().filter(|&&byte| byte == b'\n').count());
+        }
+        Ok(if total_bytes == 0 {
+            0
+        } else {
+            newline_count.saturating_add(1)
+        })
+    }
+
+    #[tracing::instrument(name = "fs.read_file_ends_with_newline", skip_all)]
+    async fn read_file_ends_with_newline(&self, path: &Path) -> Result<bool, ComputerError> {
+        let mut file = match fs::File::open(path).await {
+            Ok(file) => file,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                return Err(e.into());
+            }
+        };
+        let length = file
+            .metadata()
+            .await
+            .map_err(|e| {
+                if is_permission_error(&e) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                e
+            })?
+            .len();
+        if length == 0 {
+            return Ok(false);
+        }
+        file.seek(SeekFrom::End(-1)).await.map_err(|e| {
+            if is_permission_error(&e) {
+                xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+            }
+            e
+        })?;
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).await.map_err(|e| {
+            if is_permission_error(&e) {
+                xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+            }
+            e
+        })?;
+        Ok(byte[0] == b'\n')
+    }
+
+    #[tracing::instrument(name = "fs.read_file_lines", skip_all)]
+    async fn read_file_lines(
+        &self,
+        path: &Path,
+        start_line: usize,
+        limit: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let file = match fs::File::open(path).await {
+            Ok(file) => file,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                return Err(e.into());
+            }
+        };
+        let mut reader = BufReader::new(file);
+        let start = start_line.max(1);
+        let end = start.saturating_add(limit);
+        let mut current_line = 1usize;
+        let mut line = Vec::new();
+        let mut output = Vec::new();
+        loop {
+            line.clear();
+            let read = reader.read_until(b'\n', &mut line).await.map_err(|e| {
+                if is_permission_error(&e) {
+                    xai_grok_sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                e
+            })?;
+            if read == 0 {
+                break;
+            }
+            if current_line >= start && current_line < end {
+                output.extend_from_slice(&line);
+            }
+            if current_line >= end {
+                break;
+            }
+            current_line = current_line.saturating_add(1);
+        }
+        Ok(output)
+    }
+
     #[tracing::instrument(name = "fs.write_file", skip_all)]
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
         // RC13 Wave A: when process confine root is stamped, refuse writes if
@@ -326,6 +479,20 @@ mod tests {
         let path = dir.path().join("probe.txt");
         fs::write(&path, b"abc").await.unwrap();
         assert!(verify_write_persisted(&path, 99).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn streamed_line_reads_bound_memory_to_requested_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.txt");
+        fs::write(&path, b"one\ntwo\nthree\nfour\n").await.unwrap();
+
+        assert_eq!(LocalFs.read_file_line_count(&path).await.unwrap(), 5);
+        assert!(LocalFs.read_file_ends_with_newline(&path).await.unwrap());
+        assert_eq!(
+            LocalFs.read_file_lines(&path, 2, 2).await.unwrap(),
+            b"two\nthree\n"
+        );
     }
 
     #[tokio::test]

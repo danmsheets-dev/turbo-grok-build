@@ -117,6 +117,7 @@ pub enum WorkflowLaunchAck {
     Validated {
         name: String,
         phases: usize,
+        tasks: usize,
         summary: String,
     },
     Rejected {
@@ -171,9 +172,9 @@ impl crate::types::tool_metadata::ToolMetadata for WorkflowTool {
     fn description_template(&self) -> &str {
         r##"Launch a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one source: `name` (a registered workflow — built-in, or from the project `.grok/workflows/` or user `~/.grok/workflows/`), an inline `script`, or a `script_path`. Optionally pass `args` (bound to the script's `args`) and `agent_budget`, an absolute cap on cumulative child-agent calls: every agent() and parallel() item consumes one slot (schema retries do not); default 128. The host also caps live children per run (32 by default, host-configured) — larger parallel() panels are queued and still act as a barrier. The call returns immediately; progress appears in `/workflows`${%- if system_reminders_enabled %} and completion is reported automatically — do not poll or sleep-wait${%- endif %}.
 
-Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
+Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives. Workflow metadata may declare a bounded `tasks` queue with `id`, `description`, optional `depends_on`, and `max_attempts`. Scripts can call `task_start(id)`, `task_complete(id, result)`, `task_fail(id, reason)`, and `task_queue()`; task transitions are durable, idempotent across resume, and dependency-aware. `task_complete` leaves the next eligible task pending; scripts explicitly call `task_start` so replay and branching remain deterministic. Paused runs survive process restart; a run that was active during an unclean session end is restored as an infrastructure-paused run with its current task made retryable. Use these task calls around long-running loop work so the harness, not prose, owns progress. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
 
-A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (process restarts are terminal); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grok/workflows/<name>.rhai`."##
+A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (persisted paused runs survive process restart; active runs restore as infrastructure-paused and retry their current task); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grok/workflows/<name>.rhai`."##
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -296,12 +297,13 @@ impl xai_tool_runtime::Tool for WorkflowTool {
             Ok(WorkflowLaunchAck::Validated {
                 name,
                 phases,
+                tasks,
                 summary,
             }) => Ok(WorkflowToolOutput {
                 message: format!(
-                    "Smoke check passed for workflow '{name}' ({phases} declared phases; \
-                     canned-host path {summary}). This did not launch the workflow and did not \
-                     exercise every branch or live dependency. Offer a real run next."
+                    "Smoke check passed for workflow '{name}' ({phases} declared phases, {tasks} \
+                     queued tasks; canned-host path {summary}). This did not launch the workflow \
+                     and did not exercise every branch or live dependency. Offer a real run next."
                 ),
                 run_id: String::new(),
                 task_id: String::new(),

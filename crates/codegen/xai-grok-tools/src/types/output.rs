@@ -648,12 +648,8 @@ pub enum ToolOutput {
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListOutput),
     UpdateGoal(crate::implementations::grok_build::update_goal::UpdateGoalOutput),
     Workflow(crate::implementations::grok_build::workflow::WorkflowToolOutput),
-    DiffSubagent(
-        crate::implementations::grok_build::subagent_worktree::diff::DiffSubagentOutput,
-    ),
-    LandSubagent(
-        crate::implementations::grok_build::subagent_worktree::land::LandSubagentOutput,
-    ),
+    DiffSubagent(crate::implementations::grok_build::subagent_worktree::diff::DiffSubagentOutput),
+    LandSubagent(crate::implementations::grok_build::subagent_worktree::land::LandSubagentOutput),
     DiscardSubagent(
         crate::implementations::grok_build::subagent_worktree::discard::DiscardSubagentOutput,
     ),
@@ -2224,7 +2220,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
-                worktree_seed: None,
+            worktree_seed: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2273,7 +2269,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
-                worktree_seed: None,
+            worktree_seed: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2310,7 +2306,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
-                worktree_seed: None,
+            worktree_seed: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2347,7 +2343,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
-                worktree_seed: None,
+            worktree_seed: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-abc-123");
@@ -2633,7 +2629,7 @@ mod tests {
             baseline_ref: None,
             diffstat: None,
             error_class: None,
-                worktree_seed: None,
+            worktree_seed: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["resume_from_hint"], "sub-xyz");

@@ -3,12 +3,17 @@ pub mod host;
 pub mod journal;
 pub mod meta;
 pub mod run;
+pub mod task;
 pub mod validate;
 
 pub const MAX_WORKFLOW_NAME_LEN: usize = 64;
 pub const MAX_WORKFLOW_DESCRIPTION_LEN: usize = 1_024;
 pub const MAX_WORKFLOW_WHEN_TO_USE_LEN: usize = 2_048;
 pub const MAX_WORKFLOW_PHASES: usize = 64;
+pub const MAX_WORKFLOW_TASKS: usize = 256;
+pub const MAX_TASK_ID_LEN: usize = 128;
+pub const MAX_TASK_DESCRIPTION_LEN: usize = 1_024;
+pub const MAX_TASK_RESULT_SUMMARY_LEN: usize = 16 * 1024;
 pub const MAX_PHASE_TITLE_LEN: usize = 128;
 pub const MAX_PHASE_DETAIL_LEN: usize = 1_024;
 pub const MAX_PARALLEL: usize = 1_024;
@@ -39,6 +44,10 @@ pub use host::{AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostReque
 pub use journal::{Journal, JournalEntry, JournalError};
 pub use meta::{MetaError, PhaseMeta, WorkflowMeta, extract_meta};
 pub use run::{PauseKind, WorkflowOutcome};
+pub use task::{
+    DEFAULT_TASK_MAX_ATTEMPTS, MAX_TASK_ATTEMPTS, TaskDefinition, TaskQueueError, TaskQueueState,
+    TaskState, TaskStatus,
+};
 pub use validate::{
     ValidationError, ValidationReport, validate_script, validate_script_with_agent_budget,
 };

@@ -38,6 +38,10 @@ pub struct ToolCallParams {
     /// W3C `traceparent` for distributed tracing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_context: Option<String>,
+    /// Explicit caller role for mutating tool authorization. Omitted roles
+    /// are treated as unauthorized for `ToolScope::Write`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_role: Option<crate::ToolCallerRole>,
 }
 
 /// Body of a successful `tool_call_result` response.

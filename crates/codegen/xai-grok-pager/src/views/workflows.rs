@@ -9,10 +9,23 @@ use crate::views::goal_detail::{format_elapsed, strip_control_chars, truncate_to
 use crate::views::picker::{PickerRow, render_picker_row};
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowTaskRowView {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub attempts: u32,
+    pub max_attempts: u32,
+    pub depends_on: Vec<String>,
+    pub result_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowAgentRowView {
     pub agent_id: String,
     pub label: String,
     pub phase: Option<String>,
+    pub task_id: Option<String>,
     pub model: Option<String>,
     pub state: String,
     pub tokens_used: u64,
@@ -29,6 +42,13 @@ pub struct WorkflowAgentLiveStatus {
 pub type WorkflowAgentLiveMap = std::collections::HashMap<String, WorkflowAgentLiveStatus>;
 
 #[derive(Debug, Clone)]
+struct RailItem {
+    key: String,
+    title: String,
+    state: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct WorkflowRunSnapshot {
     pub run_id: String,
     pub name: String,
@@ -37,7 +57,9 @@ pub struct WorkflowRunSnapshot {
     pub management_available: bool,
     pub builtin: bool,
     pub phases: Vec<(String, String)>,
+    pub tasks: Vec<WorkflowTaskRowView>,
     pub current_phase: Option<String>,
+    pub current_task_id: Option<String>,
     pub agents: Vec<WorkflowAgentRowView>,
     pub agent_budget: Option<u64>,
     pub agents_used: u64,
@@ -68,7 +90,7 @@ impl WorkflowRunSnapshot {
     }
 
     pub fn can_resume(&self) -> bool {
-        if !self.management_available {
+        if !self.management_available || self.tasks.iter().any(|task| task.status == "failed") {
             return false;
         }
         matches!(
@@ -114,6 +136,20 @@ impl WorkflowRunSnapshot {
         }
     }
 
+    pub fn agents_in_task(&self, task_id: &str) -> Vec<&WorkflowAgentRowView> {
+        self.agents
+            .iter()
+            .filter(|agent| {
+                agent.task_id.as_deref() == Some(task_id)
+                    || (agent.task_id.is_none()
+                        && agent
+                            .phase
+                            .as_deref()
+                            .is_some_and(|phase| phase.eq_ignore_ascii_case(task_id)))
+            })
+            .collect()
+    }
+
     pub fn phase_has_running_agents(&self, phase: &str) -> bool {
         self.agents
             .iter()
@@ -121,11 +157,14 @@ impl WorkflowRunSnapshot {
     }
 
     pub fn effective_active_phase(&self) -> Option<String> {
-        phase_rail(self)
+        if let Some(task_id) = self.current_task_id.clone() {
+            return Some(task_id);
+        }
+        phase_rail_items(self)
             .iter()
             .rev()
-            .find(|(title, _)| self.phase_has_running_agents(title))
-            .map(|(title, _)| title.clone())
+            .find(|item| self.phase_has_running_agents(&item.key))
+            .map(|item| item.key.clone())
             .or_else(|| self.current_phase.clone())
     }
 
@@ -294,14 +333,10 @@ impl WorkflowsViewState {
             {
                 self.selected_run = idx;
             }
-            let rail = phase_rail(run);
-            if self.phase_pinned && run.effective_active_phase() != self.pin_active_phase {
-                self.phase_pinned = false;
-                self.pin_active_phase = None;
-            }
+            let rail = phase_rail_items(run);
             if self.phase_pinned {
                 if let Some(name) = self.selected_phase_name.as_deref()
-                    && let Some(idx) = rail.iter().position(|(title, _)| title == name)
+                    && let Some(idx) = rail.iter().position(|item| item.key == name)
                 {
                     self.selected_phase = idx;
                 } else {
@@ -310,9 +345,7 @@ impl WorkflowsViewState {
             } else {
                 self.selected_phase = default_phase_index(run);
             }
-            self.selected_phase_name = rail
-                .get(self.selected_phase)
-                .map(|(title, _)| title.clone());
+            self.selected_phase_name = rail.get(self.selected_phase).map(|item| item.key.clone());
         } else {
             self.selected_phase = 0;
             self.selected_phase_name = None;
@@ -341,11 +374,9 @@ impl WorkflowsViewState {
     }
 
     pub fn select_phase(&mut self, idx: usize, run: &WorkflowRunSnapshot) {
-        let rail = phase_rail(run);
+        let rail = phase_rail_items(run);
         self.selected_phase = idx.min(rail.len().saturating_sub(1));
-        self.selected_phase_name = rail
-            .get(self.selected_phase)
-            .map(|(title, _)| title.clone());
+        self.selected_phase_name = rail.get(self.selected_phase).map(|item| item.key.clone());
         self.phase_pinned = true;
         self.pin_active_phase = run.effective_active_phase();
     }
@@ -440,31 +471,77 @@ fn ensure_selection_visible(
     }
 }
 
-pub fn phase_rail(run: &WorkflowRunSnapshot) -> Vec<(String, String)> {
-    let mut phases = run.phases.clone();
+fn phase_rail_items(run: &WorkflowRunSnapshot) -> Vec<RailItem> {
+    if !run.tasks.is_empty() {
+        return run
+            .tasks
+            .iter()
+            .map(|task| RailItem {
+                key: task.id.clone(),
+                title: task.title.clone(),
+                state: match task.status.as_str() {
+                    "completed" => "done",
+                    "in_progress" => "active",
+                    "failed" | "cancelled" => "failed",
+                    "blocked" => "blocked",
+                    _ => "pending",
+                }
+                .to_string(),
+            })
+            .collect();
+    }
+    let mut phases: Vec<RailItem> = run
+        .phases
+        .iter()
+        .map(|(title, state)| RailItem {
+            key: title.clone(),
+            title: title.clone(),
+            state: state.clone(),
+        })
+        .collect();
     if let Some(current) = run.current_phase.as_deref()
-        && !phases.iter().any(|(title, _)| title == current)
+        && !phases.iter().any(|item| item.key == current)
     {
-        let state = if run.status == "complete" {
-            "done"
-        } else {
-            "active"
-        };
-        phases.push((current.to_owned(), state.to_owned()));
+        phases.push(RailItem {
+            key: current.to_owned(),
+            title: current.to_owned(),
+            state: if run.status == "complete" {
+                "done".to_owned()
+            } else {
+                "active".to_owned()
+            },
+        });
     }
     if phases.is_empty() {
-        phases.push(("All agents".to_owned(), "active".to_owned()));
+        phases.push(RailItem {
+            key: "all-agents".to_owned(),
+            title: "All agents".to_owned(),
+            state: "active".to_owned(),
+        });
     }
     phases
 }
 
+pub fn phase_rail(run: &WorkflowRunSnapshot) -> Vec<(String, String)> {
+    phase_rail_items(run)
+        .into_iter()
+        .map(|item| (item.title, item.state))
+        .collect()
+}
+
+pub fn phase_index_for_key(run: &WorkflowRunSnapshot, key: &str) -> Option<usize> {
+    phase_rail_items(run)
+        .iter()
+        .position(|item| item.key == key)
+}
+
 fn default_phase_index(run: &WorkflowRunSnapshot) -> usize {
-    let rail = phase_rail(run);
+    let rail = phase_rail_items(run);
     run.effective_active_phase()
-        .and_then(|current| rail.iter().position(|(title, _)| title == &current))
-        .or_else(|| rail.iter().position(|(_, state)| state == "active"))
+        .and_then(|current| rail.iter().position(|item| item.key == current))
+        .or_else(|| rail.iter().position(|item| item.state == "active"))
         .unwrap_or_else(|| {
-            if rail.iter().all(|(_, state)| state == "done") {
+            if rail.iter().all(|item| item.state == "done") {
                 rail.len().saturating_sub(1)
             } else {
                 0
@@ -608,7 +685,18 @@ fn render_list(
         }
         let (glyph, glyph_style) = status_glyph_and_style(&run.status, theme);
         let done_phases = run.phases.iter().filter(|(_, s)| s == "done").count();
-        let phase_part = if run.phases.is_empty() {
+        let done_tasks = run
+            .tasks
+            .iter()
+            .filter(|task| task.status == "completed")
+            .count();
+        let phase_part = if !run.tasks.is_empty() {
+            format!(
+                "{done_tasks}/{} task{}",
+                run.tasks.len(),
+                if run.tasks.len() == 1 { "" } else { "s" }
+            )
+        } else if run.phases.is_empty() {
             run.status.clone()
         } else {
             format!(
@@ -684,8 +772,22 @@ fn render_detail(
     } else {
         format!("{glyph} ")
     };
+    let task_part = if run.tasks.is_empty() {
+        String::new()
+    } else {
+        let done = run
+            .tasks
+            .iter()
+            .filter(|task| task.status == "completed")
+            .count();
+        format!(
+            "{done}/{} task{} · ",
+            run.tasks.len(),
+            if run.tasks.len() == 1 { "" } else { "s" }
+        )
+    };
     let meta = format!(
-        "{}/{} agent{} · {}",
+        "{task_part}{}/{} agent{} · {}",
         run.done_agents(),
         run.agents.len(),
         if run.agents.len() == 1 { "" } else { "s" },
@@ -759,8 +861,16 @@ fn render_detail(
             Style::default().fg(theme.warning),
         ))
     } else if run.status == "failed" {
+        let retry_hint = if let Some(task) = run.tasks.iter().find(|task| task.status == "failed") {
+            format!(
+                "task '{}' exhausted {}/{} attempts",
+                task.id, task.attempts, task.max_attempts
+            )
+        } else {
+            "r resumes from the journal".to_string()
+        };
         Some((
-            "failed — see scrollback for details; r resumes from the journal".to_string(),
+            format!("failed — see scrollback for details; {retry_hint}"),
             Style::default().fg(theme.accent_error),
         ))
     } else {
@@ -782,14 +892,14 @@ fn render_detail(
     if body_h < 3 {
         return;
     }
-    let rail = phase_rail(run);
+    let rail = phase_rail_items(run);
     let rail_cap = inner.width.saturating_sub(5) / 2;
     if rail_cap == 0 {
         return;
     }
     let wanted_rail_w = rail
         .iter()
-        .map(|(t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()) as u16)
+        .map(|item| unicode_width::UnicodeWidthStr::width(item.title.as_str()) as u16)
         .max()
         .unwrap_or(8)
         .saturating_add(12);
@@ -823,7 +933,11 @@ fn render_detail(
         buf,
         rail_area.x,
         body_y,
-        "Phases",
+        if run.tasks.is_empty() {
+            "Phases"
+        } else {
+            "Tasks"
+        },
         Style::default().fg(theme.text_secondary),
         rail_area.right(),
     );
@@ -834,35 +948,53 @@ fn render_detail(
         body_h.saturating_sub(1),
     );
 
-    let selected_phase_title = rail
-        .get(state.selected_phase)
-        .map(|(title, _)| title.clone())
+    let selected_phase = rail.get(state.selected_phase);
+    let selected_phase_key = selected_phase
+        .map(|item| item.key.as_str())
         .unwrap_or_default();
-    let all_agents_phase = run.phases.is_empty() && run.current_phase.is_none();
+    let selected_phase_title = selected_phase
+        .map(|item| item.title.clone())
+        .unwrap_or_default();
+    let all_agents_phase =
+        run.tasks.is_empty() && (run.phases.is_empty() && run.current_phase.is_none());
     state.ensure_phase_visible(usize::from(rail_inner.height), rail.len());
-    for (idx, (title, phase_state)) in rail.iter().enumerate().skip(state.phase_viewport) {
+    for (idx, item) in rail.iter().enumerate().skip(state.phase_viewport) {
+        let title = &item.title;
+        let phase_state = &item.state;
         let y = rail_inner.y + (idx - state.phase_viewport) as u16;
         if y >= rail_inner.bottom() {
             break;
         }
         let selected = idx == state.selected_phase;
+        let task_agents = if run.tasks.is_empty() {
+            Some(run.agents_in_phase(Some(title)))
+        } else {
+            Some(run.agents_in_task(&item.key))
+        };
         let agents_in = if all_agents_phase {
             run.agents.len()
         } else {
-            run.agents_in_phase(Some(title)).len()
+            task_agents.as_ref().map_or(0, Vec::len)
         };
         let done_in = if all_agents_phase {
             run.done_agents()
         } else {
-            run.agents_in_phase(Some(title))
-                .iter()
-                .filter(|agent| agent.state != "running")
-                .count()
+            task_agents
+                .as_ref()
+                .map(|agents| {
+                    agents
+                        .iter()
+                        .filter(|agent| agent.state != "running")
+                        .count()
+                })
+                .unwrap_or_default()
         };
         let running_in = if all_agents_phase {
             run.active_agent_count() > 0
         } else {
-            run.phase_has_running_agents(title)
+            task_agents
+                .as_ref()
+                .is_some_and(|agents| agents.iter().any(|agent| agent.state == "running"))
         };
         let effective_state = if running_in {
             "active"
@@ -873,6 +1005,8 @@ fn render_detail(
         let num_style = match effective_state {
             "done" => Style::default().fg(theme.accent_success),
             "active" => Style::default().fg(theme.accent_plan),
+            "blocked" => Style::default().fg(theme.warning),
+            "failed" => Style::default().fg(theme.accent_error),
             _ => Style::default().fg(theme.gray_dim),
         };
         let title_style = if selected {
@@ -881,6 +1015,10 @@ fn render_detail(
                 .add_modifier(Modifier::BOLD)
         } else if effective_state == "pending" {
             Style::default().fg(theme.gray_dim)
+        } else if effective_state == "blocked" {
+            Style::default().fg(theme.warning)
+        } else if effective_state == "failed" {
+            Style::default().fg(theme.accent_error)
         } else {
             Style::default().fg(theme.gray_bright)
         };
@@ -919,14 +1057,16 @@ fn render_detail(
         span_at(buf, count_x, y, &count, count_style, rail_inner.right());
         state.phase_hits.push((
             Rect::new(rail_inner.x, y, rail_inner.width, 1),
-            title.clone(),
+            item.key.clone(),
         ));
     }
 
     let roster_agents = if all_agents_phase {
         run.agents_in_phase(None)
+    } else if run.tasks.is_empty() {
+        run.agents_in_phase(Some(selected_phase_key))
     } else {
-        run.agents_in_phase(Some(selected_phase_title.as_str()))
+        run.agents_in_task(selected_phase_key)
     };
     let roster_inner = Rect::new(
         roster_area.x,
@@ -948,18 +1088,50 @@ fn render_detail(
     if state.roster_scroll == 0 {
         state.roster_top_agent_id = None;
     }
+    let selected_task_detail = (!run.tasks.is_empty())
+        .then(|| {
+            run.tasks.get(state.selected_phase).map(|task| {
+                let dependencies = if task.depends_on.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · deps: {}", task.depends_on.join(", "))
+                };
+                let result = task
+                    .result_summary
+                    .as_deref()
+                    .map(|summary| format!(" · result: {}", strip_control(summary)))
+                    .unwrap_or_default();
+                format!(
+                    "{} · attempts: {}/{}{}{}",
+                    task.status.replace('_', " "),
+                    task.attempts,
+                    task.max_attempts,
+                    dependencies,
+                    result
+                )
+            })
+        })
+        .flatten();
     let roster_title = if state.roster_scroll > 0 {
         format!(
-            "{} · {} · ↑{}",
+            "{} · {} · ↑{}{}",
             selected_phase_title,
             plural(roster_agents.len(), "agent"),
             state.roster_scroll,
+            selected_task_detail
+                .as_deref()
+                .map(|detail| format!(" · {detail}"))
+                .unwrap_or_default(),
         )
     } else {
         format!(
-            "{} · {}",
+            "{} · {}{}",
             selected_phase_title,
-            plural(roster_agents.len(), "agent")
+            plural(roster_agents.len(), "agent"),
+            selected_task_detail
+                .as_deref()
+                .map(|detail| format!(" · {detail}"))
+                .unwrap_or_default(),
         )
     };
     span_at(
@@ -1102,12 +1274,15 @@ mod tests {
                 ("Research".to_string(), "active".to_string()),
                 ("Synthesize".to_string(), "pending".to_string()),
             ],
+            tasks: Vec::new(),
             current_phase: Some("Research".to_string()),
+            current_task_id: None,
             agents: vec![
                 WorkflowAgentRowView {
                     agent_id: "a1".into(),
                     label: "planner".into(),
                     phase: Some("Plan".into()),
+                    task_id: None,
                     model: None,
                     state: "done".into(),
                     tokens_used: 12_300,
@@ -1117,6 +1292,7 @@ mod tests {
                     agent_id: "a2".into(),
                     label: "researcher-1".into(),
                     phase: Some("Research".into()),
+                    task_id: None,
                     model: Some("grok-4.5".into()),
                     state: "running".into(),
                     tokens_used: 0,
@@ -1364,6 +1540,61 @@ mod tests {
     }
 
     #[test]
+    fn task_rail_uses_ids_for_selection_and_filters_agents() {
+        let mut run = make_run("wf_tasks", "tasked", "active");
+        run.phases = Vec::new();
+        run.current_phase = None;
+        run.tasks = vec![
+            WorkflowTaskRowView {
+                id: "research".into(),
+                title: "Explore the repository".into(),
+                description: Some("Explore the repository".into()),
+                status: "completed".into(),
+                attempts: 1,
+                max_attempts: 2,
+                depends_on: Vec::new(),
+                result_summary: Some("done".into()),
+            },
+            WorkflowTaskRowView {
+                id: "verify".into(),
+                title: "Verify the changes".into(),
+                description: Some("Verify the changes".into()),
+                status: "in_progress".into(),
+                attempts: 1,
+                max_attempts: 2,
+                depends_on: vec!["research".into()],
+                result_summary: None,
+            },
+        ];
+        run.current_task_id = Some("verify".into());
+        run.agents = vec![
+            WorkflowAgentRowView {
+                agent_id: "research-agent".into(),
+                label: "research".into(),
+                phase: Some("Research".into()),
+                task_id: Some("research".into()),
+                model: None,
+                state: "done".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            },
+            WorkflowAgentRowView {
+                agent_id: "verify-agent".into(),
+                label: "verify".into(),
+                phase: Some("Verify".into()),
+                task_id: Some("verify".into()),
+                model: None,
+                state: "running".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            },
+        ];
+        assert_eq!(phase_index_for_key(&run, "verify"), Some(1));
+        assert_eq!(run.agents_in_task("verify").len(), 1);
+        assert_eq!(run.agents_in_task("verify")[0].agent_id, "verify-agent");
+    }
+
+    #[test]
     fn undeclared_current_phase_is_selectable_and_filters_its_agents() {
         let mut run = make_run("wf_1", "dynamic", "active");
         run.phases = vec![("Declared".to_owned(), "pending".to_owned())];
@@ -1372,6 +1603,7 @@ mod tests {
             agent_id: "dynamic-agent".to_owned(),
             label: "dynamic-agent".to_owned(),
             phase: Some("Discovered".to_owned()),
+            task_id: None,
             model: None,
             state: "running".to_owned(),
             tokens_used: 0,
@@ -1556,6 +1788,7 @@ mod tests {
                 agent_id: format!("a{i:02}"),
                 label: format!("agent-{i:02}"),
                 phase: None,
+                task_id: None,
                 model: None,
                 state: "done".into(),
                 tokens_used: 0,
@@ -1600,6 +1833,7 @@ mod tests {
             agent_id: "a30".to_owned(),
             label: "agent-30".to_owned(),
             phase: None,
+            task_id: None,
             model: None,
             state: "running".to_owned(),
             tokens_used: 0,
@@ -1668,6 +1902,7 @@ mod tests {
                 agent_id: "a1".into(),
                 label: "audit-batch-0".into(),
                 phase: Some("Audit".into()),
+                task_id: None,
                 model: None,
                 state: "done".into(),
                 tokens_used: 1_000,
@@ -1677,6 +1912,7 @@ mod tests {
                 agent_id: "a2".into(),
                 label: "synthesizer".into(),
                 phase: Some("Synthesize".into()),
+                task_id: None,
                 model: None,
                 state: "running".into(),
                 tokens_used: 0,
@@ -1697,7 +1933,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_phase_unpins_when_run_progresses() {
+    fn pinned_phase_stays_selected_when_run_progresses() {
         let mut run = make_run("wf_1", "deep-research", "active");
         run.agents[1].state = "running".to_owned();
         let runs = vec![&run];
@@ -1713,6 +1949,7 @@ mod tests {
             agent_id: "a3".into(),
             label: "synthesizer".into(),
             phase: Some("Synthesize".into()),
+            task_id: None,
             model: None,
             state: "running".into(),
             tokens_used: 0,
@@ -1720,8 +1957,8 @@ mod tests {
         });
         let runs = vec![&run];
         state.normalize(&runs);
-        assert!(!state.phase_pinned);
-        assert_eq!(state.selected_phase_name.as_deref(), Some("Synthesize"));
+        assert!(state.phase_pinned);
+        assert_eq!(state.selected_phase_name.as_deref(), Some("Plan"));
     }
 
     #[test]

@@ -1421,16 +1421,10 @@ mod tests {
                 let session_id = format!("ext-release-{}", std::process::id());
 
                 // Shell snippet (empty args): bare `sleep` is not on Windows PATH.
-                let id = create_terminal(
-                    &session_id,
-                    &sleep_cmd(30),
-                    &[],
-                    HashMap::new(),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap();
+                let id =
+                    create_terminal(&session_id, &sleep_cmd(30), &[], HashMap::new(), None, None)
+                        .await
+                        .unwrap();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1449,27 +1443,15 @@ mod tests {
                 let session_id = format!("kill-all-{}", std::process::id());
 
                 // Create two terminals: one normal, one we'll background.
-                let normal_id = create_terminal(
-                    &session_id,
-                    &sleep_cmd(30),
-                    &[],
-                    HashMap::new(),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap();
+                let normal_id =
+                    create_terminal(&session_id, &sleep_cmd(30), &[], HashMap::new(), None, None)
+                        .await
+                        .unwrap();
 
-                let bg_id = create_terminal(
-                    &session_id,
-                    &sleep_cmd(30),
-                    &[],
-                    HashMap::new(),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap();
+                let bg_id =
+                    create_terminal(&session_id, &sleep_cmd(30), &[], HashMap::new(), None, None)
+                        .await
+                        .unwrap();
 
                 // Wait for both to start.
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1602,16 +1584,10 @@ mod tests {
                 let session_b = format!("kill-all-b-{}", std::process::id());
 
                 // Create a terminal in session B (shell snippet for Windows PATH).
-                let id_b = create_terminal(
-                    &session_b,
-                    &sleep_cmd(30),
-                    &[],
-                    HashMap::new(),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap();
+                let id_b =
+                    create_terminal(&session_b, &sleep_cmd(30), &[], HashMap::new(), None, None)
+                        .await
+                        .unwrap();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 

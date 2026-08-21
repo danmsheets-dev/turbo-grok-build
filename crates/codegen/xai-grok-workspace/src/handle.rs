@@ -2655,8 +2655,7 @@ impl WorkspaceHandle {
         > = tokio::task::spawn_blocking(move || {
             use std::collections::HashMap;
             use xai_grok_mcp::servers::{McpClientTimeoutOverrides, mcp_server_name};
-            let (disk_timeouts, oauth_config_map) =
-                crate::mcp::load_hub_mcp_config_maps(&root_cwd);
+            let (disk_timeouts, oauth_config_map) = crate::mcp::load_hub_mcp_config_maps(&root_cwd);
             let mut overrides_map: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
             for c in &configs {
                 let name = mcp_server_name(c).to_string();
@@ -2664,9 +2663,7 @@ impl WorkspaceHandle {
                 overrides_map.insert(
                     name,
                     McpClientTimeoutOverrides {
-                        startup_timeout_sec: disk
-                            .and_then(|d| d.startup_timeout_sec)
-                            .or(Some(30)),
+                        startup_timeout_sec: disk.and_then(|d| d.startup_timeout_sec).or(Some(30)),
                         tool_timeout_sec: disk.and_then(|d| d.tool_timeout_sec).or(Some(120)),
                         tool_timeouts: disk.and_then(|d| d.tool_timeouts.clone()),
                         expose_image_base64: disk.and_then(|d| d.expose_image_base64),

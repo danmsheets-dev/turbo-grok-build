@@ -85,10 +85,7 @@ pub fn supervisor_lines(phase: SupervisorPhase, tick: u64, set: SpriteSet) -> Ve
     match set {
         SpriteSet::Small => vec![
             Line::from(vec![Span::styled("  ∩∩  ", gold)]),
-            Line::from(vec![
-                Span::styled(format!(" {face}"), body),
-                Span::raw(" "),
-            ]),
+            Line::from(vec![Span::styled(format!(" {face}"), body), Span::raw(" ")]),
             Line::from(vec![Span::styled(format!(" {hands}"), body)]),
         ],
         // Every row is exactly `SUPER_W` display columns: `hands` is 3-4 cols
@@ -195,7 +192,10 @@ pub fn empty_desk_lines(set: SpriteSet) -> Vec<Line<'static>> {
             Line::from(vec![Span::styled("    ░░░░    ", dim)]),
             Line::from(vec![Span::styled("  ┌──────┐  ", wood)]),
             Line::from(vec![Span::styled("  │ IDLE │  ", dim)]),
-            Line::from(vec![Span::styled("  │  ▄▄  │  ", Style::default().fg(Color::Rgb(40, 40, 50)))]),
+            Line::from(vec![Span::styled(
+                "  │  ▄▄  │  ",
+                Style::default().fg(Color::Rgb(40, 40, 50)),
+            )]),
             Line::from(vec![Span::styled("  └──┬───┘  ", wood)]),
             Line::from(vec![Span::styled("    ─┴─     ", chair_style())]),
         ],

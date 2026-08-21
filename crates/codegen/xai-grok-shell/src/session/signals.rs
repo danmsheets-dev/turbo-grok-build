@@ -286,6 +286,13 @@ pub struct SessionSignals {
     // === Tool Usage ===
     /// Number of tool calls executed
     pub tool_call_count: u32,
+    /// Tools currently running (dispatched, not yet completed).
+    ///
+    /// Stall/idle watchdogs treat a non-zero count as activity so a child
+    /// blocked on `blender.exe --background` (or any long shell) is not
+    /// cancelled at the 180s idle limit.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub in_flight_tool_count: u32,
     /// Distinct tools that have been used in this session
     #[serde(default)]
     pub tools_used: Vec<String>,
@@ -461,6 +468,10 @@ pub struct SessionSignals {
     pub peak_rss_bytes: u64,
 }
 
+fn u32_is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
 /// Events that can be sent to the signals actor.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -472,6 +483,10 @@ pub enum SignalEvent {
     RecordAssistantMessage,
 
     // === Tool Events ===
+    /// A tool dispatch started; increment in-flight count (stall activity).
+    BeginInFlightTool,
+    /// A tool dispatch finished (success, failure, or cancel).
+    EndInFlightTool,
     /// Record a tool call with the tool name
     RecordToolCall(String),
     /// Record a tool success with the tool name
@@ -651,6 +666,17 @@ impl Default for SessionSignalsHandle {
     }
 }
 
+/// Decrements [`SessionSignals::in_flight_tool_count`] on drop.
+pub struct InFlightToolGuard {
+    handle: SessionSignalsHandle,
+}
+
+impl Drop for InFlightToolGuard {
+    fn drop(&mut self) {
+        let _ = self.handle.tx.send(SignalEvent::EndInFlightTool);
+    }
+}
+
 impl SessionSignalsHandle {
     // === Turn/Message Methods ===
 
@@ -675,6 +701,25 @@ impl SessionSignalsHandle {
     /// Record a tool call.
     pub fn record_tool_call(&self, tool_name: impl Into<String>) {
         let _ = self.tx.send(SignalEvent::RecordToolCall(tool_name.into()));
+    }
+
+    /// Increment in-flight count without a drop guard (backend tool lifecycle).
+    pub fn mark_tool_in_flight(&self) {
+        let _ = self.tx.send(SignalEvent::BeginInFlightTool);
+    }
+
+    /// Mark a tool as in-flight. Drop the guard when the dispatch finishes
+    /// (including cancel/panic unwind of the future).
+    pub fn begin_in_flight_tool(&self) -> InFlightToolGuard {
+        self.mark_tool_in_flight();
+        InFlightToolGuard {
+            handle: self.clone(),
+        }
+    }
+
+    /// Decrement in-flight count (backend tools that do not hold a guard).
+    pub fn end_in_flight_tool(&self) {
+        let _ = self.tx.send(SignalEvent::EndInFlightTool);
     }
 
     /// Record a tool success.
@@ -1254,6 +1299,14 @@ impl SessionSignalsActor {
                 }
 
                 // === Tool Events ===
+                SignalEvent::BeginInFlightTool => {
+                    self.signals.in_flight_tool_count =
+                        self.signals.in_flight_tool_count.saturating_add(1);
+                }
+                SignalEvent::EndInFlightTool => {
+                    self.signals.in_flight_tool_count =
+                        self.signals.in_flight_tool_count.saturating_sub(1);
+                }
                 SignalEvent::RecordToolCall(tool_name) => {
                     self.signals.tool_call_count += 1;
                     // Track per-turn tool usage (includes repeats)
@@ -1924,6 +1977,7 @@ mod tests {
         assert_eq!(snapshot.turn_count, 2);
         assert_eq!(snapshot.user_message_count, 2); // Incremented with turn
         assert_eq!(snapshot.tool_call_count, 3);
+        assert_eq!(snapshot.in_flight_tool_count, 0);
         assert_eq!(snapshot.error_count, 1);
         assert_eq!(snapshot.compaction_count, 1);
         assert_eq!(snapshot.cancellation_count, 1);
@@ -1931,6 +1985,34 @@ mod tests {
         assert_eq!(snapshot.tools_used.len(), 2); // Only unique tools
 
         // Shutdown
+        handle.shutdown();
+        actor_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_flight_tool_guard_increments_and_decrements() {
+        let (handle, actor) = SessionSignalsActor::new();
+        let actor_handle = tokio::spawn(actor.run());
+
+        {
+            let _g1 = handle.begin_in_flight_tool();
+            let _g2 = handle.begin_in_flight_tool();
+            let snapshot = handle.snapshot().await.unwrap();
+            assert_eq!(snapshot.in_flight_tool_count, 2);
+        }
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.in_flight_tool_count, 0);
+
+        handle.mark_tool_in_flight();
+        handle.mark_tool_in_flight();
+        handle.end_in_flight_tool();
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.in_flight_tool_count, 1);
+        handle.end_in_flight_tool();
+        handle.end_in_flight_tool(); // saturating
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.in_flight_tool_count, 0);
+
         handle.shutdown();
         actor_handle.await.unwrap();
     }

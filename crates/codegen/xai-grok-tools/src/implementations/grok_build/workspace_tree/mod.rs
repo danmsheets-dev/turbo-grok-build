@@ -192,7 +192,7 @@ fn run_action(
     depth: u32,
     limit: usize,
 ) -> Result<WorkspaceTreeOutput, xai_tool_runtime::ToolError> {
-    use xai_workspace_tree::{list, search, summary, WorkspaceTreeConfig};
+    use xai_workspace_tree::{WorkspaceTreeConfig, list, search, summary};
 
     let config = WorkspaceTreeConfig::from_env();
     if !config.enabled {
@@ -364,7 +364,7 @@ mod tests {
     use crate::util::workspace_tree_cache;
     use tempfile::TempDir;
     use xai_tool_runtime::Tool;
-    use xai_workspace_tree::{build_and_save, WorkspaceTreeConfig};
+    use xai_workspace_tree::{WorkspaceTreeConfig, build_and_save};
 
     #[test]
     fn summary_action_formats() {
@@ -425,4 +425,3 @@ mod tests {
         );
     }
 }
-
