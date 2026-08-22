@@ -62,23 +62,126 @@ pub(crate) enum CacheAuthMethod {
     Deployment,
 }
 
+pub(crate) fn spawn_requires_agent_ready(
+    subagent_type: &str,
+    capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+) -> bool {
+    xai_tool_types::spawn_requires_agent_ready(subagent_type, capability_mode)
+}
+
+pub(crate) fn model_entry_agent_ready(entry: &ModelEntry) -> bool {
+    match entry.info.request_compat.as_ref() {
+        Some(xai_grok_models::RequestCompat::ChatCompletions(compat)) => compat.agent_ready,
+        Some(_) => true,
+        None => {
+            let id = entry
+                .info
+                .id
+                .as_deref()
+                .unwrap_or(entry.info.model.as_str());
+            xai_grok_models::parse_managed_model_key(id)
+                .map(|(provider, _)| provider.as_str() != "nvidia")
+                .unwrap_or(true)
+        }
+    }
+}
+
+fn catalog_entry_is_eol(key: &str) -> bool {
+    xai_grok_models::catalog_key_is_eol(key) || xai_grok_models::is_nvidia_glm_52_eol_slug(key)
+}
+
+fn eol_model_error(requested: &str) -> String {
+    format!(
+        "Model '{requested}' is end-of-life (HTTP 410 Gone) and cannot be spawned. \
+         NVIDIA Integrate withdrew z-ai/glm-5.2; pick an agent-ready slug or omit `model` \
+         to inherit the parent model."
+    )
+}
+
+fn chat_only_model_error(
+    requested: &str,
+    available: &IndexMap<String, ModelEntry>,
+    is_session_auth: bool,
+    config_keys: Option<&std::collections::HashSet<String>>,
+) -> String {
+    let catalog = spawnable_task_model_catalog(available, is_session_auth, config_keys);
+    let agent_ready = if catalog.agent_ready.is_empty() {
+        "none currently listed".to_string()
+    } else {
+        catalog.agent_ready.join(", ")
+    };
+    let chat_only = if catalog.chat_only.is_empty() {
+        "none currently listed".to_string()
+    } else {
+        catalog.chat_only.join(", ")
+    };
+    format!(
+        "Model '{requested}' is chat-only (catalog agent_ready=false) and cannot be used for \
+         general-purpose / write-capable subagents. Chat-only models (including NVIDIA \
+         llama-3.3-70b, gpt-oss-120b, and Nemotron Ultra 550B) may be used with explore/plan/oracle \
+         or capability_mode=read-only. Agent-ready slugs: {agent_ready}. Chat-only slugs: {chat_only}."
+    )
+}
+
 pub(crate) fn task_model_error_for_catalog(
     requested: &str,
     available: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
 ) -> Option<String> {
-    let is_available =
-        |entry: &ModelEntry| entry.info.user_selectable && entry.visible_for_auth(is_session_auth);
-    if find_task_model_entry(available, requested).is_some_and(|(_, entry)| is_available(entry)) {
-        return None;
+    // Slug + EOL only. Write-capable `agent_ready` is enforced at TaskTool
+    // (which sees subagent_type). This entry is used by handle_request, which
+    // must still allow explore/plan/oracle on chat-only NVIDIA rows.
+    task_model_error_for_catalog_spawn(
+        requested,
+        available,
+        is_session_auth,
+        "explore",
+        Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
+        None,
+    )
+}
+
+pub(crate) fn task_model_error_for_catalog_spawn(
+    requested: &str,
+    available: &IndexMap<String, ModelEntry>,
+    is_session_auth: bool,
+    subagent_type: &str,
+    capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+    config_keys: Option<&std::collections::HashSet<String>>,
+) -> Option<String> {
+    if xai_grok_models::is_nvidia_glm_52_eol_slug(requested) || catalog_entry_is_eol(requested) {
+        return Some(eol_model_error(requested));
     }
 
-    let mut slugs = available
-        .iter()
-        .filter(|(_, entry)| is_available(entry))
-        .map(|(slug, _)| slug.as_str())
-        .collect::<Vec<_>>();
+    let is_available = |key: &str, entry: &ModelEntry| {
+        spawn_catalog_candidate(key, entry, is_session_auth, config_keys)
+    };
+
+    if let Some((key, entry)) = find_task_model_entry(available, requested) {
+        if catalog_entry_is_eol(key) {
+            return Some(eol_model_error(requested));
+        }
+        if spawn_requires_agent_ready(subagent_type, capability_mode)
+            && !model_entry_agent_ready(entry)
+            && is_available(key, entry)
+        {
+            return Some(chat_only_model_error(
+                requested,
+                available,
+                is_session_auth,
+                config_keys,
+            ));
+        }
+        if is_available(key, entry) {
+            return None;
+        }
+    }
+
+    let catalog = spawnable_task_model_catalog(available, is_session_auth, config_keys);
+    let mut slugs = catalog.agent_ready;
+    slugs.extend(catalog.chat_only);
     slugs.sort_unstable();
+    slugs.dedup();
     let guidance = if slugs.is_empty() {
         "No valid model slugs are currently available. Omit `model` to inherit the parent model."
             .to_string()
@@ -89,6 +192,80 @@ pub(crate) fn task_model_error_for_catalog(
         )
     };
     Some(format!("Unknown Task.model slug '{requested}'. {guidance}"))
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SpawnableTaskModelCatalog {
+    pub advertised: Vec<String>,
+    pub agent_ready: Vec<String>,
+    pub chat_only: Vec<String>,
+}
+
+fn spawn_catalog_candidate(
+    key: &str,
+    entry: &ModelEntry,
+    is_session_auth: bool,
+    config_keys: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    if catalog_entry_is_eol(key) {
+        return false;
+    }
+    if !entry.info.user_selectable {
+        return false;
+    }
+    if entry.visible_for_auth(is_session_auth) {
+        return true;
+    }
+    config_keys.is_some_and(|keys| keys.contains(key)) && entry.has_own_credentials()
+}
+
+fn openai_codex_spawn_aliases(slugs: &[String]) -> Vec<String> {
+    slugs
+        .iter()
+        .filter_map(|key| {
+            key.strip_prefix("openai-codex/")
+                .map(|rest| format!("openai/{rest}"))
+        })
+        .collect()
+}
+
+pub(crate) fn spawnable_task_model_catalog(
+    available: &IndexMap<String, ModelEntry>,
+    is_session_auth: bool,
+    config_keys: Option<&std::collections::HashSet<String>>,
+) -> SpawnableTaskModelCatalog {
+    let mut agent_ready = Vec::new();
+    let mut chat_only = Vec::new();
+    let mut configured_chat_only = Vec::new();
+    for (key, entry) in available {
+        if !spawn_catalog_candidate(key, entry, is_session_auth, config_keys) {
+            continue;
+        }
+        if model_entry_agent_ready(entry) {
+            agent_ready.push(key.clone());
+        } else {
+            chat_only.push(key.clone());
+            if config_keys.is_some_and(|keys| keys.contains(key)) {
+                configured_chat_only.push(key.clone());
+            }
+        }
+    }
+    agent_ready.extend(openai_codex_spawn_aliases(&agent_ready));
+    chat_only.extend(openai_codex_spawn_aliases(&chat_only));
+    configured_chat_only.extend(openai_codex_spawn_aliases(&configured_chat_only));
+    agent_ready.sort_unstable();
+    agent_ready.dedup();
+    chat_only.sort_unstable();
+    chat_only.dedup();
+    let mut advertised = agent_ready.clone();
+    advertised.extend(configured_chat_only);
+    advertised.sort_unstable();
+    advertised.dedup();
+    SpawnableTaskModelCatalog {
+        advertised,
+        agent_ready,
+        chat_only,
+    }
 }
 
 /// Common slugs agents copy from session briefs / NVIDIA docs that are not
@@ -124,7 +301,10 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
         ("openai/gpt-5.4-mini", "openai-codex/gpt-5.4-mini"),
         ("gpt-5.4", "openai-codex/gpt-5.4"),
         ("gpt-5.4-mini", "openai-codex/gpt-5.4-mini"),
-        ("openai/gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"),
+        (
+            "openai/gpt-5.3-codex-spark",
+            "openai-codex/gpt-5.3-codex-spark",
+        ),
         ("gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"),
     ];
     for (from, to) in CODEX_FAMILY {
@@ -687,34 +867,59 @@ impl ModelsManager {
     }
 
     pub(crate) fn task_model_error(&self, requested: &str) -> Option<String> {
-        let is_session_auth = self.is_session_auth();
-        let cat = self.inner.catalog.read();
-        let models = &cat.models;
-        task_model_error_for_catalog(requested, models, is_session_auth)
+        self.task_model_error_for_spawn(requested, "general-purpose", None)
     }
 
-    /// Catalog keys (plus `openai/` aliases of `openai-codex/` keys) that
-    /// `spawn_subagent` will accept for this session's auth.
-    pub(crate) fn spawnable_task_model_slugs(&self) -> Vec<String> {
+    pub(crate) fn task_model_error_for_spawn(
+        &self,
+        requested: &str,
+        subagent_type: &str,
+        capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+    ) -> Option<String> {
         let is_session_auth = self.is_session_auth();
-        let cat = self.inner.catalog.read();
-        let mut slugs: Vec<String> = cat
-            .models
-            .iter()
-            .filter(|(_, entry)| {
-                entry.info.user_selectable && entry.visible_for_auth(is_session_auth)
-            })
-            .map(|(key, _)| key.clone())
+        let models = self.inner.catalog.read().models.clone();
+        let config_keys: std::collections::HashSet<String> = self
+            .inner
+            .cfg
+            .read()
+            .config_models
+            .keys()
+            .cloned()
             .collect();
-        let aliases: Vec<String> = slugs
-            .iter()
-            .filter_map(|key| {
-                key.strip_prefix("openai-codex/")
-                    .map(|rest| format!("openai/{rest}"))
-            })
+        task_model_error_for_catalog_spawn(
+            requested,
+            &models,
+            is_session_auth,
+            subagent_type,
+            capability_mode,
+            Some(&config_keys),
+        )
+    }
+
+    fn spawn_catalog(&self) -> SpawnableTaskModelCatalog {
+        let is_session_auth = self.is_session_auth();
+        let models = self.inner.catalog.read().models.clone();
+        let config_keys: std::collections::HashSet<String> = self
+            .inner
+            .cfg
+            .read()
+            .config_models
+            .keys()
+            .cloned()
             .collect();
-        slugs.extend(aliases);
-        slugs
+        spawnable_task_model_catalog(&models, is_session_auth, Some(&config_keys))
+    }
+
+    /// Agent-ready catalog keys plus credentialed config entries that must be
+    /// discoverable even when they fail closed as chat-only.
+    pub(crate) fn spawnable_task_model_slugs(&self) -> Vec<String> {
+        self.spawn_catalog().advertised
+    }
+
+    /// Chat-only catalog keys (agent_ready=false) for explore/plan/oracle or
+    /// `capability_mode=read-only`. Hidden from the default general-purpose list.
+    pub(crate) fn spawnable_task_model_chat_only_slugs(&self) -> Vec<String> {
+        self.spawn_catalog().chat_only
     }
 
     pub fn current_model_id(&self) -> acp::ModelId {

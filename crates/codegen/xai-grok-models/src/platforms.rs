@@ -1266,6 +1266,10 @@ pub struct BuiltinPlatformModel {
     /// in the catalog for config and subagent model pins but are hidden from
     /// normal model selection.
     pub picker_visible: bool,
+    /// Permanently unavailable (provider HTTP 410 / withdrawn). Historical
+    /// snapshot rows stay in the catalog for archaeology but spawn, picker,
+    /// and `/providers` must treat them as gone.
+    pub eol: bool,
     /// Recommended `max_tokens` / max_completion_tokens (Kimi docs: 32k for
     /// coding thinking models).
     pub max_completion_tokens: Option<u32>,
@@ -1393,6 +1397,11 @@ struct CatalogModelRow {
     /// Catalog row availability. `false` = permanently unavailable (EOL).
     /// `true` still starts runtime-hidden until the shell stamps credentials.
     supported_in_api: bool,
+    /// Explicit EOL / HTTP 410 flag. Prefer this over deleting the snapshot
+    /// row. Defaults to `false` so existing catalog JSON does not need a
+    /// bulk rewrite.
+    #[serde(default)]
+    eol: bool,
     source: String,
 }
 
@@ -2143,8 +2152,9 @@ fn parse_platform_catalog(
                 // `apply_platform_credentials` re-enables visibility when keys
                 // resolve — unless `catalog_available` is false (EOL).
                 supported_in_api: false,
-                catalog_available: row.supported_in_api,
-                picker_visible: true,
+                catalog_available: row.supported_in_api && !row.eol,
+                picker_visible: !row.eol,
+                eol: row.eol,
                 max_completion_tokens: row.max_completion_tokens,
                 api_backend,
                 base_url_override: row.base_url_override,
@@ -2268,6 +2278,7 @@ fn apply_catalog_compat_overrides(
         chat.supports_long_cache_retention = false;
         chat.max_tokens_field = MaxTokensField::MaxTokens;
         chat.agent_ready = false;
+        chat.supports_message_model_id = false;
         if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
             chat.max_parallel_tool_calls = Some(1);
         }
@@ -2337,6 +2348,7 @@ fn fallback_request_compat(
                 compat.supports_long_cache_retention = false;
                 compat.max_tokens_field = MaxTokensField::MaxTokens;
                 compat.agent_ready = false;
+                compat.supports_message_model_id = false;
                 // Llama 3.1 70B on Integrate rejects multi tool-calls.
                 if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
                     compat.max_parallel_tool_calls = Some(1);
@@ -2410,6 +2422,7 @@ fn anthropic_claude_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 catalog_available: true,
                 picker_visible: true,
+                eol: false,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
@@ -2467,6 +2480,7 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 catalog_available: true,
                 picker_visible: true,
+                eol: false,
                 max_completion_tokens: None,
                 api_backend: PlatformApiBackend::Responses,
                 base_url_override: None,
@@ -2530,6 +2544,42 @@ fn nvidia_wire_model_id(model: &str) -> String {
     }
 }
 
+/// NVIDIA Integrate Chat Completions compat (strict gateway, not agent-ready).
+///
+/// Used for config.toml extras that occupy an `nvidia/…` catalog key without a
+/// builtin `request_compat` snapshot.
+pub fn nvidia_integrate_chat_compat(model_id: &str) -> RequestCompat {
+    fallback_request_compat(
+        PlatformId::Nvidia,
+        PlatformApiBackend::ChatCompletions,
+        model_id,
+    )
+}
+
+/// True when the offline catalog marks this catalog key as HTTP 410 / withdrawn.
+pub fn catalog_key_is_eol(catalog_key: &str) -> bool {
+    let requested = catalog_key.trim();
+    if requested.is_empty() {
+        return false;
+    }
+    platform_builtin_models().iter().any(|model| {
+        model.eol
+            && (model.catalog_key() == requested
+                || model.catalog_key().eq_ignore_ascii_case(requested))
+    })
+}
+
+/// NVIDIA Integrate GLM-5.2 (and aliases). Provider returns HTTP 410 Gone.
+pub fn is_nvidia_glm_52_eol_slug(requested: &str) -> bool {
+    let lower = requested.trim().to_ascii_lowercase();
+    if !lower.contains("glm-5.2") {
+        return false;
+    }
+    lower.starts_with("nvidia/")
+        || lower.contains("/nvidia/z-ai/glm-5.2")
+        || lower == "nvidia/z-ai/glm-5.2"
+}
+
 /// Catalog keys follow `{provider}/{model}` so
 /// `nvidia/nemotron-3.5-lightning-30b-a3b` becomes
 /// `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` (same as Ultra/Super/Nano).
@@ -2553,6 +2603,7 @@ fn nvidia_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
         supported_in_api: true,
         catalog_available: true,
         picker_visible: true,
+        eol: false,
         max_completion_tokens: Some(max_out),
         api_backend: PlatformApiBackend::ChatCompletions,
         base_url_override: None,
@@ -2655,6 +2706,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 catalog_available: true,
                 picker_visible: true,
+                eol: false,
                 max_completion_tokens: $max_tok,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
@@ -2718,6 +2770,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 catalog_available: true,
                 picker_visible: true,
+                eol: false,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::ChatCompletions,
                 base_url_override: None,
@@ -4312,6 +4365,7 @@ mod tests {
         assert!(!chat.supports_long_cache_retention);
         assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
         assert!(!chat.agent_ready);
+        assert!(!chat.supports_message_model_id);
         assert!(chat.max_parallel_tool_calls.is_none());
     }
 
@@ -4328,6 +4382,7 @@ mod tests {
         assert_eq!(chat.max_parallel_tool_calls, Some(1));
         assert!(!chat.supports_prompt_cache_key);
         assert!(!chat.agent_ready);
+        assert!(!chat.supports_message_model_id);
     }
 
     #[test]
@@ -4345,6 +4400,7 @@ mod tests {
         assert!(!chat.supports_strict_mode);
         assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
         assert!(!chat.agent_ready);
+        assert!(!chat.supports_message_model_id);
         // Catalog max must not exceed NVIDIA max_model_len (128000).
         if let Some(max_tok) = nano.max_completion_tokens {
             assert!(
@@ -4473,6 +4529,47 @@ mod tests {
                 .find(|model| model.catalog_key() == alias)
                 .expect("NVIDIA alias");
             assert_eq!(model.resolved_runtime().wire_model_id, canonical);
+        }
+    }
+
+    #[test]
+    fn nvidia_glm_52_is_catalog_eol() {
+        let glm = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/z-ai/glm-5.2")
+            .expect("nvidia glm-5.2 snapshot row must remain");
+        assert!(glm.eol, "historical snapshot stays, marked EOL");
+        assert!(!glm.catalog_available);
+        assert!(!glm.picker_visible);
+        assert!(catalog_key_is_eol("nvidia/z-ai/glm-5.2"));
+        assert!(is_nvidia_glm_52_eol_slug("nvidia/z-ai/glm-5.2"));
+        assert!(is_nvidia_glm_52_eol_slug("nvidia/glm-5.2"));
+        assert!(
+            !is_nvidia_glm_52_eol_slug("openrouter/z-ai/glm-5.2"),
+            "OpenRouter GLM-5.2 is not the NVIDIA 410 row"
+        );
+    }
+
+    #[test]
+    fn nvidia_hang_and_ultra_models_stay_chat_only() {
+        for key in [
+            "nvidia/meta/llama-3.3-70b-instruct",
+            "nvidia/openai/gpt-oss-120b",
+            "nvidia/nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/meta/llama-3.1-8b-instruct",
+        ] {
+            let row = platform_builtin_models()
+                .iter()
+                .find(|m| m.catalog_key() == key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert!(!row.eol, "{key} is chat-only, not deleted");
+            let RequestCompat::ChatCompletions(chat) = &row.request_compat else {
+                panic!("{key} is chat completions");
+            };
+            assert!(
+                !chat.agent_ready,
+                "{key} must stay agent_ready=false (chat-only)"
+            );
         }
     }
 

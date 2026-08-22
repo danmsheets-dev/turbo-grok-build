@@ -237,10 +237,7 @@ pub fn is_valid_resume_id(s: &str) -> bool {
 /// ReadOnly sessions skip MCP tools that are not explicitly annotated
 /// `readOnlyHint: true`. Missing/unknown hint is fail-closed (treated as
 /// mutating). The live gate is MCP registration in the shell session actor.
-pub fn skip_mutating_mcp_on_readonly(
-    read_only_hint: Option<bool>,
-    readonly_session: bool,
-) -> bool {
+pub fn skip_mutating_mcp_on_readonly(read_only_hint: Option<bool>, readonly_session: bool) -> bool {
     readonly_session && !read_only_hint.unwrap_or(false)
 }
 
@@ -1123,6 +1120,10 @@ register_resource!("grok_build", "MaxSubagentDepth", MaxSubagentDepth);
 /// Returns an error message for an invalid slug and `None` for a valid slug.
 /// The closure reads the live model catalog so refreshes apply without rebuilding
 /// the tool bridge.
+///
+/// Write-capable vs chat-only policy is applied by [`TaskTool`] using
+/// [`xai_tool_types::spawn_requires_agent_ready`]: the catalog closure reports
+/// chat-only as an `agent_ready=false` error, and read-only roles swallow it.
 type TaskModelValidationFn = dyn Fn(&str) -> Option<String> + Send + Sync;
 
 #[derive(Clone)]

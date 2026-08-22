@@ -457,7 +457,17 @@ impl xai_tool_runtime::Tool for TaskTool {
                 )
             })?;
             if let Some(error) = validator.error_for(requested) {
-                return Err(xai_tool_runtime::ToolError::invalid_arguments(error));
+                // Catalog closures historically take only the slug. Chat-only
+                // (agent_ready=false) is reported as an error so general-purpose
+                // cannot spawn hang/EOL-adjacent NVIDIA rows; explore/plan/oracle
+                // and capability_mode=read-only may still use them.
+                let allow_chat_only = !xai_tool_types::spawn_requires_agent_ready(
+                    &input.subagent_type,
+                    input.capability_mode,
+                ) && xai_tool_types::is_chat_only_agent_ready_error(&error);
+                if !allow_chat_only {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(error));
+                }
             }
         }
 
@@ -580,10 +590,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 &task_output_name,
                 continue_parent,
             );
-            let iso = input
-                .isolation
-                .map(|m| m.as_str())
-                .unwrap_or("default");
+            let iso = input.isolation.map(|m| m.as_str()).unwrap_or("default");
             started.push_str(&format!(
                 "\nisolation_requested: {iso}\n\
                  isolation=worktree creates a disposable git worktree; DisplayCwd may still \
@@ -1362,6 +1369,50 @@ mod tests {
             rx.try_recv().is_err(),
             "spawn must not reach the coordinator"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_ready_gate_sees_subagent_type() {
+        fn chat_only_validator() -> TaskModelValidator {
+            TaskModelValidator::new(|requested| {
+                (requested == "chat-only").then(|| {
+                    "Model 'chat-only' is chat-only (catalog agent_ready=false) and cannot be used for general-purpose / write-capable subagents."
+                        .to_string()
+                })
+            })
+        }
+        let (backend, mut rx) = make_backend();
+        let mut resources = resources_for_task(backend);
+        resources.insert(chat_only_validator());
+        let mut gp = task_input("general-purpose", true);
+        gp.model = Some("chat-only".to_string());
+        let msg = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), gp)
+            .await
+            .expect_err("GP must reject chat-only")
+            .to_string();
+        assert!(msg.contains("agent_ready=false"));
+        assert!(rx.try_recv().is_err());
+
+        let (backend, mut rx) = make_backend();
+        let mut resources = resources_for_task(backend);
+        resources.insert(chat_only_validator());
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
+                let _ = boxed.respond_with(|boxed| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(""),
+                    subagent_id: boxed.id.clone(),
+                    child_session_id: boxed.id.clone(),
+                    ..Default::default()
+                });
+            }
+        });
+        let mut explore = task_input("explore", true);
+        explore.model = Some("chat-only".to_string());
+        xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), explore)
+            .await
+            .expect("explore may use chat-only models");
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
     }
 
     #[tokio::test]

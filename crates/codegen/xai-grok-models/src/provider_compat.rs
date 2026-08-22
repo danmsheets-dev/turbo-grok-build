@@ -116,9 +116,19 @@ pub struct OpenAiCompletionsCompat {
     /// routes; NVIDIA platform fallback forces `false`.
     #[serde(default = "default_agent_ready")]
     pub agent_ready: bool,
+    /// When `false`, Chat Completions messages must not include Grok's
+    /// internal `model_id` field. NVIDIA Integrate rejects it with
+    /// `extra_forbidden` / HTTP 400. Defaults to `true` so first-party
+    /// OpenAI-class routes keep current serialization.
+    #[serde(default = "default_supports_message_model_id")]
+    pub supports_message_model_id: bool,
 }
 
 fn default_agent_ready() -> bool {
+    true
+}
+
+fn default_supports_message_model_id() -> bool {
     true
 }
 
@@ -151,6 +161,7 @@ impl Default for OpenAiCompletionsCompat {
             supports_prompt_cache_key: true,
             max_parallel_tool_calls: None,
             agent_ready: true,
+            supports_message_model_id: true,
         }
     }
 }

@@ -2538,3 +2538,138 @@ async fn identity_switch_clears_user_pick_latch() {
         "a new identity's first catalog must reselect the default after clear()",
     );
 }
+
+fn nvidia_catalog_entry(
+    catalog_key: &str,
+    routing: &str,
+    agent_ready: bool,
+    hidden: bool,
+) -> ModelEntry {
+    let mut entry = make_model_entry(routing);
+    entry.info.id = Some(catalog_key.to_string());
+    entry.info.hidden = hidden;
+    entry.info.supported_in_api = true;
+    entry.api_key = Some("nv-test-key".into());
+    let mut compat = xai_grok_models::OpenAiCompletionsCompat::default();
+    compat.agent_ready = agent_ready;
+    compat.supports_message_model_id = false;
+    entry.info.request_compat = Some(xai_grok_models::RequestCompat::ChatCompletions(compat));
+    entry
+}
+
+#[test]
+fn gpt55_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-5.5".to_string(),
+        make_model_entry("gpt-5.5"),
+    );
+    assert!(
+        task_model_error_for_catalog("openai/gpt-5.5", &models, false).is_none(),
+        "openai/gpt-5.5 must resolve to openai-codex/gpt-5.5 (rc5 alias)"
+    );
+    let (key, _) = find_task_model_entry(&models, "openai/gpt-5.5").expect("alias must resolve");
+    assert_eq!(key, "openai-codex/gpt-5.5");
+}
+
+#[test]
+fn glm_52_nvidia_spawn_is_http_410() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "nvidia/z-ai/glm-5.2".to_string(),
+        nvidia_catalog_entry("nvidia/z-ai/glm-5.2", "z-ai/glm-5.2", false, true),
+    );
+    models.insert("grok-4.5".to_string(), make_model_entry("grok-4.5"));
+    let err = task_model_error_for_catalog("nvidia/z-ai/glm-5.2", &models, false)
+        .expect("EOL must reject");
+    assert!(err.contains("410"), "msg: {err}");
+    assert!(err.contains("end-of-life"), "msg: {err}");
+    let catalog = spawnable_task_model_catalog(&models, false, None);
+    assert!(!catalog.agent_ready.iter().any(|s| s.contains("glm-5.2")));
+    assert!(!catalog.chat_only.iter().any(|s| s.contains("glm-5.2")));
+}
+
+#[test]
+fn agent_ready_false_rejected_for_general_purpose_allowed_for_explore() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "nvidia/meta/llama-3.3-70b-instruct".to_string(),
+        nvidia_catalog_entry(
+            "nvidia/meta/llama-3.3-70b-instruct",
+            "meta/llama-3.3-70b-instruct",
+            false,
+            false,
+        ),
+    );
+    models.insert("grok-4.5".to_string(), make_model_entry("grok-4.5"));
+    let gp = task_model_error_for_catalog_spawn(
+        "nvidia/meta/llama-3.3-70b-instruct",
+        &models,
+        false,
+        "general-purpose",
+        None,
+        None,
+    )
+    .expect("GP must reject chat-only");
+    assert!(gp.contains("agent_ready=false"), "msg: {gp}");
+    assert!(
+        task_model_error_for_catalog_spawn(
+            "nvidia/meta/llama-3.3-70b-instruct",
+            &models,
+            false,
+            "explore",
+            None,
+            None,
+        )
+        .is_none(),
+        "explore may use chat-only NVIDIA models"
+    );
+    let catalog = spawnable_task_model_catalog(&models, false, None);
+    assert!(
+        !catalog
+            .agent_ready
+            .iter()
+            .any(|s| s.contains("llama-3.3-70b")),
+        "hang models must not be in the default spawn list: {:?}",
+        catalog.agent_ready
+    );
+    assert!(
+        catalog
+            .chat_only
+            .iter()
+            .any(|s| s.contains("llama-3.3-70b")),
+        "hang models are chat-only: {:?}",
+        catalog.chat_only
+    );
+}
+
+#[test]
+fn config_nvidia_extras_surface_in_spawn_catalog() {
+    let key = "nvidia/acme/custom-nim";
+    let mut models = IndexMap::new();
+    models.insert(
+        key.to_string(),
+        nvidia_catalog_entry(key, "acme/custom-nim", false, true),
+    );
+    models.insert("grok-4.5".to_string(), make_model_entry("grok-4.5"));
+    let mut config_keys = std::collections::HashSet::new();
+    config_keys.insert(key.to_string());
+    let catalog = spawnable_task_model_catalog(&models, false, Some(&config_keys));
+    assert!(
+        catalog.advertised.iter().any(|s| s == key),
+        "config.toml NVIDIA extras must appear even when hidden aliases: {:?}",
+        catalog.advertised
+    );
+    assert!(!catalog.agent_ready.iter().any(|s| s == key));
+    assert!(catalog.chat_only.iter().any(|s| s == key));
+    let err = task_model_error_for_catalog_spawn(
+        key,
+        &models,
+        false,
+        "general-purpose",
+        None,
+        Some(&config_keys),
+    )
+    .expect("uncertified config NVIDIA models must fail closed");
+    assert!(err.contains("agent_ready=false"), "msg: {err}");
+}

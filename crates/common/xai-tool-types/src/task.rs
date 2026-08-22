@@ -247,6 +247,32 @@ impl SubagentCapabilityMode {
     }
 }
 
+/// Write-capable spawns (general-purpose, xdotcom, user-defined, or an explicit
+/// write/execute/all capability) must use a catalog `agent_ready` model.
+/// explore/plan/oracle and `capability_mode=read-only` may use chat-only models.
+pub fn spawn_requires_agent_ready(
+    subagent_type: &str,
+    capability_mode: Option<SubagentCapabilityMode>,
+) -> bool {
+    match capability_mode {
+        Some(SubagentCapabilityMode::ReadOnly) => false,
+        Some(
+            SubagentCapabilityMode::ReadWrite
+            | SubagentCapabilityMode::Execute
+            | SubagentCapabilityMode::All,
+        ) => true,
+        None => {
+            let kind = subagent_type.trim();
+            !matches!(kind, "explore" | "plan" | "oracle")
+        }
+    }
+}
+
+/// Catalog validator error for `agent_ready=false` on a write-capable spawn.
+pub fn is_chat_only_agent_ready_error(message: &str) -> bool {
+    message.contains("agent_ready=false") || message.contains("is chat-only")
+}
+
 /// Typed reasoning effort used by subagent role/persona/default resolution.
 ///
 /// This lives in the common tool-types crate so the task runtime and resolver
@@ -1621,6 +1647,29 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_requires_agent_ready_gates_write_capable_roles() {
+        assert!(spawn_requires_agent_ready("general-purpose", None));
+        assert!(spawn_requires_agent_ready("xdotcom", None));
+        assert!(!spawn_requires_agent_ready("explore", None));
+        assert!(!spawn_requires_agent_ready("plan", None));
+        assert!(!spawn_requires_agent_ready("oracle", None));
+        assert!(!spawn_requires_agent_ready(
+            "general-purpose",
+            Some(SubagentCapabilityMode::ReadOnly)
+        ));
+        assert!(spawn_requires_agent_ready(
+            "explore",
+            Some(SubagentCapabilityMode::All)
+        ));
+        assert!(is_chat_only_agent_ready_error(
+            "Model 'x' is chat-only (catalog agent_ready=false) and cannot be used"
+        ));
+        assert!(!is_chat_only_agent_ready_error(
+            "Unknown Task.model slug 'invented'"
+        ));
+    }
 
     #[test]
     fn task_input_preserves_reasoning_effort_pin() {

@@ -5555,6 +5555,7 @@
       "max_completion_tokens": 131072,
       "model": "z-ai/glm-5.2",
       "name": "GLM-5.2",
+      "eol": true,
       "platform": "nvidia",
       "request_compat": {
         "chat_completions": {

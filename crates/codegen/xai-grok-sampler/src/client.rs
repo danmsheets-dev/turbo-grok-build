@@ -1716,6 +1716,19 @@ impl SamplingClient {
         if !compat.supports_prompt_cache_key {
             object.remove("prompt_cache_key");
         }
+        // Grok-internal `model_id` on assistant messages is not part of the
+        // OpenAI Chat Completions schema. NVIDIA Integrate rejects it with
+        // extra_forbidden / HTTP 400 (mistral-nemotron).
+        if !compat.supports_message_model_id {
+            object.remove("model_id");
+            if let Some(messages) = object.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                for message in messages {
+                    if let Some(msg) = message.as_object_mut() {
+                        msg.remove("model_id");
+                    }
+                }
+            }
+        }
         if !compat.supports_strict_mode {
             Self::strip_strict_tool_fields(body);
         }
@@ -4121,6 +4134,50 @@ mod tests {
 
         assert!(body.get("prompt_cache_key").is_none());
         assert!(body.get("store").is_none());
+    }
+
+    #[test]
+    fn nvidia_chat_compat_strips_extra_model_id() {
+        let mut cfg = minimal_config();
+        cfg.model = "mistralai/mistral-nemotron".into();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                supports_prompt_cache_key: false,
+                supports_store: false,
+                supports_message_model_id: false,
+                max_tokens_field: MaxTokensField::MaxTokens,
+                agent_ready: false,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut body = serde_json::json!({
+            "model": "mistralai/mistral-nemotron",
+            "model_id": "mistralai/mistral-nemotron",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": "hello",
+                    "model_id": "mistralai/mistral-nemotron"
+                }
+            ]
+        });
+
+        client.patch_chat_request_body(&mut body, false);
+
+        assert!(
+            body.get("model_id").is_none(),
+            "top-level model_id must not reach NVIDIA Integrate"
+        );
+        let messages = body["messages"].as_array().expect("messages");
+        for message in messages {
+            assert!(
+                message.get("model_id").is_none(),
+                "message model_id must not reach NVIDIA Integrate: {message}"
+            );
+        }
+        assert_eq!(body["model"], "mistralai/mistral-nemotron");
     }
 
     #[test]
