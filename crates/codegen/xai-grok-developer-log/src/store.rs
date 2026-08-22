@@ -632,11 +632,17 @@ impl DeveloperLogStore {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        let pretty = serde_json::to_string_pretty(incident)?;
+        // Defense-in-depth: field-level sanitization already ran via `sanitize_incident`,
+        // but walk the serialized JSON once more so any missed free-form value is
+        // scrubbed before it lands on disk.
+        let mut value = serde_json::to_value(incident)?;
+        xai_grok_secrets::redact_json_string_values(&mut value);
+        let pretty = serde_json::to_string_pretty(&value)?;
         fs::write(&tmp, pretty)?;
         if path.exists() {
             let _ = fs::remove_file(path);
         }
+        // Windows cannot rename over an existing file — remove dest first.
         fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -875,5 +881,45 @@ mod tests {
         );
         let listed = store.list(&ListFilter::default()).unwrap();
         assert!(listed.is_empty());
+    }
+
+    /// Regression: embedded fake tokens in arbitrary report fields must be
+    /// redacted to `[REDACTED_SECRET]` in the JSON persisted to disk.
+    /// Fixtures join fragments at runtime so secret scanners don't flag the source.
+    fn fixture(parts: &[&str]) -> String {
+        parts.concat()
+    }
+
+    #[test]
+    fn stored_incident_redacts_embedded_fake_tokens() {
+        let (_dir, store) = tmp_store();
+        let ghp = fixture(&["ghp_f", "akefakefakefakefakefakefake"]);
+        let aws = fixture(&["AKIA", "ABCDEFGHIJKLMNOP"]);
+        let bearer = fixture(&["Authorization: Bearer sk-CANARY", "abcdefghij1234567890"]);
+        let req = ReportRequest {
+            title: fixture(&["incident with ", &ghp, " token"]),
+            summary: fixture(&["detail ", &aws, " and ", &bearer]),
+            error_class: ErrorClass::ToolSchema,
+            component: vec!["schema".into()],
+            ..Default::default()
+        };
+        let r = store.report(req).unwrap();
+        let raw = std::fs::read_to_string(&r.path).unwrap_or_default();
+        assert!(
+            !raw.contains("ghp_f"),
+            "GitHub PAT prefix leaked to disk: {raw}"
+        );
+        assert!(
+            !raw.contains("AKIA"),
+            "AWS access key leaked to disk: {raw}"
+        );
+        assert!(
+            !raw.contains("CANARY"),
+            "bearer token leaked to disk: {raw}"
+        );
+        assert!(
+            raw.contains("[REDACTED_SECRET]"),
+            "expected [REDACTED_SECRET] in stored JSON: {raw}"
+        );
     }
 }

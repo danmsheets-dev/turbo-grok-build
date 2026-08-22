@@ -45,10 +45,13 @@ pub fn export_feature_requests(
     for entry in &entries {
         match store.get(&entry.request_id) {
             Ok(fr) => {
-                let path = evidence_dir.join(format!("{}.json", fr.request_id));
-                let pretty = serde_json::to_string_pretty(&fr)?;
+                let clean = super::store::sanitize_request_doc(fr);
+                let mut value = serde_json::to_value(&clean)?;
+                xai_grok_secrets::redact_json_string_values(&mut value);
+                let path = evidence_dir.join(format!("{}.json", clean.request_id));
+                let pretty = serde_json::to_string_pretty(&value)?;
                 fs::write(&path, pretty)?;
-                requests.push(fr);
+                requests.push(clean);
             }
             Err(e) => {
                 tracing::warn!(

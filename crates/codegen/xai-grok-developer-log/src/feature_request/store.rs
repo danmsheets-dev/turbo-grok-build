@@ -599,7 +599,12 @@ impl FeatureRequestStore {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        let pretty = serde_json::to_string_pretty(fr)?;
+        // Defense-in-depth: field-level sanitization already ran via `sanitize_request_doc`,
+        // but walk the serialized JSON once more so any missed free-form value is
+        // scrubbed before it lands on disk.
+        let mut value = serde_json::to_value(fr)?;
+        xai_grok_secrets::redact_json_string_values(&mut value);
+        let pretty = serde_json::to_string_pretty(&value)?;
         fs::write(&tmp, pretty)?;
         if path.exists() {
             let _ = fs::remove_file(path);
@@ -738,7 +743,7 @@ fn sanitize_report(mut req: FeatureRequestReport) -> FeatureRequestReport {
     req
 }
 
-fn sanitize_request_doc(mut fr: FeatureRequest) -> FeatureRequest {
+pub(super) fn sanitize_request_doc(mut fr: FeatureRequest) -> FeatureRequest {
     fr.title = truncate_field(&redact_text(&fr.title), 200);
     fr.summary = truncate_field(&redact_text(&fr.summary), 4_000);
     if let Some(ref mut u) = fr.use_case {
@@ -841,5 +846,46 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, FrStoreError::Invalid(_)));
+    }
+
+    /// Fixtures join fragments at runtime so secret scanners don't flag the source.
+    fn fixture(parts: &[&str]) -> String {
+        parts.concat()
+    }
+
+    /// Regression: embedded fake tokens in FR fields must be
+    /// redacted to `[REDACTED_SECRET]` in the JSON persisted to disk.
+    #[test]
+    fn stored_feature_request_redacts_embedded_fake_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FeatureRequestStore::new(dir.path().to_path_buf());
+        let ghp = fixture(&["ghp_f", "akefakefakefakefakefakefake"]);
+        let aws = fixture(&["AKIA", "ABCDEFGHIJKLMNOP"]);
+        let bearer = fixture(&["Authorization: Bearer sk-CANARY", "abcdefghij1234567890"]);
+        let req = FeatureRequestReport {
+            title: fixture(&["FR with ", &ghp, " token"]),
+            summary: fixture(&["detail ", &aws, " and ", &bearer]),
+            request_class: RequestClass::ToolSurface,
+            use_case: Some(fixture(&["needs ", &ghp])),
+            ..Default::default()
+        };
+        let r = store.report(req).unwrap();
+        let raw = std::fs::read_to_string(&r.path).unwrap_or_default();
+        assert!(
+            !raw.contains("ghp_f"),
+            "GitHub PAT prefix leaked to disk: {raw}"
+        );
+        assert!(
+            !raw.contains("AKIA"),
+            "AWS access key leaked to disk: {raw}"
+        );
+        assert!(
+            !raw.contains("CANARY"),
+            "bearer token leaked to disk: {raw}"
+        );
+        assert!(
+            raw.contains("[REDACTED_SECRET]"),
+            "expected [REDACTED_SECRET] in stored JSON: {raw}"
+        );
     }
 }
