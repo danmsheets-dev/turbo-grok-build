@@ -23,6 +23,7 @@ xai-grok-voice = { path = "../xai-grok-voice", default-features = false, feature
 xai-grok-config = { path = "../xai-grok-config" }
 xai-grok-paths = { path = "../xai-grok-paths" }
 xai-grok-developer-log = { workspace = true }
+xai-grok-secrets = { workspace = true }
 xai-grok-extra-ca = { workspace = true }
 xai-grok-tools-api = { path = "../xai-grok-tools-api" }
 xai-grok-workspace-types = { path = "../xai-grok-workspace-types" }
@@ -84,6 +85,7 @@ tracing = { workspace = true }
 unicode-normalization = { workspace = true, optional = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
+sha2 = { workspace = true }
 wildmatch = { workspace = true }
 xai-grok-env = { workspace = true }
 serde_yaml = { workspace = true }

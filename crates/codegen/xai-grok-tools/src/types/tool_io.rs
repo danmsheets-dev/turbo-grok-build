@@ -107,6 +107,9 @@ pub enum ToolInput {
     FeatureRequestLog(
         crate::implementations::grok_build::feature_request_log::FeatureRequestLogInput,
     ),
+    Receipts(crate::implementations::grok_build::receipts::ReceiptsInput),
+    Rollback(crate::implementations::grok_build::receipts::RollbackInput),
+    Steer(crate::implementations::grok_build::steer::SteerInput),
     WorkspaceTree(crate::implementations::grok_build::workspace_tree::WorkspaceTreeInput),
     ResolvePath(crate::implementations::grok_build::resolve_path::ResolvePathInput),
     SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyInput),

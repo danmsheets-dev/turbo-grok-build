@@ -17125,6 +17125,7 @@ dependencies = [
  "xai-grok-meetings",
  "xai-grok-paths",
  "xai-grok-sandbox",
+ "xai-grok-secrets",
  "xai-grok-test-support",
  "xai-grok-tools-api",
  "xai-grok-version",

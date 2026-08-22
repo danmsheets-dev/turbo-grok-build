@@ -701,6 +701,9 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::DiscardSubagentTool>();
         b.register::<grok_build::DeveloperLogTool>();
         b.register::<grok_build::FeatureRequestLogTool>();
+        b.register::<grok_build::ReceiptsTool>();
+        b.register::<grok_build::RollbackTool>();
+        b.register::<grok_build::SteerTool>();
         b.register::<grok_build::WorkspaceTreeTool>();
         b.register::<grok_build::ResolvePathTool>();
         b.register::<grok_build::SpawnManyTool>();

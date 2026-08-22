@@ -657,6 +657,9 @@ pub enum ToolOutput {
     FeatureRequestLog(
         crate::implementations::grok_build::feature_request_log::FeatureRequestLogOutput,
     ),
+    Receipts(crate::implementations::grok_build::receipts::ReceiptsOutput),
+    Rollback(crate::implementations::grok_build::receipts::RollbackOutput),
+    Steer(crate::implementations::grok_build::steer::SteerOutput),
     WorkspaceTree(crate::implementations::grok_build::workspace_tree::WorkspaceTreeOutput),
     ResolvePath(crate::implementations::grok_build::resolve_path::ResolvePathOutput),
     SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyOutput),
@@ -708,6 +711,11 @@ impl ToolOutput {
             ToolOutput::LandSubagent(o) => !o.success,
             ToolOutput::DiscardSubagent(o) => !o.success,
             ToolOutput::SpawnMany(o) => o.tasks.iter().any(|t| t.status == "failed"),
+            // A refused steer is a logical failure the model must see.
+            ToolOutput::Steer(steer) => match steer {
+                crate::implementations::grok_build::steer::SteerOutput::Queued { .. } => false,
+                crate::implementations::grok_build::steer::SteerOutput::Refused { .. } => true,
+            },
             _ => false,
         }
     }
@@ -1098,6 +1106,16 @@ impl ToolOutput {
             ToolOutput::DiscardSubagent(o) => o.message.clone(),
             ToolOutput::DeveloperLog(o) => o.message.clone(),
             ToolOutput::FeatureRequestLog(o) => o.message.clone(),
+            ToolOutput::Receipts(o) => o.text.clone(),
+            ToolOutput::Rollback(o) => o.message.clone(),
+            ToolOutput::Steer(o) => match o {
+                crate::implementations::grok_build::steer::SteerOutput::Queued { message, .. } => {
+                    message.clone()
+                }
+                crate::implementations::grok_build::steer::SteerOutput::Refused { reason, .. } => {
+                    reason.clone()
+                }
+            },
             ToolOutput::WorkspaceTree(o) => o.message.clone(),
             ToolOutput::ResolvePath(o) => o.message.clone(),
             ToolOutput::SpawnMany(o) => o.message.clone(),
