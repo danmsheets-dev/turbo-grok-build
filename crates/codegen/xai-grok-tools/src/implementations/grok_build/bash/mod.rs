@@ -1945,6 +1945,23 @@ impl xai_tool_runtime::Tool for BashTool {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
         }
 
+        // --- Validate: session policy engine v1 (deny_commands) ---
+        {
+            let res = resources.lock().await;
+            let params = res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0));
+            if let Some(frag) = policy.command_denied(&input.command) {
+                return Err(xai_tool_runtime::ToolError::custom(
+                    "policy_denied",
+                    crate::implementations::grok_build::policy::denial(
+                        "bash",
+                        "deny_commands",
+                        &format!("command matching `{frag}`"),
+                    ),
+                ));
+            }
+        }
+
         // --- Validate: reject self-matching pkill/pgrep -f <pat> ---
         // `pkill -f` matches the wrapper bash's full argv (which contains
         // the literal pattern), causing the wrapper to SIGTERM itself

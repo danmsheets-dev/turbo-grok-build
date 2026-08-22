@@ -26,6 +26,7 @@ pub mod list_dir;
 pub mod lsp;
 pub mod meeting;
 pub mod monitor;
+pub mod policy;
 pub mod read_file;
 pub mod receipts;
 pub mod resolve_path;

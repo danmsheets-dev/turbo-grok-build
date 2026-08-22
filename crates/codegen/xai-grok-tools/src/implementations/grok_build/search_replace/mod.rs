@@ -242,6 +242,21 @@ pub(crate) async fn run_search_replace(
             "Old string and new string are the same".to_owned(),
         ));
     }
+    // Session policy engine v1: refuse edits to denied paths before any I/O.
+    {
+        let res = resources.lock().await;
+        let params = res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
+        let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0));
+        if let Some(frag) = policy.path_denied(&path) {
+            return Ok(SearchReplaceOutput::InvalidInput(
+                crate::implementations::grok_build::policy::denial(
+                    "search_replace",
+                    "deny_paths",
+                    &format!("`{}`", input.file_path),
+                ) + &format!(" — matched deny-path fragment `{frag}`"),
+            ));
+        }
+    }
     // Execution receipts (Phase 5): snapshot pre-edit contents so a rollback
     // receipt can restore them. Storage failures degrade to no-receipt.
     let session_folder = {
@@ -305,6 +320,25 @@ pub(crate) async fn run_search_replace(
             lines_removed = removed
         )
         .in_scope(|| {});
+        // Session policy engine v1: enforce max_diff_lines on the applied edit.
+        {
+            let res = resources.lock().await;
+            let params =
+                res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
+            let policy =
+                crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0));
+            if let Some((added_lines, max)) =
+                policy.diff_exceeds_limit(added.max(0) as u64)
+            {
+                return Ok(SearchReplaceOutput::InvalidInput(
+                    crate::implementations::grok_build::policy::denial(
+                        "search_replace",
+                        "max_diff_lines",
+                        &format!("edit adding {added_lines} lines (limit {max})"),
+                    ),
+                ));
+            }
+        }
         // Execution receipts: hash the post-edit file and persist the receipt
         // with the pre-edit bytes as the undo payload (audit + rollback).
         let hash_after =
