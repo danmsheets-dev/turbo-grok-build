@@ -684,6 +684,29 @@ fn live_worktree_cap_counts_protected_trees_only() {
 }
 
 #[test]
+fn retain_worktree_does_not_fill_live_children_cap() {
+    use super::{
+        counts_toward_live_cap, ensure_live_worktree_cap, is_live_worktree_protected,
+        write_retained_worktree_marker,
+    };
+    let base = tempfile::TempDir::new().unwrap();
+    let retained = base.path().join("subagent-retained");
+    std::fs::create_dir_all(&retained).unwrap();
+    write_retained_worktree_marker(&retained).expect("retain marker");
+    assert!(
+        is_live_worktree_protected(&retained),
+        "retain trees stay prune-protected"
+    );
+    assert!(
+        !counts_toward_live_cap(&retained),
+        "retain trees must not occupy the live-children admission cap"
+    );
+    unsafe { std::env::set_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES", "1") };
+    ensure_live_worktree_cap(base.path()).expect("retain-only tree must not fill cap=1");
+    unsafe { std::env::remove_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES") };
+}
+
+#[test]
 fn subagent_inherits_parent_lsp_via_context() {
     let parent: std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend> = Arc::new(
         DummyLspDispatch,

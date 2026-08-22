@@ -1,5 +1,13 @@
 use super::*;
 use crate::upload::trace::GCS_SCHEMA_VERSION;
+
+/// Cancels the live-marker heartbeat when `run_shell_child` returns.
+struct CancelHeartbeatOnDrop(CancellationToken);
+impl Drop for CancelHeartbeatOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 use xai_grok_sampling_types::ReasoningEffort;
 use xai_grok_tools::implementations::{grok_build, opencode};
 pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u64 {
@@ -223,6 +231,10 @@ pub(crate) async fn run_shell_child(
     } = run;
     let start = std::time::Instant::now();
     let mut completion_data = ShellCompletionData::from_context(&ctx);
+    // Dedicated stop token so the live-marker heartbeat dies on every
+    // terminal path (success, error, cancel), not only budget hard-timeout.
+    let live_heartbeat_stop = CancellationToken::new();
+    let _live_heartbeat_guard = CancelHeartbeatOnDrop(live_heartbeat_stop.clone());
     // Defense in depth: `request.id` is joined into worktree paths,
     // `subagents/<id>/meta.json`, and session dirs. The Task tool gates
     // model `task_id`, but every join site must fail closed in case another
@@ -470,7 +482,18 @@ pub(crate) async fn run_shell_child(
                             None
                         } else {
                             // Protect reused tree from keep-N prune while this child runs.
-                            if let Err(e) = write_live_worktree_marker(dest) {
+                            let _admission = LIVE_WORKTREE_ADMISSION.lock().await;
+                            if let Err(msg) = ensure_live_worktree_cap_for_new_marker(dest) {
+                                if isolation_requested && !allow_shared_fallback {
+                                    return child_run_output(
+                                        failure_result(&request, &msg),
+                                        completion_data,
+                                        None,
+                                    );
+                                }
+                                isolation_fallback = true;
+                                None
+                            } else if let Err(e) = write_live_worktree_marker(dest) {
                                 if isolation_requested && !allow_shared_fallback {
                                     return child_run_output(
                                         failure_result(&request, &e),
@@ -488,7 +511,7 @@ pub(crate) async fn run_shell_child(
                             } else {
                                 spawn_live_marker_heartbeat(
                                     dest.to_path_buf(),
-                                    cancel_token.clone(),
+                                    live_heartbeat_stop.clone(),
                                 );
                                 Some(dest.to_path_buf())
                             }
@@ -529,7 +552,19 @@ pub(crate) async fn run_shell_child(
                                     isolation_fallback = isolation_requested;
                                     None
                                 } else {
-                                    if let Err(e) = write_live_worktree_marker(&path) {
+                                    let _admission = LIVE_WORKTREE_ADMISSION.lock().await;
+                                    if let Err(msg) = ensure_live_worktree_cap_for_new_marker(&path)
+                                    {
+                                        if isolation_requested && !allow_shared_fallback {
+                                            return child_run_output(
+                                                failure_result(&request, &msg),
+                                                completion_data,
+                                                None,
+                                            );
+                                        }
+                                        isolation_fallback = true;
+                                        None
+                                    } else if let Err(e) = write_live_worktree_marker(&path) {
                                         if isolation_requested && !allow_shared_fallback {
                                             return child_run_output(
                                                 failure_result(&request, &e),
@@ -547,7 +582,7 @@ pub(crate) async fn run_shell_child(
                                     } else {
                                         spawn_live_marker_heartbeat(
                                             path.clone(),
-                                            cancel_token.clone(),
+                                            live_heartbeat_stop.clone(),
                                         );
                                         Some(path)
                                     }
@@ -634,6 +669,9 @@ pub(crate) async fn run_shell_child(
         // RC12: prune soft-preserved worktrees (keep-N) + free-space guard so
         // parallel densify loops don't fill the disk (os error 112).
         // Phase 5: pre-spawn live-children cap (named scheduler gate).
+        // Hold admission across cap-check + create + marker so concurrent
+        // spawns cannot all pass the precheck before any marker exists.
+        let _admission = LIVE_WORKTREE_ADMISSION.lock().await;
         let mut skip_worktree_create = false;
         if let Some(parent_base) = dest.parent() {
             prune_soft_preserved_worktrees(parent_base);
@@ -834,7 +872,7 @@ pub(crate) async fn run_shell_child(
                     } else {
                         spawn_live_marker_heartbeat(
                             report.worktree_path.clone(),
-                            cancel_token.clone(),
+                            live_heartbeat_stop.clone(),
                         );
                         Some(report.worktree_path)
                     }
@@ -2831,6 +2869,9 @@ pub(crate) async fn run_shell_child(
                         result.baseline_ref = baseline_for_export.clone();
                         if keep_live {
                             result.worktree_state = Some("preserved".to_string());
+                            // Stop heartbeat before rewriting/clearing the marker
+                            // so it cannot recreate a live PID marker after dispose.
+                            live_heartbeat_stop.cancel();
                             if retain_worktree {
                                 // Keep-N must never reclaim retain_worktree trees.
                                 // Rewrite retain=1 (do not clear).

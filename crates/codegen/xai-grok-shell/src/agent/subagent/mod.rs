@@ -2868,6 +2868,11 @@ pub(crate) fn write_live_worktree_marker_ex(worktree: &Path, retain: bool) -> Re
     })
 }
 
+/// Serializes live-cap check + marker publication so concurrent parent-process
+/// spawns cannot all observe `live < cap` before any marker exists.
+pub(crate) static LIVE_WORKTREE_ADMISSION: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 /// Heartbeat: rewrite `.grok-subagent-live` ~every 30s until `stop` is cancelled.
 pub(crate) fn spawn_live_marker_heartbeat(worktree: PathBuf, stop: CancellationToken) {
     tokio::spawn(async move {
@@ -2927,6 +2932,23 @@ pub(crate) fn is_live_worktree_protected(worktree: &Path) -> bool {
         return true;
     };
     age <= live_marker_max_age()
+}
+
+/// Whether this tree occupies a slot in [`ensure_live_worktree_cap`].
+///
+/// Completed `retain_worktree` trees stay prune-protected (`retain=1`) but
+/// must not fill the live-children admission cap — they are not RUNNING.
+/// Running trees (live PID or fresh heartbeat, and not retain) still count.
+pub(crate) fn counts_toward_live_cap(worktree: &Path) -> bool {
+    let marker = worktree.join(LIVE_WORKTREE_MARKER);
+    let Ok(contents) = std::fs::read_to_string(&marker) else {
+        return false;
+    };
+    let parsed = parse_live_worktree_marker(&contents);
+    if parsed.retain {
+        return false;
+    }
+    is_live_worktree_protected(worktree)
 }
 
 pub(crate) fn prune_soft_preserved_worktrees(base: &Path) {
@@ -3110,18 +3132,31 @@ pub(crate) fn ensure_live_worktree_cap(base: &Path) -> Result<(), String> {
         if !name.starts_with("subagent-") {
             continue;
         }
-        if is_live_worktree_protected(&path) {
+        if counts_toward_live_cap(&path) {
             live += 1;
         }
     }
     if live >= cap {
         return Err(format!(
             "spawn gate [live-children]: {live} live worktrees already at or above cap {cap} \
-             (GROK_SUBAGENT_MAX_LIVE_WORKTREES). Finish or kill running subagents first; \
+             (GROK_SUBAGENT_MAX_LIVE_WORKTREES). Finish or kill running subagents first. \
+             Completed retain_worktree trees are excluded from this cap; \
              `turbo subagent prune` only removes non-live trees."
         ));
     }
     Ok(())
+}
+
+/// Admit a tree that is about to publish a live marker. Already-counted
+/// (running) trees pass so resume of self is not blocked by the cap.
+pub(crate) fn ensure_live_worktree_cap_for_new_marker(dest: &Path) -> Result<(), String> {
+    if counts_toward_live_cap(dest) {
+        return Ok(());
+    }
+    let Some(base) = dest.parent() else {
+        return Ok(());
+    };
+    ensure_live_worktree_cap(base)
 }
 
 /// Resolve the git tree a worktree-isolated child is created from.
