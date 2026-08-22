@@ -3091,10 +3091,11 @@ pub(crate) fn ensure_min_free_space_for_worktree(base: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// Cap on live (marker-protected) worktrees per base dir before spawn refuses
+/// Cap on live (running) worktrees per base dir before spawn refuses
 /// another one. Env: `GROK_SUBAGENT_MAX_LIVE_WORKTREES` (0 disables).
 /// Default 8. Completed children clear their live marker so they stop
-/// counting; `retain_worktree` trees keep counting until pruned manually.
+/// counting; `retain_worktree` trees stay prune-protected but are excluded
+/// from this admission cap.
 pub(crate) fn max_live_worktrees() -> usize {
     match std::env::var("GROK_SUBAGENT_MAX_LIVE_WORKTREES")
         .ok()

@@ -47,6 +47,14 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
+Phase 5 control-plane follow-up (post-audit):
+
+- **Tools on stock toolsets:** `steer`, `receipts`, `rollback`, `gh_pr_status`, `gh_ci_status`, `gh_ci_rerun` are on default / workspace / concise grok-build toolsets (the running rc.5 binary still will not show them until this tree is built).
+- **Policy fail-closed:** `max_diff_lines` is checked before `write_file`; `write`, `apply_patch`, and `monitor` honor `GROK_POLICY_*`.
+- **Receipts:** undo payload is written first; secret-shaped / credential-path files are not stored as raw `.before`.
+- **gh CLI:** dropped illegal `--no-browser` (use `GH_NO_BROWSER`/`CI` env); `kill_on_drop`; `--` before user ids; `gh_ci_status` filters `--branch` and fetches `jobs`.
+- **Scheduler:** live-marker heartbeat stops on every completion; `retain_worktree` trees do not fill the live-children cap; resume/create serialize admission.
+
 ---
 
 ## [1.0.0-rc.6] - 2026-08-22
