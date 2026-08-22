@@ -359,6 +359,22 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
                 input: u.tool_input.clone(),
             },
             ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
+            // Mutating built-ins must never fall into the Read(None) catch-all
+            // below: rollback rewrites a file, gh rerun triggers CI, steer
+            // injects into a child session (control-plane write). Receipt ids
+            // are not paths, so rollback gates on a distinctive name the way
+            // unparseable apply_patch bodies do.
+            ToolInput::Rollback(rb) => AccessKind::Edit(format!("<rollback:{}>", rb.receipt_id)),
+            ToolInput::GhCiRerun(rerun) => {
+                AccessKind::Bash(if rerun.failed_only {
+                    format!("gh run rerun {} --failed", rerun.run)
+                } else {
+                    format!("gh run rerun {}", rerun.run)
+                })
+            }
+            ToolInput::Steer(steer) => {
+                AccessKind::Bash(format!("steer {} <guidance>", steer.subagent_id))
+            }
             ToolInput::Dynamic(_) => AccessKind::Read(None),
             #[allow(unreachable_patterns)]
             _ => AccessKind::Read(None),
@@ -806,6 +822,46 @@ mod tests {
         assert!(
             matches!(access, AccessKind::Bash(ref cmd) if cmd == "tail -f /var/log/syslog"),
             "Monitor runs shell and must map to AccessKind::Bash (not Read), got {access:?}"
+        );
+    }
+    #[test]
+    fn mutating_builtin_tools_do_not_fall_into_read_catch_all() {
+        use xai_grok_tools::implementations::grok_build::gh::{GhCiRerunInput, GhCiStatusInput};
+        use xai_grok_tools::implementations::grok_build::receipts::RollbackInput;
+        use xai_grok_tools::implementations::grok_build::steer::SteerInput;
+        use xai_grok_tools::types::ToolInput;
+
+        let rerun = AccessKind::from(&ToolInput::GhCiRerun(GhCiRerunInput {
+            run: "12345".into(),
+            failed_only: true,
+        }));
+        assert!(
+            matches!(rerun, AccessKind::Bash(ref cmd) if cmd.contains("run rerun 12345") && cmd.contains("--failed")),
+            "gh_ci_rerun must gate as Bash, got {rerun:?}"
+        );
+
+        let rollback = AccessKind::from(&ToolInput::Rollback(RollbackInput {
+            receipt_id: "rcpt-x".into(),
+        }));
+        assert!(
+            matches!(rollback, AccessKind::Edit(ref p) if p.contains("rcpt-x")),
+            "rollback must gate as Edit, got {rollback:?}"
+        );
+
+        let steer = AccessKind::from(&ToolInput::Steer(SteerInput {
+            subagent_id: "sa-1".into(),
+            text: "hi".into(),
+        }));
+        assert!(
+            matches!(steer, AccessKind::Bash(ref cmd) if cmd.contains("sa-1")),
+            "steer must gate as Bash, got {steer:?}"
+        );
+
+        // The read-only gh tools stay reads (no accidental Bash gating).
+        let status = AccessKind::from(&ToolInput::GhCiStatus(GhCiStatusInput { run: None }));
+        assert!(
+            !matches!(status, AccessKind::Bash(_)),
+            "gh_ci_status is read-only and must not map to Bash, got {status:?}"
         );
     }
     #[test]
