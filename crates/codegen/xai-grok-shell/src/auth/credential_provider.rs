@@ -95,6 +95,7 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
             deployment_id: None,
             api_key_id,
             organization_id,
+            scopes: None,
         }
     }
     async fn refresh_after_unauthorized(&self) -> bool {
@@ -332,6 +333,7 @@ impl OtelAuthCredentialProvider {
             deployment_id: None,
             api_key_id,
             organization_id,
+            scopes: None,
         }
     }
 }
