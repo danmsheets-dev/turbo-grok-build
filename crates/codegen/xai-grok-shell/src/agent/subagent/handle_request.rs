@@ -633,9 +633,28 @@ pub(crate) async fn run_shell_child(
         };
         // RC12: prune soft-preserved worktrees (keep-N) + free-space guard so
         // parallel densify loops don't fill the disk (os error 112).
+        // Phase 5: pre-spawn live-children cap (named scheduler gate).
         let mut skip_worktree_create = false;
         if let Some(parent_base) = dest.parent() {
             prune_soft_preserved_worktrees(parent_base);
+            if let Err(msg) = ensure_live_worktree_cap(parent_base) {
+                if !allow_shared_fallback {
+                    tracing::error!(
+                        subagent_id = %request.id,
+                        error = %msg,
+                        "Pre-spawn live-worktree cap refused worktree create"
+                    );
+                    return child_run_output(failure_result(&request, &msg), completion_data, None);
+                }
+                isolation_fallback = true;
+                skip_worktree_create = true;
+                tracing::warn!(
+                    subagent_id = %request.id,
+                    error = %msg,
+                    isolation_fallback,
+                    "Live-worktree cap hit; shared-workspace fallback (opt-in)"
+                );
+            }
             // Second prune pass if still low: drop to keep-N/2 (or age-only if KEEP_N=0).
             if ensure_min_free_space_for_worktree(parent_base).is_err() {
                 let keep = soft_preserve_keep_n();

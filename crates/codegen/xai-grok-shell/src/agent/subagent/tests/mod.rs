@@ -651,6 +651,38 @@ fn keep_n_dead_pid_stale_mtime_not_protected() {
     assert!(fresh.is_dir(), "keep-N must retain the newest non-live tree");
 }
 
+/// Phase 5 scheduler: live-children cap counts only marker-protected trees
+/// and the gate error names the gate.
+#[test]
+fn live_worktree_cap_counts_protected_trees_only() {
+    use super::{ensure_live_worktree_cap, write_live_worktree_marker};
+    let base = tempfile::TempDir::new().unwrap();
+    // One live tree (fresh marker written by this process).
+    let live = base.path().join("subagent-live");
+    std::fs::create_dir_all(&live).unwrap();
+    write_live_worktree_marker(&live).expect("marker");
+    // One dead/stale tree that must not count.
+    let stale = base.path().join("subagent-stale");
+    write_stale_live_marker(&stale, 4_000_000_000, false);
+    // Non-subagent dirs are ignored entirely.
+    let other = base.path().join("unrelated");
+    std::fs::create_dir_all(&other).unwrap();
+    write_live_worktree_marker(&other).expect("marker");
+
+    // cap=1: one protected tree is at capacity → named-gate refusal.
+    // SAFETY: single-threaded test; env has no concurrent readers here.
+    unsafe { std::env::set_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES", "1") };
+    let err = ensure_live_worktree_cap(base.path()).expect_err("cap must refuse");
+    assert!(err.contains("[live-children]"), "gate must be named: {err}");
+    // cap=2: headroom below the cap passes.
+    unsafe { std::env::set_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES", "2") };
+    ensure_live_worktree_cap(base.path()).expect("under cap must pass");
+    // cap=0 disables the gate.
+    unsafe { std::env::set_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES", "0") };
+    ensure_live_worktree_cap(base.path()).expect("cap=0 disables");
+    unsafe { std::env::remove_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES") };
+}
+
 #[test]
 fn subagent_inherits_parent_lsp_via_context() {
     let parent: std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend> = Arc::new(

@@ -3045,12 +3045,67 @@ pub(crate) fn ensure_min_free_space_for_worktree(base: &Path) -> Result<(), Stri
     })?;
     if available < min {
         return Err(format!(
-            "not enough free disk space to create isolated worktree \
+            "spawn gate [disk]: not enough free disk space to create isolated worktree \
              (available {available} bytes, need at least {min}). \
              Run `turbo disk clean --safe` and/or `turbo subagent prune`; \
              or lower the gate with GROK_MIN_FREE_GB / GROK_SUBAGENT_MIN_FREE_BYTES=0; \
              or raise keep-N via GROK_SUBAGENT_KEEP_N. \
              Original symptom: os error 112 / StorageFull."
+        ));
+    }
+    Ok(())
+}
+
+/// Cap on live (marker-protected) worktrees per base dir before spawn refuses
+/// another one. Env: `GROK_SUBAGENT_MAX_LIVE_WORKTREES` (0 disables).
+/// Default 8. Completed children clear their live marker so they stop
+/// counting; `retain_worktree` trees keep counting until pruned manually.
+pub(crate) fn max_live_worktrees() -> usize {
+    match std::env::var("GROK_SUBAGENT_MAX_LIVE_WORKTREES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(0) => 0,
+        Some(n) => n,
+        // Unset or invalid → default.
+        None => 8,
+    }
+}
+
+/// Pre-spawn live-children gate (Phase 5 scheduler FR): count marker-protected
+/// worktree dirs under `base` and fail closed above the cap. Live markers are
+/// heartbeat-refreshed (~30s) so stale-but-dead trees do not count forever.
+pub(crate) fn ensure_live_worktree_cap(base: &Path) -> Result<(), String> {
+    let cap = max_live_worktrees();
+    if cap == 0 {
+        return Ok(());
+    }
+    let mut live = 0usize;
+    let rd = match std::fs::read_dir(base) {
+        Ok(rd) => rd,
+        // No base dir yet — nothing is live.
+        Err(_) => return Ok(()),
+    };
+    for ent in rd.flatten() {
+        let path = ent.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        if !name.starts_with("subagent-") {
+            continue;
+        }
+        if is_live_worktree_protected(&path) {
+            live += 1;
+        }
+    }
+    if live >= cap {
+        return Err(format!(
+            "spawn gate [live-children]: {live} live worktrees already at or above cap {cap} \
+             (GROK_SUBAGENT_MAX_LIVE_WORKTREES). Finish or kill running subagents first; \
+             `turbo subagent prune` only removes non-live trees."
         ));
     }
     Ok(())
