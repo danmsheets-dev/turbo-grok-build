@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
-use xai_grok_config::{encode_cwd_dirname, sessions_cwd_dir};
+use xai_grok_config::{encode_cwd_dirname, grok_home, sessions_cwd_dir};
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct SubagentArgs {
@@ -175,7 +175,8 @@ pub fn run(args: SubagentArgs) -> Result<()> {
             json_union_by,
         } => {
             let r = resolve(&cwd_str, &id, session.as_deref())?;
-            cmd_land(&cwd, &r, &mode, json_union_by.as_deref())
+            let git_cwd = git_cwd_for_land(&cwd, &r);
+            cmd_land(&git_cwd, &r, &mode, json_union_by.as_deref())
         }
         SubagentCommand::Discard {
             id,
@@ -195,6 +196,110 @@ pub fn run(args: SubagentArgs) -> Result<()> {
 
 fn sessions_root_for_cwd(cwd: &str) -> PathBuf {
     sessions_cwd_dir(cwd)
+}
+
+/// Scan `sessions_root` (either one encoded-cwd dir, or the global
+/// `~/.grok/sessions` parent) for `*/<session>/subagents/<id>/meta.json`.
+fn collect_hits_under(
+    sessions_root: &Path,
+    id: &str,
+    session: Option<&str>,
+    hits: &mut Vec<Resolved>,
+) -> Result<()> {
+    if !sessions_root.is_dir() {
+        return Ok(());
+    }
+    let cwd_dirs: Vec<PathBuf> = if sessions_root.join("subagents").is_dir()
+        || session
+            .map(|sid| sessions_root.join(sid).is_dir())
+            .unwrap_or(false)
+    {
+        // Already a per-cwd sessions directory.
+        vec![sessions_root.to_path_buf()]
+    } else {
+        fs::read_dir(sessions_root)
+            .with_context(|| format!("read {}", sessions_root.display()))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.path())
+            .collect()
+    };
+    for cwd_dir in cwd_dirs {
+        let session_dirs: Vec<PathBuf> = if let Some(sid) = session {
+            vec![cwd_dir.join(sid)]
+        } else {
+            fs::read_dir(&cwd_dir)
+                .with_context(|| format!("read {}", cwd_dir.display()))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.path())
+                .collect()
+        };
+        for session_dir in session_dirs {
+            let sid = session_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let meta_path = session_dir.join("subagents").join(id).join("meta.json");
+            if !meta_path.is_file() {
+                continue;
+            }
+            if hits.iter().any(|h| h.meta_path == meta_path) {
+                continue;
+            }
+            let raw = fs::read_to_string(&meta_path)
+                .with_context(|| format!("read {}", meta_path.display()))?;
+            let meta: MetaView = serde_json::from_str(&raw)
+                .with_context(|| format!("parse {}", meta_path.display()))?;
+            hits.push(Resolved {
+                id: id.to_string(),
+                session_id: sid,
+                dir: meta_path.parent().unwrap().to_path_buf(),
+                meta_path,
+                meta,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Git repo that holds `refs/grok/subagents/*`. The TUI session cwd may be a
+/// non-git umbrella with a nested checkout (this workspace).
+fn git_cwd_for_land(cli_cwd: &Path, r: &Resolved) -> PathBuf {
+    if git(cli_cwd, &["rev-parse", "--git-dir"]).is_ok() {
+        return cli_cwd.to_path_buf();
+    }
+    for ancestor in cli_cwd.ancestors().skip(1) {
+        if ancestor.join(".git").exists()
+            && git(ancestor, &["rev-parse", "--git-dir"]).is_ok()
+        {
+            return ancestor.to_path_buf();
+        }
+    }
+    if let Ok(rd) = fs::read_dir(cli_cwd) {
+        let mut matches = Vec::new();
+        for entry in rd.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if !p.join(".git").exists() {
+                continue;
+            }
+            if let Some(base) = r.meta.baseline_ref.as_deref().filter(|b| !b.is_empty()) {
+                if git(&p, &["rev-parse", "--verify", base]).is_ok() {
+                    matches.push(p);
+                }
+            } else if git(&p, &["rev-parse", "--git-dir"]).is_ok() {
+                matches.push(p);
+            }
+        }
+        if matches.len() == 1 {
+            return matches.remove(0);
+        }
+        if let Some(p) = matches.into_iter().next() {
+            return p;
+        }
+    }
+    cli_cwd.to_path_buf()
 }
 
 fn resolve(cwd: &str, id: &str, session: Option<&str>) -> Result<Resolved> {
@@ -243,6 +348,12 @@ fn resolve(cwd: &str, id: &str, session: Option<&str>) -> Result<Resolved> {
             meta_path,
             meta,
         });
+    }
+
+    if hits.is_empty() {
+        if let Some(sid) = session {
+            collect_hits_under(&grok_home().join("sessions"), id, Some(sid), &mut hits)?;
+        }
     }
 
     match hits.len() {
