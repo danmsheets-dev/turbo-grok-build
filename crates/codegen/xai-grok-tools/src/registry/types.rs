@@ -704,6 +704,9 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::ReceiptsTool>();
         b.register::<grok_build::RollbackTool>();
         b.register::<grok_build::SteerTool>();
+        b.register::<grok_build::GhPrStatusTool>();
+        b.register::<grok_build::GhCiStatusTool>();
+        b.register::<grok_build::GhCiRerunTool>();
         b.register::<grok_build::WorkspaceTreeTool>();
         b.register::<grok_build::ResolvePathTool>();
         b.register::<grok_build::SpawnManyTool>();

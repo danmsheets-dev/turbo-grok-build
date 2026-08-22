@@ -17,6 +17,7 @@ pub mod developer_log;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
 pub mod feature_request_log;
+pub mod gh;
 pub mod grep;
 pub mod image_edit;
 pub mod image_gen;
@@ -63,6 +64,7 @@ pub use developer_log::{DEVELOPER_LOG_TOOL_NAME, DeveloperLogTool};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use feature_request_log::{FEATURE_REQUEST_LOG_TOOL_NAME, FeatureRequestLogTool};
+pub use gh::{GhCiRerunTool, GhCiStatusTool, GhPrStatusTool};
 pub use grep::GrepTool;
 pub use image_edit::{IMAGE_EDIT_TOOL_NAME, ImageEditTool};
 pub use image_gen::{

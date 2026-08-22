@@ -660,6 +660,9 @@ pub enum ToolOutput {
     Receipts(crate::implementations::grok_build::receipts::ReceiptsOutput),
     Rollback(crate::implementations::grok_build::receipts::RollbackOutput),
     Steer(crate::implementations::grok_build::steer::SteerOutput),
+    GhPrStatus(crate::implementations::grok_build::gh::GhPrStatusOutput),
+    GhCiStatus(crate::implementations::grok_build::gh::GhCiStatusOutput),
+    GhCiRerun(crate::implementations::grok_build::gh::GhCiRerunOutput),
     WorkspaceTree(crate::implementations::grok_build::workspace_tree::WorkspaceTreeOutput),
     ResolvePath(crate::implementations::grok_build::resolve_path::ResolvePathOutput),
     SpawnMany(crate::implementations::grok_build::spawn_many::SpawnManyOutput),
@@ -716,6 +719,9 @@ impl ToolOutput {
                 crate::implementations::grok_build::steer::SteerOutput::Queued { .. } => false,
                 crate::implementations::grok_build::steer::SteerOutput::Refused { .. } => true,
             },
+            ToolOutput::GhPrStatus(o) => !o.success,
+            ToolOutput::GhCiStatus(o) => !o.success,
+            ToolOutput::GhCiRerun(o) => !o.success,
             _ => false,
         }
     }
@@ -1116,6 +1122,9 @@ impl ToolOutput {
                     reason.clone()
                 }
             },
+            ToolOutput::GhPrStatus(o) => o.message.clone(),
+            ToolOutput::GhCiStatus(o) => o.message.clone(),
+            ToolOutput::GhCiRerun(o) => o.message.clone(),
             ToolOutput::WorkspaceTree(o) => o.message.clone(),
             ToolOutput::ResolvePath(o) => o.message.clone(),
             ToolOutput::SpawnMany(o) => o.message.clone(),
