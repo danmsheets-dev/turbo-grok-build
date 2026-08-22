@@ -6192,10 +6192,8 @@ mod tests {
     fn mcp_read_only_hint_from_annotations_passthrough() {
         use rmcp::model::ToolAnnotations;
         assert_eq!(mcp_read_only_hint_from_annotations(None), None);
-        let ann = ToolAnnotations {
-            read_only_hint: Some(true),
-            ..Default::default()
-        };
+        let mut ann = ToolAnnotations::default();
+        ann.read_only_hint = Some(true);
         assert_eq!(mcp_read_only_hint_from_annotations(Some(&ann)), Some(true));
     }
 
