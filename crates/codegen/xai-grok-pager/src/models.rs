@@ -47,9 +47,8 @@ pub fn billing_for_model_id(model_id: &str) -> BillingClass {
         }
         // Direct provider API-key platforms (pay-per-token).
         "openai" | "anthropic" | "google" | "gemini" | "mistral" | "deepseek" | "groq"
-        | "together" | "fireworks" | "openrouter" | "amazon-bedrock" | "azure" | "azure-openai" => {
-            BillingClass::PayPerToken
-        }
+        | "together" | "fireworks" | "openrouter" | "poolside" | "amazon-bedrock" | "azure"
+        | "azure-openai" => BillingClass::PayPerToken,
         // Everything else with a platform prefix is user-key BYOK.
         other if model_id.contains('/') && other != model_id => BillingClass::ProviderKey,
         // Unprefixed ids are the native default catalog.

@@ -30,6 +30,7 @@ pub use platforms::{
     nexus_messages_base, nexus_normalize_root, nexus_responses_base,
     normalize_azure_openai_base_url, normalize_kimi_code_base_url, normalize_messages_sdk_base_url,
     nvidia_integrate_chat_compat, parse_managed_model_key, platform_builtin_models,
+    poolside_hosted_chat_compat,
     provider_registry, provider_spec, validate_provider_assets,
 };
 pub use provider_compat::{

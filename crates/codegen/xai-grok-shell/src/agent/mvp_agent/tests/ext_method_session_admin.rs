@@ -110,6 +110,27 @@ async fn ext_method_routes_pager_sent_turbo_internal_methods() {
     assert_eq!(cleared_result.get("cleared"), Some(&json!(true)));
     assert!(crate::auth::read_platform_api_key(grok_home.path(), "openrouter").is_none());
 
+    let poolside = agent
+        .ext_method(ext_request(
+            "x.ai/internal/set_platform_api_key",
+            json!({
+                "platform": "poolside",
+                "apiKey": "psk-test",
+            }),
+        ))
+        .await
+        .expect("poolside set_platform_api_key must dispatch");
+    let poolside_body: serde_json::Value = serde_json::from_str(poolside.0.get()).unwrap();
+    let poolside_result = poolside_body
+        .get("result")
+        .cloned()
+        .unwrap_or(poolside_body.clone());
+    assert_eq!(poolside_result.get("platform"), Some(&json!("poolside")));
+    assert_eq!(
+        crate::auth::read_platform_api_key(grok_home.path(), "poolside").as_deref(),
+        Some("psk-test")
+    );
+
     let unknown = agent
         .ext_method(ext_request(
             "x.ai/internal/definitely_not_a_method",

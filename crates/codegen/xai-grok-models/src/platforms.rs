@@ -770,6 +770,8 @@ pub enum PlatformId {
     Cerebras,
     Nvidia,
     OpenRouter,
+    /// Poolside-hosted OpenAI-compatible Chat Completions (`inference.poolside.ai`).
+    Poolside,
     MiniMax,
     MiniMaxCn,
     Zai,
@@ -790,7 +792,7 @@ pub enum PlatformId {
 
 impl PlatformId {
     /// All platforms; subscription first.
-    pub const ALL: [PlatformId; 24] = [
+    pub const ALL: [PlatformId; 25] = [
         Self::KimiCode,
         Self::OpenAiCodex,
         Self::OpenCodeGo,
@@ -807,6 +809,7 @@ impl PlatformId {
         Self::Cerebras,
         Self::Nvidia,
         Self::OpenRouter,
+        Self::Poolside,
         Self::MiniMax,
         Self::MiniMaxCn,
         Self::Zai,
@@ -835,6 +838,7 @@ impl PlatformId {
             Self::Cerebras => "cerebras",
             Self::Nvidia => "nvidia",
             Self::OpenRouter => "openrouter",
+            Self::Poolside => "poolside",
             Self::MiniMax => "minimax",
             Self::MiniMaxCn => "minimax-cn",
             Self::Zai => "zai",
@@ -891,6 +895,7 @@ impl PlatformId {
             Self::Cerebras => "Cerebras",
             Self::Nvidia => "NVIDIA NIM",
             Self::OpenRouter => "OpenRouter",
+            Self::Poolside => "Poolside",
             Self::MiniMax => "MiniMax",
             Self::MiniMaxCn => "MiniMax (China)",
             Self::Zai => "Z.AI",
@@ -922,6 +927,7 @@ impl PlatformId {
             Self::Cerebras => "https://api.cerebras.ai/v1",
             Self::Nvidia => "https://integrate.api.nvidia.com/v1",
             Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::Poolside => "https://inference.poolside.ai/v1",
             Self::MiniMax => "https://api.minimax.io/v1",
             Self::MiniMaxCn => "https://api.minimaxi.com/v1",
             // General Z.AI PaaS (pay-as-you-go). Coding Plan uses `ZaiCoding`.
@@ -1067,6 +1073,7 @@ impl PlatformId {
             Self::Cerebras => &["GROK_CEREBRAS_API_KEY", "CEREBRAS_API_KEY"],
             Self::Nvidia => &["GROK_NVIDIA_API_KEY", "NVIDIA_API_KEY"],
             Self::OpenRouter => &["GROK_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
+            Self::Poolside => &["GROK_POOLSIDE_API_KEY", "POOLSIDE_API_KEY"],
             Self::MiniMax => &["GROK_MINIMAX_API_KEY", "MINIMAX_API_KEY"],
             Self::MiniMaxCn => &["GROK_MINIMAX_CN_API_KEY", "MINIMAX_API_KEY"],
             Self::Zai => &["GROK_ZAI_API_KEY", "ZAI_API_KEY"],
@@ -1341,10 +1348,10 @@ impl BuiltinPlatformModel {
 
     /// Materialize all non-secret runtime route metadata for this model.
     pub fn resolved_runtime(&self) -> ResolvedProviderRuntime {
-        let wire_model = if self.provider.as_str() == "nvidia" {
-            nvidia_wire_model_id(&self.model)
-        } else {
-            self.model.clone()
+        let wire_model = match self.provider.as_str() {
+            "nvidia" => nvidia_wire_model_id(&self.model),
+            "poolside" => poolside_wire_model_id(&self.model),
+            _ => self.model.clone(),
         };
         self.provider_spec().resolve_runtime(
             &self.raw_resolved_base_url(),
@@ -2219,6 +2226,15 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
                 out.push(m);
             }
         }
+        // Poolside-hosted inference (`inference.poolside.ai`) is not in Pi.
+        for m in poolside_offline_fallbacks() {
+            if let Some(idx) = existing.get(&m.catalog_key()) {
+                out[*idx] = m;
+            } else {
+                existing.insert(m.catalog_key(), out.len());
+                out.push(m);
+            }
+        }
         // Anthropic Claude (Pro/Max subscription OAuth) — hand-maintained.
         for m in anthropic_claude_offline_fallbacks() {
             if let Some(idx) = existing.get(&m.catalog_key()) {
@@ -2282,6 +2298,20 @@ fn apply_catalog_compat_overrides(
         if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
             chat.max_parallel_tool_calls = Some(1);
         }
+    }
+    if provider_id == "poolside"
+        && let RequestCompat::ChatCompletions(ref mut chat) = compat
+    {
+        chat.supports_prompt_cache_key = false;
+        chat.supports_store = false;
+        chat.supports_developer_role = false;
+        chat.supports_strict_mode = false;
+        chat.supports_long_cache_retention = false;
+        chat.max_tokens_field = MaxTokensField::MaxTokens;
+        chat.requires_reasoning_content_on_assistant_messages = true;
+        chat.thinking_format = ThinkingFormat::QwenChatTemplate;
+        chat.supports_message_model_id = false;
+        chat.agent_ready = true;
     }
     compat
 }
@@ -2353,6 +2383,21 @@ fn fallback_request_compat(
                 if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
                     compat.max_parallel_tool_calls = Some(1);
                 }
+            }
+            // Poolside-hosted Chat Completions: thinking on by default via
+            // `chat_template_kwargs.enable_thinking`; preserve `reasoning_content`
+            // on assistant follow-ups; `max_tokens` not `max_completion_tokens`.
+            if platform == PlatformId::Poolside {
+                compat.supports_prompt_cache_key = false;
+                compat.supports_store = false;
+                compat.supports_developer_role = false;
+                compat.supports_strict_mode = false;
+                compat.supports_long_cache_retention = false;
+                compat.max_tokens_field = MaxTokensField::MaxTokens;
+                compat.requires_reasoning_content_on_assistant_messages = true;
+                compat.thinking_format = ThinkingFormat::QwenChatTemplate;
+                compat.supports_message_model_id = false;
+                compat.agent_ready = true;
             }
             RequestCompat::ChatCompletions(compat)
         }
@@ -2542,6 +2587,70 @@ fn nvidia_wire_model_id(model: &str) -> String {
         "nemotron-3.5-lightning-30b-a3b" => "nvidia/nemotron-3.5-lightning-30b-a3b".to_owned(),
         _ => model.to_owned(),
     }
+}
+
+/// Poolside-hosted inference expects the publisher-qualified model id
+/// (`poolside/laguna-s-2.1`). Catalog keys stay `poolside/<short-id>`.
+fn poolside_wire_model_id(model: &str) -> String {
+    if model.starts_with("poolside/") {
+        model.to_owned()
+    } else {
+        format!("poolside/{model}")
+    }
+}
+
+/// Poolside-hosted Chat Completions (`https://inference.poolside.ai/v1`).
+pub fn poolside_hosted_chat_compat(model_id: &str) -> RequestCompat {
+    fallback_request_compat(
+        PlatformId::Poolside,
+        PlatformApiBackend::ChatCompletions,
+        model_id,
+    )
+}
+
+fn poolside_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
+    const MAX_OUT_32K: u32 = 32_768;
+    let mk = |model: &str, name: &str, desc: &str, ctx: u64| BuiltinPlatformModel {
+        provider: PlatformId::Poolside.provider_id(),
+        model: model.into(),
+        name: name.into(),
+        description: desc.into(),
+        context_window: ctx,
+        supports_reasoning_effort: true,
+        supported_in_api: false,
+        catalog_available: true,
+        picker_visible: true,
+        eol: false,
+        max_completion_tokens: Some(MAX_OUT_32K),
+        api_backend: PlatformApiBackend::ChatCompletions,
+        base_url_override: None,
+        request_compat: fallback_request_compat(
+            PlatformId::Poolside,
+            PlatformApiBackend::ChatCompletions,
+            model,
+        ),
+        route: fallback_route(PlatformId::Poolside, PlatformApiBackend::ChatCompletions),
+    };
+    vec![
+        mk(
+            "laguna-s-2.1",
+            "Poolside Laguna S 2.1",
+            "118B/8B-active MoE for long-horizon agentic coding (1M ctx, hosted Chat API)",
+            CTX_1M,
+        ),
+        mk(
+            "laguna-xs-2.1",
+            "Poolside Laguna XS 2.1",
+            "33B/3B-active MoE for fast agentic coding (256K ctx, hosted Chat API)",
+            CTX_256K,
+        ),
+        mk(
+            "laguna-m.1",
+            "Poolside Laguna M.1",
+            "225B/23B-active MoE for complex multi-step coding (256K ctx, hosted Chat API)",
+            CTX_256K,
+        ),
+    ]
 }
 
 /// NVIDIA Integrate Chat Completions compat (strict gateway, not agent-ready).
@@ -3160,7 +3269,7 @@ mod tests {
         }
 
         // These special providers were previously absent from the JSON file.
-        for id in ["openai-codex", "nexus", "anthropic-claude"] {
+        for id in ["openai-codex", "nexus", "anthropic-claude", "poolside"] {
             assert!(provider_spec(id).is_some(), "missing {id}");
         }
     }
@@ -4514,6 +4623,60 @@ mod tests {
                     .is_some_and(|model| !model.picker_visible),
                 "Nvidia compatibility alias should be hidden: {alias}"
             );
+        }
+    }
+
+    #[test]
+    fn poolside_hosted_catalog_is_picker_visible_with_qualified_wire_ids() {
+        assert_eq!(PlatformId::parse("poolside"), Some(PlatformId::Poolside));
+        assert_eq!(PlatformId::Poolside.display_name(), "Poolside");
+        assert_eq!(
+            PlatformId::Poolside.base_url(),
+            "https://inference.poolside.ai/v1"
+        );
+        assert_eq!(
+            PlatformId::Poolside.api_key_env_names(),
+            &["GROK_POOLSIDE_API_KEY", "POOLSIDE_API_KEY"]
+        );
+        assert!(!PlatformId::Poolside.live_models_list_enabled());
+        let spec = provider_spec("poolside").expect("poolside registry row");
+        assert_eq!(spec.display_name, "Poolside");
+        assert_eq!(spec.default_base_url, "https://inference.poolside.ai/v1");
+        assert!(spec.accepts_api_key());
+
+        for (key, wire, ctx) in [
+            (
+                "poolside/laguna-s-2.1",
+                "poolside/laguna-s-2.1",
+                CTX_1M,
+            ),
+            (
+                "poolside/laguna-xs-2.1",
+                "poolside/laguna-xs-2.1",
+                CTX_256K,
+            ),
+            ("poolside/laguna-m.1", "poolside/laguna-m.1", CTX_256K),
+        ] {
+            let model = platform_builtin_models()
+                .iter()
+                .find(|m| m.catalog_key() == key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert!(model.picker_visible, "{key} should be picker-visible");
+            assert!(model.catalog_available);
+            assert!(!model.eol);
+            assert_eq!(model.context_window, ctx);
+            assert_eq!(model.resolved_runtime().wire_model_id, wire);
+            match &model.request_compat {
+                RequestCompat::ChatCompletions(c) => {
+                    assert!(c.agent_ready);
+                    assert!(c.requires_reasoning_content_on_assistant_messages);
+                    assert_eq!(c.thinking_format, ThinkingFormat::QwenChatTemplate);
+                    assert_eq!(c.max_tokens_field, MaxTokensField::MaxTokens);
+                    assert!(!c.supports_prompt_cache_key);
+                    assert!(!c.supports_message_model_id);
+                }
+                other => panic!("{key} expected chat completions compat, got {other:?}"),
+            }
         }
     }
 

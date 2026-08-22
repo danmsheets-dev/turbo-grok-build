@@ -843,6 +843,32 @@
       "adapter": "standard",
       "aliases": [],
       "base_url_env_keys": [
+        "GROK_POOLSIDE_BASE_URL"
+      ],
+      "catalog_source": "hyper",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_POOLSIDE_API_KEY",
+          "POOLSIDE_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://inference.poolside.ai/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Poolside",
+      "id": "poolside",
+      "pi_id": null,
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
         "GROK_QWEN_TOKEN_PLAN_BASE_URL"
       ],
       "catalog_source": "pi",
