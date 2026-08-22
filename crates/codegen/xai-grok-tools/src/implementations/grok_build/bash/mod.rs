@@ -2221,6 +2221,31 @@ impl xai_tool_runtime::Tool for BashTool {
                 output_delta: None,
                 was_bare_echo: false,
             };
+            // Execution receipts (Phase 5): audit-only receipt for mutating
+            // foreground commands (no undo payload for shell effects).
+            if !bash.timed_out
+                && crate::implementations::grok_build::receipts::looks_mutating(&bash.command)
+            {
+                let session = {
+                    let res = resources.lock().await;
+                    res.get::<crate::types::resources::SessionFolder>()
+                        .map(|s| s.0.clone())
+                };
+                if let Some(session) = session.as_deref() {
+                    crate::implementations::grok_build::receipts::try_record(
+                        Some(session),
+                        "bash",
+                        "bash",
+                        None,
+                        None,
+                        None,
+                        Some(bash.command.clone()),
+                        Some(bash.exit_code),
+                        None,
+                    )
+                    .await;
+                }
+            }
             bash.output_for_prompt = format_default_prompt(&bash);
 
             // Bare `echo "<msg>"` usage (common model anti-pattern for "just output something").

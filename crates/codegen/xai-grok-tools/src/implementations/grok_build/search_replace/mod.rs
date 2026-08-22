@@ -242,6 +242,14 @@ pub(crate) async fn run_search_replace(
             "Old string and new string are the same".to_owned(),
         ));
     }
+    // Execution receipts (Phase 5): snapshot pre-edit contents so a rollback
+    // receipt can restore them. Storage failures degrade to no-receipt.
+    let session_folder = {
+        let res = resources.lock().await;
+        res.get::<crate::types::resources::SessionFolder>()
+            .map(|s| s.0.clone())
+    };
+    let pre_edit_bytes: Option<Vec<u8>> = fs.read_file(&path).await.ok();
     let (empty_old_string_does_not_override, include_user_edit_hint);
     {
         let res = resources.lock().await;
@@ -297,6 +305,31 @@ pub(crate) async fn run_search_replace(
             lines_removed = removed
         )
         .in_scope(|| {});
+        // Execution receipts: hash the post-edit file and persist the receipt
+        // with the pre-edit bytes as the undo payload (audit + rollback).
+        let hash_after =
+            fs.read_file(&path).await.ok().map(|bytes| {
+                crate::implementations::grok_build::receipts::hash_bytes(&bytes)
+            });
+        if let Some(session) = session_folder.as_deref() {
+            let undo_payload = pre_edit_bytes
+                .as_deref()
+                .filter(|_| hash_after.is_some());
+            crate::implementations::grok_build::receipts::try_record(
+                Some(session),
+                "search_replace",
+                "edit",
+                Some(path.to_string_lossy().to_string()),
+                pre_edit_bytes
+                    .as_deref()
+                    .map(crate::implementations::grok_build::receipts::hash_bytes),
+                hash_after,
+                None,
+                None,
+                undo_payload.map(<[u8]>::to_vec),
+            )
+            .await;
+        }
     }
     Ok(result)
 }
