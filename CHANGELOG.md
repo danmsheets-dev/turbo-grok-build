@@ -38,6 +38,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc3** | **`1.0.0-rc.3`** | Agent WebView field-test pass |
 | **1.0 rc4** | **`1.0.0-rc.4`** | Fathom-style `/meeting` notetaker |
 | **1.0 rc5** | **`1.0.0-rc.5`** | Harness Q&A: spawn catalog, WebView save, logs/redaction |
+| **1.0 rc6** | **`1.0.0-rc.6`** | Providers ACP, isolation, Poolside hosted Chat API |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -45,6 +46,47 @@ Older release notes (r1–r13 detail) are archived under
 ---
 
 ## Unreleased
+
+---
+
+## [1.0.0-rc.6] - 2026-08-22
+
+**Providers + isolation + browser policy.** rc.5 field tests found `/providers` ACP
+dispatch holes, worktree keep-N/land fail-open, sandbox credential writes, and
+NVIDIA catalog 400/410/hangs. This release lands those plus Poolside hosted Chat
+API as a first-class `/providers` platform.
+
+### Added
+- **Poolside** (`/providers poolside <api_key>`). OpenAI-compatible Chat Completions
+  at `https://inference.poolside.ai/v1`. Env: `POOLSIDE_API_KEY` /
+  `GROK_POOLSIDE_API_KEY`. Offline catalog: Laguna S 2.1 (1M), XS 2.1 (256K),
+  M.1 (256K). Thinking via `chat_template_kwargs.enable_thinking`; assistant
+  `reasoning_content` is preserved on tool loops. Wire ids are
+  `poolside/laguna-s-2.1` (catalog key `poolside/laguna-s-2.1`).
+- **`turbo issues resolve --sha` / `turbo features ship --sha`** record a proving
+  commit on the incident/request.
+- **NVIDIA `agent_ready` spawn gate** — write-capable children cannot pin
+  chat-only Integrate rows; glm-5.2 is catalog EOL (410). Extra `model_id` is
+  stripped on NVIDIA Chat Completions.
+
+### Fixed
+- **`/providers` ACP** dispatches `x.ai/internal/set_platform_api_key` (OpenRouter
+  and every other BYOK platform). rc.5 TUI saved keys; the agent match did not.
+- **keep-N** never deletes `retain_worktree` or live-PID trees; land fail-closes
+  on missing v1 `allowed_paths`; ReadOnly capability_mode clamps MCP and
+  verbatim-fork tools.
+- **Sandbox** write-denies `auth.json` / credential files under `~/.grok` on
+  confining profiles (Windows enforcement remains advisory).
+- **Agent WebView:** `browser_save` re-checks redirect policy; zip/pdf navigations
+  broker into session downloads; PDF empty DOM falls back to AX; `wait_ms`
+  clamped to 60s; HTML saves as `.html` not `download.bin`.
+- **Land CLI** finds `--session` across cwd hashes and uses a nested git root
+  when the umbrella workspace is not a repo.
+
+### Known
+- Windows sandbox credential write-deny is profile metadata only (no kernel jail).
+- Named/required `tool_choice` is not supported on Poolside while thinking is on
+  (Poolside API); Turbo uses auto tool_choice.
 
 ---
 

@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-1.0.0--rc.5-blue" alt="1.0.0-rc.5">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.6-blue" alt="1.0.0-rc.6">
   <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.5`** — GitHub
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.6`** — GitHub
 **Latest** with `SHA256SUMS` so managed `~/.turbo` installs auto-update.
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
@@ -73,6 +73,7 @@ community updater and `install.ps1` / `install.sh` require:
 
 | Wire | Release | Windows asset |
 | --- | --- | --- |
+| `1.0.0-rc.6` | [v1.0.0-rc.6](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.6) | `turbo-1.0.0-rc.6-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.5` | [v1.0.0-rc.5](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.5) | `turbo-1.0.0-rc.5-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.4` | [v1.0.0-rc.4](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.4) | `turbo-1.0.0-rc.4-x86_64-pc-windows-msvc.zip` |
 
@@ -218,6 +219,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **1.0-rc.3** | **`1.0.0-rc.3`** | Agent WebView field-test pass |
 | **1.0-rc.4** | **`1.0.0-rc.4`** | **Fathom-style `/meeting` notetaker** (loopback STT, `Turbo:` Q&A, work-only recap) |
 | **1.0-rc.5** | **`1.0.0-rc.5`** | **Harness Q&A:** spawn catalog aliases, `browser_save`/`browser_downloads`, log redaction |
+| **1.0-rc.6** | **`1.0.0-rc.6`** | **Providers:** `/providers` ACP, isolation keep-N/land, **Poolside** hosted Chat API |
 
 > RC numbering follows the **wire version**, which restarted at `r1` when RC15
 > synced upstream `0.2.119`. The 1.0 line starts at **`1.0.0-rc.1`**.
@@ -242,7 +244,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **1.0.0-rc.5** |
+| Release line | upstream cadence | **1.0.0-rc.6** |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -273,12 +275,12 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v1.0.0-rc.5
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v1.0.0-rc.6
 ```
 
 ```powershell
 # Windows — pin this release
-.\install.ps1 -Version v1.0.0-rc.5
+.\install.ps1 -Version v1.0.0-rc.6
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
@@ -314,6 +316,8 @@ nix develop
 | ChatGPT Codex | ChatGPT OAuth | GPT-5.x + experimental live voice |
 | OpenCode Go | subscription key | Chat Completions + Messages |
 | OpenAI / Anthropic / DeepSeek-style | BYOK | Catalog platforms |
+| OpenRouter | BYOK (`/providers openrouter`) | OpenAI-compatible aggregator |
+| Poolside | `POOLSIDE_API_KEY` or `/providers poolside` | Hosted Laguna Chat API (`inference.poolside.ai`) |
 | Z.AI Coding Plan | platform key | International plan |
 | Ollama Cloud | API key | Live roster sync |
 
