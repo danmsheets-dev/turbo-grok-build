@@ -1710,7 +1710,7 @@ pub(crate) fn execute(
                         cleared: false,
                         models_unlocked: 0,
                         env_still_active: Vec::new(),
-                        error: Some(sanitize_user_error(&e.to_string())),
+                        error: Some(sanitize_acp_user_error(&e)),
                     },
                 }
             });
@@ -1734,7 +1734,8 @@ pub(crate) fn execute(
                     Ok(Ok(response)) => parse_subagent_models_reload_response(response.0.get())
                         .map_err(|error| sanitize_user_error(&error)),
                     Ok(Err(error)) => Err(sanitize_user_error(&format!(
-                        "couldn't activate subagent model pin: {error}"
+                        "couldn't activate subagent model pin: {}",
+                        sanitize_acp_user_error(&error)
                     ))),
                     Err(_) => Err("timed out activating the subagent model pin".to_string()),
                 };

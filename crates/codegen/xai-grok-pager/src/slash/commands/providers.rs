@@ -498,6 +498,29 @@ mod tests {
     }
 
     #[test]
+    fn run_openrouter_accepts_api_key() {
+        let provider = xai_grok_models::provider_spec("openrouter").expect("openrouter registered");
+        assert!(
+            provider.accepts_api_key(),
+            "OpenRouter must accept BYOK via /providers"
+        );
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        match ProvidersCommand.run(&mut ctx, "openrouter sk-or-test") {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform,
+                api_key,
+                base_url,
+            }) => {
+                assert_eq!(platform, "openrouter");
+                assert_eq!(api_key, "sk-or-test");
+                assert_eq!(base_url, None);
+            }
+            other => panic!("expected OpenRouter SetPlatformApiKey, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn run_emits_set_platform_api_key() {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);

@@ -83,6 +83,92 @@ async fn set_platform_api_key_effect_forwards_optional_base_url() {
     assert_eq!(params["baseUrl"], "https://gw.example");
 }
 
+#[tokio::test]
+async fn set_platform_api_key_effect_forwards_empty_key_clear() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+
+    execute(
+        Effect::SetPlatformApiKey {
+            platform: "openrouter".to_string(),
+            api_key: String::new(),
+            base_url: None,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+
+    let message = rx.recv().await.expect("set-platform request must be sent");
+    let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = message else {
+        panic!("expected set-platform ext_method request");
+    };
+    assert_eq!(
+        args.request.method.as_ref(),
+        "x.ai/internal/set_platform_api_key"
+    );
+    let params: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
+    assert_eq!(params["platform"], "openrouter");
+    assert_eq!(params["apiKey"], "");
+    assert!(params.get("baseUrl").is_none());
+}
+
+#[tokio::test]
+async fn set_platform_api_key_effect_surfaces_acp_data_not_bare_display() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+
+    execute(
+        Effect::SetPlatformApiKey {
+            platform: "openrouter".to_string(),
+            api_key: "sk-or-test".to_string(),
+            base_url: None,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+
+    let message = rx.recv().await.expect("set-platform request must be sent");
+    let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = message else {
+        panic!("expected set-platform ext_method request");
+    };
+    args.response_tx
+        .send(Err(acp::Error::method_not_found().data(
+            "unknown ACP extension method: x.ai/internal/set_platform_api_key",
+        )))
+        .expect("set-platform task must still be waiting");
+
+    let result = tasks
+        .join_next()
+        .await
+        .expect("set-platform task must complete")
+        .expect("set-platform task must not panic");
+    let TaskResult::SetPlatformApiKeyComplete {
+        platform,
+        error: Some(error),
+        ..
+    } = result
+    else {
+        panic!("expected SetPlatformApiKeyComplete with error, got {result:?}");
+    };
+    assert_eq!(platform, "openrouter");
+    assert!(
+        error.contains("set_platform_api_key"),
+        "ACP data detail must survive sanitize_user_error, got {error:?}"
+    );
+    assert!(
+        !error.contains("sk-or-test"),
+        "toast must not echo the pasted key"
+    );
+}
+
 #[test]
 fn subagent_model_reload_requires_positive_shell_acknowledgement() {
     assert!(

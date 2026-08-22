@@ -279,6 +279,18 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
     }
     result
 }
+/// Prefer ACP `error.data` over `Display` so handler details (unknown
+/// provider, unknown extension method, IO) survive the toast path.
+/// `Display` is often just "Method not found" / "Internal error".
+pub(super) fn sanitize_acp_user_error(err: &acp::Error) -> String {
+    let raw = err
+        .data
+        .as_ref()
+        .and_then(error_detail_from_data)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| err.to_string());
+    sanitize_user_error(&raw)
+}
 /// Additive session creation flags passed from CLI → AppView → effects.
 ///
 /// The flags map to built-in `BuiltinAgentName` profiles (`agentProfile`)

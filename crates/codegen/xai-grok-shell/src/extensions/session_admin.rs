@@ -37,6 +37,28 @@ use crate::session::unified_list::SessionKind;
 use crate::session::{ExtMethodResult, SessionCommand};
 use xai_grok_telemetry::id::agent_id;
 
+/// Turbo-only ACP methods this module handles that have **no**
+/// [`InternalMethod`] variant. `MvpAgent::ext_method` must match these by
+/// name; `InternalMethod::from_name` returns `None` so they cannot ride the
+/// internal-method guard. Do not add variants — see `leader/protocol.rs`.
+///
+/// Keep in sync with the `ext_method` string arms in
+/// `agent/mvp_agent/acp_agent.rs` and the pager Effects
+/// (`SetPlatformApiKey`, `ReloadSubagentModels`).
+pub(crate) fn is_turbo_only_internal_method(method: &str) -> bool {
+    matches!(
+        method,
+        "x.ai/internal/reload_subagent_models" | "x.ai/internal/set_platform_api_key"
+    )
+}
+
+/// Pager-sent turbo-only internals. Used by the dispatch table test so a new
+/// Effect method cannot land without an agent match.
+pub(crate) const PAGER_SENT_TURBO_INTERNAL_METHODS: &[&str] = &[
+    "x.ai/internal/set_platform_api_key",
+    "x.ai/internal/reload_subagent_models",
+];
+
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     if let Some(method) = InternalMethod::from_name(args.method.as_ref()) {
@@ -954,4 +976,37 @@ async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
     to_raw_response(&response)
+}
+
+#[cfg(test)]
+mod turbo_internal_method_tests {
+    use super::{PAGER_SENT_TURBO_INTERNAL_METHODS, is_turbo_only_internal_method};
+    use crate::leader::protocol::InternalMethod;
+
+    #[test]
+    fn pager_sent_turbo_internal_methods_are_session_admin_string_match_not_variants() {
+        assert_eq!(
+            PAGER_SENT_TURBO_INTERNAL_METHODS,
+            &[
+                "x.ai/internal/set_platform_api_key",
+                "x.ai/internal/reload_subagent_models",
+            ]
+        );
+        for method in PAGER_SENT_TURBO_INTERNAL_METHODS {
+            assert!(
+                is_turbo_only_internal_method(method),
+                "{method} must be a turbo-only session_admin method"
+            );
+            assert!(
+                InternalMethod::from_name(method).is_none(),
+                "{method} must not be an InternalMethod variant (see protocol.rs)"
+            );
+        }
+        assert!(!is_turbo_only_internal_method(
+            "x.ai/internal/reload_models"
+        ));
+        assert!(!is_turbo_only_internal_method(
+            "x.ai/internal/auth_cleared"
+        ));
+    }
 }

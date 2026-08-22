@@ -2229,7 +2229,12 @@ impl acp::Agent for MvpAgent {
             }
             "x.ai/session/rename" | "x.ai/session/delete"
             | "x.ai/session/update_mcp_servers" | "x.ai/session/fork"
-            | "x.ai/plugins/reload" | "x.ai/commands/list" => {
+            | "x.ai/plugins/reload" | "x.ai/commands/list"
+            // Turbo-only internals: no InternalMethod variant (see
+            // leader/protocol.rs). Keep in sync with
+            // session_admin::is_turbo_only_internal_method.
+            | "x.ai/internal/set_platform_api_key"
+            | "x.ai/internal/reload_subagent_models" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             m if InternalMethod::from_name(m).is_some() => {

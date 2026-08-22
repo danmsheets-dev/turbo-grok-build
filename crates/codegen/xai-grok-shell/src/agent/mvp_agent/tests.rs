@@ -2107,6 +2107,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
 mod process_scope_reclaim;
 mod session_resume_close_tests;
 mod subagent_spawn_context_tests;
+mod ext_method_session_admin;
 /// No load in flight and no session → the wait returns immediately
 /// (the caller then surfaces "unknown session id" exactly as before).
 #[tokio::test]

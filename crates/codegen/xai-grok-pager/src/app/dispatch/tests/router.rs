@@ -22,6 +22,45 @@ fn reload_subagent_models_action_preserves_origin_when_active_view_changes() {
 }
 
 #[test]
+fn set_platform_api_key_action_emits_effect_for_save_and_clear() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetPlatformApiKey {
+            platform: "openrouter".into(),
+            api_key: "sk-or-test".into(),
+            base_url: None,
+        },
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SetPlatformApiKey {
+            platform,
+            api_key,
+            base_url
+        }] if platform == "openrouter" && api_key == "sk-or-test" && base_url.is_none()
+    ));
+
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetPlatformApiKey {
+            platform: "openrouter".into(),
+            api_key: String::new(),
+            base_url: None,
+        },
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SetPlatformApiKey {
+            platform,
+            api_key,
+            ..
+        }] if platform == "openrouter" && api_key.is_empty()
+    ));
+}
+
+#[test]
 fn reload_subagent_models_action_is_not_silently_dropped_after_origin_closes() {
     let mut app = test_app_with_agent();
     let effects = dispatch(
