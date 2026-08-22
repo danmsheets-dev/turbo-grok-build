@@ -95,9 +95,8 @@ impl xai_tool_runtime::Tool for BrowserSaveTool {
                     })?
             }
         };
-        check_url_in_session(&url, handle.session_folder()).map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(e.to_string())
-        })?;
+        check_url_in_session(&url, handle.session_folder())
+            .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
         let session_folder = handle.session_folder().ok_or_else(|| {
             xai_tool_runtime::ToolError::invalid_arguments(
                 "browser_save: no session folder is configured",
@@ -127,7 +126,7 @@ impl xai_tool_runtime::Tool for BrowserSaveTool {
     }
 }
 
-async fn broker_http_or_file(
+pub(crate) async fn broker_http_or_file(
     url: &str,
     session_folder: &Path,
 ) -> Result<PathBuf, xai_tool_runtime::ToolError> {
@@ -138,9 +137,9 @@ async fn broker_http_or_file(
             format!("browser_save: cannot create {}: {e}", downloads.display()),
         )
     })?;
-    let filename = filename_from_url(url);
-    let dest = unique_path(&downloads, &filename);
     if let Some(rest) = url.strip_prefix("file:") {
+        let filename = filename_from_url(url);
+        let dest = unique_path(&downloads, &filename);
         let src = PathBuf::from(rest.trim_start_matches('/').trim_start_matches('\\'));
         std::fs::copy(&src, &dest).map_err(|e| {
             xai_tool_runtime::ToolError::custom(
@@ -150,12 +149,22 @@ async fn broker_http_or_file(
         })?;
         return Ok(dest);
     }
+    let folder = session_folder.to_path_buf();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            let next = attempt.url().as_str();
+            match redirect_hop_action(next, attempt.previous().len() + 1, Some(folder.as_path())) {
+                Ok(()) => attempt.follow(),
+                Err(err) => attempt.error(err),
+            }
+        }))
         .build()
         .map_err(|e| {
-            xai_tool_runtime::ToolError::custom("browser_error", format!("browser_save: http client: {e}"))
+            xai_tool_runtime::ToolError::custom(
+                "browser_error",
+                format!("browser_save: http client: {e}"),
+            )
         })?;
     let response = client.get(url).send().await.map_err(|e| {
         xai_tool_runtime::ToolError::custom(
@@ -163,10 +172,19 @@ async fn broker_http_or_file(
             format!("browser_save: GET {url} failed: {e}"),
         )
     })?;
+    let final_url = response.url().as_str().to_owned();
+    check_url_in_session(&final_url, Some(session_folder)).map_err(|e| {
+        xai_tool_runtime::ToolError::invalid_arguments(format!(
+            "browser_save: final URL after redirects is not allowed: {e}"
+        ))
+    })?;
     if !response.status().is_success() {
         return Err(xai_tool_runtime::ToolError::custom(
             "browser_error",
-            format!("browser_save: GET {url} returned HTTP {}", response.status()),
+            format!(
+                "browser_save: GET {url} returned HTTP {}",
+                response.status()
+            ),
         ));
     }
     if let Some(len) = response.content_length()
@@ -176,6 +194,14 @@ async fn broker_http_or_file(
             "browser_save: remote file is {len} bytes (limit {MAX_SAVE_BYTES})"
         )));
     }
+    let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
+    let content_disposition = header_str(response.headers(), reqwest::header::CONTENT_DISPOSITION);
+    let filename = filename_from_headers(
+        &final_url,
+        content_type.as_deref(),
+        content_disposition.as_deref(),
+    );
+    let dest = unique_path(&downloads, &filename);
     let bytes = response.bytes().await.map_err(|e| {
         xai_tool_runtime::ToolError::custom(
             "browser_error",
@@ -197,16 +223,192 @@ async fn broker_http_or_file(
     Ok(dest)
 }
 
+const MAX_REDIRECTS: usize = 5;
+
+/// Re-check URL policy on each redirect hop (https / local http / session file).
+pub(crate) fn redirect_hop_action(
+    next_url: &str,
+    hop_count: usize,
+    session_folder: Option<&Path>,
+) -> Result<(), String> {
+    if hop_count > MAX_REDIRECTS {
+        return Err("too many redirects (limit 5)".into());
+    }
+    check_url_in_session(next_url, session_folder).map_err(|e| format!("redirect blocked: {e}"))
+}
+
+fn header_str(
+    headers: &reqwest::header::HeaderMap,
+    name: reqwest::header::HeaderName,
+) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// True when the URL path looks like a direct binary/PDF/zip download.
+pub(crate) fn url_looks_like_direct_download(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "pdf"
+            | "zip"
+            | "7z"
+            | "rar"
+            | "gz"
+            | "tgz"
+            | "tar"
+            | "bz2"
+            | "xz"
+            | "exe"
+            | "msi"
+            | "dmg"
+            | "pkg"
+            | "iso"
+            | "bin"
+            | "apk"
+            | "vsix"
+            | "wasm"
+            | "docx"
+            | "xlsx"
+            | "pptx"
+            | "odt"
+            | "ods"
+            | "odp"
+    )
+}
+
+pub(crate) fn filename_from_headers(
+    url: &str,
+    content_type: Option<&str>,
+    content_disposition: Option<&str>,
+) -> String {
+    if let Some(name) = content_disposition.and_then(filename_from_content_disposition) {
+        let safe = sanitize_filename(&name);
+        if safe != "download.bin" {
+            return safe;
+        }
+    }
+    let from_url = filename_from_url(url);
+    if filename_has_extension(&from_url) && from_url != "download.bin" {
+        return from_url;
+    }
+    let default = default_filename_for_content_type(content_type);
+    if from_url != "download.bin" && !from_url.is_empty() {
+        if let Some(ext) = Path::new(&default).extension().and_then(|e| e.to_str())
+            && !filename_has_extension(&from_url)
+        {
+            return sanitize_filename(&format!("{from_url}.{ext}"));
+        }
+        return from_url;
+    }
+    default
+}
+
+fn filename_from_content_disposition(header: &str) -> Option<String> {
+    let lower = header.to_ascii_lowercase();
+    if let Some(idx) = lower.find("filename*") {
+        let rest = header[idx + "filename*".len()..].trim_start();
+        let rest = rest.trim_start_matches('=').trim();
+        let rest = rest.trim_matches('"');
+        if let Some(encoded) = rest.split('\'').nth(2) {
+            let decoded = percent_decode_filename(encoded);
+            if !decoded.is_empty() {
+                return Some(decoded);
+            }
+        }
+    }
+    let idx = lower.find("filename")?;
+    let rest = header[idx + "filename".len()..].trim_start();
+    let rest = rest.trim_start_matches('=').trim();
+    let rest = rest
+        .split(';')
+        .next()
+        .unwrap_or(rest)
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_owned())
+    }
+}
+
+fn percent_decode_filename(input: &str) -> String {
+    let mut bytes = Vec::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '%' && i + 2 < chars.len() {
+            let hex: String = chars[i + 1..i + 3].iter().collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                bytes.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        let mut buf = [0u8; 4];
+        let encoded = chars[i].encode_utf8(&mut buf);
+        bytes.extend_from_slice(encoded.as_bytes());
+        i += 1;
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn default_filename_for_content_type(content_type: Option<&str>) -> String {
+    let mime = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "text/html" | "application/xhtml+xml" => "page.html".into(),
+        "text/plain" => "download.txt".into(),
+        "application/pdf" => "download.pdf".into(),
+        "application/zip" | "application/x-zip-compressed" => "download.zip".into(),
+        "application/json" => "download.json".into(),
+        "application/gzip" | "application/x-gzip" => "download.gz".into(),
+        "image/png" => "download.png".into(),
+        "image/jpeg" => "download.jpg".into(),
+        "image/gif" => "download.gif".into(),
+        "image/webp" => "download.webp".into(),
+        "application/octet-stream" => "download.bin".into(),
+        _ => "download.bin".into(),
+    }
+}
+
+fn filename_has_extension(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| !e.is_empty())
+}
+
 fn filename_from_url(url: &str) -> String {
-    let path = url.split('?').next().unwrap_or(url);
+    let path = url.split(['?', '#']).next().unwrap_or(url);
     let name = path
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or("download.bin")
         .trim();
+    sanitize_filename(name)
+}
+
+fn sanitize_filename(name: &str) -> String {
     let safe = name
         .chars()
-        .filter(|ch| !ch.is_control() && !matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .filter(|ch| {
+            !ch.is_control() && !matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
         .take(180)
         .collect::<String>();
     if safe.is_empty() || safe == "." || safe == ".." {
@@ -222,7 +424,10 @@ fn unique_path(folder: &Path, filename: &str) -> PathBuf {
         return candidate;
     }
     let path = Path::new(filename);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
     let extension = path.extension().and_then(|s| s.to_str());
     for index in 1..=10_000u32 {
         let name = match extension {
@@ -247,5 +452,111 @@ mod tests {
             filename_from_url("https://lists.w3.org/a/wcag-rawgit.pdf?dl=1"),
             "wcag-rawgit.pdf"
         );
+    }
+
+    #[test]
+    fn filename_from_html_content_type_is_not_bin() {
+        assert_eq!(
+            filename_from_headers(
+                "https://example.com/",
+                Some("text/html; charset=utf-8"),
+                None
+            ),
+            "page.html"
+        );
+        assert_eq!(
+            filename_from_headers("https://example.com/guide", Some("text/html"), None),
+            "guide.html"
+        );
+        assert_eq!(
+            filename_from_headers(
+                "https://example.com/file.zip",
+                Some("application/zip"),
+                None
+            ),
+            "file.zip"
+        );
+        assert_eq!(
+            filename_from_headers(
+                "https://example.com/dl",
+                Some("application/octet-stream"),
+                Some(r#"attachment; filename="report.pdf""#)
+            ),
+            "report.pdf"
+        );
+    }
+
+    #[test]
+    fn redirect_hop_rechecks_url_policy() {
+        assert!(redirect_hop_action("https://example.com/next", 1, None).is_ok());
+        assert!(redirect_hop_action("http://127.0.0.1/local", 1, None).is_ok());
+        let err = redirect_hop_action("http://example.com/secret", 1, None).unwrap_err();
+        assert!(
+            err.contains("redirect blocked") || err.contains("http"),
+            "{err}"
+        );
+        let err = redirect_hop_action("https://example.com/x", 6, None).unwrap_err();
+        assert!(err.contains("too many"), "{err}");
+        let err = redirect_hop_action("file:///C:/Windows/notepad.exe", 1, None).unwrap_err();
+        assert!(err.contains("file:"), "{err}");
+    }
+
+    #[test]
+    fn zip_and_pdf_urls_look_like_downloads() {
+        assert!(url_looks_like_direct_download("https://example.com/a.zip"));
+        assert!(url_looks_like_direct_download(
+            "https://lists.w3.org/a/wcag-rawgit.pdf?dl=1"
+        ));
+        assert!(!url_looks_like_direct_download("https://example.com/jobs"));
+        assert!(!url_looks_like_direct_download(
+            "https://example.com/index.html"
+        ));
+    }
+
+    #[tokio::test]
+    async fn redirect_to_public_http_is_blocked() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("Location", "http://example.com/secret"),
+            )
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let err = broker_http_or_file(&format!("{}/start", server.uri()), tmp.path())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("redirect") || msg.contains("blocked") || msg.contains("http"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn html_body_is_saved_as_page_html() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("<html>hi</html>", "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = broker_http_or_file(&server.uri(), tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(dest.file_name().and_then(|n| n.to_str()), Some("page.html"));
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "<html>hi</html>");
     }
 }

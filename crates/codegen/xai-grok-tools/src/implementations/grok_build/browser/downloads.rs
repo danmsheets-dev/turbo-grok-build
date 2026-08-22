@@ -10,7 +10,8 @@ pub const BROWSER_DOWNLOADS_TOOL_NAME: &str = "browser_downloads";
 pub struct BrowserDownloadsInput {
     #[schemars(
         description = "Optional max wait in milliseconds for a completed brokered file to appear \
-            (JS download interstitials). Omit or 0 to list immediately."
+            (JS download interstitials). Omit or 0 to list immediately. Capped at 60000 \
+            (same as browser_wait)."
     )]
     #[serde(default)]
     pub wait_ms: Option<u64>,
@@ -76,15 +77,14 @@ impl xai_tool_runtime::Tool for BrowserDownloadsTool {
         input: BrowserDownloadsInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let handle = super::require_handle(&ctx).await?;
-        let wait_ms = input.wait_ms.unwrap_or(0);
+        let wait_ms = clamp_downloads_wait_ms(input.wait_ms);
         let filter = input
             .name_contains
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_ascii_lowercase);
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         loop {
             let mut result = handle.downloads().await?;
             if let Some(ref needle) = filter {
@@ -98,5 +98,27 @@ impl xai_tool_runtime::Tool for BrowserDownloadsTool {
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
+    }
+}
+
+/// Same ceiling as `browser_wait` so JS download interstitials cannot hang.
+pub(crate) const MAX_DOWNLOADS_WAIT_MS: u64 = 60_000;
+
+pub(crate) fn clamp_downloads_wait_ms(wait_ms: Option<u64>) -> u64 {
+    wait_ms.unwrap_or(0).min(MAX_DOWNLOADS_WAIT_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_ms_is_clamped_to_page_wait_ceiling() {
+        assert_eq!(clamp_downloads_wait_ms(None), 0);
+        assert_eq!(clamp_downloads_wait_ms(Some(0)), 0);
+        assert_eq!(clamp_downloads_wait_ms(Some(1_000)), 1_000);
+        assert_eq!(clamp_downloads_wait_ms(Some(60_000)), 60_000);
+        assert_eq!(clamp_downloads_wait_ms(Some(60_001)), 60_000);
+        assert_eq!(clamp_downloads_wait_ms(Some(u64::MAX)), 60_000);
     }
 }

@@ -34,6 +34,11 @@ pub struct SandboxProfile {
     pub deny: Vec<PathBuf>,
     /// Typed direct global hook sources (write-denied, still readable).
     pub write_deny: Vec<GlobalHookSource>,
+    /// Credential files under `$GROK_HOME` (write-denied, still readable).
+    ///
+    /// Applied on every confining profile including `devbox`. The host may
+    /// still *read* `auth.json`; agent/child writes are the incident.
+    pub credential_write_deny: Vec<PathBuf>,
     /// Whether to grant read access to the entire filesystem by default
     pub default_read: bool,
     /// Whether child processes should have network blocked
@@ -42,6 +47,13 @@ pub struct SandboxProfile {
 
 fn resolve_write_deny(profile: &ProfileName) -> anyhow::Result<Vec<GlobalHookSource>> {
     profile_hook_write_deny(profile)
+}
+
+fn resolve_credential_write_deny(profile: &ProfileName) -> Vec<PathBuf> {
+    match profile {
+        ProfileName::Off => Vec::new(),
+        _ => crate::paths::grok_home_credential_write_deny_paths(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -309,6 +321,16 @@ impl ProfileName {
             apply_write_deny_paths_to_capability_set(&mut caps, &pairs, &profile.read_write)?;
         }
 
+        // Grok-home credentials: readable, not writable (macOS Seatbelt; Linux bwrap).
+        if !profile.credential_write_deny.is_empty() {
+            let pairs: Vec<(PathBuf, bool)> = profile
+                .credential_write_deny
+                .iter()
+                .map(|p| (p.clone(), p.is_dir()))
+                .collect();
+            apply_write_deny_paths_to_capability_set(&mut caps, &pairs, &profile.read_write)?;
+        }
+
         // Kernel deny (read+write): macOS Seatbelt rules; Linux via bwrap bind-over.
         // The effective deny set is the profile's own `deny` (custom profiles only;
         // built-ins carry an empty `deny`). An empty set means there is nothing to
@@ -355,6 +377,7 @@ impl ProfileName {
                 read_write: essential_writable_paths(workspace),
                 deny: vec![],
                 write_deny: resolve_write_deny(self)?,
+                credential_write_deny: resolve_credential_write_deny(self),
                 default_read: true,
                 restrict_network: false,
             }),
@@ -394,6 +417,7 @@ impl ProfileName {
                     read_write,
                     deny: vec![],
                     write_deny: vec![],
+                    credential_write_deny: resolve_credential_write_deny(self),
                     default_read: true,
                     restrict_network: false,
                 })
@@ -405,6 +429,7 @@ impl ProfileName {
                 read_write: essential_writable_paths_minimal(),
                 deny: vec![],
                 write_deny: resolve_write_deny(self)?,
+                credential_write_deny: resolve_credential_write_deny(self),
                 default_read: true,
                 restrict_network: true,
             }),
@@ -439,6 +464,7 @@ impl ProfileName {
                     read_write: essential_writable_paths(workspace),
                     deny: vec![],
                     write_deny: resolve_write_deny(self)?,
+                    credential_write_deny: resolve_credential_write_deny(self),
                     default_read: false,
                     restrict_network: true,
                 })
@@ -502,6 +528,11 @@ impl ProfileName {
 
                 if matches!(base, Self::Devbox) {
                     profile.write_deny.clear();
+                }
+                // Credential write-deny stays even when hook write-deny is
+                // cleared for a devbox-based custom profile.
+                if profile.credential_write_deny.is_empty() {
+                    profile.credential_write_deny = resolve_credential_write_deny(&base);
                 }
 
                 Ok(profile)
@@ -598,6 +629,83 @@ mod tests {
             let resolved = name.resolve_profile(&workspace, &config).unwrap();
             assert_eq!(resolved.restrict_network, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn confining_profiles_write_deny_grok_home_credentials() {
+        if skip_if_host_hook_write_deny_unresolvable() {
+            return;
+        }
+        let workspace = std::env::current_dir().unwrap();
+        let config = SandboxConfig::default();
+        let auth = grok_home().join("auth.json");
+        let credentials = grok_home().join("credentials.json");
+        for name in [
+            ProfileName::Workspace,
+            ProfileName::Devbox,
+            ProfileName::ReadOnly,
+            ProfileName::Strict,
+        ] {
+            let resolved = name.resolve_profile(&workspace, &config).unwrap();
+            assert!(
+                resolved.credential_write_deny.iter().any(|p| p == &auth),
+                "{name} must write-deny auth.json; got {:?}",
+                resolved.credential_write_deny
+            );
+            assert!(
+                resolved
+                    .credential_write_deny
+                    .iter()
+                    .any(|p| p == &credentials),
+                "{name} must write-deny credentials.json; got {:?}",
+                resolved.credential_write_deny
+            );
+            assert!(
+                resolved.read_write.iter().any(|p| p == &grok_home())
+                    || matches!(name, ProfileName::Devbox),
+                "{name} still grants ~/.grok (or broader) for sessions/logs; got {:?}",
+                resolved.read_write
+            );
+            assert!(
+                !resolved
+                    .credential_write_deny
+                    .iter()
+                    .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("config.toml")),
+                "{name} must not write-deny config.toml"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_devbox_keeps_credential_write_deny() {
+        if skip_if_host_hook_write_deny_unresolvable() {
+            return;
+        }
+        let workspace = std::env::current_dir().unwrap();
+        let config = SandboxConfig {
+            profiles: HashMap::from([(
+                "mydev".to_string(),
+                ProfileConfig {
+                    extends: Some("devbox".to_string()),
+                    restrict_network: None,
+                    read_only: vec![],
+                    read_write: vec![],
+                    deny: vec![],
+                },
+            )]),
+        };
+        let resolved = ProfileName::Custom("mydev".to_string())
+            .resolve_profile(&workspace, &config)
+            .unwrap();
+        assert!(resolved.write_deny.is_empty());
+        assert!(
+            resolved
+                .credential_write_deny
+                .iter()
+                .any(|p| p == &grok_home().join("auth.json")),
+            "devbox-based custom must still write-deny auth.json: {:?}",
+            resolved.credential_write_deny
+        );
     }
 
     fn network_inheritance_config() -> SandboxConfig {

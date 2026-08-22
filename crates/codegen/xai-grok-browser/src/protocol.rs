@@ -4,6 +4,7 @@
 //! not a serde internally-tagged enum. [`BrowserRequest`] is a convenience
 //! decode of `method` + `params` after the envelope is parsed.
 
+use std::borrow::Cow;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -695,19 +696,75 @@ pub fn check_eval_result_len(len: usize) -> Result<(), EvalPolicyError> {
     }
 }
 
+/// Exact https origins allowed to keep a real WebView2 OAuth popup.
+///
+/// Substring matching (`ux_mode=popup`, `/oauth/authorize` anywhere) opened an
+/// unpolicied window for attacker-controlled URLs. Host must match exactly.
+const OAUTH_POPUP_HOSTS: &[&str] = &[
+    "accounts.google.com",
+    "login.microsoftonline.com",
+    "login.live.com",
+    "appleid.apple.com",
+];
+
 /// OAuth / Google Identity Services popup URLs that must not replace the only tab.
+///
+/// Exact-origin only: `https://accounts.google.com/...` is a popup;
+/// `https://evil.test/accounts.google.com/gsi` is not.
 pub fn is_oauth_popup_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.contains("accounts.google.com/gsi")
-        || lower.contains("accounts.google.com/o/oauth2")
-        || lower.contains("accounts.google.com/signin/oauth")
-        || lower.contains("ux_mode=popup")
-        || lower.contains("login.microsoftonline.com")
-        || lower.contains("login.live.com")
-        || lower.contains("appleid.apple.com")
-        || lower.contains("/oauth/authorize")
-        || lower.contains("/o/oauth2/v2/auth")
-        || lower.contains("oauth2/authorize")
+    oauth_popup_host(url).is_some()
+}
+
+/// Host of an allowlisted https OAuth popup origin, if `url` is one.
+pub fn oauth_popup_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (scheme, rest) = split_scheme(url)?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let after = strip_authority_slashes(rest)?;
+    let authority_end = after.find(AUTHORITY_END).unwrap_or(after.len());
+    let authority = &after[..authority_end];
+    if authority.contains('@') || authority.contains('%') {
+        return None;
+    }
+    let host = parse_http_host(authority).ok()?;
+    let host_lc = host.trim_end_matches('.').to_ascii_lowercase();
+    OAUTH_POPUP_HOSTS
+        .iter()
+        .copied()
+        .find(|allowed| host_lc == *allowed)
+        .map(str::to_owned)
+}
+
+/// True when `path` is the session folder or a descendant after canonicalize.
+///
+/// Fail closed: unresolvable paths are outside. Windows compare is
+/// case-insensitive and uses path components so `C:\work` does not match
+/// `C:\work-evil`.
+pub fn path_is_under_session_folder(path: &Path, session_folder: &Path) -> bool {
+    let Ok(folder) = dunce::canonicalize(session_folder) else {
+        return false;
+    };
+    let Ok(path) = dunce::canonicalize(path) else {
+        return false;
+    };
+    path_components_under(&path, &folder)
+}
+
+fn path_components_under(path: &Path, root: &Path) -> bool {
+    let path_c: Vec<Cow<'_, str>> = path.components().map(component_key).collect();
+    let root_c: Vec<Cow<'_, str>> = root.components().map(component_key).collect();
+    path_c.starts_with(&root_c)
+}
+
+fn component_key(component: Component<'_>) -> Cow<'_, str> {
+    let raw = component.as_os_str().to_string_lossy();
+    if cfg!(windows) {
+        Cow::Owned(raw.to_ascii_lowercase())
+    } else {
+        raw
+    }
 }
 
 /// Whether a `browser.eval` function expression looks like it mutates the page.
@@ -1641,7 +1698,63 @@ mod tests {
         assert!(is_oauth_popup_url(
             "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
         ));
+        assert!(is_oauth_popup_url(
+            "https://login.live.com/oauth20_authorize.srf"
+        ));
+        assert!(is_oauth_popup_url(
+            "https://appleid.apple.com/auth/authorize"
+        ));
         assert!(!is_oauth_popup_url("https://www.linkedin.com/login"));
         assert!(!is_oauth_popup_url("https://www.indeed.com/"));
+    }
+
+    #[test]
+    fn oauth_popup_requires_exact_https_origin() {
+        assert!(!is_oauth_popup_url(
+            "https://evil.test/accounts.google.com/gsi/select?ux_mode=popup"
+        ));
+        assert!(!is_oauth_popup_url(
+            "https://accounts.google.com.evil.test/o/oauth2/v2/auth"
+        ));
+        assert!(!is_oauth_popup_url(
+            "https://evil.test/?redirect=https://login.microsoftonline.com/oauth2/authorize"
+        ));
+        assert!(!is_oauth_popup_url("http://accounts.google.com/gsi"));
+        assert!(!is_oauth_popup_url(
+            "https://not-google.test/oauth/authorize?ux_mode=popup"
+        ));
+        assert_eq!(
+            oauth_popup_host("https://accounts.google.com/gsi"),
+            Some("accounts.google.com".into())
+        );
+        assert_eq!(oauth_popup_host("https://evil.test/oauth/authorize"), None);
+    }
+
+    #[test]
+    fn path_under_session_folder_is_component_prefix() {
+        let tmp = std::env::temp_dir().join(format!(
+            "turbo-session-folder-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session = tmp.join("session");
+        let uploads = session.join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        let file = uploads.join("resume.pdf");
+        std::fs::write(&file, b"%PDF").unwrap();
+        std::fs::create_dir_all(tmp.join("session-evil")).unwrap();
+        let escape = tmp.join("session-evil").join("x.pdf");
+        std::fs::write(&escape, b"no").unwrap();
+        assert!(path_is_under_session_folder(&file, &session));
+        assert!(path_is_under_session_folder(&uploads, &session));
+        assert!(!path_is_under_session_folder(&escape, &session));
+        assert!(!path_is_under_session_folder(
+            Path::new("/no/such/file"),
+            &session
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

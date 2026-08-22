@@ -266,6 +266,15 @@ impl AgentWebView {
                     title: "Download in progress".to_owned(),
                 });
             }
+            if let Some(saved) = recent_completed_download(
+                self.session_folder.as_deref(),
+                &self.active_downloads.borrow(),
+            ) {
+                return Ok(NavigateResult {
+                    url: url.to_owned(),
+                    title: format!("Saved download {}", saved.name),
+                });
+            }
             // HTTP error documents (404 HTML) still have a Source URL.
             if let Ok(loc) = self.location()
                 && !loc.url.is_empty()
@@ -287,23 +296,25 @@ impl AgentWebView {
         verbose: bool,
         include_text: bool,
     ) -> Result<SnapshotResult, String> {
+        let loc = self.location()?;
         let cap = snapshot_cap(verbose);
         let js = format!("window.__turboAx.collect({cap})");
-        let (nodes, source, overlay) = match self.eval_in_world(&js) {
+        let (dom_nodes, overlay) = match self.eval_in_world(&js) {
             Ok(value) => {
                 let overlay = value.get("overlay").and_then(Value::as_bool);
                 (
-                    parse_collected_nodes(&value, cap)?,
-                    SnapshotSource::Dom,
+                    parse_collected_nodes(&value, cap).unwrap_or_default(),
                     overlay,
                 )
             }
-            Err(_) => (
-                self.snapshot_cdp_fallback(verbose)?,
-                SnapshotSource::AxFallback,
-                None,
-            ),
+            Err(_) => (Vec::new(), None),
         };
+        let ax_fallback = if dom_nodes.is_empty() {
+            self.snapshot_cdp_fallback(verbose)
+        } else {
+            Ok(Vec::new())
+        };
+        let (nodes, source) = super::ax::pick_snapshot_nodes(dom_nodes, ax_fallback, &loc.url)?;
         let text = if include_text && source == SnapshotSource::Dom {
             self.eval_in_world("window.__turboAx.pageText()")
                 .ok()
@@ -312,7 +323,6 @@ impl AgentWebView {
         } else {
             None
         };
-        let loc = self.location()?;
         Ok(SnapshotResult {
             url: loc.url,
             title: loc.title,
@@ -976,18 +986,32 @@ fn register_popup_download_permission(
             }
         };
         let operation = unsafe { args.DownloadOperation() }.ok();
-        let filename = operation
-            .as_ref()
-            .and_then(|operation| {
-                let mut uri = PWSTR::null();
-                unsafe { operation.Uri(&mut uri) }.ok()?;
-                let uri = take_pwstr(uri);
-                uri.split('?')
-                    .next()
-                    .and_then(|path| path.rsplit('/').next())
+        let suggested = {
+            let mut path = PWSTR::null();
+            if unsafe { args.ResultFilePath(&mut path) }.is_ok() {
+                let raw = take_pwstr(path);
+                Path::new(&raw)
+                    .file_name()
+                    .and_then(|n| n.to_str())
                     .map(str::to_owned)
-            })
+            } else {
+                None
+            }
+        };
+        let filename = suggested
             .and_then(|name| safe_download_filename(&name))
+            .or_else(|| {
+                operation.as_ref().and_then(|operation| {
+                    let mut uri = PWSTR::null();
+                    unsafe { operation.Uri(&mut uri) }.ok()?;
+                    let uri = take_pwstr(uri);
+                    uri.split('?')
+                        .next()
+                        .and_then(|path| path.rsplit('/').next())
+                        .map(str::to_owned)
+                        .and_then(|name| safe_download_filename(&name))
+                })
+            })
             .unwrap_or_else(|| "download.bin".to_owned());
         let final_destination = unique_download_path(&folder, &filename);
         let partial_name = format!(
@@ -1138,6 +1162,29 @@ fn reject_symlink_components(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn recent_completed_download(
+    session_folder: Option<&Path>,
+    active_downloads: &HashSet<PathBuf>,
+) -> Option<DownloadInfo> {
+    let folder = session_folder?;
+    let list = list_brokered_downloads(folder, active_downloads).ok()?;
+    let now = std::time::SystemTime::now();
+    list.downloads.into_iter().rev().find(|download| {
+        if !download.completed {
+            return false;
+        }
+        let Ok(meta) = std::fs::metadata(&download.path) else {
+            return false;
+        };
+        let Ok(modified) = meta.modified() else {
+            return false;
+        };
+        now.duration_since(modified)
+            .map(|age| age.as_secs() < 15)
+            .unwrap_or(false)
+    })
 }
 
 fn list_brokered_downloads(

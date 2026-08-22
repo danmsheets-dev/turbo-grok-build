@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::profile::{agent_browser_profile_dir, pipe_name};
 use crate::protocol::{
     BrowserRequest, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
-    check_fill, check_url_in_session, eval_looks_mutating,
+    check_fill, check_url_in_session, eval_looks_mutating, path_is_under_session_folder,
 };
 
 mod ax;
@@ -24,7 +24,8 @@ mod webview;
 mod window;
 
 pub use ax::{
-    SNAPSHOT_NODE_CAP, SNAPSHOT_NODE_CAP_VERBOSE, compact_ax_tree, resolve_uid, snapshot_cap,
+    SNAPSHOT_NODE_CAP, SNAPSHOT_NODE_CAP_VERBOSE, compact_ax_tree, pick_snapshot_nodes,
+    resolve_uid, snapshot_cap,
 };
 
 /// JSON-RPC parse error.
@@ -794,20 +795,20 @@ pub(crate) fn decode_host_call(
                     });
                 }
                 Some(folder) => {
-                    let canon_folder = folder
-                        .canonicalize()
-                        .unwrap_or_else(|_| folder.to_path_buf());
-                    let canon_path = path.canonicalize().unwrap_or(path);
-                    if !canon_path.starts_with(&canon_folder) {
+                    if !path_is_under_session_folder(&path, folder) {
                         return Err(DecodedRpcError {
                             id: Some(id),
                             error: JsonRpcError {
                                 code: RPC_HOST_ERROR,
-                                message: "file path is not under the session folder".into(),
+                                message: format!(
+                                    "file path is not under the session folder (`{}` must be brokered into the session uploads/ directory first)",
+                                    path.display()
+                                ),
                                 data: None,
                             },
                         });
                     }
+                    let canon_path = dunce::canonicalize(&path).unwrap_or(path);
                     Ok((
                         id,
                         HostCall::SetFile {
@@ -941,7 +942,7 @@ mod tests {
     use crate::client::encode_rpc_request;
     use crate::protocol::{
         METHOD_CLICK, METHOD_EVAL, METHOD_FILL, METHOD_NAVIGATE, METHOD_NEW_TAB, METHOD_SCREENSHOT,
-        METHOD_SNAPSHOT,
+        METHOD_SET_FILE, METHOD_SNAPSHOT,
     };
 
     #[test]
@@ -1025,6 +1026,63 @@ mod tests {
             (JsonRpcId::Number(2), HostCall::Screenshot) => {}
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_set_file_refuses_workspace_path() {
+        let tmp = std::env::temp_dir().join(format!(
+            "turbo-set-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session = tmp.join("session");
+        let workspace = tmp.join("ws");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace_file = workspace.join("resume.pdf");
+        std::fs::write(&workspace_file, b"%PDF").unwrap();
+        let upload = session.join("uploads");
+        std::fs::create_dir_all(&upload).unwrap();
+        let session_file = upload.join("resume.pdf");
+        std::fs::write(&session_file, b"%PDF").unwrap();
+
+        let bad = encode_rpc_request(
+            JsonRpcId::Number(40),
+            METHOD_SET_FILE,
+            serde_json::json!({
+                "uid": "1-1",
+                "path": workspace_file.to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        let err = decode_host_call(&bad, Some(&session)).unwrap_err();
+        assert_eq!(err.error.code, RPC_HOST_ERROR);
+        assert!(
+            err.error.message.contains("session folder"),
+            "{}",
+            err.error.message
+        );
+
+        let good = encode_rpc_request(
+            JsonRpcId::Number(41),
+            METHOD_SET_FILE,
+            serde_json::json!({
+                "uid": "1-1",
+                "path": session_file.to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        match decode_host_call(&good, Some(&session)).unwrap() {
+            (_, HostCall::SetFile { uid, path }) => {
+                assert_eq!(uid, "1-1");
+                assert!(path.contains("resume.pdf"), "{path}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

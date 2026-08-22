@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::protocol::{AxNode, check_eval_result};
+use crate::protocol::{AxNode, SnapshotSource, check_eval_result};
 
 /// Default `browser.snapshot` node cap.
 pub const SNAPSHOT_NODE_CAP: usize = 200;
@@ -46,6 +46,44 @@ pub fn snapshot_cap(verbose: bool) -> usize {
     } else {
         SNAPSHOT_NODE_CAP
     }
+}
+
+/// Choose DOM nodes vs AX fallback when the injected collector is empty.
+///
+/// Inline PDF viewers return a successful empty DOM; reporting that as a
+/// snapshot would hide the document. Fall back to CDP AX; if that is also
+/// empty (and the URL is not `about:blank`), fail with a `browser_save` hint.
+pub fn pick_snapshot_nodes(
+    dom_nodes: Vec<AxNode>,
+    ax_fallback: Result<Vec<AxNode>, String>,
+    url: &str,
+) -> Result<(Vec<AxNode>, SnapshotSource), String> {
+    if !dom_nodes.is_empty() {
+        return Ok((dom_nodes, SnapshotSource::Dom));
+    }
+    match ax_fallback {
+        Ok(ax) if !ax.is_empty() => Ok((ax, SnapshotSource::AxFallback)),
+        other => {
+            if url_is_blank(url) {
+                Ok((Vec::new(), SnapshotSource::Dom))
+            } else {
+                let extra = match other {
+                    Err(err) if !err.is_empty() => format!(" AX fallback: {err}."),
+                    _ => String::new(),
+                };
+                Err(format!(
+                    "snapshot is empty for {url}.{extra} Inline PDF/binary viewers expose no \
+                     accessibility nodes. Use browser_save to broker the document into the \
+                     session downloads folder."
+                ))
+            }
+        }
+    }
+}
+
+fn url_is_blank(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    url.is_empty() || url == "about:blank" || url.starts_with("about:blank#")
 }
 
 /// JSON-RPC / host error text for a missing or invalid snapshot uid.
@@ -392,6 +430,37 @@ mod tests {
     use crate::protocol::EVAL_RESULT_MAX_BYTES;
 
     const AX_EXAMPLE: &str = include_str!("../../tests/fixtures/ax_example.json");
+
+    #[test]
+    fn empty_dom_uses_ax_fallback() {
+        let ax = vec![AxNode {
+            uid: "ax-1".into(),
+            role: "heading".into(),
+            name: "Document".into(),
+            value: None,
+            focused: false,
+        }];
+        let (nodes, source) =
+            pick_snapshot_nodes(Vec::new(), Ok(ax.clone()), "https://example.com/doc.pdf").unwrap();
+        assert_eq!(source, SnapshotSource::AxFallback);
+        assert_eq!(nodes, ax);
+    }
+
+    #[test]
+    fn empty_dom_and_empty_ax_fails_closed() {
+        let err = pick_snapshot_nodes(Vec::new(), Ok(Vec::new()), "https://example.com/guide.pdf")
+            .unwrap_err();
+        assert!(err.contains("browser_save"), "{err}");
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn empty_about_blank_is_allowed() {
+        let (nodes, source) =
+            pick_snapshot_nodes(Vec::new(), Ok(Vec::new()), "about:blank").unwrap();
+        assert!(nodes.is_empty());
+        assert_eq!(source, SnapshotSource::Dom);
+    }
 
     #[test]
     fn compact_ax_example_fixture() {

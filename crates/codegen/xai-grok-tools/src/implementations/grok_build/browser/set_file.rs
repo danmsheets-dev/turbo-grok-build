@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use xai_grok_browser::path_is_under_session_folder;
+
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{ConfineRoot, path_is_under_confine_root};
@@ -15,8 +17,10 @@ pub struct BrowserSetFileInput {
     #[schemars(description = "Snapshot uid of a file input (e.g. \"4-17\").")]
     pub uid: String,
     #[schemars(
-        description = "Workspace-relative or absolute path of an existing file under the \
-            workspace, confine root, or session folder. Does not submit the form."
+        description = "Workspace-relative or absolute path of an existing file. Workspace and \
+            confine-root files are copied into the session uploads/ folder first; the host only \
+            accepts session-folder paths. Paths outside those roots are refused here (not after a \
+            host reject)."
     )]
     pub path: String,
 }
@@ -107,14 +111,19 @@ impl xai_tool_runtime::Tool for BrowserSetFileTool {
                 canonical.display()
             )));
         }
-        let session_path = match session_folder.as_ref() {
-            Some(folder) => broker_into_session(folder, &canonical)?,
-            None => {
-                return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                    "browser_set_file: no session folder is configured",
-                ));
-            }
+        let Some(folder) = session_folder.as_ref() else {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "browser_set_file: no session folder is configured; workspace paths cannot be sent to the host",
+            ));
         };
+        let session_path = broker_into_session(folder, &canonical)?;
+        if !path_is_under_session_folder(&session_path, folder) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "browser_set_file: `{}` is not under the session folder after broker; \
+                 the host only accepts session-folder paths",
+                session_path.display()
+            )));
+        }
         let path = session_path.to_string_lossy().into_owned();
         handle.set_file(input.uid.clone(), path.clone()).await?;
         Ok(super::text_output(format!(
@@ -128,7 +137,8 @@ fn broker_into_session(
     session_folder: &Path,
     src: &Path,
 ) -> Result<PathBuf, xai_tool_runtime::ToolError> {
-    let session_canon = dunce::canonicalize(session_folder).unwrap_or_else(|_| session_folder.to_path_buf());
+    let session_canon =
+        dunce::canonicalize(session_folder).unwrap_or_else(|_| session_folder.to_path_buf());
     if path_is_under_confine_root(src, &session_canon) {
         return Ok(src.to_path_buf());
     }
@@ -167,7 +177,10 @@ fn unique_upload_path(folder: &Path, filename: &str) -> PathBuf {
         return candidate;
     }
     let path = Path::new(filename);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("upload");
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload");
     let extension = path.extension().and_then(|s| s.to_str());
     for index in 1..=10_000u32 {
         let name = match extension {
@@ -199,6 +212,22 @@ mod tests {
         assert!(dest.starts_with(&session));
         assert_eq!(std::fs::read(&dest).unwrap(), b"%PDF");
         assert_ne!(dest, src);
+        assert!(path_is_under_session_folder(&dest, &session));
+    }
+
+    #[test]
+    fn workspace_path_outside_session_is_not_under_host_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("ws");
+        let session = tmp.path().join("session");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&session).unwrap();
+        let src = workspace.join("resume.pdf");
+        std::fs::write(&src, b"%PDF").unwrap();
+        assert!(
+            !path_is_under_session_folder(&src, &session),
+            "raw workspace path must fail the host allowlist so the tool brokers first"
+        );
     }
 }
 

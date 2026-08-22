@@ -278,6 +278,20 @@ impl BrowserHandle {
         }
     }
 
+    /// Mock host that may broker `file:` / downloads under `session_folder`.
+    #[cfg(test)]
+    pub fn mock_with_folder(session_id: impl Into<String>, folder: PathBuf) -> Self {
+        let session_id = session_id.into();
+        let client = BrowserClient::mock(session_id.clone()).with_session_folder(folder.clone());
+        Self {
+            session_id: session_id.clone(),
+            session_folder: Some(folder),
+            inner: BrowserHandleInner::Mock(client),
+            ensure: None,
+            write: write_lock_for(&session_id),
+        }
+    }
+
     /// Named-pipe client. `ensure` (or the process-wide hook) runs on the
     /// first real tool call.
     pub fn pipe(session_id: impl Into<String>, ensure: Option<BrowserEnsureFn>) -> Self {

@@ -471,6 +471,26 @@ struct BwrapDenyPlan {
     deny_read: Vec<String>,
     has_globs: bool,
 }
+/// Existing grok-home credential files to `--ro-bind` (write-deny, still readable).
+#[cfg(target_os = "linux")]
+fn with_credential_write_binds(
+    profile: &ProfileName,
+    mut deny_write_optional: Vec<String>,
+) -> Vec<String> {
+    if *profile == ProfileName::Off {
+        return deny_write_optional;
+    }
+    for path in paths::grok_home_credential_write_deny_paths() {
+        if path.exists() {
+            let rendered = path.display().to_string();
+            if !deny_write_optional.iter().any(|p| p == &rendered) {
+                deny_write_optional.push(rendered);
+            }
+        }
+    }
+    deny_write_optional
+}
+
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyPlan> {
     let config = profiles::load_sandbox_config(workspace);
@@ -479,6 +499,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     } else {
         Vec::new()
     };
+    let deny_write_optional = with_credential_write_binds(profile, deny_write_optional);
     let resolved = if *profile == ProfileName::Off {
         None
     } else {
@@ -549,6 +570,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     } else {
         Vec::new()
     };
+    let deny_write_optional = with_credential_write_binds(profile, deny_write_optional);
     let hook_plan = if requires_hook_write_deny(profile, workspace) {
         match hook_write_deny::prepare_hook_write_deny(profile) {
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
