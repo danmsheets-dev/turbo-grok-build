@@ -1755,10 +1755,14 @@ impl AgentDefinition {
             inherit_skills: false,
             inject_default_tools: false,
             mcp_inheritance: McpInheritance::None,
-            max_turns: Some(24),
-            max_tool_calls: Some(48),
-            timeout_secs: Some(300),
-            finalize_grace_secs: Some(30),
+            // Audit/exploration sweeps on large repos exhaust the original
+            // 300s / 48-call budgets mid-review (ADL inc_01a029e2f31b…);
+            // these stay bounded but leave real headroom (oracle gets 600s
+            // for the same toolset).
+            max_turns: Some(40),
+            max_tool_calls: Some(96),
+            timeout_secs: Some(900),
+            finalize_grace_secs: Some(45),
             ..Self::base(BuiltinAgentName::Explore, "")
         }
     }
@@ -2245,10 +2249,10 @@ Agent.
     #[test]
     fn explore_has_bounded_execution_defaults() {
         let def = AgentDefinition::explore();
-        assert_eq!(def.max_turns, Some(24));
-        assert_eq!(def.max_tool_calls, Some(48));
-        assert_eq!(def.timeout_secs, Some(300));
-        assert_eq!(def.finalize_grace_secs, Some(30));
+        assert_eq!(def.max_turns, Some(40));
+        assert_eq!(def.max_tool_calls, Some(96));
+        assert_eq!(def.timeout_secs, Some(900));
+        assert_eq!(def.finalize_grace_secs, Some(45));
     }
     #[test]
     fn oracle_is_enforced_read_only_by_its_exact_toolset() {
