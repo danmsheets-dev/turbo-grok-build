@@ -38,6 +38,12 @@ pub trait ChildControl: 'static {
 
     fn progress(&self) -> Self::ProgressFuture;
     fn cancel(&self);
+    /// Inject a mid-run steering message (untrusted user data) into the live
+    /// child. Default: unsupported (returns false). Shell sessions queue it
+    /// as an interjection delivered at the child's next turn boundary.
+    fn steer(&self, _text: &str) -> bool {
+        false
+    }
 }
 
 /// Data reported when runtime initialization has produced a live child.
@@ -485,6 +491,10 @@ pub(super) trait ForegroundChild {
     fn mark_backgrounded(&mut self);
     /// Cancel the child's execution (token + active control where present).
     fn cancel(&mut self);
+    /// Steer a live child (no-op for pending children — nothing runs yet).
+    fn steer(&mut self, _text: &str) -> bool {
+        false
+    }
 }
 
 impl ForegroundChild for PendingChild {
@@ -555,6 +565,10 @@ impl<C: ChildControl> ForegroundChild for ActiveChild<C> {
     fn cancel(&mut self) {
         self.cancellation.cancel();
         self.control.cancel();
+    }
+
+    fn steer(&mut self, text: &str) -> bool {
+        self.control.steer(text)
     }
 }
 

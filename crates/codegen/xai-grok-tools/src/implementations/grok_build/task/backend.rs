@@ -17,8 +17,8 @@ use super::types::{
     SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentInspectRequest,
     SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
     SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
-    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
-    SubagentValidateTypeRequest,
+    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentSteerRequest,
+    SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use xai_tool_runtime::ToolError;
@@ -73,6 +73,14 @@ pub trait SubagentBackend: Send + Sync + 'static {
 
     /// Request cancellation of a subagent by ID.
     async fn cancel(&self, id: &str) -> SubagentCancelOutcome;
+
+    /// Steer a running subagent with untrusted mid-run guidance.
+    /// Returns Err(reason) when the child is not steerable (not found,
+    /// finished, queued, or runtime lacks support).
+    async fn steer(&self, id: &str, text: &str) -> Result<String, String> {
+        let _ = (id, text);
+        Err("steering unsupported by this backend".to_owned())
+    }
 
     /// Validate a subagent type synchronously before spawning.
     /// Returns `ValidationUnavailable` on channel close / responder drop / timeout.
@@ -462,6 +470,22 @@ impl SubagentBackend for ChannelBackend {
             return SubagentCancelOutcome::NotFound;
         }
         response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
+    }
+
+    async fn steer(&self, id: &str, text: &str) -> Result<String, String> {
+        let (respond_to, response_rx) = oneshot::channel();
+        let sent = self.tx.send(SubagentEvent::Steer(SubagentSteerRequest {
+            parent_session_id: self.parent_session_id(),
+            target_id: id.to_string(),
+            text: text.to_string(),
+            respond_to,
+        }));
+        if sent.is_err() {
+            return Err("subagent coordinator channel closed".to_owned());
+        }
+        response_rx
+            .await
+            .map_err(|_| "coordinator dropped the steer request".to_owned())?
     }
 
     async fn validate_type(

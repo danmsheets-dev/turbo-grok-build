@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 struct TestControl {
     cancellation: CancellationToken,
+    steers: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl ChildControl for TestControl {
@@ -32,6 +33,12 @@ impl ChildControl for TestControl {
     fn cancel(&self) {
         self.cancellation.cancel();
     }
+
+    fn steer(&self, text: &str) -> bool {
+        self.steers
+            .as_ref()
+            .is_some_and(|tx| tx.send(text.to_owned()).is_ok())
+    }
 }
 
 struct TestRunner {
@@ -43,6 +50,8 @@ struct TestRunner {
     requests: mpsc::UnboundedSender<SubagentRequest>,
     started: mpsc::UnboundedSender<String>,
     queue_waits: mpsc::UnboundedSender<(String, Option<std::time::Duration>, usize)>,
+    /// When set, child controls accept steering and forward text here.
+    steers: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl ChildRunner for TestRunner {
@@ -60,6 +69,7 @@ impl ChildRunner for TestRunner {
         let requests = self.requests.clone();
         let started = self.started.clone();
         let queue_waits = self.queue_waits.clone();
+        let steers_tx = self.steers.clone();
         Box::pin(async move {
             let ChildRunRequest {
                 request,
@@ -97,6 +107,7 @@ impl ChildRunner for TestRunner {
                     definition_background: request.subagent_type == "background-default",
                     control: TestControl {
                         cancellation: cancellation.clone(),
+                        steers: steers_tx.clone(),
                     },
                 })
                 .await
@@ -306,6 +317,7 @@ fn harness_with_options(
                 requests: request_tx,
                 started: started_tx,
                 queue_waits: queue_wait_tx,
+                steers: None,
             },
             config,
         )
@@ -344,6 +356,107 @@ async fn loop_unit_active(backend: &ChannelBackend, task_id: &str) -> bool {
         ))
         .expect("actor command channel open");
     response_rx.await.expect("loop activity response")
+}
+
+/// Phase 5 `/steer`: an active child receives the steer; pending/unknown
+/// children refuse with a named reason.
+#[tokio::test]
+async fn steer_reaches_active_child_and_refuses_unknown() {
+    // Harness variant with steering wired into the child controls.
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (start, _) = tokio::sync::broadcast::channel(4);
+    let (finish, _) = tokio::sync::broadcast::channel(4);
+    let (completion_tx, _completions) = mpsc::unbounded_channel();
+    let (request_tx, mut requests) = mpsc::unbounded_channel();
+    let (started_tx, mut started) = mpsc::unbounded_channel();
+    let (_queue_wait_tx, _queue_waits) = mpsc::unbounded_channel();
+    let (steers_tx, mut steers) = mpsc::unbounded_channel();
+    let actor = tokio::spawn(
+        SubagentCoordinator::new(
+            command_rx,
+            TestRunner {
+                wait_before_start: true,
+                wait_after_cancel: false,
+                start: start.clone(),
+                finish: finish.clone(),
+                completions: completion_tx,
+                requests: request_tx,
+                started: started_tx,
+                queue_waits: _queue_wait_tx,
+                steers: Some(steers_tx),
+            },
+            CoordinatorConfig {
+                foreground_budget: std::time::Duration::from_secs(60),
+                ..CoordinatorConfig::default()
+            },
+        )
+        .run(),
+    );
+    let backend = ChannelBackend::for_session(command_tx, "parent");
+    let spawn = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("sa-steer", true)).await }
+    });
+    let req = requests.recv().await.expect("runner request");
+    assert_eq!(req.id, "sa-steer");
+    let _ = start.send(());
+    let started_id = started.recv().await.expect("child started");
+    assert_eq!(started_id, "sa-steer");
+
+    // Active child: steer delivered through ChildControl.
+    let outcome = backend
+        .steer("sa-steer", "focus on crates/foo only")
+        .await;
+    assert!(outcome.is_ok(), "active child must accept steer: {outcome:?}");
+    let steered = steers.recv().await.expect("steer text forwarded");
+    assert_eq!(steered, "focus on crates/foo only");
+
+    // Unknown id: refused.
+    let unknown = backend.steer("sa-nope", "hello").await;
+    assert!(unknown.is_err(), "unknown id must refuse");
+    assert!(unknown.unwrap_err().contains("not found"));
+
+    // Empty text: refused before touching the child.
+    let empty = backend.steer("sa-steer", "   ").await;
+    assert!(empty.is_err(), "empty steer must refuse");
+
+    let _ = finish.send(());
+    let res = spawn.await.unwrap().unwrap();
+    assert_eq!(res.subagent_id, "sa-steer");
+    // Completed child: refused as finished.
+    let done = backend.steer("sa-steer", "too late").await;
+    assert!(done.is_err());
+    assert!(done.unwrap_err().contains("not running"));
+    actor.abort();
+}
+
+/// A runtime without steer support reports refusal instead of silently
+/// dropping the message.
+#[tokio::test]
+async fn steer_refuses_when_runtime_lacks_support() {
+    let mut h = harness_with_config(
+        true,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+    );
+    let backend = parent_backend(&h);
+    let spawn = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("sa-nosteer", true)).await }
+    });
+    let _req = h.requests.recv().await.expect("runner request");
+    let _ = h.start.send(());
+    let _started = h.started.recv().await.expect("child started");
+    // TestControl in this harness has no steer channel wired (None) —
+    // steer() returns false → named refusal.
+    let outcome = backend.steer("sa-nosteer", "hello").await;
+    assert!(outcome.is_err());
+    assert!(outcome.unwrap_err().contains("does not support steering"));
+    let _ = h.finish.send(());
+    let _ = spawn.await.unwrap().unwrap();
+    h.actor.abort();
 }
 
 async fn outstanding(backend: &ChannelBackend, prompt_id: &str) -> SubagentOutstandingReply {

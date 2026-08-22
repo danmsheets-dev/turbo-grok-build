@@ -1062,6 +1062,22 @@ pub enum SubagentEvent {
     ValidateType(SubagentValidateTypeRequest),
     DescribeType(SubagentDescribeRequest),
     LoopUnitActive(SubagentLoopUnitActiveRequest),
+    /// Inject a steering message into a running child (Phase 5 `/steer`).
+    Steer(SubagentSteerRequest),
+}
+
+/// Request to steer a running subagent with mid-run guidance.
+///
+/// The text is untrusted user data: the child session wraps it as an
+/// interjection (never as trusted system instruction).
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentSteerRequest {
+    pub parent_session_id: Option<String>,
+    pub target_id: String,
+    pub text: String,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<Result<String, String>>,
 }
 
 // Resource types

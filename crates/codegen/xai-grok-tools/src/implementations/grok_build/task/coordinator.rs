@@ -22,10 +22,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::admission::Admission;
 use super::coordinator_state::{
-    ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, InternalEvent,
-    ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
-    active_summary, background_at_deadline, background_if_caller_gone, completed_snapshot,
-    completion_summary, sleep_until, workflow_outstanding,
+    ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, ForegroundChild,
+    InternalEvent, ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture,
+    TaggedFuture, active_summary, background_at_deadline, background_if_caller_gone,
+    completed_snapshot, completion_summary, sleep_until, workflow_outstanding,
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
@@ -263,6 +263,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .map(active_summary)
                     .collect();
                 let _ = request.respond_to.send(summaries);
+            }
+            SubagentEvent::Steer(request) => {
+                let outcome = self.handle_steer(
+                    &request.target_id,
+                    request.parent_session_id.as_deref(),
+                    &request.text,
+                );
+                let _ = request.respond_to.send(outcome);
             }
             SubagentEvent::ListRunning(request) => {
                 self.handle_list_running(request.parent_session_id, request.respond_to);
@@ -812,6 +820,53 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             };
         }
         SubagentCancelOutcome::NotFound
+    }
+
+    /// Steer a running child with mid-run guidance (Phase 5 `/steer`).
+    ///
+    /// Only *active* children accept steering: pending children have no live
+    /// session yet and queued/completed children cannot act on it. The text
+    /// is untrusted user data — the runtime wraps it as an interjection.
+    fn handle_steer(
+        &mut self,
+        id: &str,
+        parent_session_id: Option<&str>,
+        text: &str,
+    ) -> Result<String, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err("steer text is empty".to_owned());
+        }
+        if trimmed.len() > 16_384 {
+            return Err("steer text exceeds the 16 KiB limit".to_owned());
+        }
+        if let Some(child) = self.active.get_mut(id)
+            && belongs_to_session(&child.request, parent_session_id)
+        {
+            if child.request.owner.is_workflow() {
+                return Err(format!("subagent {id} is workflow-owned; steering is unsupported"));
+            }
+            if child.steer(trimmed) {
+                tracing::info!(subagent_id = %id, "steer delivered to running child");
+                return Ok(format!("steer queued for subagent {id}"));
+            }
+            return Err(format!(
+                "subagent {id} is running but its runtime does not support steering"
+            ));
+        }
+        if self.pending.contains_key(id) || self.completed.contains_key(id) {
+            return Err(format!(
+                "subagent {id} is not running (pending or finished); only running \
+                 subagents can be steered"
+            ));
+        }
+        // Queued children: deliverable once they start — refuse for v1 honesty.
+        if self.queued.iter().any(|q| q.request.id == id) {
+            return Err(format!(
+                "subagent {id} is still queued behind the concurrency cap; kill it or wait"
+            ));
+        }
+        Err(format!("subagent {id} not found"))
     }
 
     fn cancel_parent_prompt(&mut self, parent_prompt_id: &str, parent_session_id: Option<&str>) {

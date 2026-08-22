@@ -479,6 +479,19 @@ impl ChildControl for ShellChildRuntime {
             crate::session::ShutdownKind::Graceful,
         ));
     }
+
+    fn steer(&self, text: &str) -> bool {
+        // Delivered as an interjection: untrusted user data queued at the
+        // child's next turn boundary (or run as its own turn when idle).
+        self.child_handle
+            .cmd_tx
+            .send(SessionCommand::Interject {
+                text: text.to_owned(),
+                id: Some(uuid::Uuid::now_v7().to_string()),
+                images: Vec::new(),
+            })
+            .is_ok()
+    }
 }
 #[derive(Default)]
 pub(crate) struct ShellCompletionData {

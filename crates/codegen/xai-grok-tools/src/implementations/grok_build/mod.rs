@@ -26,10 +26,12 @@ pub mod lsp;
 pub mod meeting;
 pub mod monitor;
 pub mod read_file;
+pub mod receipts;
 pub mod resolve_path;
 pub mod scheduler;
 pub mod search_replace;
 pub mod spawn_many;
+pub mod steer;
 pub(crate) mod storage;
 pub mod subagent_worktree;
 pub mod task;
@@ -81,6 +83,8 @@ pub use meeting::{
 };
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
+pub use receipts::{RECEIPTS_TOOL_NAME, ReceiptsTool, ROLLBACK_TOOL_NAME, RollbackTool};
+pub use steer::{STEER_TOOL_NAME, SteerTool};
 pub use resolve_path::{RESOLVE_PATH_TOOL_NAME, ResolvePathTool};
 pub use scheduler::create::{
     LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,
