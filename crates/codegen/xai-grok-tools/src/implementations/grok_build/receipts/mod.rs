@@ -96,6 +96,28 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
+/// Write with a short retry loop: Windows AV / indexer / editor processes
+/// transiently hold files open (ERROR_SHARING_VIOLATION), which would
+/// otherwise silently drop audit records.
+async fn write_with_retry(path: &std::path::Path, bytes: &[u8]) -> Result<(), ReceiptError> {
+    let mut attempt = 0;
+    loop {
+        match tokio::fs::write(path, bytes).await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < 3 && is_transient_windows_lock(&e) => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(25 * attempt as u64)).await;
+            }
+            Err(e) => return Err(ReceiptError::Io(e)),
+        }
+    }
+}
+
+fn is_transient_windows_lock(e: &std::io::Error) -> bool {
+    // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION.
+    e.raw_os_error().is_some_and(|code| code == 32 || code == 33)
+}
+
 /// Record a receipt (and optional raw undo payload) under the session folder.
 ///
 /// Returns the receipt id. Metadata is secret-scrubbed; failures are returned
@@ -105,6 +127,15 @@ pub async fn record_receipt(
     mut receipt: ToolReceipt,
     undo_payload: Option<&[u8]>,
 ) -> Result<String, ReceiptError> {
+    // Oversized payloads are rejected up front so `undoable` never lies about
+    // a `.before` file that will not exist.
+    let stored_payload = match undo_payload {
+        Some(payload) if (payload.len() as u64) > MAX_UNDO_BYTES => {
+            receipt.undoable = false;
+            None
+        }
+        other => other,
+    };
     let dir = receipts_dir(session_folder);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -113,29 +144,11 @@ pub async fn record_receipt(
     let mut value = serde_json::to_value(&receipt)
         .map_err(|e| ReceiptError::Io(std::io::Error::other(e.to_string())))?;
     redact_json_string_values(&mut value);
-    receipt = serde_json::from_value(value)
+    let json = serde_json::to_vec_pretty(&value)
         .map_err(|e| ReceiptError::Io(std::io::Error::other(e.to_string())))?;
-    let json = serde_json::to_vec_pretty(&receipt)
-        .map_err(|e| ReceiptError::Io(std::io::Error::other(e.to_string())))?;
-    tokio::fs::write(dir.join(format!("{id}.json")), json)
-        .await
-        .map_err(ReceiptError::Io)?;
-    if let Some(payload) = undo_payload {
-        if (payload.len() as u64) <= MAX_UNDO_BYTES {
-            tokio::fs::write(dir.join(format!("{id}.before")), payload)
-                .await
-                .map_err(ReceiptError::Io)?;
-        } else {
-            receipt.undoable = false;
-            let mut value = serde_json::to_value(&receipt)
-                .map_err(|e| ReceiptError::Io(std::io::Error::other(e.to_string())))?;
-            redact_json_string_values(&mut value);
-            let json = serde_json::to_vec_pretty(&receipt)
-                .map_err(|e| ReceiptError::Io(std::io::Error::other(e.to_string())))?;
-            tokio::fs::write(dir.join(format!("{id}.json")), json)
-                .await
-                .map_err(ReceiptError::Io)?;
-        }
+    write_with_retry(&dir.join(format!("{id}.json")), &json).await?;
+    if let Some(payload) = stored_payload {
+        write_with_retry(&dir.join(format!("{id}.before")), payload).await?;
     }
     Ok(id)
 }
@@ -252,6 +265,12 @@ pub async fn rollback_receipt(
             "{file} changed since {receipt_id}; refusing to overwrite"
         )));
     }
+    // NOTE (accepted v1 TOCTOU): between this hash check and the restore
+    // below, a concurrent writer can still land an edit that the restore
+    // would clobber. The AsyncFileSystem abstraction has no compare-and-swap;
+    // closing this needs a file lock or CAS primitive on the fs backend.
+    // Mitigation for now: the refusal check above catches every *completed*
+    // prior write; only writes racing inside this window are at risk.
     let Some(prior) = load_undo_payload(session_folder, receipt_id).await? else {
         return Ok(RollbackOutcome::NotUndoable(format!(
             "{receipt_id} has no undo payload"
