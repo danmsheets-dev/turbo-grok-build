@@ -121,6 +121,9 @@ pub fn sanitize_incident(mut inc: Incident) -> Incident {
     if let Some(fix) = inc.suggested_fix.as_mut() {
         *fix = truncate_field(&redact_text(fix), SUMMARY_MAX);
     }
+    if let Some(note) = inc.resolution_note.as_mut() {
+        *note = truncate_field(&redact_text(note), SUMMARY_MAX);
+    }
     inc.repro = sanitize_repro(inc.repro);
     inc.evidence = sanitize_evidence(inc.evidence);
     inc

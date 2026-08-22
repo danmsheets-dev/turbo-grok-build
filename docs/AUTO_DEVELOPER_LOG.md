@@ -29,6 +29,7 @@ turbo issues path
 turbo issues path --json
 turbo issues ack <id>
 turbo issues resolve <id>
+turbo issues resolve <id> --sha <gitsha> --note "landed keep-N PID/retain"
 
 # Set where logs are stored (writes ~/.grok/developer-log.toml)
 turbo issues set-dir D:/HyperLogs/developer-log

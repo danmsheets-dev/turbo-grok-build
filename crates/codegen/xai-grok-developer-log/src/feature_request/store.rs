@@ -428,6 +428,8 @@ impl FeatureRequestStore {
             evidence: req.evidence.clone(),
             source: req.source.clone(),
             tags: req.tags.clone(),
+            ship_sha: None,
+            ship_note: None,
         };
         let fr = sanitize_request_doc(fr);
         self.write_at(&abs_path, &fr)?;
@@ -490,6 +492,16 @@ impl FeatureRequestStore {
         id_or_fingerprint: &str,
         status: RequestStatus,
     ) -> Result<FeatureRequest, FrStoreError> {
+        self.set_status_with(id_or_fingerprint, status, None, None)
+    }
+
+    pub fn set_status_with(
+        &self,
+        id_or_fingerprint: &str,
+        status: RequestStatus,
+        sha: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<FeatureRequest, FrStoreError> {
         if !fr_is_enabled() {
             return Err(FrStoreError::Disabled);
         }
@@ -504,14 +516,24 @@ impl FeatureRequestStore {
         let mut fr = self.read_at(&self.root.join(&entry.path))?;
         fr.status = status;
         fr.last_seen = Utc::now();
+        if let Some(sha) = sha.map(str::trim).filter(|s| !s.is_empty()) {
+            fr.ship_sha = Some(sha.to_owned());
+        }
+        if let Some(note) = note.map(str::trim).filter(|s| !s.is_empty()) {
+            fr.ship_note = Some(note.to_owned());
+        }
         self.write_at(&self.root.join(&entry.path), &fr)?;
         self.upsert_index(&mut index, &fr, &entry.path)?;
+        let detail = match (sha.map(str::trim).filter(|s| !s.is_empty()), status.as_str()) {
+            (Some(sha), st) => Some(format!("{st} sha={sha}")),
+            (None, st) => Some(st.to_string()),
+        };
         self.append_event(FeatureRequestEvent {
             ts: Utc::now(),
             request_id: fr.request_id.clone(),
             fingerprint: fr.fingerprint.clone(),
             action: "status".into(),
-            detail: Some(status.as_str().to_string()),
+            detail,
         })?;
         Ok(fr)
     }
@@ -730,6 +752,9 @@ fn sanitize_request_doc(mut fr: FeatureRequest) -> FeatureRequest {
     }
     sanitize_env_fields(&mut fr.environment);
     fr.evidence = sanitize_evidence(fr.evidence);
+    if let Some(ref mut note) = fr.ship_note {
+        *note = truncate_field(&redact_text(note), 4_000);
+    }
     fr
 }
 
@@ -783,8 +808,16 @@ mod tests {
             })
             .unwrap();
         store
-            .set_status(&r.request_id, RequestStatus::Shipped)
+            .set_status_with(
+                &r.request_id,
+                RequestStatus::Shipped,
+                Some("abc1234"),
+                Some("shipped in rc6"),
+            )
             .unwrap();
+        let shipped = store.get(&r.request_id).unwrap();
+        assert_eq!(shipped.ship_sha.as_deref(), Some("abc1234"));
+        assert_eq!(shipped.ship_note.as_deref(), Some("shipped in rc6"));
         let open = store.list(&FrListFilter::default()).unwrap();
         assert!(open.is_empty());
         let all = store

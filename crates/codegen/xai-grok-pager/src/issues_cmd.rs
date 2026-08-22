@@ -61,7 +61,15 @@ pub enum IssuesCommand {
         error_class: Option<String>,
     },
     /// Mark an incident resolved
-    Resolve { id: String },
+    Resolve {
+        id: String,
+        /// Proving git commit sha (no secrets)
+        #[arg(long)]
+        sha: Option<String>,
+        /// Optional close note (no secrets)
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Mark an incident acknowledged
     Ack { id: String },
     /// Print the developer-log root path and how it was resolved
@@ -246,11 +254,22 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             println!("  manifest: {}", result.manifest_path.display());
             Ok(())
         }
-        IssuesCommand::Resolve { id } => {
+        IssuesCommand::Resolve { id, sha, note } => {
             let inc = store
-                .set_status(&id, IncidentStatus::Resolved)
+                .set_status_with(
+                    &id,
+                    IncidentStatus::Resolved,
+                    sha.as_deref(),
+                    note.as_deref(),
+                )
                 .with_context(|| format!("resolve `{id}`"))?;
-            println!("Resolved {} ({})", inc.incident_id, inc.title);
+            match inc.resolution_sha.as_deref() {
+                Some(sha) => println!(
+                    "Resolved {} ({}) sha={}",
+                    inc.incident_id, inc.title, sha
+                ),
+                None => println!("Resolved {} ({})", inc.incident_id, inc.title),
+            }
             Ok(())
         }
         IssuesCommand::Ack { id } => {

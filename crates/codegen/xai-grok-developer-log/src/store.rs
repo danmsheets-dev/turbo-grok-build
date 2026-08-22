@@ -456,6 +456,8 @@ impl DeveloperLogStore {
             suggested_fix: req.suggested_fix.clone(),
             source: req.source.clone(),
             tags: req.tags.clone(),
+            resolution_sha: None,
+            resolution_note: None,
         };
         let incident = sanitize_incident(incident);
         self.write_incident_at(&abs_path, &incident)?;
@@ -522,6 +524,17 @@ impl DeveloperLogStore {
         id_or_fingerprint: &str,
         status: IncidentStatus,
     ) -> Result<Incident, StoreError> {
+        self.set_status_with(id_or_fingerprint, status, None, None)
+    }
+
+    /// Update status and optionally record a proving git sha / close note.
+    pub fn set_status_with(
+        &self,
+        id_or_fingerprint: &str,
+        status: IncidentStatus,
+        sha: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<Incident, StoreError> {
         if !is_enabled() {
             return Err(StoreError::Disabled);
         }
@@ -536,14 +549,24 @@ impl DeveloperLogStore {
         let mut incident = self.read_incident_at(&self.root.join(&entry.path))?;
         incident.status = status;
         incident.last_seen = Utc::now();
+        if let Some(sha) = sha.map(str::trim).filter(|s| !s.is_empty()) {
+            incident.resolution_sha = Some(sha.to_owned());
+        }
+        if let Some(note) = note.map(str::trim).filter(|s| !s.is_empty()) {
+            incident.resolution_note = Some(note.to_owned());
+        }
         self.write_incident_at(&self.root.join(&entry.path), &incident)?;
         self.upsert_index_entry(&mut index, &incident, &entry.path)?;
+        let detail = match (sha.map(str::trim).filter(|s| !s.is_empty()), status.as_str()) {
+            (Some(sha), st) => Some(format!("{st} sha={sha}")),
+            (None, st) => Some(st.to_string()),
+        };
         self.append_event(LogEvent {
             ts: Utc::now(),
             incident_id: incident.incident_id.clone(),
             fingerprint: incident.fingerprint.clone(),
             action: "status".into(),
-            detail: Some(status.as_str().to_string()),
+            detail,
         })?;
         Ok(incident)
     }
@@ -761,7 +784,7 @@ pub fn report_best_effort(request: ReportRequest) -> Option<ReportResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{ErrorClass, ReporterKind, Source};
+    use crate::schema::{ErrorClass, IncidentStatus, ReporterKind, Source};
 
     fn tmp_store() -> (tempfile::TempDir, DeveloperLogStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -823,5 +846,34 @@ mod tests {
         set_root_override(Some(custom.clone()));
         assert_eq!(default_root(), custom);
         set_root_override(None);
+    }
+
+    #[test]
+    fn resolve_records_proving_sha() {
+        let (_dir, store) = tmp_store();
+        let r = store
+            .report(ReportRequest {
+                title: "keep-N deleted retain tree".into(),
+                summary: "retain_worktree was pruned".into(),
+                error_class: ErrorClass::WorkLostRisk,
+                ..Default::default()
+            })
+            .unwrap();
+        let got = store
+            .set_status_with(
+                &r.incident_id,
+                IncidentStatus::Resolved,
+                Some("99535f08a"),
+                Some("landed isolation keep-N"),
+            )
+            .unwrap();
+        assert_eq!(got.status, IncidentStatus::Resolved);
+        assert_eq!(got.resolution_sha.as_deref(), Some("99535f08a"));
+        assert_eq!(
+            got.resolution_note.as_deref(),
+            Some("landed isolation keep-N")
+        );
+        let listed = store.list(&ListFilter::default()).unwrap();
+        assert!(listed.is_empty());
     }
 }

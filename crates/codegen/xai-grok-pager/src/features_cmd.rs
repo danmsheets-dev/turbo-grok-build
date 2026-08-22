@@ -56,7 +56,15 @@ pub enum FeaturesCommand {
         request_class: Option<String>,
     },
     /// Mark a request shipped
-    Ship { id: String },
+    Ship {
+        id: String,
+        /// Proving git commit sha (no secrets)
+        #[arg(long)]
+        sha: Option<String>,
+        /// Optional ship note (no secrets)
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Mark a request acknowledged
     Ack { id: String },
     /// Mark a request planned (roadmap)
@@ -226,11 +234,14 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
             println!("  manifest: {}", result.manifest_path.display());
             Ok(())
         }
-        FeaturesCommand::Ship { id } => {
+        FeaturesCommand::Ship { id, sha, note } => {
             let fr = store
-                .set_status(&id, RequestStatus::Shipped)
+                .set_status_with(&id, RequestStatus::Shipped, sha.as_deref(), note.as_deref())
                 .with_context(|| format!("ship `{id}`"))?;
-            println!("Shipped {} ({})", fr.request_id, fr.title);
+            match fr.ship_sha.as_deref() {
+                Some(sha) => println!("Shipped {} ({}) sha={}", fr.request_id, fr.title, sha),
+                None => println!("Shipped {} ({})", fr.request_id, fr.title),
+            }
             Ok(())
         }
         FeaturesCommand::Ack { id } => {

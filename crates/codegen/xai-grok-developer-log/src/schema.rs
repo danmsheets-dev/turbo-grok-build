@@ -389,6 +389,12 @@ pub struct Incident {
     pub source: Source,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Proving git commit when status is resolved (no secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_sha: Option<String>,
+    /// Optional short close note (no secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_note: Option<String>,
 }
 
 /// Input for creating or merging an incident (agent tool / detectors).

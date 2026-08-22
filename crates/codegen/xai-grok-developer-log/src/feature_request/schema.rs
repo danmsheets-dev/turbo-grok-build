@@ -231,6 +231,12 @@ pub struct FeatureRequest {
     pub source: Source,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Proving git commit when status is shipped (no secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ship_sha: Option<String>,
+    /// Optional short ship/decline note (no secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ship_note: Option<String>,
 }
 
 /// Input for creating or merging a feature request (agent tool / CLI).

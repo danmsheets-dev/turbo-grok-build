@@ -32,6 +32,7 @@ turbo features path
 turbo features ack <id>
 turbo features plan <id>
 turbo features ship <id>
+turbo features ship <id> --sha <gitsha> --note "landed in rc6"
 turbo features decline <id>
 
 # Configure storage
