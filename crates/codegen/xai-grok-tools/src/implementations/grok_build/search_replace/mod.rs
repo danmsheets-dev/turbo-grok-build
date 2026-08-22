@@ -243,19 +243,19 @@ pub(crate) async fn run_search_replace(
         ));
     }
     // Session policy engine v1: refuse edits to denied paths before any I/O.
-    {
+    let policy = {
         let res = resources.lock().await;
         let params = res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
-        let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0));
-        if let Some(frag) = policy.path_denied(&path) {
-            return Ok(SearchReplaceOutput::InvalidInput(
-                crate::implementations::grok_build::policy::denial(
-                    "search_replace",
-                    "deny_paths",
-                    &format!("`{}`", input.file_path),
-                ) + &format!(" — matched deny-path fragment `{frag}`"),
-            ));
-        }
+        crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0))
+    };
+    if let Some(frag) = policy.path_denied(&path) {
+        return Ok(SearchReplaceOutput::InvalidInput(
+            crate::implementations::grok_build::policy::denial(
+                "search_replace",
+                "deny_paths",
+                &format!("`{}`", input.file_path),
+            ) + &format!(" — matched deny-path fragment `{frag}`"),
+        ));
     }
     // Execution receipts (Phase 5): snapshot pre-edit contents so a rollback
     // receipt can restore them. Storage failures degrade to no-receipt.
@@ -288,6 +288,7 @@ pub(crate) async fn run_search_replace(
             display_cwd.as_deref(),
             hints_enabled,
             empty_old_string_does_not_override,
+            &policy,
         )
         .await?
     } else {
@@ -303,6 +304,7 @@ pub(crate) async fn run_search_replace(
             hints_enabled,
             is_legacy,
             include_user_edit_hint,
+            &policy,
         )
         .await?
     };
@@ -320,35 +322,15 @@ pub(crate) async fn run_search_replace(
             lines_removed = removed
         )
         .in_scope(|| {});
-        // Session policy engine v1: enforce max_diff_lines on the applied edit.
-        {
-            let res = resources.lock().await;
-            let params =
-                res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
-            let policy =
-                crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0));
-            if let Some((added_lines, max)) =
-                policy.diff_exceeds_limit(added.max(0) as u64)
-            {
-                return Ok(SearchReplaceOutput::InvalidInput(
-                    crate::implementations::grok_build::policy::denial(
-                        "search_replace",
-                        "max_diff_lines",
-                        &format!("edit adding {added_lines} lines (limit {max})"),
-                    ),
-                ));
-            }
-        }
         // Execution receipts: hash the post-edit file and persist the receipt
         // with the pre-edit bytes as the undo payload (audit + rollback).
-        let hash_after =
-            fs.read_file(&path).await.ok().map(|bytes| {
-                crate::implementations::grok_build::receipts::hash_bytes(&bytes)
-            });
+        let hash_after = fs
+            .read_file(&path)
+            .await
+            .ok()
+            .map(|bytes| crate::implementations::grok_build::receipts::hash_bytes(&bytes));
         if let Some(session) = session_folder.as_deref() {
-            let undo_payload = pre_edit_bytes
-                .as_deref()
-                .filter(|_| hash_after.is_some());
+            let undo_payload = pre_edit_bytes.as_deref().filter(|_| hash_after.is_some());
             crate::implementations::grok_build::receipts::try_record(
                 Some(session),
                 "search_replace",
@@ -389,6 +371,19 @@ fn validate_path_length(file_path: &str) -> Option<SearchReplaceOutput> {
     }
     None
 }
+
+fn max_diff_limit_error(
+    policy: &crate::implementations::grok_build::policy::PolicyParams,
+    added_lines: u64,
+) -> Option<SearchReplaceOutput> {
+    policy.diff_exceeds_limit(added_lines).map(|(added, max)| {
+        SearchReplaceOutput::InvalidInput(crate::implementations::grok_build::policy::denial(
+            "search_replace",
+            "max_diff_lines",
+            &format!("edit adding {added} lines (limit {max})"),
+        ))
+    })
+}
 /// Handle new file creation when `old_string` is empty.
 async fn handle_new_file_creation(
     input: &SearchReplaceInput,
@@ -401,6 +396,7 @@ async fn handle_new_file_creation(
     display_cwd: Option<&std::path::Path>,
     hints_enabled: bool,
     empty_old_string_does_not_override: bool,
+    policy: &crate::implementations::grok_build::policy::PolicyParams,
 ) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
     let file_exists = match fs.read_file(path).await {
         Ok(bytes) => !bytes.is_empty(),
@@ -423,6 +419,12 @@ async fn handle_new_file_creation(
             "{} is empty, which is only allowed when creating a new file or when the file is empty.",
             old_string_name
         )));
+    }
+    let added_lines = crate::types::output::line_diff("", &input.new_string)
+        .0
+        .max(0) as u64;
+    if let Some(error) = max_diff_limit_error(policy, added_lines) {
+        return Ok(error);
     }
     if let Err(e) = fs.write_file(path, input.new_string.as_bytes()).await {
         return Ok(match e.io_error_kind() {
@@ -630,6 +632,7 @@ async fn handle_replacement(
     hints_enabled: bool,
     is_legacy: bool,
     include_user_edit_hint: bool,
+    policy: &crate::implementations::grok_build::policy::PolicyParams,
 ) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
     let bytes = match fs.read_file(path).await {
         Ok(bytes) => bytes,
@@ -810,6 +813,12 @@ async fn handle_replacement(
     } else {
         new_text.clone()
     };
+    let added_lines = crate::types::output::line_diff(&old_text, &write_text)
+        .0
+        .max(0) as u64;
+    if let Some(error) = max_diff_limit_error(policy, added_lines) {
+        return Ok(error);
+    }
     if let Err(e) = fs.write_file(path, write_text.as_bytes()).await {
         return Ok(match e.io_error_kind() {
             Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
@@ -1137,6 +1146,36 @@ mod tests {
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
+    #[tokio::test]
+    async fn max_diff_limit_denial_leaves_existing_bytes_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("test.txt");
+        std::fs::write(&file, "before\n").unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(
+            crate::implementations::grok_build::policy::PolicyParams {
+                max_diff_lines: Some(1),
+                ..Default::default()
+            },
+        ));
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("test.txt", "before", "after\nsecond"),
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("policy denied (search_replace)"), "got: {msg}");
+                assert!(msg.contains("max_diff_lines"), "got: {msg}");
+            }
+            other => panic!("Expected policy denial, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"before\n");
+    }
+
     #[tokio::test]
     async fn new_file_creation() {
         let tmp = TempDir::new().unwrap();

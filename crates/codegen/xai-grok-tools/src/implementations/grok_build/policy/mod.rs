@@ -1,15 +1,16 @@
 //! Session policy engine v1 (Phase 5 FR fr_01a028e7bf6875339bfa220a9adc5c9b).
 //!
-//! Enforced at the two built-in mutation chokepoints — [`crate::implementations::grok_build::search_replace`]
-//! (every file edit) and [`crate::implementations::grok_build::bash`] (shell
-//! effects) — so violations fail the tool closed with a named error instead of
-//! relying on prompt text. MCP tools keep their own permission classification
-//! (`AccessKind::MCPTool`); extending policy there is a documented follow-up.
+//! Enforced before effects at [`crate::implementations::grok_build::search_replace`],
+//! OpenCode `write`, Codex `apply_patch`, [`crate::implementations::grok_build::bash`],
+//! and [`crate::implementations::grok_build::monitor`]. File-edit sites enforce
+//! `deny_paths` and `max_diff_lines`; command sites enforce `deny_commands`.
+//! MCP tools keep their own permission classification (`AccessKind::MCPTool`).
 //!
-//! Config sources (later wins):
-//! 1. Env: `GROK_POLICY_DENY_PATHS` / `GROK_POLICY_DENY_COMMANDS`
-//!    (`;`-separated), `GROK_POLICY_MAX_DIFF_LINES` (integer).
-//! 2. `Params<PolicyParams>` when a host injects one (same fields).
+//! V1 configuration source: `GROK_POLICY_DENY_PATHS` /
+//! `GROK_POLICY_DENY_COMMANDS` (`;`-separated) and
+//! `GROK_POLICY_MAX_DIFF_LINES` (integer). `Params<PolicyParams>` is honored
+//! when a host injects it, but no host-injection configuration path is provided
+//! by this crate.
 
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +60,10 @@ impl PolicyParams {
         if self.deny_paths.is_empty() {
             return None;
         }
-        let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let normalized = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
         for frag in &self.deny_paths {
             let frag = frag.trim();
             if frag.is_empty() {
@@ -70,10 +74,7 @@ impl PolicyParams {
             if normalized.contains(&format!("/{needle}/"))
                 || normalized.ends_with(&format!("/{needle}"))
                 || normalized.split('/').any(|c| {
-                    c == needle
-                        || (needle.starts_with('.')
-                            && c.starts_with(needle)
-                            && c != needle)
+                    c == needle || (needle.starts_with('.') && c.starts_with(needle) && c != needle)
                 })
             {
                 return Some(frag.to_owned());
@@ -131,17 +132,29 @@ mod tests {
     #[test]
     fn deny_paths_match_components_and_suffixes() {
         let p = policy(&["production", ".env"], &[], None);
-        assert!(p.path_denied(std::path::Path::new("src/production/main.rs")).is_some());
+        assert!(
+            p.path_denied(std::path::Path::new("src/production/main.rs"))
+                .is_some()
+        );
         assert!(p.path_denied(std::path::Path::new(".env")).is_some());
-        assert!(p.path_denied(std::path::Path::new("config/.env.local")).is_some());
-        assert!(p.path_denied(std::path::Path::new("src/lib/producer.rs")).is_none());
+        assert!(
+            p.path_denied(std::path::Path::new("config/.env.local"))
+                .is_some()
+        );
+        assert!(
+            p.path_denied(std::path::Path::new("src/lib/producer.rs"))
+                .is_none()
+        );
         assert!(p.path_denied(std::path::Path::new("src/main.rs")).is_none());
     }
 
     #[test]
     fn deny_commands_match_case_insensitively() {
         let p = policy(&[], &["terraform destroy", "drop table"], None);
-        assert!(p.command_denied("Terraform Destroy -auto-approve").is_some());
+        assert!(
+            p.command_denied("Terraform Destroy -auto-approve")
+                .is_some()
+        );
         assert!(p.command_denied("psql -c 'DROP TABLE users'").is_some());
         assert!(p.command_denied("cargo build").is_none());
     }

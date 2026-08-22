@@ -8,8 +8,8 @@
 //!
 //! V1 honesty notes:
 //! - Bash receipts are audit-only (no undo payload).
-//! - Receipts larger than [`MAX_UNDO_BYTES`] are recorded but marked
-//!   `undoable=false`.
+//! - Receipts larger than [`MAX_UNDO_BYTES`], secret-shaped pre-edit content,
+//!   and credential-named files are recorded but marked `undoable=false`.
 //! - Receipt metadata passes through the secrets sanitizer before hitting disk.
 
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use xai_grok_secrets::redact_json_string_values;
+use xai_grok_secrets::{redact_json_string_values, redact_secrets};
 
 use crate::types::requirements::{Expr, ToolRequirement};
 
@@ -115,7 +115,28 @@ async fn write_with_retry(path: &std::path::Path, bytes: &[u8]) -> Result<(), Re
 
 fn is_transient_windows_lock(e: &std::io::Error) -> bool {
     // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION.
-    e.raw_os_error().is_some_and(|code| code == 32 || code == 33)
+    e.raw_os_error()
+        .is_some_and(|code| code == 32 || code == 33)
+}
+
+fn credential_path(path: Option<&str>) -> bool {
+    let Some(name) = path
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name == ".env"
+        || name.starts_with(".env.")
+        || matches!(name.as_str(), "auth.json" | "id_rsa" | "credentials.json")
+        || name.ends_with(".pem")
+}
+
+fn secret_payload(payload: &[u8]) -> bool {
+    std::str::from_utf8(payload)
+        .ok()
+        .is_some_and(|text| redact_secrets(text) != text)
 }
 
 /// Record a receipt (and optional raw undo payload) under the session folder.
@@ -127,10 +148,13 @@ pub async fn record_receipt(
     mut receipt: ToolReceipt,
     undo_payload: Option<&[u8]>,
 ) -> Result<String, ReceiptError> {
-    // Oversized payloads are rejected up front so `undoable` never lies about
-    // a `.before` file that will not exist.
-    let stored_payload = match undo_payload {
-        Some(payload) if (payload.len() as u64) > MAX_UNDO_BYTES => {
+    // Only undoable edit receipts may retain a raw pre-edit payload.
+    let stored_payload = match undo_payload.filter(|_| receipt.undoable) {
+        Some(payload)
+            if (payload.len() as u64) > MAX_UNDO_BYTES
+                || secret_payload(payload)
+                || credential_path(receipt.file.as_deref()) =>
+        {
             receipt.undoable = false;
             None
         }
@@ -141,14 +165,20 @@ pub async fn record_receipt(
         .await
         .map_err(ReceiptError::Io)?;
     let id = receipt.receipt_id.clone();
+    let payload_path = dir.join(format!("{id}.before"));
+    if let Some(payload) = stored_payload {
+        write_with_retry(&payload_path, payload).await?;
+    }
     let mut value = serde_json::to_value(&receipt)
         .map_err(|e| ReceiptError::Io(std::io::Error::other(e.to_string())))?;
     redact_json_string_values(&mut value);
     let json = serde_json::to_vec_pretty(&value)
         .map_err(|e| ReceiptError::Io(std::io::Error::other(e.to_string())))?;
-    write_with_retry(&dir.join(format!("{id}.json")), &json).await?;
-    if let Some(payload) = stored_payload {
-        write_with_retry(&dir.join(format!("{id}.before")), payload).await?;
+    if let Err(error) = write_with_retry(&dir.join(format!("{id}.json")), &json).await {
+        if stored_payload.is_some() {
+            let _ = tokio::fs::remove_file(&payload_path).await;
+        }
+        return Err(error);
     }
     Ok(id)
 }
@@ -194,11 +224,7 @@ pub async fn list_receipts(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(ReceiptError::Io(e)),
     };
-    while let Some(entry) = rd
-        .next_entry()
-        .await
-        .map_err(ReceiptError::Io)?
-    {
+    while let Some(entry) = rd.next_entry().await.map_err(ReceiptError::Io)? {
         let name = entry.file_name().to_string_lossy().to_string();
         if let Some(id) = name.strip_suffix(".json") {
             ids.push(id.to_owned());
@@ -257,7 +283,7 @@ pub async fn rollback_receipt(
         Err(_) => {
             return Ok(RollbackOutcome::ChangedSinceReceipt(format!(
                 "{file} is gone; cannot roll back safely"
-            )))
+            )));
         }
     };
     if &hash_bytes(&current) != after {
@@ -372,9 +398,7 @@ pub struct ReceiptsTool;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct ReceiptsInput {
-    #[schemars(
-        description = "Receipt id to show (rcpt-...). Omit to list recent receipts."
-    )]
+    #[schemars(description = "Receipt id to show (rcpt-...). Omit to list recent receipts.")]
     pub receipt_id: Option<String>,
     #[schemars(description = "Max entries when listing (default 20, max 100).")]
     pub limit: Option<usize>,
@@ -460,17 +484,26 @@ impl xai_tool_runtime::Tool for ReceiptsTool {
                 text: "No session folder in this context; receipts are unavailable.".into(),
             });
         };
-        if let Some(id) = input.receipt_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(id) = input
+            .receipt_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let receipt = load_receipt(&session, id)
                 .await
                 .map_err(|e| xai_tool_runtime::ToolError::custom("receipt_io", e.to_string()))?;
             let text = match receipt {
-                Some(r) => serde_json::to_string_pretty(&r)
-                    .unwrap_or_else(|_| format!("{r:?}")),
+                Some(r) => serde_json::to_string_pretty(&r).unwrap_or_else(|_| format!("{r:?}")),
                 None => format!("Receipt {id} not found."),
             };
             return Ok(ReceiptsOutput {
-                mode: if text.starts_with("Receipt ") { "not_found" } else { "show" }.into(),
+                mode: if text.starts_with("Receipt ") {
+                    "not_found"
+                } else {
+                    "show"
+                }
+                .into(),
                 text,
             });
         }
@@ -500,7 +533,10 @@ impl xai_tool_runtime::Tool for ReceiptsTool {
                 if r.undoable { " (undoable)" } else { "" }
             ));
         }
-        Ok(ReceiptsOutput { mode: "list".into(), text })
+        Ok(ReceiptsOutput {
+            mode: "list".into(),
+            text,
+        })
     }
 }
 
@@ -608,12 +644,16 @@ impl xai_tool_runtime::Tool for RollbackTool {
                 status: "restored".into(),
                 message: format!(
                     "Rolled back {}: restored {} bytes of {}. Follow-up receipt: {new_receipt_id}.",
-                    receipt.receipt_id, restored_bytes,
+                    receipt.receipt_id,
+                    restored_bytes,
                     receipt.file.as_deref().unwrap_or_default()
                 ),
             }),
             RollbackOutcome::NotUndoable(msg) | RollbackOutcome::ChangedSinceReceipt(msg) => {
-                Ok(RollbackOutput { status: "refused".into(), message: msg })
+                Ok(RollbackOutput {
+                    status: "refused".into(),
+                    message: msg,
+                })
             }
             RollbackOutcome::NotFound(id) => Ok(RollbackOutput {
                 status: "not_found".into(),
@@ -675,7 +715,12 @@ mod tests {
         ToolReceipt {
             receipt_id: new_receipt_id(),
             ts_rfc3339: chrono::Utc::now().to_rfc3339(),
-            tool: if kind == "edit" { "search_replace" } else { "bash" }.into(),
+            tool: if kind == "edit" {
+                "search_replace"
+            } else {
+                "bash"
+            }
+            .into(),
             kind: kind.into(),
             file: (kind == "edit").then(|| "src/lib.rs".to_owned()),
             hash_before: (kind == "edit").then(|| "aa".repeat(32)),
@@ -692,11 +737,18 @@ mod tests {
     async fn round_trips_receipt_and_scrubs_embedded_tokens() {
         let dir = temp_session();
         let receipt = sample("bash");
-        let id =
-            record_receipt(dir.path(), receipt.clone(), None).await.expect("record");
+        let id = record_receipt(dir.path(), receipt.clone(), None)
+            .await
+            .expect("record");
         assert_eq!(id, receipt.receipt_id);
-        let loaded = load_receipt(dir.path(), &id).await.unwrap().expect("exists");
-        assert_eq!(loaded.command.as_deref(), Some("git commit -m 'tok [REDACTED_SECRET]'"));
+        let loaded = load_receipt(dir.path(), &id)
+            .await
+            .unwrap()
+            .expect("exists");
+        assert_eq!(
+            loaded.command.as_deref(),
+            Some("git commit -m 'tok [REDACTED_SECRET]'")
+        );
     }
 
     #[tokio::test]
@@ -717,7 +769,12 @@ mod tests {
     #[tokio::test]
     async fn rejects_path_traversal_ids() {
         let dir = temp_session();
-        assert!(load_receipt(dir.path(), "../escape").await.unwrap().is_none());
+        assert!(
+            load_receipt(dir.path(), "../escape")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -743,14 +800,21 @@ mod tests {
             undoable: true,
             rolled_back: None,
         };
-        let id = record_receipt(dir.path(), receipt, Some(&before)).await.unwrap();
+        let id = record_receipt(dir.path(), receipt, Some(&before))
+            .await
+            .unwrap();
 
-        match rollback_receipt(dir.path(), fs.as_ref(), &id).await.unwrap() {
+        match rollback_receipt(dir.path(), fs.as_ref(), &id)
+            .await
+            .unwrap()
+        {
             RollbackOutcome::Restored { new_receipt_id, .. } => {
                 let now = tokio::fs::read(&file).await.unwrap();
                 assert_eq!(now, b"before");
-                let followup =
-                    load_receipt(dir.path(), &new_receipt_id).await.unwrap().unwrap();
+                let followup = load_receipt(dir.path(), &new_receipt_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(followup.kind, "rollback");
                 assert_eq!(followup.rolled_back.as_deref(), Some(id.as_str()));
             }
@@ -777,9 +841,14 @@ mod tests {
             undoable: true,
             rolled_back: None,
         };
-        let id = record_receipt(dir.path(), receipt, Some(b"v0")).await.unwrap();
+        let id = record_receipt(dir.path(), receipt, Some(b"v0"))
+            .await
+            .unwrap();
         tokio::fs::write(&file, b"drifted").await.unwrap();
-        match rollback_receipt(dir.path(), fs.as_ref(), &id).await.unwrap() {
+        match rollback_receipt(dir.path(), fs.as_ref(), &id)
+            .await
+            .unwrap()
+        {
             RollbackOutcome::ChangedSinceReceipt(_) => {}
             other => panic!("expected refusal, got {other:?}"),
         }
@@ -791,9 +860,98 @@ mod tests {
         let big = vec![b'x'; (MAX_UNDO_BYTES + 1) as usize];
         let mut receipt = sample("edit");
         receipt.undoable = true;
-        let id = record_receipt(dir.path(), receipt, Some(&big)).await.unwrap();
+        let id = record_receipt(dir.path(), receipt, Some(&big))
+            .await
+            .unwrap();
         let loaded = load_receipt(dir.path(), &id).await.unwrap().unwrap();
-        assert!(!loaded.undoable, "oversized payloads must downgrade undoability");
+        assert!(
+            !loaded.undoable,
+            "oversized payloads must downgrade undoability"
+        );
+        assert!(
+            !receipts_dir(dir.path())
+                .join(format!("{id}.before"))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_undo_payload_is_not_persisted() {
+        let dir = temp_session();
+        let mut receipt = sample("edit");
+        receipt.file = Some("src/config.rs".to_owned());
+        let payload = ["api_key=", "abcdefghij"].concat();
+        let id = record_receipt(dir.path(), receipt, Some(payload.as_bytes()))
+            .await
+            .unwrap();
+
+        let loaded = load_receipt(dir.path(), &id).await.unwrap().unwrap();
+        assert!(!loaded.undoable, "secret payload must not be undoable");
+        assert!(
+            !receipts_dir(dir.path())
+                .join(format!("{id}.before"))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_named_file_does_not_store_undo_payload() {
+        let dir = temp_session();
+        let mut receipt = sample("edit");
+        receipt.file = Some(".env.local".to_owned());
+        let id = record_receipt(dir.path(), receipt, Some(b"ordinary content"))
+            .await
+            .unwrap();
+
+        let loaded = load_receipt(dir.path(), &id).await.unwrap().unwrap();
+        assert!(!loaded.undoable);
+        assert!(
+            !receipts_dir(dir.path())
+                .join(format!("{id}.before"))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_write_failure_does_not_publish_undoable_json() {
+        let dir = temp_session();
+        let receipt = sample("edit");
+        let id = receipt.receipt_id.clone();
+        let receipts = receipts_dir(dir.path());
+        tokio::fs::create_dir_all(receipts.join(format!("{id}.before")))
+            .await
+            .unwrap();
+
+        assert!(
+            record_receipt(dir.path(), receipt, Some(b"before"))
+                .await
+                .is_err()
+        );
+        assert!(
+            !receipts.join(format!("{id}.json")).exists(),
+            "a payload-write failure must not publish an undoable receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_write_failure_removes_payload() {
+        let dir = temp_session();
+        let receipt = sample("edit");
+        let id = receipt.receipt_id.clone();
+        let receipts = receipts_dir(dir.path());
+        tokio::fs::create_dir_all(receipts.join(format!("{id}.json")))
+            .await
+            .unwrap();
+
+        assert!(
+            record_receipt(dir.path(), receipt, Some(b"before"))
+                .await
+                .is_err()
+        );
+        assert!(
+            !receipts.join(format!("{id}.before")).exists(),
+            "a JSON-write failure must clean up the raw undo payload"
+        );
     }
 
     #[test]

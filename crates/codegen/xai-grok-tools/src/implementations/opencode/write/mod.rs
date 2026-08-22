@@ -11,8 +11,8 @@ use crate::types::output::{
 use crate::types::requirements::Expr;
 #[allow(unused_imports)]
 use crate::types::resources::{
-    ConfineRoot, Cwd, DisplayCwd, FileSystem, NotificationHandle, SharedResources,
-    enforce_write_path, resolve_write_model_path,
+    ConfineRoot, Cwd, DisplayCwd, FileSystem, NotificationHandle, Params, SessionFolder,
+    SharedResources, enforce_write_path, resolve_write_model_path,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
@@ -101,7 +101,16 @@ impl xai_tool_runtime::Tool for WriteTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (cwd, display_cwd, fs, notification_handle, confine_root, allowed_paths) = {
+        let (
+            cwd,
+            display_cwd,
+            fs,
+            notification_handle,
+            confine_root,
+            allowed_paths,
+            policy,
+            session_folder,
+        ) = {
             let cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
             let res = resources.lock().await;
             let display_cwd = res.get::<DisplayCwd>().map(|d| d.0.clone());
@@ -109,6 +118,12 @@ impl xai_tool_runtime::Tool for WriteTool {
             let notification_handle = res.require::<NotificationHandle>()?.0.clone();
             let confine_root = res.get::<ConfineRoot>().map(|c| c.0.clone());
             let allowed_paths = res.get::<AllowedWritePaths>().map(|a| a.0.clone());
+            let params =
+                res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+                params.map(|p| &p.0),
+            );
+            let session_folder = res.get::<SessionFolder>().map(|s| s.0.clone());
             (
                 cwd,
                 display_cwd,
@@ -116,6 +131,8 @@ impl xai_tool_runtime::Tool for WriteTool {
                 notification_handle,
                 confine_root,
                 allowed_paths,
+                policy,
+                session_folder,
             )
         };
         let tool_call_id = ctx.call_id.as_str().to_owned();
@@ -138,16 +155,45 @@ impl xai_tool_runtime::Tool for WriteTool {
             )
         })?;
 
+        if let Some(frag) = policy.path_denied(&path) {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "policy_denied",
+                crate::implementations::grok_build::policy::denial(
+                    "write",
+                    "deny_paths",
+                    &format!(
+                        "`{}` — matched deny-path fragment `{frag}`",
+                        input.file_path
+                    ),
+                ),
+            ));
+        }
+
         // Spawn allowed_paths: fail closed at write time (not only land).
         if let Some(ref prefixes) = allowed_paths {
             enforce_allowed_write_paths(&cwd, &path, prefixes).map_err(|e| e.into_tool_error())?;
         }
 
         // ── Check if file exists and read old content ────────────
-        let (existed, old_content) = match fs.read_file(&path).await {
-            Ok(bytes) => (true, Some(String::from_utf8_lossy(&bytes).into_owned())),
-            Err(_) => (false, None),
-        };
+        let pre_edit_bytes = fs.read_file(&path).await.ok();
+        let existed = pre_edit_bytes.is_some();
+        let old_content = pre_edit_bytes
+            .as_deref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        let old_for_diff = old_content.as_deref().unwrap_or_default();
+        let added_lines = crate::types::output::line_diff(old_for_diff, &input.content)
+            .0
+            .max(0) as u64;
+        if let Some((added, max)) = policy.diff_exceeds_limit(added_lines) {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "policy_denied",
+                crate::implementations::grok_build::policy::denial(
+                    "write",
+                    "max_diff_lines",
+                    &format!("edit adding {added} lines (limit {max})"),
+                ),
+            ));
+        }
 
         // Parent mkdir is performed inside fs.write_file (LocalFs / ConfinedFs
         // checks the parent under the confine root). Never host create_dir_all
@@ -171,6 +217,23 @@ impl xai_tool_runtime::Tool for WriteTool {
             previous_content: old_content.clone(),
             is_new_file: !existed,
         });
+
+        crate::implementations::grok_build::receipts::try_record(
+            session_folder.as_deref(),
+            "write",
+            "edit",
+            Some(path.to_string_lossy().to_string()),
+            pre_edit_bytes
+                .as_deref()
+                .map(crate::implementations::grok_build::receipts::hash_bytes),
+            Some(crate::implementations::grok_build::receipts::hash_bytes(
+                input.content.as_bytes(),
+            )),
+            None,
+            None,
+            pre_edit_bytes,
+        )
+        .await;
 
         let old_string = old_content.unwrap_or_default();
         let new_string = input.content;
@@ -293,6 +356,35 @@ mod tests {
         }
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "new content\n");
+    }
+
+    #[tokio::test]
+    async fn policy_denies_oversized_write_before_mutating_file() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("existing.txt");
+        std::fs::write(&file_path, "before\n").unwrap();
+        let tool = WriteTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(
+            crate::implementations::grok_build::policy::PolicyParams {
+                max_diff_lines: Some(1),
+                ..Default::default()
+            },
+        ));
+
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            WriteInput {
+                file_path: file_path.to_string_lossy().into_owned(),
+                content: "after\nsecond\n".to_string(),
+            },
+        )
+        .await
+        .expect_err("policy must deny oversized write");
+
+        assert!(err.to_string().contains("policy denied (write)"));
+        assert_eq!(std::fs::read(&file_path).unwrap(), b"before\n");
     }
 
     // ── Creates parent directories ──────────────────────────────

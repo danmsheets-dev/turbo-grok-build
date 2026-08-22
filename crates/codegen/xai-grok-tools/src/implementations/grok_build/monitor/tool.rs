@@ -7,7 +7,7 @@ use crate::notification::MonitorEvent;
 use crate::notification::types::ToolNotificationHandle;
 
 use crate::types::requirements::Expr;
-use crate::types::resources::Terminal;
+use crate::types::resources::{Params, Terminal};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 use super::event::{self, LineProcessor};
@@ -85,7 +85,7 @@ impl xai_tool_runtime::Tool for MonitorTool {
         let resolved_timeout = input.resolved_timeout_ms();
         let description = input.description;
 
-        let (terminal, notification_handle, cwd, session_folder, owner_session_id) = {
+        let (terminal, notification_handle, cwd, session_folder, owner_session_id, policy) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let notif = res
@@ -103,8 +103,23 @@ impl xai_tool_runtime::Tool for MonitorTool {
             let owner = res
                 .get::<crate::types::resources::OwnerSessionId>()
                 .map(|o| o.0.clone());
-            (terminal, notif, cwd, session_folder, owner)
+            let params =
+                res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+                params.map(|p| &p.0),
+            );
+            (terminal, notif, cwd, session_folder, owner, policy)
         };
+        if let Some(frag) = policy.command_denied(&input.command) {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "policy_denied",
+                crate::implementations::grok_build::policy::denial(
+                    "monitor",
+                    "deny_commands",
+                    &format!("command matching `{frag}`"),
+                ),
+            ));
+        }
 
         // Output file lives in the session folder alongside bash terminal logs.
         let output_file = session_folder

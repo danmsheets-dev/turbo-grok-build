@@ -13,7 +13,7 @@ use crate::notification::types::FileWritten;
 use crate::types::output::{ApplyPatchFileResult, ApplyPatchOutput};
 use crate::types::requirements::Expr;
 #[allow(unused_imports)]
-use crate::types::resources::{Cwd, FileSystem, NotificationHandle, SharedResources};
+use crate::types::resources::{Cwd, FileSystem, NotificationHandle, Params, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 use super::errors::ParseError;
@@ -198,6 +198,37 @@ fn resolve_hunk_path(cwd: &std::path::Path, path: &std::path::Path) -> Result<Pa
     Ok(resolved)
 }
 
+fn hunk_paths(hunk: &Hunk) -> impl Iterator<Item = &std::path::Path> {
+    let paths: [&std::path::Path; 2] = match hunk {
+        Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => [path, path],
+        Hunk::UpdateFile {
+            path, move_path, ..
+        } => [path, move_path.as_deref().unwrap_or(path)],
+    };
+    paths.into_iter()
+}
+
+fn changes_added_lines(changes: &[FileChange]) -> u64 {
+    changes
+        .iter()
+        .map(|change| match change {
+            FileChange::Add { content, .. } => crate::types::output::line_diff("", content).0,
+            FileChange::Delete { .. } => 0,
+            FileChange::Update {
+                original_content,
+                new_content,
+                ..
+            }
+            | FileChange::Move {
+                original_content,
+                new_content,
+                ..
+            } => crate::types::output::line_diff(original_content, new_content).0,
+        })
+        .map(|added| added.max(0) as u64)
+        .sum()
+}
+
 /// Compute all file changes in memory without writing anything.
 /// Returns an error string if any hunk can't be applied.
 async fn compute_all_changes(
@@ -347,7 +378,7 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (cwd, fs, notification_handle, confine_root, allowed_paths);
+        let (cwd, fs, notification_handle, confine_root, allowed_paths, policy);
         {
             cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
             let res = resources.lock().await;
@@ -359,6 +390,11 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
             allowed_paths = res
                 .get::<crate::types::resources::AllowedWritePaths>()
                 .map(|a| a.0.clone());
+            let params =
+                res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
+            policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+                params.map(|p| &p.0),
+            );
         }
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.
         crate::types::resources::enforce_write_path(&cwd, confine_root.as_deref())
@@ -386,11 +422,37 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
             ));
         }
 
+        for hunk in &parsed.hunks {
+            for path in hunk_paths(hunk) {
+                if let Some(frag) = policy.path_denied(path) {
+                    return Err(xai_tool_runtime::ToolError::custom(
+                        "policy_denied",
+                        crate::implementations::grok_build::policy::denial(
+                            "apply_patch",
+                            "deny_paths",
+                            &format!("`{}` — matched deny-path fragment `{frag}`", path.display()),
+                        ),
+                    ));
+                }
+            }
+        }
+
         // ── Phase 2: Compute all changes in memory (no writes yet) ───
         let changes = match compute_all_changes(&cwd, &fs, &parsed.hunks).await {
             Ok(c) => c,
             Err(msg) => return Ok(ApplyPatchOutput::ApplicationError(msg)),
         };
+        let added_lines = changes_added_lines(&changes);
+        if let Some((added, max)) = policy.diff_exceeds_limit(added_lines) {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "policy_denied",
+                crate::implementations::grok_build::policy::denial(
+                    "apply_patch",
+                    "max_diff_lines",
+                    &format!("patch adding {added} lines (limit {max})"),
+                ),
+            ));
+        }
 
         // Spawn allowed_paths: fail closed before any write (audit C3).
         if let Some(ref prefixes) = allowed_paths {
@@ -624,6 +686,58 @@ mod tests {
             }
             other => panic!("Expected Success, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn policy_denied_path_refuses_entire_patch_before_writes() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ApplyPatchTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(
+            crate::implementations::grok_build::policy::PolicyParams {
+                deny_paths: vec!["blocked.txt".to_string()],
+                ..Default::default()
+            },
+        ));
+        let patch =
+            wrap_patch("*** Add File: allowed.txt\n+allowed\n*** Add File: blocked.txt\n+blocked");
+
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input(&patch),
+        )
+        .await
+        .expect_err("policy must deny patch");
+
+        assert!(err.to_string().contains("policy denied (apply_patch)"));
+        assert!(!tmp.path().join("allowed.txt").exists());
+        assert!(!tmp.path().join("blocked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn policy_denied_diff_limit_refuses_before_writes() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ApplyPatchTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(
+            crate::implementations::grok_build::policy::PolicyParams {
+                max_diff_lines: Some(1),
+                ..Default::default()
+            },
+        ));
+        let patch = wrap_patch("*** Add File: too-large.txt\n+one\n+two");
+
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input(&patch),
+        )
+        .await
+        .expect_err("policy must deny patch");
+
+        assert!(err.to_string().contains("max_diff_lines"));
+        assert!(!tmp.path().join("too-large.txt").exists());
     }
 
     // ── Delete file ──────────────────────────────────────────────
