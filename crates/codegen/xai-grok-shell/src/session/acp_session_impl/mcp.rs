@@ -123,6 +123,21 @@ impl SessionActor {
                 .insert(qualified_name, reg);
             return;
         }
+        let readonly_session = matches!(
+            self.agent.borrow().definition().capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+        );
+        if xai_grok_tools::implementations::grok_build::task::types::skip_mutating_mcp_on_readonly(
+            reg.read_only_hint,
+            readonly_session,
+        ) {
+            tracing::info!(
+                tool = %qualified_name,
+                server = %server_name,
+                "Skipping mutating MCP tool on ReadOnly session (readOnlyHint is not true)"
+            );
+            return;
+        }
         if reg.model_visible {
             if let Err(e) = self
                 .agent

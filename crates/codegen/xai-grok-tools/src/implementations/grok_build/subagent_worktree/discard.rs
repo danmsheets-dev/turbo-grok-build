@@ -132,6 +132,7 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
         let drop_snapshot = input.drop_snapshot.unwrap_or(false);
 
         let mut worktree_removed = false;
+        let mut remove_err: Option<String> = None;
         if let Some(ref wt) = work.live_worktree {
             // Clear live marker first so concurrent keep-N prune cannot race a
             // half-deleted RUNNING tree (RC13 Wave A).
@@ -157,16 +158,10 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
                     worktree_removed = true;
                 }
                 Ok(Err(e)) => {
-                    return Err(xai_tool_runtime::ToolError::custom(
-                        "worktree_remove_failed",
-                        format!("failed to remove live worktree {}: {e}", wt.display()),
-                    ));
+                    remove_err = Some(format!("failed to remove live worktree {}: {e}", wt.display()));
                 }
                 Err(e) => {
-                    return Err(xai_tool_runtime::ToolError::custom(
-                        "worktree_remove_failed",
-                        format!("failed to remove live worktree {}: {e}", wt.display()),
-                    ));
+                    remove_err = Some(format!("failed to remove live worktree {}: {e}", wt.display()));
                 }
             }
         } else {
@@ -199,7 +194,15 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
 
         // RC13 Wave A: always terminal meta — land_status=discarded,
         // worktree_state=cleaned, status not left running, clear worktree_path.
+        // Must run even when remove_dir_all failed so the session is not left
+        // `running` / `land_status=pending` after a discard attempt.
         update_meta_discarded(&work.meta_path, snapshot_dropped).await;
+        if let Some(msg) = remove_err {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "worktree_remove_failed",
+                msg,
+            ));
+        }
 
         let mut message = format!(
             "Discarded subagent `{}`: worktree_removed={worktree_removed}, snapshot_dropped={snapshot_dropped}, \
@@ -289,5 +292,41 @@ mod tests {
         assert_eq!(v["worktree_state"], "cleaned");
         assert_eq!(v["status"], "completed"); // not running — leave terminal status
         assert!(v["snapshot_ref"].is_null());
+    }
+
+    #[tokio::test]
+    async fn discard_updates_meta_even_when_remove_fails() {
+        // Contract: even if remove_dir_all fails, discard still writes
+        // terminal meta before returning worktree_remove_failed.
+        let dir = tempfile::tempdir().unwrap();
+        let meta_path = dir.path().join("meta.json");
+        let initial = serde_json::json!({
+            "subagent_id": "s3",
+            "status": "running",
+            "worktree_path": "/tmp/subagent-s3",
+            "worktree_state": "live",
+            "land_status": "pending",
+        });
+        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&initial).unwrap())
+            .await
+            .unwrap();
+        update_meta_discarded(&meta_path, false).await;
+        let err = xai_tool_runtime::ToolError::custom(
+            "worktree_remove_failed",
+            "failed to remove live worktree /tmp/subagent-s3: simulated",
+        );
+        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::Custom);
+        assert_eq!(
+            err.details
+                .as_ref()
+                .and_then(|v| v.get("code"))
+                .and_then(|v| v.as_str()),
+            Some("worktree_remove_failed")
+        );
+        let raw = tokio::fs::read_to_string(&meta_path).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["land_status"], "discarded");
+        assert_eq!(v["status"], "cancelled");
+        assert!(v["worktree_path"].is_null());
     }
 }

@@ -2037,7 +2037,9 @@ impl SubagentExecutionBudget {
             }),
         };
         let finalize_grace_secs = timeout_secs.map(|timeout| {
-            let default_grace = timeout.saturating_div(6).clamp(30, 120);
+            // timeout/6, clamp 1–120s (no 30s floor — short explicit
+            // timeout_ms must still get a stop-and-summarize window).
+            let default_grace = timeout.saturating_div(6).clamp(1, 120);
             definition
                 .finalize_grace_secs
                 .unwrap_or(default_grace)
@@ -2053,14 +2055,26 @@ impl SubagentExecutionBudget {
             _ => None,
         };
         let max_tool_calls = definition.max_tool_calls.or_else(|| reviewer.then_some(48));
+        // First-progress: fail hung spawns, but do not kill xhigh/unbounded
+        // children that spend minutes in reasoning before the first token.
+        // Scoped allowlist jobs stay fail-fast (60s). NVIDIA catalog stalls
+        // get 3 min. Unbounded GP / xhigh get 12 min (FR xhigh default).
+        let first_progress_timeout_ms = if allowed_paths_scoped {
+            Some(60_000)
+        } else if model_is_nvidia_platform(model_id) {
+            Some(180_000)
+        } else if timeout_secs.is_none() {
+            Some(720_000)
+        } else {
+            Some(60_000)
+        };
         Self {
             max_turns: resolve_subagent_max_turns(definition.max_turns, parent_max_turns),
             max_tool_calls,
             timeout_secs,
             finalize_grace_secs,
             stall_timeout_ms,
-            // Always fail-fast if the child never emits a tool or token.
-            first_progress_timeout_ms: Some(60_000),
+            first_progress_timeout_ms,
         }
     }
 
@@ -2118,9 +2132,6 @@ fn append_execution_budget_prompt(
     definition: &mut xai_grok_agent::config::AgentDefinition,
     budget: SubagentExecutionBudget,
 ) {
-    if budget.is_unbounded() {
-        return;
-    }
     let mut limits = Vec::new();
     if let Some(turns) = budget.max_turns {
         limits.push(format!("{turns} model/tool-use rounds"));
@@ -2135,6 +2146,16 @@ fn append_execution_budget_prompt(
         limits.push(format!(
             "{ms}ms idle stall (pauses while a tool/shell is in flight; wall-clock timeout still applies)"
         ));
+    }
+    // Mention first-progress, including unbounded children — a stuck spawn
+    // still dies after the first-progress window even without a wall-clock cap.
+    if let Some(ms) = budget.first_progress_timeout_ms {
+        limits.push(format!(
+            "{ms}ms first-progress (no tool/token/turn yet; in-flight sampling counts as progress)"
+        ));
+    }
+    if limits.is_empty() {
+        return;
     }
     let reminder = format!(
         "\n\n<execution_budget>\nYour execution budget is {}. Build a hypothesis, inspect only discriminating evidence, and leave enough budget to produce the required final answer. When warned that the budget is nearly exhausted, call no more tools and answer immediately from the evidence already collected.\n</execution_budget>",
@@ -2243,15 +2264,16 @@ fn budget_exhausted_message(
 
 /// Hard budget decision used by the child watchdog.
 ///
-/// In-flight tools (a running `bash` / Blender process) count as activity:
-/// first-progress and stall clocks pause until the dispatch finishes.
-/// Wall-clock `timeout_ms` still fires.
+/// In-flight tools (a running `bash` / Blender process) and in-flight
+/// sampling count as activity: first-progress and stall clocks pause until
+/// the dispatch / sample finishes. Wall-clock `timeout_ms` still fires.
 fn evaluate_hard_budget(
     budget: SubagentExecutionBudget,
     elapsed: std::time::Duration,
     last_progress_age: std::time::Duration,
     tool_call_count: u32,
     in_flight_tool_count: u32,
+    in_flight_sampling: bool,
     no_completed_progress: bool,
 ) -> Option<SubagentBudgetTrigger> {
     if budget
@@ -2260,7 +2282,7 @@ fn evaluate_hard_budget(
     {
         return Some(SubagentBudgetTrigger::Timeout);
     }
-    let idle = in_flight_tool_count == 0;
+    let idle = in_flight_tool_count == 0 && !in_flight_sampling;
     if idle
         && no_completed_progress
         && budget
@@ -2367,17 +2389,20 @@ fn spawn_subagent_budget_monitor(
                 last_sig = sig;
                 last_progress = std::time::Instant::now();
             }
-            if signals.in_flight_tool_count > 0 {
+            if signals.in_flight_tool_count > 0 || signals.in_flight_sampling_count > 0 {
                 last_progress = std::time::Instant::now();
             }
 
-            let no_progress_yet = last_sig == (0, 0, 0) && signals.in_flight_tool_count == 0;
+            let no_progress_yet = last_sig == (0, 0, 0)
+                && signals.in_flight_tool_count == 0
+                && signals.in_flight_sampling_count == 0;
             let hard = evaluate_hard_budget(
                 budget,
                 elapsed,
                 last_progress.elapsed(),
                 signals.tool_call_count,
                 signals.in_flight_tool_count,
+                signals.in_flight_sampling_count > 0,
                 no_progress_yet,
             );
             if let Some(trigger) = hard {
@@ -2658,6 +2683,34 @@ fn live_marker_max_age() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Heartbeat interval for rewriting `.grok-subagent-live` while the child runs.
+pub(crate) const LIVE_MARKER_HEARTBEAT_SECS: u64 = 30;
+
+/// Parsed `.grok-subagent-live` body (`pid=` / `retain=` keys).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LiveWorktreeMarker {
+    pub pid: Option<u32>,
+    pub retain: bool,
+}
+
+/// Parse `pid=/retain=1` tokens from a live-marker file (whitespace-separated).
+pub(crate) fn parse_live_worktree_marker(contents: &str) -> LiveWorktreeMarker {
+    let mut parsed = LiveWorktreeMarker::default();
+    for part in contents.split(|c: char| c.is_whitespace() || c == ',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(v) = part.strip_prefix("pid=") {
+            parsed.pid = v.trim().parse().ok();
+        } else if let Some(v) = part.strip_prefix("retain=") {
+            let v = v.trim();
+            parsed.retain = v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes");
+        }
+    }
+    parsed
+}
+
 /// Default max soft-preserved `subagent-*` trees under a project worktree base.
 ///
 /// Env precedence (first set wins):
@@ -2771,11 +2824,22 @@ pub(crate) fn validate_subagent_worktree_materialized(worktree: &Path) -> Result
 /// Returns `Err` when the marker cannot be written — callers must fail spawn
 /// rather than run without prune protection (audit C4).
 pub(crate) fn write_live_worktree_marker(worktree: &Path) -> Result<(), String> {
+    write_live_worktree_marker_ex(worktree, false)
+}
+
+/// Rewrite the live marker with `retain=1` so keep-N never reclaims this tree
+/// after `retain_worktree` completion.
+pub(crate) fn write_retained_worktree_marker(worktree: &Path) -> Result<(), String> {
+    write_live_worktree_marker_ex(worktree, true)
+}
+
+pub(crate) fn write_live_worktree_marker_ex(worktree: &Path, retain: bool) -> Result<(), String> {
     let marker = worktree.join(LIVE_WORKTREE_MARKER);
+    let retain_flag = if retain { 1 } else { 0 };
     std::fs::write(
         &marker,
         format!(
-            "pid={} ts={}\n",
+            "pid={} ts={} retain={retain_flag}\n",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2791,15 +2855,54 @@ pub(crate) fn write_live_worktree_marker(worktree: &Path) -> Result<(), String> 
     })
 }
 
+/// Heartbeat: rewrite `.grok-subagent-live` ~every 30s until `stop` is cancelled.
+pub(crate) fn spawn_live_marker_heartbeat(worktree: PathBuf, stop: CancellationToken) {
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(LIVE_MARKER_HEARTBEAT_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                _ = interval.tick() => {
+                    if let Err(e) = write_live_worktree_marker(&worktree) {
+                        tracing::warn!(
+                            worktree = %worktree.display(),
+                            error = %e,
+                            "live worktree marker heartbeat write failed"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Clear the live marker so soft-preserved trees become eligible for keep-N prune.
 pub(crate) fn clear_live_worktree_marker(worktree: &Path) {
     let marker = worktree.join(LIVE_WORKTREE_MARKER);
     let _ = std::fs::remove_file(&marker);
 }
 
-/// True when the tree still has a non-stale live marker (do not prune).
+/// True when keep-N must not delete this tree.
+///
+/// Protected when the marker says `retain=1`, the recorded PID is still alive,
+/// or the marker mtime is still fresh (heartbeat ~30s). Unreadable mtime is
+/// treated as protected so a live run is never tombstoned.
 pub(crate) fn is_live_worktree_protected(worktree: &Path) -> bool {
     let marker = worktree.join(LIVE_WORKTREE_MARKER);
+    if let Ok(contents) = std::fs::read_to_string(&marker) {
+        let parsed = parse_live_worktree_marker(&contents);
+        if parsed.retain {
+            return true;
+        }
+        if parsed
+            .pid
+            .is_some_and(crate::util::is_process_alive)
+        {
+            return true;
+        }
+    }
     let Ok(meta) = std::fs::metadata(&marker) else {
         return false;
     };
@@ -3532,6 +3635,11 @@ mod progress_publisher_tests {
 /// For the GCS-persisted artifact (`subagent.json`), see [`SubagentSessionMetadata`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SubagentMeta {
+    /// Wire schema for land/diff fail-closed allowlist. v1 always writes
+    /// `allowed_paths` (empty vec = unrestricted). Missing `allowed_paths` on
+    /// v1 is refuse, not unrestricted.
+    #[serde(default)]
+    pub schema_version: u32,
     pub subagent_id: String,
     pub parent_session_id: String,
     pub child_session_id: String,
@@ -3627,6 +3735,12 @@ pub(crate) struct SubagentMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
 }
+
+impl SubagentMeta {
+    /// Current on-disk `meta.json` schema (land fail-closed for missing allowlist).
+    pub(crate) const SCHEMA_VERSION: u32 = 1;
+}
+
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 ///
 /// Contains the full subagent identity, provenance, and execution state.

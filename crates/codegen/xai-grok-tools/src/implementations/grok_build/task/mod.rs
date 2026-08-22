@@ -1952,7 +1952,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_preserves_tools_without_kind() {
+    fn filter_read_only_drops_tools_without_kind() {
         use crate::registry::types::ToolServerConfig;
         use crate::types::tool::ToolKind;
         let mut config = ToolServerConfig {
@@ -1966,9 +1966,39 @@ mod tests {
         let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&"read_file"));
         assert!(
-            ids.contains(&"mcp_custom_tool"),
-            "tools without kind preserved"
+            !ids.contains(&"mcp_custom_tool"),
+            "ReadOnly drops kind=None; mutating MCP is gated at registration via readOnlyHint"
         );
+    }
+
+    #[test]
+    fn filter_read_write_preserves_tools_without_kind() {
+        use crate::registry::types::ToolServerConfig;
+        use crate::types::tool::ToolKind;
+        let mut config = ToolServerConfig {
+            tools: vec![
+                tc("read_file", ToolKind::Read),
+                crate::registry::types::ToolConfig::from_id("mcp_custom_tool"),
+            ],
+            behavior_preset: None,
+        };
+        SubagentCapabilityMode::ReadWrite.filter_tool_config(&mut config);
+        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&"read_file"));
+        assert!(
+            ids.contains(&"mcp_custom_tool"),
+            "non-ReadOnly modes keep kind=None so MCP/custom tools remain"
+        );
+    }
+
+    #[test]
+    fn skip_mutating_mcp_on_readonly_fail_closed() {
+        assert!(skip_mutating_mcp_on_readonly(None, true));
+        assert!(skip_mutating_mcp_on_readonly(Some(false), true));
+        assert!(!skip_mutating_mcp_on_readonly(Some(true), true));
+        assert!(!skip_mutating_mcp_on_readonly(None, false));
+        assert!(!skip_mutating_mcp_on_readonly(Some(false), false));
+        assert!(!skip_mutating_mcp_on_readonly(Some(true), false));
     }
 
     // ── resume_from tests ────────────────────────────────────────────

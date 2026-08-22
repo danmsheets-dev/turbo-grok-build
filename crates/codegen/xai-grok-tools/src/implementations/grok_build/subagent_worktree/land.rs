@@ -229,7 +229,8 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
             && work.snapshot_ref.is_some();
         if prefer_snapshot {
             if let Some(ref snap) = work.snapshot_ref {
-                return land_snapshot_ref(&work, snap, mode, only_missing, json_union_by).await;
+                return land_snapshot_ref(&work, snap, mode, only_missing, json_union_by, force)
+                    .await;
             }
         }
 
@@ -264,7 +265,11 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
             // Pre-check allowlist against worktree change set before any apply.
             // Fail closed when an allowlist is set and path collection fails.
             match collect_live_worktree_paths(wt, &work.parent_git_root).await {
-                Ok(paths) => refuse_land_outside_allowlist(&work.meta, &paths)?,
+                Ok(paths) => {
+                    let n = filter_harness_land_paths(&paths).len() as u32;
+                    super::land_size_guard(Some(n), force, super::DEFAULT_LAND_MAX_FILES)?;
+                    refuse_land_outside_allowlist(&work.meta, &paths)?;
+                }
                 Err(e) if effective_allowed_paths(&work.meta).is_some() => {
                     return Err(xai_tool_runtime::ToolError::custom(
                         "land_allowlist_check_failed",
@@ -307,18 +312,25 @@ impl xai_tool_runtime::Tool for LandSubagentTool {
                 }
             }
             // In-process mirror of apply_worktree Merge/Overwrite.
-            return land_live_worktree_inprocess(&work, wt, mode, only_missing, json_union_by)
-                .await;
+            return land_live_worktree_inprocess(
+                &work,
+                wt,
+                mode,
+                only_missing,
+                json_union_by,
+                force,
+            )
+            .await;
         }
 
         // 2) Snapshot ref
         if let Some(ref snap) = work.snapshot_ref {
-            return land_snapshot_ref(&work, snap, mode, only_missing, json_union_by).await;
+            return land_snapshot_ref(&work, snap, mode, only_missing, json_union_by, force).await;
         }
 
         // 3) Patch
         if let Some(ref patch) = work.patch_path {
-            return land_patch(&work, patch, mode).await;
+            return land_patch(&work, patch, mode, force).await;
         }
 
         Err(xai_tool_runtime::ToolError::custom(
@@ -426,6 +438,7 @@ async fn land_live_worktree_inprocess(
     mode: LandMode,
     only_missing: bool,
     json_union_by: Option<&str>,
+    force: bool,
 ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
     let parent = &work.parent_git_root;
     let parent_head = git_capture(parent, &["rev-parse", "HEAD"])
@@ -452,6 +465,11 @@ async fn land_live_worktree_inprocess(
     paths.sort();
     paths.dedup();
     paths = filter_harness_land_paths(&paths);
+    super::land_size_guard(
+        Some(paths.len() as u32),
+        force,
+        super::DEFAULT_LAND_MAX_FILES,
+    )?;
 
     if only_missing {
         paths.retain(|p| !parent.join(p).exists());
@@ -584,6 +602,7 @@ async fn land_snapshot_ref(
     mode: LandMode,
     only_missing: bool,
     json_union_by: Option<&str>,
+    force: bool,
 ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
     let parent = &work.parent_git_root;
     git_capture(parent, &["rev-parse", "--verify", snap])
@@ -637,6 +656,11 @@ async fn land_snapshot_ref(
             xai_tool_runtime::ToolError::custom("git_error", format!("diff name-status: {e}"))
         })?;
     let mut paths = filter_harness_land_paths(&parse_name_status(&name_status));
+    super::land_size_guard(
+        Some(paths.len() as u32),
+        force,
+        super::DEFAULT_LAND_MAX_FILES,
+    )?;
     if only_missing {
         paths.retain(|p| !parent.join(p).exists());
     }
@@ -774,6 +798,7 @@ async fn land_patch(
     work: &super::ResolvedSubagentWork,
     patch: &std::path::Path,
     mode: LandMode,
+    force: bool,
 ) -> Result<LandSubagentOutput, xai_tool_runtime::ToolError> {
     let parent = &work.parent_git_root;
     let patch_str = patch.to_string_lossy().into_owned();
@@ -783,6 +808,8 @@ async fn land_patch(
     let patch_body = tokio::fs::read_to_string(patch).await.unwrap_or_default();
     let patch_files = super::diff::files_from_patch(&patch_body);
     refuse_patch_paths_in_repo(&patch_files)?;
+    let payload_n = filter_harness_land_paths(&patch_files).len() as u32;
+    super::land_size_guard(Some(payload_n), force, super::DEFAULT_LAND_MAX_FILES)?;
     refuse_land_outside_allowlist(&work.meta, &patch_files)?;
 
     // Always check first so we can fail closed without partial apply.

@@ -4,8 +4,9 @@ pub use xai_grok_mcp::servers::{
     AcpServerEntry, HttpConfig, MCP_TOOL_NAME_DELIMITER, McpClient, McpClientTimeoutOverrides,
     McpConfigDiff, McpError, McpInitStrategy, McpMetaConfigMap, McpServerMetaConfig, McpServerName,
     McpService, McpSpawnCtx, McpState, McpTool, McpToolRegistration, OauthInteractivity,
-    SharedMcpPool, make_qualified_mcp_tool_name, mcp_server_name, mcp_target_str,
-    mcp_transport_str, parse_mcp_meta_config, parse_mcp_tool_name, sanitize_descriptor_segment,
+    SharedMcpPool, make_qualified_mcp_tool_name, mcp_read_only_hint_from_annotations,
+    mcp_read_only_hint_from_meta, mcp_server_name, mcp_target_str, mcp_transport_str,
+    parse_mcp_meta_config, parse_mcp_tool_name, sanitize_descriptor_segment,
     sanitize_mcp_name_segment, validate_tool_name,
 };
 

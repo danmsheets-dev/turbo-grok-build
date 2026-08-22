@@ -293,6 +293,12 @@ pub struct SessionSignals {
     /// cancelled at the 180s idle limit.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub in_flight_tool_count: u32,
+    /// Model sampling currently in progress (submit/collect not yet finished).
+    ///
+    /// Stall/idle watchdogs treat a non-zero count as activity so a child
+    /// blocked on a long sample is not cancelled at the 180s idle limit.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub in_flight_sampling_count: u32,
     /// Distinct tools that have been used in this session
     #[serde(default)]
     pub tools_used: Vec<String>,
@@ -487,6 +493,10 @@ pub enum SignalEvent {
     BeginInFlightTool,
     /// A tool dispatch finished (success, failure, or cancel).
     EndInFlightTool,
+    /// A sampler turn started; increment in-flight sampling count (stall activity).
+    BeginInFlightSampling,
+    /// A sampler turn finished (response, compact/resubmit, or error).
+    EndInFlightSampling,
     /// Record a tool call with the tool name
     RecordToolCall(String),
     /// Record a tool success with the tool name
@@ -677,6 +687,17 @@ impl Drop for InFlightToolGuard {
     }
 }
 
+/// Decrements [`SessionSignals::in_flight_sampling_count`] on drop.
+pub struct InFlightSamplingGuard {
+    handle: SessionSignalsHandle,
+}
+
+impl Drop for InFlightSamplingGuard {
+    fn drop(&mut self) {
+        let _ = self.handle.tx.send(SignalEvent::EndInFlightSampling);
+    }
+}
+
 impl SessionSignalsHandle {
     // === Turn/Message Methods ===
 
@@ -720,6 +741,25 @@ impl SessionSignalsHandle {
     /// Decrement in-flight count (backend tools that do not hold a guard).
     pub fn end_in_flight_tool(&self) {
         let _ = self.tx.send(SignalEvent::EndInFlightTool);
+    }
+
+    /// Increment in-flight sampling count without a drop guard.
+    pub fn mark_sampling_in_flight(&self) {
+        let _ = self.tx.send(SignalEvent::BeginInFlightSampling);
+    }
+
+    /// Mark sampling as in-flight. Drop the guard when the sample finishes
+    /// (including cancel/panic unwind of the future).
+    pub fn begin_in_flight_sampling(&self) -> InFlightSamplingGuard {
+        self.mark_sampling_in_flight();
+        InFlightSamplingGuard {
+            handle: self.clone(),
+        }
+    }
+
+    /// Decrement in-flight sampling count (callers that do not hold a guard).
+    pub fn end_in_flight_sampling(&self) {
+        let _ = self.tx.send(SignalEvent::EndInFlightSampling);
     }
 
     /// Record a tool success.
@@ -1306,6 +1346,14 @@ impl SessionSignalsActor {
                 SignalEvent::EndInFlightTool => {
                     self.signals.in_flight_tool_count =
                         self.signals.in_flight_tool_count.saturating_sub(1);
+                }
+                SignalEvent::BeginInFlightSampling => {
+                    self.signals.in_flight_sampling_count =
+                        self.signals.in_flight_sampling_count.saturating_add(1);
+                }
+                SignalEvent::EndInFlightSampling => {
+                    self.signals.in_flight_sampling_count =
+                        self.signals.in_flight_sampling_count.saturating_sub(1);
                 }
                 SignalEvent::RecordToolCall(tool_name) => {
                     self.signals.tool_call_count += 1;
@@ -2012,6 +2060,34 @@ mod tests {
         handle.end_in_flight_tool(); // saturating
         let snapshot = handle.snapshot().await.unwrap();
         assert_eq!(snapshot.in_flight_tool_count, 0);
+
+        handle.shutdown();
+        actor_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_flight_sampling_guard_increments_and_decrements() {
+        let (handle, actor) = SessionSignalsActor::new();
+        let actor_handle = tokio::spawn(actor.run());
+
+        {
+            let _g1 = handle.begin_in_flight_sampling();
+            let _g2 = handle.begin_in_flight_sampling();
+            let snapshot = handle.snapshot().await.unwrap();
+            assert_eq!(snapshot.in_flight_sampling_count, 2);
+        }
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.in_flight_sampling_count, 0);
+
+        handle.mark_sampling_in_flight();
+        handle.mark_sampling_in_flight();
+        handle.end_in_flight_sampling();
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.in_flight_sampling_count, 1);
+        handle.end_in_flight_sampling();
+        handle.end_in_flight_sampling(); // saturating
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.in_flight_sampling_count, 0);
 
         handle.shutdown();
         actor_handle.await.unwrap();

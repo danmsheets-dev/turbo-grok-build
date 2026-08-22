@@ -526,8 +526,7 @@ impl AllowedPathsViolation {
              Re-spawn with allowed_paths that includes this prefix, e.g. \
              allowed_paths=[..., \"{hint}\"], or omit allowed_paths for \
              unrestricted writes (isolation=none parent files like \
-             .gitattributes need an explicit prefix unless they are \
-             root metadata).",
+             .gitattributes / .gitignore need an explicit allowlist prefix).",
             self.path, self.allowed
         )
     }
@@ -548,16 +547,6 @@ pub fn enforce_allowed_write_paths(
     allowed: &[String],
 ) -> Result<(), AllowedPathsViolation> {
     if allowed.is_empty() {
-        return Ok(());
-    }
-    // Root metadata pins (eol=lf, ignore) are always writable even when
-    // allowed_paths is crate-scoped — Task 5 / include_str! assets.
-    if let Some(rel) = resolved
-        .strip_prefix(cwd)
-        .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        && is_root_metadata_rel(&rel)
-    {
         return Ok(());
     }
     let rel: PathBuf = match resolved.strip_prefix(cwd) {
@@ -586,9 +575,6 @@ pub fn enforce_allowed_write_paths(
             allowed: allowed.to_vec(),
         });
     };
-    if is_root_metadata_rel(&norm) {
-        return Ok(());
-    }
     let allowed_ok = allowed.iter().any(|prefix| {
         let Some(p) = normalize_rel_allowlist_path(prefix) else {
             return false;
@@ -2552,13 +2538,16 @@ mod tests {
     }
 
     #[test]
-    fn enforce_allowed_write_paths_allows_root_gitattributes() {
+    fn enforce_allowed_write_paths_requires_gitattributes_on_allowlist() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         let ga = cwd.join(".gitattributes");
-        super::enforce_allowed_write_paths(cwd, &ga, &["crates/foo/".into()]).unwrap();
+        let err = super::enforce_allowed_write_paths(cwd, &ga, &["crates/foo/".into()]).unwrap_err();
+        assert!(err.message().contains("Re-spawn with allowed_paths"));
         let gi = cwd.join(".gitignore");
-        super::enforce_allowed_write_paths(cwd, &gi, &["crates/foo/".into()]).unwrap();
+        assert!(super::enforce_allowed_write_paths(cwd, &gi, &["crates/foo/".into()]).is_err());
+        super::enforce_allowed_write_paths(cwd, &ga, &[".gitattributes".into()]).unwrap();
+        super::enforce_allowed_write_paths(cwd, &gi, &[".gitignore".into()]).unwrap();
         let nested = cwd.join("crates").join(".gitattributes");
         let err = super::enforce_allowed_write_paths(cwd, &nested, &["docs".into()]).unwrap_err();
         assert!(err.message().contains("Re-spawn with allowed_paths"));

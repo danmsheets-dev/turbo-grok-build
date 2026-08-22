@@ -49,6 +49,10 @@ pub struct SubagentMetaView {
     /// When non-empty, land refuses paths outside these prefixes.
     #[serde(default)]
     pub allowed_paths: Option<Vec<String>>,
+    /// On-disk meta schema. v1 always writes `allowed_paths`; missing
+    /// `allowed_paths` on v1 is fail-closed at land (not unrestricted).
+    #[serde(default)]
+    pub schema_version: u32,
 }
 
 /// Default max files for land without `force` (dirty-tree mega-patch guard).
@@ -253,6 +257,7 @@ fn empty_meta_view(subagent_id: &str) -> SubagentMetaView {
         diffstat: None,
         changed_paths: None,
         allowed_paths: None,
+        schema_version: 0,
     }
 }
 
@@ -896,9 +901,6 @@ pub fn path_is_allowed(path: &str, allowed: &[String]) -> bool {
     let Some(norm) = normalize_allowlist_path(path) else {
         return false;
     };
-    if crate::types::resources::is_root_metadata_rel(&norm) {
-        return true;
-    }
     for pref in allowed {
         let Some(p) = normalize_allowlist_path(pref) else {
             continue;
@@ -944,10 +946,20 @@ pub fn partition_by_allowlist(paths: &[String], allowed: &[String]) -> (Vec<Stri
 
 /// If meta has a non-empty allowlist and `paths` contains anything outside it,
 /// return a clear land-refusal error. Otherwise `Ok(())`.
+///
+/// v1 meta (`schema_version >= 1`) that is missing `allowed_paths` fail-closes
+/// rather than treating the omission as unrestricted.
 pub fn refuse_land_outside_allowlist(
     meta: &SubagentMetaView,
     paths: &[String],
 ) -> Result<(), xai_tool_runtime::ToolError> {
+    if meta.schema_version >= 1 && meta.allowed_paths.is_none() {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "path_allowlist_violation",
+            "land refused: v1 subagent meta is missing allowed_paths (fail-closed). \
+             Re-spawn so meta.json records allowed_paths (empty vec = unrestricted).",
+        ));
+    }
     let Some(allowed) = effective_allowed_paths(meta) else {
         return Ok(());
     };
@@ -1057,6 +1069,7 @@ mod manifest_merge_tests {
             diffstat: None,
             changed_paths: None,
             allowed_paths: Some(vec!["assets/manifest/".into(), "tools/blender/".into()]),
+            schema_version: 1,
         };
         let paths = vec![
             "assets/manifest/cliff.json".into(),
@@ -1118,9 +1131,17 @@ mod allowlist_tests {
         assert!(!path_is_allowed("crates/foobar/x.rs", &allowed));
         assert!(!path_is_allowed("docs/a.md", &allowed));
         assert!(
-            path_is_allowed(".gitattributes", &allowed),
-            "root .gitattributes is always landable"
+            !path_is_allowed(".gitattributes", &allowed),
+            "root .gitattributes is not an implicit allowlist bypass"
         );
+        assert!(
+            !path_is_allowed(".gitignore", &allowed),
+            "root .gitignore is not an implicit allowlist bypass"
+        );
+        assert!(path_is_allowed(
+            ".gitattributes",
+            &[".gitattributes".to_string()]
+        ));
     }
 
     #[test]
@@ -1155,6 +1176,7 @@ mod allowlist_tests {
             diffstat: None,
             changed_paths: None,
             allowed_paths: Some(vec!["crates/a/".into(), "docs".into()]),
+            schema_version: 1,
         };
         let paths = vec![
             "crates/a/mod.rs".into(),
@@ -1169,10 +1191,43 @@ mod allowlist_tests {
         assert!(refuse_land_outside_allowlist(&meta, &ok).is_ok());
 
         let unrestricted = SubagentMetaView {
-            allowed_paths: None,
+            allowed_paths: Some(vec![]),
             ..meta.clone()
         };
         assert!(refuse_land_outside_allowlist(&unrestricted, &paths).is_ok());
+
+        let v1_missing = SubagentMetaView {
+            allowed_paths: None,
+            schema_version: 1,
+            ..meta.clone()
+        };
+        assert!(
+            refuse_land_outside_allowlist(&v1_missing, &paths).is_err(),
+            "v1 missing allowed_paths must fail-closed"
+        );
+
+        let legacy_missing = SubagentMetaView {
+            allowed_paths: None,
+            schema_version: 0,
+            ..meta.clone()
+        };
+        assert!(refuse_land_outside_allowlist(&legacy_missing, &paths).is_ok());
+    }
+
+    #[test]
+    fn land_size_guard_after_path_discovery() {
+        assert!(land_size_guard(Some(1), false, DEFAULT_LAND_MAX_FILES).is_ok());
+        assert!(land_size_guard(Some(DEFAULT_LAND_MAX_FILES), false, DEFAULT_LAND_MAX_FILES).is_ok());
+        assert!(land_size_guard(Some(DEFAULT_LAND_MAX_FILES + 1), false, DEFAULT_LAND_MAX_FILES).is_err());
+        assert!(land_size_guard(Some(DEFAULT_LAND_MAX_FILES + 1), true, DEFAULT_LAND_MAX_FILES).is_ok());
+        let n = filter_harness_land_paths(&[
+            "src/lib.rs".into(),
+            ".grok-subagent-live".into(),
+            ".grok/x".into(),
+        ])
+        .len() as u32;
+        assert_eq!(n, 1);
+        assert!(land_size_guard(Some(n), false, DEFAULT_LAND_MAX_FILES).is_ok());
     }
 }
 

@@ -233,6 +233,17 @@ pub fn is_valid_resume_id(s: &str) -> bool {
     is_not_sentinel(trimmed) && xai_tool_types::is_safe_task_id(trimmed)
 }
 
+/// MCP spec: `annotations.readOnlyHint` defaults to **false** (mutating).
+/// ReadOnly sessions skip MCP tools that are not explicitly annotated
+/// `readOnlyHint: true`. Missing/unknown hint is fail-closed (treated as
+/// mutating). The live gate is MCP registration in the shell session actor.
+pub fn skip_mutating_mcp_on_readonly(
+    read_only_hint: Option<bool>,
+    readonly_session: bool,
+) -> bool {
+    readonly_session && !read_only_hint.unwrap_or(false)
+}
+
 /// Extension methods for [`SubagentCapabilityMode`] that depend on this crate's
 /// tool-config internals (`ToolKind` / `ToolServerConfig`).
 pub trait SubagentCapabilityModeExt {
@@ -240,8 +251,9 @@ pub trait SubagentCapabilityModeExt {
     ///
     /// Uses the `kind` field on each `ToolConfig`, populated automatically
     /// by `for_tool::<T>()` / `From<&T: Tool>` at toolset construction time.
-    /// Tools without a `kind` (e.g. MCP/custom tools via
-    /// `ToolConfig::from_id()`) are preserved unconditionally.
+    /// ReadOnly drops `kind: None` (unknown MCP/custom via `from_id()`).
+    /// Mutating MCP is gated separately via `readOnlyHint` at registration
+    /// ([`skip_mutating_mcp_on_readonly`]). Other modes keep unknown kinds.
     fn filter_tool_config(self, config: &mut crate::registry::types::ToolServerConfig);
 
     /// Return the set of `ToolKind`s allowed under this capability mode.
@@ -289,9 +301,13 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
             return;
         }
         let allowed = self.allowed_tool_kinds();
+        let drop_unknown = self == Self::ReadOnly;
         config.tools.retain(|tc| match tc.kind {
             Some(k) => allowed.contains(&k),
-            None => true,
+            // ReadOnly: drop kind=None (MCP/custom) — mutating MCP is gated
+            // separately via readOnlyHint at registration. Other modes keep
+            // unknown kinds so MCP/custom tools remain available.
+            None => !drop_unknown,
         });
         prune_orphaned_background_task_tools(config);
     }

@@ -62,6 +62,41 @@ pub(super) fn task_model_override_error(
 /// `H:\…\target`) mixes CMake's worktree path with MSBuild FileTracker tlogs
 /// under the parent target and fails FTK1011 on Windows. Always overwrite —
 /// the child must not share the parent's target.
+/// Verbatim fork: keep parent ToolSpecs that still exist on the child's
+/// capability-clamped toolset. Drop MCP (`server__tool`) under ReadOnly so
+/// a read-only child cannot see mutating parent MCP tools in the prefix.
+pub(super) fn intersect_verbatim_fork_tools(
+    parent: Option<Vec<xai_grok_sampling_types::ToolSpec>>,
+    child_config: &xai_grok_tools::registry::types::ToolServerConfig,
+    capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+) -> Option<Vec<xai_grok_sampling_types::ToolSpec>> {
+    let parent = parent?;
+    let drop_mcp = matches!(
+        capability_mode,
+        Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+    );
+    let mut names = std::collections::HashSet::new();
+    for tc in &child_config.tools {
+        names.insert(tc.id.clone());
+        if let Some(n) = tc.id.rsplit(':').next() {
+            names.insert(n.to_string());
+        }
+        if let Some(n) = &tc.name_override {
+            names.insert(n.clone());
+        }
+    }
+    let out: Vec<_> = parent
+        .into_iter()
+        .filter(|spec| {
+            if drop_mcp && spec.name.contains(crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER) {
+                return false;
+            }
+            names.contains(&spec.name)
+        })
+        .collect();
+    Some(out)
+}
+
 pub(super) fn inject_worktree_cargo_env(
     env: &mut std::collections::HashMap<String, String>,
     worktree: &std::path::Path,
@@ -446,10 +481,17 @@ pub(crate) async fn run_shell_child(
                                 tracing::warn!(
                                     subagent_id = %request.id,
                                     error = %e,
-                                    "live worktree marker write failed; prune may reclaim tree"
+                                    "live worktree marker write failed; shared-workspace fallback (do not use worktree as CWD)"
                                 );
+                                isolation_fallback = true;
+                                None
+                            } else {
+                                spawn_live_marker_heartbeat(
+                                    dest.to_path_buf(),
+                                    cancel_token.clone(),
+                                );
+                                Some(dest.to_path_buf())
                             }
-                            Some(dest.to_path_buf())
                         }
                     }
                     ResumeWorktreeAction::Rehydrate => {
@@ -498,10 +540,17 @@ pub(crate) async fn run_shell_child(
                                         tracing::warn!(
                                             subagent_id = %request.id,
                                             error = %e,
-                                            "live worktree marker write failed; prune may reclaim tree"
+                                            "live worktree marker write failed; shared-workspace fallback (do not use worktree as CWD)"
                                         );
+                                        isolation_fallback = true;
+                                        None
+                                    } else {
+                                        spawn_live_marker_heartbeat(
+                                            path.clone(),
+                                            cancel_token.clone(),
+                                        );
+                                        Some(path)
                                     }
-                                    Some(path)
                                 }
                             }
                             Err(e) => {
@@ -755,10 +804,21 @@ pub(crate) async fn run_shell_child(
                         tracing::warn!(
                             subagent_id = %request.id,
                             error = %e,
-                            "live worktree marker write failed; prune may reclaim tree"
+                            isolation_fallback = true,
+                            "live worktree marker write failed; shared-workspace fallback (do not use worktree as CWD)"
                         );
+                        isolation_fallback = true;
+                        let wt = report.worktree_path.clone();
+                        let _ = xai_fast_worktree::remove_worktree(&wt);
+                        let _ = std::fs::remove_dir_all(&wt);
+                        None
+                    } else {
+                        spawn_live_marker_heartbeat(
+                            report.worktree_path.clone(),
+                            cancel_token.clone(),
+                        );
+                        Some(report.worktree_path)
                     }
-                    Some(report.worktree_path)
                 }
             }
             Some(Ok(Err(e))) => {
@@ -1179,6 +1239,7 @@ pub(crate) async fn run_shell_child(
         InitialContextSource::Resumed => "resumed",
     };
     let subagent_meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: subagent_id.clone(),
         parent_session_id: ctx.parent_session_id.clone(),
         child_session_id: child_session_id.0.to_string(),
@@ -1223,11 +1284,12 @@ pub(crate) async fn run_shell_child(
         diffstat: None,
         changed_paths: None,
         land_status: None,
+        // v1 always writes allowed_paths (Some). Empty vec = unrestricted.
         // Inherit source allowlist on resume when the caller omits one so land
         // continues to enforce the original spawn boundary (RC11 harness).
         // Fail closed: non-empty request that normalizes to nothing is rejected
         // later (before SetAllowedWritePaths); store only valid prefixes.
-        allowed_paths: {
+        allowed_paths: Some({
             let from_request = request.allowed_paths.as_ref().filter(|p| !p.is_empty());
             if let Some(raw) = from_request {
                 let norm: Vec<String> = raw
@@ -1240,20 +1302,23 @@ pub(crate) async fn run_shell_child(
                     .collect();
                 if norm.is_empty() {
                     // Keep raw so meta reflects the caller's intent; spawn aborts below.
-                    Some(raw.clone())
+                    raw.clone()
                 } else {
-                    Some(norm)
+                    norm
                 }
             } else {
-                resume_source.as_ref().and_then(|src| {
-                    durable_source_allowed_paths(
-                        &src.subagent_id,
-                        &ctx.parent_session_id,
-                        &ctx.parent_cwd,
-                    )
-                })
+                resume_source
+                    .as_ref()
+                    .and_then(|src| {
+                        durable_source_allowed_paths(
+                            &src.subagent_id,
+                            &ctx.parent_session_id,
+                            &ctx.parent_cwd,
+                        )
+                    })
+                    .unwrap_or_default()
             }
-        },
+        }),
         worktree_seed: worktree_seed.map(|s| s.to_string()).or_else(|| {
             // Resume: inherit source seed from durable meta when present.
             resume_source.as_ref().and_then(|src| {
@@ -1736,6 +1801,15 @@ pub(crate) async fn run_shell_child(
             agent_name: Some(definition.name.clone()),
             reasoning_effort: Some(effective_sampling_config.reasoning_effort),
         });
+    let forked_tool_override = if verbatim_mirror_fork && !request.owner.is_workflow() {
+        intersect_verbatim_fork_tools(
+            std::mem::take(&mut ctx.parent_tool_definitions),
+            &definition.tool_config,
+            effective_runtime.capability_mode,
+        )
+    } else {
+        None
+    };
     let spawn_result = session::spawn_session_on_thread(
         child_session_info,
         gateway.clone(),
@@ -1890,11 +1964,7 @@ pub(crate) async fn run_shell_child(
             ctx.parent_scheduler_handle.clone()
         },
         subagent_max_turns,
-        if verbatim_mirror_fork && !request.owner.is_workflow() {
-            std::mem::take(&mut ctx.parent_tool_definitions)
-        } else {
-            None
-        },
+        forked_tool_override,
         false,
     )
     .await;
@@ -2742,9 +2812,22 @@ pub(crate) async fn run_shell_child(
                         result.baseline_ref = baseline_for_export.clone();
                         if keep_live {
                             result.worktree_state = Some("preserved".to_string());
-                            // Child finished: drop live marker so keep-N may reclaim
-                            // this tree on later spawns (never while running).
-                            clear_live_worktree_marker(wt_path);
+                            if retain_worktree {
+                                // Keep-N must never reclaim retain_worktree trees.
+                                // Rewrite retain=1 (do not clear).
+                                if let Err(e) = write_retained_worktree_marker(wt_path) {
+                                    tracing::warn!(
+                                        subagent_id = %request.id,
+                                        worktree_path = %wt_path.display(),
+                                        error = %e,
+                                        "failed to rewrite retain=1 live marker; keep-N may reclaim"
+                                    );
+                                }
+                            } else {
+                                // Soft-preserve: drop live marker so keep-N may reclaim
+                                // this tree on later spawns (never while running).
+                                clear_live_worktree_marker(wt_path);
+                            }
                             tracing::info!(
                                 subagent_id = %request.id,
                                 worktree_path = %wt_path.display(),

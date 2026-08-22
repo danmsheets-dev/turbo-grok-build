@@ -74,9 +74,9 @@ pub struct ToolConfig {
     /// enforcement to filter tools without a hardcoded ID mapping.
     ///
     /// `None` means the tool's kind is unknown (e.g. MCP/custom tools
-    /// created via `ToolConfig::from_id()`). Capability-mode filtering
-    /// preserves tools with `kind: None` — this is intentional to avoid
-    /// breaking extensibility.
+    /// created via `ToolConfig::from_id()`). ReadOnly drops `kind: None`
+    /// (mutating MCP is gated separately via `readOnlyHint` at registration).
+    /// Other capability modes keep unknown kinds so MCP/custom tools remain.
     ///
     /// `ToolKind` is `#[serde(other)]`, so an unknown deserialized `kind` becomes
     /// `Some(Other)` (dropped by restrictive modes) rather than an error — not a
@@ -128,8 +128,9 @@ impl ToolConfig {
     /// Build a `ToolConfig` from a string id (no associated Rust type).
     ///
     /// Use this for MCP/custom tools or anywhere the id is only known at
-    /// runtime. `kind` is left as `None`; capability-mode filtering then
-    /// preserves the tool unconditionally.
+    /// runtime. `kind` is left as `None`. ReadOnly drops unknown kinds;
+    /// other modes keep them. Mutating MCP is gated at registration via
+    /// `readOnlyHint`.
     pub fn from_id(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),

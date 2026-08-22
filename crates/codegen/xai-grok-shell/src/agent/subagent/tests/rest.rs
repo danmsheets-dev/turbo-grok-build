@@ -325,6 +325,7 @@ fn compaction_no_prefix_passes_through() {
 #[test]
 fn resumed_from_field_in_meta_roundtrips() {
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-resumed".into(),
         parent_session_id: "parent".into(),
         child_session_id: "child".into(),
@@ -383,6 +384,7 @@ fn resumed_from_field_in_meta_roundtrips() {
 #[test]
 fn resumed_from_none_not_serialized_in_meta() {
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-fresh".into(),
         parent_session_id: "p".into(),
         child_session_id: "c".into(),
@@ -441,6 +443,7 @@ fn backward_compat_meta_without_resumed_from() {
 #[test]
 fn snapshot_ref_field_in_meta_roundtrips() {
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-snap".into(),
         parent_session_id: "parent".into(),
         child_session_id: "child".into(),
@@ -502,6 +505,7 @@ fn backward_compat_meta_without_snapshot_ref() {
 /// Minimal completed-status meta for the snapshot-ref persistence tests.
 fn snapshot_test_meta(id: &str) -> SubagentMeta {
     SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: id.into(),
         parent_session_id: "session-A".into(),
         child_session_id: format!("child-{id}"),
@@ -783,6 +787,7 @@ async fn completion_snapshot_sequence_persists_ref_then_removes_worktree() {
 #[test]
 fn subagent_session_metadata_roundtrip() {
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-1".into(),
         parent_session_id: "parent-1".into(),
         child_session_id: "child-1".into(),
@@ -854,6 +859,7 @@ fn subagent_session_metadata_roundtrip() {
 #[test]
 fn subagent_session_metadata_non_forked() {
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-2".into(),
         parent_session_id: "parent-2".into(),
         child_session_id: "child-2".into(),
@@ -929,6 +935,7 @@ fn subagent_session_metadata_backward_compat_deserialization() {
 #[test]
 fn upload_lifecycle_spawn_then_completion_preserves_fields() {
     let spawn_meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-lifecycle".into(),
         parent_session_id: "parent-1".into(),
         child_session_id: "child-1".into(),
@@ -1023,6 +1030,7 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
 #[test]
 fn upload_lifecycle_failure_preserves_error() {
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-fail".into(),
         parent_session_id: "p".into(),
         child_session_id: "c".into(),
@@ -1082,6 +1090,7 @@ fn initial_context_source_resumed_variant() {
 #[test]
 fn session_metadata_session_kind_for_resumed() {
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-resume".into(),
         parent_session_id: "p".into(),
         child_session_id: "c".into(),
@@ -1476,6 +1485,7 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         .join(uuid::Uuid::now_v7().to_string());
     let _ = std::fs::create_dir_all(&dir);
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-dur".into(),
         parent_session_id: "parent-dur".into(),
         child_session_id: "child-dur".into(),
@@ -1526,6 +1536,7 @@ fn durable_fallback_rejects_running_status() {
     let parent_dir = dir.join("subagents").join("sa-running");
     let _ = std::fs::create_dir_all(&parent_dir);
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-running".into(),
         parent_session_id: "parent-x".into(),
         child_session_id: "child-running".into(),
@@ -1619,6 +1630,7 @@ fn drain_cancelled_finish_broadcasts(
 /// A `running` meta with no terminal counterpart, as left by a dead process.
 fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
     SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: id.into(),
         parent_session_id: parent_session_id.into(),
         child_session_id: format!("child-{id}"),
@@ -1910,6 +1922,7 @@ fn durable_meta_roundtrips_effective_model_id() {
         .join(uuid::Uuid::now_v7().to_string());
     let _ = std::fs::create_dir_all(&dir);
     let meta = SubagentMeta {
+        schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: "sa-model".into(),
         parent_session_id: "parent".into(),
         child_session_id: "child".into(),

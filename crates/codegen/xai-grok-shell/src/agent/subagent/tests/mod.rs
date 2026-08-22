@@ -76,7 +76,7 @@ fn unbounded_agent_does_not_gain_runtime_limits() {
     let budget = SubagentExecutionBudget::resolve(& definition, None);
     assert!(budget.is_unbounded());
     assert!(budget.wire().is_none());
-    assert_eq!(budget.first_progress_timeout_ms, Some(60_000));
+    assert_eq!(budget.first_progress_timeout_ms, Some(720_000));
 }
 #[test]
 fn scoped_allowed_paths_uses_shorter_stall_and_first_progress() {
@@ -107,6 +107,7 @@ fn nvidia_platform_default_budget_is_one_hour() {
     );
     assert_eq!(budget.timeout_secs, Some(3_600));
     assert_eq!(budget.stall_timeout_ms, Some(1_800_000));
+    assert_eq!(budget.first_progress_timeout_ms, Some(180_000));
 }
 
 #[test]
@@ -182,6 +183,7 @@ fn in_flight_tools_pause_stall_and_first_progress_but_not_wall_clock() {
             stall_age,
             0,
             1,
+            false,
             true,
         ),
         None
@@ -194,12 +196,13 @@ fn in_flight_tools_pause_stall_and_first_progress_but_not_wall_clock() {
             32,
             1,
             false,
+            false,
         ),
         None
     );
     // Idle (no in-flight) past stall → cancel.
     assert_eq!(
-        evaluate_hard_budget(budget, stall_age, stall_age, 32, 0, false),
+        evaluate_hard_budget(budget, stall_age, stall_age, 32, 0, false, false),
         Some(SubagentBudgetTrigger::Stall)
     );
     // Never started and idle past first-progress → cancel.
@@ -210,6 +213,7 @@ fn in_flight_tools_pause_stall_and_first_progress_but_not_wall_clock() {
             first_age,
             0,
             0,
+            false,
             true,
         ),
         Some(SubagentBudgetTrigger::FirstProgress)
@@ -223,8 +227,22 @@ fn in_flight_tools_pause_stall_and_first_progress_but_not_wall_clock() {
             4,
             1,
             false,
+            false,
         ),
         Some(SubagentBudgetTrigger::Timeout)
+    );
+    // In-flight sampling: stall/first-progress pause (same as tools).
+    assert_eq!(
+        evaluate_hard_budget(
+            budget,
+            first_age,
+            stall_age,
+            0,
+            0,
+            true,
+            true,
+        ),
+        None
     );
 }
 #[tokio::test]
@@ -559,6 +577,80 @@ fn live_worktree_marker_roundtrip() {
     clear_live_worktree_marker(dir.path());
     assert!(!is_live_worktree_protected(dir.path()));
 }
+
+fn write_stale_live_marker(worktree: &std::path::Path, pid: u32, retain: bool) {
+    use super::LIVE_WORKTREE_MARKER;
+    std::fs::create_dir_all(worktree).unwrap();
+    let marker = worktree.join(LIVE_WORKTREE_MARKER);
+    std::fs::write(
+        &marker,
+        format!(
+            "pid={pid} ts=1 retain={}\n",
+            if retain { 1 } else { 0 }
+        ),
+    )
+    .unwrap();
+    let past = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(&marker, past).unwrap();
+    filetime::set_file_mtime(worktree, past).unwrap();
+}
+
+/// keep-N: retain=1 is protected even with a dead pid and stale mtime.
+#[test]
+fn keep_n_retain_flag_protects_stale_dead_pid() {
+    use super::{is_live_worktree_protected, prune_soft_preserved_worktrees_with_cap};
+    let base = tempfile::TempDir::new().unwrap();
+    let retained = base.path().join("subagent-retained");
+    write_stale_live_marker(&retained, 4_000_000_000, true);
+    assert!(
+        is_live_worktree_protected(&retained),
+        "retain=1 must protect even with dead pid + stale mtime"
+    );
+    prune_soft_preserved_worktrees_with_cap(base.path(), 1);
+    assert!(
+        retained.is_dir(),
+        "keep-N must not prune a retain=1 worktree"
+    );
+}
+
+/// keep-N: a live pid stays protected even when the marker mtime is stale.
+#[test]
+fn keep_n_live_pid_protects_stale_mtime() {
+    use super::{is_live_worktree_protected, prune_soft_preserved_worktrees_with_cap};
+    let base = tempfile::TempDir::new().unwrap();
+    let live = base.path().join("subagent-live-pid");
+    write_stale_live_marker(&live, std::process::id(), false);
+    assert!(
+        is_live_worktree_protected(&live),
+        "live pid must protect even if marker mtime is stale"
+    );
+    prune_soft_preserved_worktrees_with_cap(base.path(), 1);
+    assert!(live.is_dir(), "keep-N must not prune a live-pid worktree");
+}
+
+/// keep-N: dead pid + retain=0 + stale mtime is not protected and is prunable.
+#[test]
+fn keep_n_dead_pid_stale_mtime_not_protected() {
+    use super::{is_live_worktree_protected, prune_soft_preserved_worktrees_with_cap};
+    let base = tempfile::TempDir::new().unwrap();
+    let stale = base.path().join("subagent-stale-dead");
+    write_stale_live_marker(&stale, 4_000_000_000, false);
+    assert!(
+        !is_live_worktree_protected(&stale),
+        "dead pid + retain=0 + stale mtime must not be protected"
+    );
+    // A newer sibling so keep=1 reclaims the stale tree.
+    let fresh = base.path().join("subagent-fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::write(fresh.join("marker.txt"), "x").unwrap();
+    prune_soft_preserved_worktrees_with_cap(base.path(), 1);
+    assert!(
+        !stale.exists(),
+        "keep-N must prune dead-pid stale retain=0 worktree"
+    );
+    assert!(fresh.is_dir(), "keep-N must retain the newest non-live tree");
+}
+
 #[test]
 fn subagent_inherits_parent_lsp_via_context() {
     let parent: std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend> = Arc::new(

@@ -1607,16 +1607,30 @@ pub(super) async fn run_session(
                                 if let Some(reg) = mcp_state.disabled_tool_registrations.remove(&qualified)
                                     && reg.model_visible
                                 {
-                                    let bridge = session.agent.borrow().tool_bridge().clone();
-                                    if let Err(e) = bridge
-                                        .register_mcp_tools(reg.name, reg.tool, Some(reg.input_schema))
-                                        .await
-                                    {
-                                        tracing::warn!(
+                                    let readonly_session = matches!(
+                                        session.agent.borrow().definition().capability_mode,
+                                        Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+                                    );
+                                    if xai_grok_tools::implementations::grok_build::task::types::skip_mutating_mcp_on_readonly(
+                                        reg.read_only_hint,
+                                        readonly_session,
+                                    ) {
+                                        tracing::info!(
                                             tool = qualified.as_str(),
-                                            error = %e,
-                                            "Failed to re-register toggled MCP tool"
+                                            "Skipping mutating MCP tool on ReadOnly session (toggle re-enable)"
                                         );
+                                    } else {
+                                        let bridge = session.agent.borrow().tool_bridge().clone();
+                                        if let Err(e) = bridge
+                                            .register_mcp_tools(reg.name, reg.tool, Some(reg.input_schema))
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                tool = qualified.as_str(),
+                                                error = %e,
+                                                "Failed to re-register toggled MCP tool"
+                                            );
+                                        }
                                     }
                                 }
                             } else {

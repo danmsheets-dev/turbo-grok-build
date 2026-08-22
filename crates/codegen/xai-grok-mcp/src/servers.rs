@@ -1359,6 +1359,8 @@ pub struct McpTool {
     mcp_state: Arc<Mutex<McpState>>,
     schema: serde_json::Value,
     meta: Option<serde_json::Value>,
+    /// MCP `annotations.readOnlyHint`. Missing = mutating (spec default).
+    read_only_hint: Option<bool>,
 }
 
 /// Data needed to register an MCP tool via `register_erased()`.
@@ -1378,6 +1380,46 @@ pub struct McpToolRegistration {
     pub tool: McpErasedTool,
     pub meta: Option<serde_json::Value>,
     pub model_visible: bool,
+    /// MCP `annotations.readOnlyHint`. Missing = mutating (spec default).
+    pub read_only_hint: Option<bool>,
+}
+
+/// Read `readOnlyHint` from MCP `_meta` (top-level or nested under
+/// `annotations`). Used when reconstructing a tool from stashed meta
+/// after disable/re-enable, which does not retain typed annotations.
+pub fn mcp_read_only_hint_from_meta(meta: Option<&serde_json::Value>) -> Option<bool> {
+    let meta = meta?;
+    meta.get("readOnlyHint")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            meta.get("annotations")
+                .and_then(|a| a.get("readOnlyHint"))
+                .and_then(|v| v.as_bool())
+        })
+}
+
+/// Typed MCP `ToolAnnotations.read_only_hint`.
+pub fn mcp_read_only_hint_from_annotations(
+    annotations: Option<&rmcp::model::ToolAnnotations>,
+) -> Option<bool> {
+    annotations.and_then(|a| a.read_only_hint)
+}
+
+/// Persist the spec hint onto `_meta` so disable/re-enable reconstruction
+/// (which only has meta, not annotations) stays fail-closed.
+fn merge_read_only_hint_into_meta(
+    meta: Option<serde_json::Value>,
+    hint: Option<bool>,
+) -> Option<serde_json::Value> {
+    let Some(hint) = hint else {
+        return meta;
+    };
+    let mut value = meta.unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("readOnlyHint")
+            .or_insert_with(|| serde_json::json!(hint));
+    }
+    Some(value)
 }
 
 impl McpTool {
@@ -1391,6 +1433,7 @@ impl McpTool {
         schema: serde_json::Value,
         meta: Option<serde_json::Value>,
     ) -> Self {
+        let read_only_hint = mcp_read_only_hint_from_meta(meta.as_ref());
         Self {
             name,
             description,
@@ -1398,6 +1441,7 @@ impl McpTool {
             mcp_state,
             schema,
             meta,
+            read_only_hint,
         }
     }
 
@@ -1433,6 +1477,7 @@ impl McpTool {
         let description = self.description.clone();
         let input_schema = self.schema.clone();
         let meta = self.meta.clone();
+        let read_only_hint = self.read_only_hint;
 
         let model_visible = meta
             .as_ref()
@@ -1449,6 +1494,7 @@ impl McpTool {
             tool: McpErasedTool { tool: self },
             meta,
             model_visible,
+            read_only_hint,
         })
     }
 }
@@ -1481,6 +1527,10 @@ impl ToolMetadata for McpErasedTool {
 
     fn description_template(&self) -> &str {
         &self.tool.description
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.tool.read_only_hint.unwrap_or(false)
     }
 }
 
@@ -4080,7 +4130,7 @@ impl McpClient {
         let registrations: Vec<_> = all_tools
             .into_iter()
             .filter_map(|tool| {
-                let meta: Option<serde_json::Value> = tool
+                let mut meta: Option<serde_json::Value> = tool
                     .meta
                     .as_ref()
                     .and_then(|m| serde_json::to_value(m).ok());
@@ -4101,6 +4151,10 @@ impl McpClient {
                         .or_insert_with(|| serde_json::json!({}));
                 }
 
+                let read_only_hint = mcp_read_only_hint_from_annotations(tool.annotations.as_ref())
+                    .or_else(|| mcp_read_only_hint_from_meta(meta.as_ref()));
+                meta = merge_read_only_hint_into_meta(meta, read_only_hint);
+
                 let mcp_tool = McpTool {
                     name,
                     description,
@@ -4108,6 +4162,7 @@ impl McpClient {
                     mcp_state: Arc::clone(&mcp_state),
                     schema,
                     meta,
+                    read_only_hint,
                 };
                 // Invalid tools (bad names) return None and are skipped
                 mcp_tool.into_registration()
@@ -6122,6 +6177,50 @@ mod tests {
             serde_json::json!({}),
             None,
         )
+    }
+
+    #[test]
+    fn mcp_read_only_hint_from_meta_top_level_and_nested() {
+        assert_eq!(mcp_read_only_hint_from_meta(None), None);
+        let top = serde_json::json!({"readOnlyHint": true});
+        assert_eq!(mcp_read_only_hint_from_meta(Some(&top)), Some(true));
+        let nested = serde_json::json!({"annotations": {"readOnlyHint": false}});
+        assert_eq!(mcp_read_only_hint_from_meta(Some(&nested)), Some(false));
+    }
+
+    #[test]
+    fn mcp_read_only_hint_from_annotations_passthrough() {
+        use rmcp::model::ToolAnnotations;
+        assert_eq!(mcp_read_only_hint_from_annotations(None), None);
+        let ann = ToolAnnotations {
+            read_only_hint: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(mcp_read_only_hint_from_annotations(Some(&ann)), Some(true));
+    }
+
+    #[test]
+    fn mcp_new_extracts_read_only_hint_from_meta() {
+        let tool = McpTool::new(
+            "list".into(),
+            "list things".into(),
+            "docs".into(),
+            Arc::new(Mutex::new(McpState::new(vec![]))),
+            serde_json::json!({"type": "object"}),
+            Some(serde_json::json!({"readOnlyHint": true})),
+        );
+        let reg = tool.into_registration().expect("valid name");
+        assert_eq!(reg.read_only_hint, Some(true));
+        assert!(reg.tool.is_read_only());
+    }
+
+    #[test]
+    fn merge_read_only_hint_into_meta_does_not_overwrite() {
+        let existing = Some(serde_json::json!({"readOnlyHint": false, "ui": {}}));
+        let merged = merge_read_only_hint_into_meta(existing, Some(true)).unwrap();
+        assert_eq!(merged["readOnlyHint"], serde_json::json!(false));
+        let injected = merge_read_only_hint_into_meta(None, Some(true)).unwrap();
+        assert_eq!(injected["readOnlyHint"], serde_json::json!(true));
     }
 
     #[test]
