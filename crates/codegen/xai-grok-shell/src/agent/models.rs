@@ -87,14 +87,16 @@ pub(crate) fn model_entry_agent_ready(entry: &ModelEntry) -> bool {
 }
 
 fn catalog_entry_is_eol(key: &str) -> bool {
-    xai_grok_models::catalog_key_is_eol(key) || xai_grok_models::is_nvidia_glm_52_eol_slug(key)
+    xai_grok_models::catalog_key_is_eol(key)
+        || xai_grok_models::is_nvidia_glm_52_eol_slug(key)
+        || xai_grok_models::is_poolside_laguna_m1_eol_slug(key)
 }
 
 fn eol_model_error(requested: &str) -> String {
     format!(
         "Model '{requested}' is end-of-life (HTTP 410 Gone) and cannot be spawned. \
-         NVIDIA Integrate withdrew z-ai/glm-5.2; pick an agent-ready slug or omit `model` \
-         to inherit the parent model."
+         NVIDIA Integrate withdrew z-ai/glm-5.2; Poolside retired laguna-m.1; pick an \
+         agent-ready slug or omit `model` to inherit the parent model."
     )
 }
 

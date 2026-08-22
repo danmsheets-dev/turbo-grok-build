@@ -2590,6 +2590,25 @@ fn glm_52_nvidia_spawn_is_http_410() {
 }
 
 #[test]
+fn poolside_laguna_m1_spawn_is_http_410() {
+    let mut models = IndexMap::new();
+    models.insert("grok-4.5".to_string(), make_model_entry("grok-4.5"));
+    let err = task_model_error_for_catalog("poolside/laguna-m.1", &models, false)
+        .expect("EOL must reject");
+    assert!(err.contains("410"), "msg: {err}");
+    assert!(err.contains("laguna-m.1"), "msg: {err}");
+    let clone = task_model_error_for_catalog("openrouter/poolside/laguna-m.1", &models, false)
+        .expect("OpenRouter clone EOL must reject");
+    assert!(clone.contains("410"), "msg: {clone}");
+    if let Some(other) = task_model_error_for_catalog("poolside/laguna-s-2.1", &models, false) {
+        assert!(
+            !other.contains("end-of-life"),
+            "S 2.1 must not be treated as EOL: {other}"
+        );
+    }
+}
+
+#[test]
 fn agent_ready_false_rejected_for_general_purpose_allowed_for_explore() {
     let mut models = IndexMap::new();
     models.insert(

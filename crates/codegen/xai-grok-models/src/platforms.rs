@@ -2610,17 +2610,18 @@ pub fn poolside_hosted_chat_compat(model_id: &str) -> RequestCompat {
 
 fn poolside_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     const MAX_OUT_32K: u32 = 32_768;
-    let mk = |model: &str, name: &str, desc: &str, ctx: u64| BuiltinPlatformModel {
-        provider: PlatformId::Poolside.provider_id(),
-        model: model.into(),
-        name: name.into(),
-        description: desc.into(),
-        context_window: ctx,
-        supports_reasoning_effort: true,
-        supported_in_api: false,
-        catalog_available: true,
-        picker_visible: true,
-        eol: false,
+    let mk =
+        |model: &str, name: &str, desc: &str, ctx: u64, eol: bool| BuiltinPlatformModel {
+            provider: PlatformId::Poolside.provider_id(),
+            model: model.into(),
+            name: name.into(),
+            description: desc.into(),
+            context_window: ctx,
+            supports_reasoning_effort: true,
+            supported_in_api: false,
+            catalog_available: !eol,
+            picker_visible: !eol,
+            eol,
         max_completion_tokens: Some(MAX_OUT_32K),
         api_backend: PlatformApiBackend::ChatCompletions,
         base_url_override: None,
@@ -2637,18 +2638,23 @@ fn poolside_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
             "Poolside Laguna S 2.1",
             "118B/8B-active MoE for long-horizon agentic coding (1M ctx, hosted Chat API)",
             CTX_1M,
+            false,
         ),
         mk(
             "laguna-xs-2.1",
             "Poolside Laguna XS 2.1",
             "33B/3B-active MoE for fast agentic coding (256K ctx, hosted Chat API)",
             CTX_256K,
+            false,
         ),
+        // Poolside and OpenRouter both reject this id with HTTP 404; kept as an
+        // EOL snapshot row so spawn/picker return a clear 410-class error.
         mk(
             "laguna-m.1",
             "Poolside Laguna M.1",
             "225B/23B-active MoE for complex multi-step coding (256K ctx, hosted Chat API)",
             CTX_256K,
+            true,
         ),
     ]
 }
@@ -2676,6 +2682,16 @@ pub fn catalog_key_is_eol(catalog_key: &str) -> bool {
             && (model.catalog_key() == requested
                 || model.catalog_key().eq_ignore_ascii_case(requested))
     })
+}
+
+/// Poolside Laguna M.1 is rejected with HTTP 404 by both Poolside-hosted
+/// inference and its OpenRouter clones. Provider returns 404 "No endpoints".
+pub fn is_poolside_laguna_m1_eol_slug(requested: &str) -> bool {
+    let lower = requested.trim().to_ascii_lowercase();
+    if !lower.contains("laguna-m.1") && !lower.contains("laguna-m1") {
+        return false;
+    }
+    lower.starts_with("poolside/") || lower.contains("/poolside/laguna-m")
 }
 
 /// NVIDIA Integrate GLM-5.2 (and aliases). Provider returns HTTP 410 Gone.
@@ -4655,7 +4671,6 @@ mod tests {
                 "poolside/laguna-xs-2.1",
                 CTX_256K,
             ),
-            ("poolside/laguna-m.1", "poolside/laguna-m.1", CTX_256K),
         ] {
             let model = platform_builtin_models()
                 .iter()
@@ -4678,6 +4693,21 @@ mod tests {
                 other => panic!("{key} expected chat completions compat, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn poolside_laguna_m1_is_catalog_eol() {
+        let model = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "poolside/laguna-m.1")
+            .expect("poolside laguna-m.1 row");
+        assert!(model.eol);
+        assert!(!model.picker_visible);
+        assert!(!model.catalog_available);
+        assert!(catalog_key_is_eol("poolside/laguna-m.1"));
+        // OpenRouter clone shares the fate so neither route 404s at the provider.
+        assert!(is_poolside_laguna_m1_eol_slug("openrouter/poolside/laguna-m.1"));
+        assert!(!is_poolside_laguna_m1_eol_slug("poolside/laguna-s-2.1"));
     }
 
     #[test]
