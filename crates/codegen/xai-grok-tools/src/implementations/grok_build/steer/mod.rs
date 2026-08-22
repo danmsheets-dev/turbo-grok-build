@@ -50,8 +50,7 @@ pub struct SteerTool;
 
 impl ToolMetadata for SteerTool {
     fn kind(&self) -> ToolKind {
-        // Delivers user guidance into a child's queue — control-plane write.
-        ToolKind::Monitor
+        ToolKind::Execute
     }
 
     fn tool_namespace(&self) -> crate::types::tool::ToolNamespace {
@@ -67,8 +66,7 @@ impl ToolMetadata for SteerTool {
     }
 
     fn is_read_only(&self) -> bool {
-        // Writes only into the child's pending-input queue.
-        true
+        false
     }
 }
 
@@ -92,7 +90,7 @@ impl xai_tool_runtime::Tool for SteerTool {
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: true,
+            is_read_only: false,
             tool_scope: Some(xai_tool_protocol::ToolScope::Write),
             ..Default::default()
         }
@@ -150,6 +148,19 @@ mod tests {
         .expect("parse");
         assert_eq!(input.subagent_id.len(), 36);
         assert_eq!(input.text, "stay in crates/foo");
+    }
+
+    #[test]
+    fn metadata_marks_steer_as_a_write() {
+        let tool = SteerTool;
+        assert_eq!(tool.kind(), ToolKind::Execute);
+        assert!(!tool.is_read_only());
+        let capabilities = xai_tool_runtime::Tool::capabilities(&tool);
+        assert!(!capabilities.is_read_only);
+        assert_eq!(
+            capabilities.tool_scope,
+            Some(xai_tool_protocol::ToolScope::Write)
+        );
     }
 
     #[test]

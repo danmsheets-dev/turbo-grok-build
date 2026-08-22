@@ -281,6 +281,12 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerDeleteTool).into(),
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
+            (&grok_build::SteerTool).into(),
+            (&grok_build::ReceiptsTool).into(),
+            (&grok_build::RollbackTool).into(),
+            (&grok_build::GhPrStatusTool).into(),
+            (&grok_build::GhCiStatusTool).into(),
+            (&grok_build::GhCiRerunTool).into(),
             (&search_tool::SearchTool).into(),
             (&mcp_server_health::McpServerHealthTool).into(),
             (&use_tool::UseTool).into(),
@@ -319,6 +325,12 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerDeleteTool).into(),
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
+            (&grok_build::SteerTool).into(),
+            (&grok_build::ReceiptsTool).into(),
+            (&grok_build::RollbackTool).into(),
+            (&grok_build::GhPrStatusTool).into(),
+            (&grok_build::GhCiStatusTool).into(),
+            (&grok_build::GhCiRerunTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             (&grok_build::DeveloperLogTool).into(),
@@ -2706,6 +2718,28 @@ description: Test default tool config
             ids.iter().any(|id| id.contains("meeting_join")),
             "default toolset must expose meeting_join; got {ids:?}"
         );
+        for (name, toolset) in [
+            ("default", default_grok_build_toolset()),
+            ("workspace", workspace_grok_build_toolset()),
+            ("concise", grok_build_concise_toolset()),
+        ] {
+            let toolset_ids: Vec<String> = toolset.tools.into_iter().map(|tool| tool.id).collect();
+            for required in [
+                "steer",
+                "receipts",
+                "rollback",
+                "gh_pr_status",
+                "gh_ci_status",
+                "gh_ci_rerun",
+            ] {
+                assert!(
+                    toolset_ids
+                        .iter()
+                        .any(|id| id.rsplit(':').next() == Some(required)),
+                    "{name} toolset must expose {required}; got {toolset_ids:?}"
+                );
+            }
+        }
         // Explore (RO) also gets it so deepaudit children can file incidents.
         let explore = explore_toolset();
         let explore_ids: Vec<String> = explore.tools.iter().map(|t| t.id.clone()).collect();

@@ -9,15 +9,22 @@ that wire the existing `gh` CLI — no new GitHub API client, no new dependencie
 
 | Tool | Kind | Args | Reads stdout/stderr |
 |------|------|------|-------------------|
-| `gh_pr_status` | Read | `{pr?: string}` (default: detect current branch's PR) | `gh pr view --json number,title,state,statusCheckRollup,reviewDecision,url` |
-| `gh_ci_status` | Read | `{run?: string}` (default: latest run on current branch) | `gh run list --limit 1 ...` then `gh run view <id>` |
-| `gh_ci_rerun` | Execute | `{run: string, failed_only?: boolean}` | `gh run rerun <id> [--failed]` |
+| `gh_pr_status` | Read | `{pr?: string}` (default: detect current branch's PR) | `gh pr view --json number,title,state,statusCheckRollup,reviewDecision,url [-- <pr>]` |
+| `gh_ci_status` | Read | `{run?: string}` (default: latest run on current branch) | `gh run list --branch <branch> --limit 1 ...`, then `gh run view --json ...,jobs -- <id>` |
+| `gh_ci_rerun` | Execute | `{run: string, failed_only?: boolean}` | `gh run rerun [--failed] -- <id>` |
 
 ### Architecture
 
 - **Spawn strategy**: shell-free `tokio::process::Command::new(gh_path)` with
-  `--no-browser` flag, `Stdio::piped()` for stdout/stderr, 30s timeout via
-  `tokio::time::timeout`.
+  `GH_NO_BROWSER=1` and `CI=1`, `kill_on_drop(true)`, `Stdio::piped()` for
+  stdout/stderr, and a 30s timeout via `tokio::time::timeout`. The invalid
+  `--no-browser` argv flag was removed because these subcommands do not accept it.
+- **Argument safety**: user-supplied PR and run identifiers must be non-empty
+  and cannot start with `-`; they are passed after `--` so they cannot become flags.
+- **Branch/jobs**: an omitted CI run resolves the current git branch with
+  `git rev-parse --abbrev-ref HEAD` and passes it to `gh run list --branch`.
+  If branch resolution fails, the result explicitly says it is repository-wide.
+  The selected run is fetched with `jobs` so `failing_jobs` contains job failures.
 - **Output capping**: captured stdout/stderr truncated to 60 KB (`GH_OUTPUT_CAP_BYTES`)
   with a `[truncated]` marker appended.
 - **Error handling**: every error path returns
@@ -55,29 +62,13 @@ that wire the existing `gh` CLI — no new GitHub API client, no new dependencie
   command surface).
 - **Merge gating**: `gh pr merge --{merge,squash,rebase} --admin` with
   pre-flight checks (required reviews, passing CI, no conflicts).
-- **Structured CI job list**: `gh run view --json jobs` to populate the
-  `failing_jobs` field with real job-level data (v1 only surfaces check-run names
-  from `statusCheckRollup` and optional `jobs`/`steps` arrays if present).
 
 ## Permission classification note
 
-`From<&ToolInput> for AccessKind` lives in `xai-grok-workspace/src/permission/types.rs`
-(outside this tool crate's allowed paths). Its match ends with:
-
-```rust
-_ => AccessKind::Read(None),
-```
-
-The three new `gh_*` input variants fall into this catch-all, so they are classified
-as `AccessKind::Read(None)` — prompt-free, no permission gate. This means
-`gh_ci_rerun` (`ToolKind::Execute`, mutating) will **not** prompt for bash-like
-confirmation via the permission layer.
-
-This is a **known limitation of v1** — the tool itself returns an error if `gh`
-is missing/auth-broken, but the permission layer won't gate it. A follow-up PR
-should add explicit arms in `From<&ToolInput> for AccessKind` to map `GhCiRerun`
-to `AccessKind::Bash(...)` (or a new `AccessKind::GhRun` variant) so the
-permission manager can prompt or deny rerun actions.
+`747e1ddf6` adds an explicit `From<&ToolInput> for AccessKind` arm mapping
+`GhCiRerun` to `AccessKind::Bash`. The mutating rerun tool therefore follows the
+normal bash-like permission prompt/deny path; it is not classified as a read-only
+catch-all. The PR and CI status tools remain read-only.
 
 ## Test evidence
 

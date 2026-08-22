@@ -40,11 +40,15 @@ fn resolve_gh() -> Result<std::path::PathBuf, xai_tool_runtime::ToolError> {
 async fn run_gh(
     argv: &[String],
     timeout_secs: Option<u64>,
+    mutating: bool,
 ) -> Result<(Vec<u8>, Vec<u8>, i32), xai_tool_runtime::ToolError> {
     let gh_path = resolve_gh()?;
     let mut cmd = tokio::process::Command::new(&gh_path);
     cmd.args(argv)
-        .arg("--no-browser")
+        .env("GH_NO_BROWSER", "1")
+        .env("CI", "1")
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -52,11 +56,7 @@ async fn run_gh(
         .map(Duration::from_secs)
         .unwrap_or(GH_TIMEOUT);
 
-    let result = tokio::time::timeout(timeout, async {
-        let output = cmd.output().await?;
-        Ok::<std::process::Output, std::io::Error>(output)
-    })
-    .await;
+    let result = tokio::time::timeout(timeout, cmd.output()).await;
 
     let output = match result {
         Ok(Ok(out)) => out,
@@ -67,10 +67,15 @@ async fn run_gh(
             ));
         }
         Err(_) => {
+            let outcome = if mutating {
+                " The rerun outcome is unknown; check GitHub before retrying."
+            } else {
+                ""
+            };
             return Err(xai_tool_runtime::ToolError::custom(
                 "gh_timeout",
                 format!(
-                    "`gh` command timed out after {}s. Try narrowing the query or check your GitHub connection.",
+                    "`gh` command timed out after {}s. Try narrowing the query or check your GitHub connection.{outcome}",
                     timeout.as_secs()
                 ),
             ));
@@ -82,6 +87,42 @@ async fn run_gh(
     let exit_code = output.status.code().unwrap_or(-1);
 
     Ok((stdout, stderr, exit_code))
+}
+
+fn validate_user_token<'a>(
+    value: &'a str,
+    error_code: &'static str,
+    label: &'static str,
+) -> Result<&'a str, xai_tool_runtime::ToolError> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('-') {
+        return Err(xai_tool_runtime::ToolError::custom(
+            error_code,
+            format!("{label} is required and must not start with `-`."),
+        ));
+    }
+    Ok(value)
+}
+
+async fn current_git_branch() -> Option<String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = tokio::time::timeout(GH_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&cap_bytes(output.stdout, GH_OUTPUT_CAP_BYTES))
+        .trim()
+        .to_string();
+    (!branch.is_empty() && branch != "HEAD").then_some(branch)
 }
 
 /// Truncate captured output to `cap` bytes, appending a marker if truncated.
@@ -97,6 +138,57 @@ fn cap_bytes(input: Vec<u8>, cap: usize) -> Vec<u8> {
 // ===========================================================================
 // gh_pr_status
 // ===========================================================================
+
+const PR_STATUS_JSON_FIELDS: &str = "number,title,state,statusCheckRollup,reviewDecision,url";
+const CI_RUN_JSON_FIELDS: &str = "databaseId,name,status,conclusion,headBranch,event,url";
+const CI_RUN_VIEW_JSON_FIELDS: &str = "databaseId,name,status,conclusion,headBranch,event,url,jobs";
+
+fn build_pr_status_argv(pr: Option<&str>) -> Vec<String> {
+    let mut argv = vec![
+        "pr".to_string(),
+        "view".to_string(),
+        "--json".to_string(),
+        PR_STATUS_JSON_FIELDS.to_string(),
+    ];
+    if let Some(pr) = pr {
+        argv.extend(["--".to_string(), pr.to_string()]);
+    }
+    argv
+}
+
+fn build_ci_run_view_argv(run_id: &str) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "view".to_string(),
+        "--json".to_string(),
+        CI_RUN_VIEW_JSON_FIELDS.to_string(),
+        "--".to_string(),
+        run_id.to_string(),
+    ]
+}
+
+fn build_ci_run_list_argv(branch: Option<&str>) -> Vec<String> {
+    let mut argv = vec![
+        "run".to_string(),
+        "list".to_string(),
+        "--limit".to_string(),
+        "1".to_string(),
+    ];
+    if let Some(branch) = branch {
+        argv.extend(["--branch".to_string(), branch.to_string()]);
+    }
+    argv.extend(["--json".to_string(), CI_RUN_JSON_FIELDS.to_string()]);
+    argv
+}
+
+fn build_ci_rerun_argv(run_id: &str, failed_only: bool) -> Vec<String> {
+    let mut argv = vec!["run".to_string(), "rerun".to_string()];
+    if failed_only {
+        argv.push("--failed".to_string());
+    }
+    argv.extend(["--".to_string(), run_id.to_string()]);
+    argv
+}
 
 pub const GH_PR_STATUS_TOOL_NAME: &str = "gh_pr_status";
 
@@ -212,17 +304,14 @@ async fn run_gh_pr_status(input: GhPrStatusInput) -> Result<GhPrStatusOutput, xa
     // Early guard: refuse if gh is not installed.
     resolve_gh()?;
 
-    // Build the command argv.
-    let mut argv: Vec<String> = vec!["pr".to_string(), "view".to_string()];
-    if let Some(pr) = &input.pr {
-        argv.push(pr.clone());
-    }
-    argv.extend([
-        "--json".to_string(),
-        "number,title,state,statusCheckRollup,reviewDecision,url".to_string(),
-    ]);
+    let pr = input
+        .pr
+        .as_deref()
+        .map(|pr| validate_user_token(pr, "gh_pr_invalid_pr", "PR identifier"))
+        .transpose()?;
+    let argv = build_pr_status_argv(pr);
 
-    let (stdout, stderr, exit_code) = run_gh(&argv, Some(30)).await?;
+    let (stdout, stderr, exit_code) = run_gh(&argv, Some(30), false).await?;
 
     if exit_code != 0 {
         let stderr_str = String::from_utf8_lossy(&stderr);
@@ -489,121 +578,130 @@ impl xai_tool_runtime::Tool for GhCiStatusTool {
 }
 
 async fn run_gh_ci_status(input: GhCiStatusInput) -> Result<GhCiStatusOutput, xai_tool_runtime::ToolError> {
-    let gh_path = resolve_gh()?;
-    let _ = gh_path; // resolved for early error
+    resolve_gh()?;
 
-    if let Some(run_id) = &input.run {
-        // Query a specific run by ID.
-        let argv: Vec<String> = vec![
-            "run".to_string(),
-            "view".to_string(),
-            run_id.clone(),
-            "--json".to_string(),
-            "databaseId,name,status,conclusion,headBranch,event,url".to_string(),
-        ];
+    if let Some(run_id) = input.run.as_deref() {
+        let run_id = validate_user_token(run_id, "gh_ci_status_invalid_run", "Run ID")?;
+        return run_gh_ci_view(run_id).await;
+    }
 
-        let (stdout, stderr, exit_code) = run_gh(&argv, Some(30)).await?;
+    let branch = current_git_branch().await;
+    let argv = build_ci_run_list_argv(branch.as_deref());
+    let (stdout, stderr, exit_code) = run_gh(&argv, Some(30), false).await?;
 
-        if exit_code != 0 {
-            let stderr_str = String::from_utf8_lossy(&stderr);
-            let msg = stderr_str.trim();
-            if msg.contains("authentication") || msg.contains("auth") || msg.contains("token") {
-                return Err(xai_tool_runtime::ToolError::custom(
-                    "gh_auth_failed",
-                    format!(
-                        "`gh` auth failed. Run `gh auth login` to authenticate with GitHub, \
-                         then retry. Detail: {msg}"
-                    ),
-                ));
-            }
+    if exit_code != 0 {
+        let stderr_str = String::from_utf8_lossy(&stderr);
+        let msg = stderr_str.trim();
+        if msg.contains("authentication") || msg.contains("auth") || msg.contains("token") {
             return Err(xai_tool_runtime::ToolError::custom(
-                "gh_run_view_failed",
+                "gh_auth_failed",
                 format!(
-                    "`gh run view {}` failed (exit {}). Ensure you are in a git \
-                     repository with the `gh` CLI authenticated. Detail: {msg}",
-                    run_id, exit_code
+                    "`gh` auth failed. Run `gh auth login` to authenticate with GitHub, \
+                     then retry. Detail: {msg}"
                 ),
             ));
         }
+        return Err(xai_tool_runtime::ToolError::custom(
+            "gh_run_list_failed",
+            format!(
+                "`gh run list` failed (exit {}). Ensure you are in a git \
+                 repository with the `gh` CLI authenticated. Detail: {msg}",
+                exit_code
+            ),
+        ));
+    }
 
-        let body = String::from_utf8_lossy(&stdout);
-        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-            xai_tool_runtime::ToolError::custom(
-                "gh_run_parse_failed",
-                format!("Could not parse `gh run view` JSON output: {e}"),
-            )
-        })?;
+    let body = String::from_utf8_lossy(&stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "gh_run_parse_failed",
+            format!("Could not parse `gh run list` JSON output: {e}"),
+        )
+    })?;
 
-        let output = parse_run_view(&parsed);
-        Ok(output)
-    } else {
-        // Fetch latest run on current branch.
-        let argv: Vec<String> = vec![
-            "run".to_string(),
-            "list".to_string(),
-            "--limit".to_string(),
-            "1".to_string(),
-            "--json".to_string(),
-            "databaseId,name,status,conclusion,headBranch,event,url".to_string(),
-        ];
-
-        let (stdout, stderr, exit_code) = run_gh(&argv, Some(30)).await?;
-
-        if exit_code != 0 {
-            let stderr_str = String::from_utf8_lossy(&stderr);
-            let msg = stderr_str.trim();
-            if msg.contains("authentication") || msg.contains("auth") || msg.contains("token") {
-                return Err(xai_tool_runtime::ToolError::custom(
-                    "gh_auth_failed",
-                    format!(
-                        "`gh` auth failed. Run `gh auth login` to authenticate with GitHub, \
-                         then retry. Detail: {msg}"
-                    ),
-                ));
-            }
-            return Err(xai_tool_runtime::ToolError::custom(
-                "gh_run_list_failed",
-                format!(
-                    "`gh run list` failed (exit {}). Ensure you are in a git \
-                     repository with the `gh` CLI authenticated. Detail: {msg}",
-                    exit_code
-                ),
-            ));
-        }
-
-        let body = String::from_utf8_lossy(&stdout);
-        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-            xai_tool_runtime::ToolError::custom(
-                "gh_run_parse_failed",
-                format!("Could not parse `gh run list` JSON output: {e}"),
-            )
-        })?;
-
-        if let Some(arr) = parsed.as_array() {
-            if arr.is_empty() {
-                return Ok(GhCiStatusOutput {
-                    success: true,
-                    message: "No CI runs found for this branch.".to_string(),
-                    run_id: None,
-                    run_name: None,
-                    status: None,
-                    conclusion: None,
-                    head_branch: None,
-                    event: None,
-                    url: None,
-                    failing_jobs: vec![],
-                });
-            }
-            // Take the first (latest) run.
-            let run = &arr[0];
-            return Ok(parse_run_view(run));
-        }
-
-        Err(xai_tool_runtime::ToolError::custom(
+    let Some(runs) = parsed.as_array() else {
+        return Err(xai_tool_runtime::ToolError::custom(
             "gh_run_parse_failed",
             "Unexpected `gh run list` output shape — expected a JSON array.",
-        ))
+        ));
+    };
+    if runs.is_empty() {
+        let message = if branch.is_some() {
+            "No CI runs found for this branch.".to_string()
+        } else {
+            "No CI runs found in this repository; current git branch could not be resolved."
+                .to_string()
+        };
+        return Ok(GhCiStatusOutput {
+            success: true,
+            message,
+            run_id: None,
+            run_name: None,
+            status: None,
+            conclusion: None,
+            head_branch: None,
+            event: None,
+            url: None,
+            failing_jobs: vec![],
+        });
     }
+
+    let run_id = runs[0]
+        .get("databaseId")
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_u64().map(|id| id.to_string()))
+        })
+        .ok_or_else(|| {
+            xai_tool_runtime::ToolError::custom(
+                "gh_run_parse_failed",
+                "Latest `gh run list` entry did not contain a databaseId.",
+            )
+        })?;
+    let mut output = run_gh_ci_view(&run_id).await?;
+    if branch.is_none() {
+        output.message.push_str(
+            "\nScope: repository-wide latest run (current git branch could not be resolved).",
+        );
+    }
+    Ok(output)
+}
+
+async fn run_gh_ci_view(run_id: &str) -> Result<GhCiStatusOutput, xai_tool_runtime::ToolError> {
+    let argv = build_ci_run_view_argv(run_id);
+    let (stdout, stderr, exit_code) = run_gh(&argv, Some(30), false).await?;
+
+    if exit_code != 0 {
+        let stderr_str = String::from_utf8_lossy(&stderr);
+        let msg = stderr_str.trim();
+        if msg.contains("authentication") || msg.contains("auth") || msg.contains("token") {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "gh_auth_failed",
+                format!(
+                    "`gh` auth failed. Run `gh auth login` to authenticate with GitHub, \
+                     then retry. Detail: {msg}"
+                ),
+            ));
+        }
+        return Err(xai_tool_runtime::ToolError::custom(
+            "gh_run_view_failed",
+            format!(
+                "`gh run view {run_id}` failed (exit {exit_code}). Ensure you are in a git \
+                 repository with the `gh` CLI authenticated. Detail: {msg}",
+            ),
+        ));
+    }
+
+    let body = String::from_utf8_lossy(&stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "gh_run_parse_failed",
+            format!("Could not parse `gh run view` JSON output: {e}"),
+        )
+    })?;
+    Ok(parse_run_view(&parsed))
 }
 
 /// Format run data from `gh run view` (or `gh run list` item) into output.
@@ -616,9 +714,8 @@ fn parse_run_view(parsed: &serde_json::Value) -> GhCiStatusOutput {
     let event = parsed.get("event").and_then(|v| v.as_str()).map(|s| s.to_string());
     let url = parsed.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-    // For a full view, gh run view --json includes a `steps` or `jobs` array
-    // with node/totalCount. We extract failing jobs from `steps.allocation`
-    // if present, otherwise from `steps` array.
+    // `gh run view --json ...jobs` supplies job-level conclusions.
+    // Fall back to steps for richer payloads from compatible gh versions.
     let failing_jobs = extract_failing_jobs(parsed);
 
     let mut message = format!(
@@ -655,10 +752,8 @@ fn parse_run_view(parsed: &serde_json::Value) -> GhCiStatusOutput {
 fn extract_failing_jobs(parsed: &serde_json::Value) -> Vec<String> {
     let mut failing = Vec::new();
 
-    // gh run view with `--json databaseId,name,status,conclusion,headBranch,event,url`
-    // does NOT include jobs. For job-level detail, consumers need `--json ...jobs`.
-    // This tool's v1 surface only fetches the top-level run fields. If jobs
-    // are present in the payload (e.g. from a richer query), extract failures:
+    // The selected run is fetched with `--json ...jobs` so job-level failures
+    // are available in the normal tool response.
     if let Some(jobs) = parsed.get("jobs").and_then(|v| v.as_array()) {
         for job in jobs {
             let job_conclusion = job
@@ -806,25 +901,10 @@ async fn run_gh_ci_rerun(input: GhCiRerunInput) -> Result<GhCiRerunOutput, xai_t
     // Refuse early if gh is not installed — do not even build the command.
     let _gh_path = resolve_gh()?;
 
-    let run_id = input.run.trim();
-    if run_id.is_empty() {
-        return Err(xai_tool_runtime::ToolError::custom(
-            "gh_ci_rerun_invalid_run",
-            "Run ID is required and must not be empty. Provide a CI run databaseId \
-             (obtainable via gh_ci_status).",
-        ));
-    }
+    let run_id = validate_user_token(&input.run, "gh_ci_rerun_invalid_run", "Run ID")?;
+    let argv = build_ci_rerun_argv(run_id, input.failed_only);
 
-    let mut argv: Vec<String> = vec![
-        "run".to_string(),
-        "rerun".to_string(),
-        run_id.to_string(),
-    ];
-    if input.failed_only {
-        argv.push("--failed".to_string());
-    }
-
-    let (stdout, stderr, exit_code) = run_gh(&argv, Some(30)).await?;
+    let (stdout, stderr, exit_code) = run_gh(&argv, Some(30), true).await?;
 
     if exit_code != 0 {
         let stderr_str = String::from_utf8_lossy(&stderr);
@@ -945,74 +1025,100 @@ mod tests {
 
     #[test]
     fn gh_pr_status_command_with_pr_number() {
-        let input = GhPrStatusInput { pr: Some("12345".to_string()) };
-        let argv = build_pr_status_argv(&input);
+        let argv = build_pr_status_argv(Some("12345"));
         assert_eq!(
             argv.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            vec!["pr", "view", "12345", "--json", "number,title,state,statusCheckRollup,reviewDecision,url", "--no-browser"]
+            vec![
+                "pr",
+                "view",
+                "--json",
+                PR_STATUS_JSON_FIELDS,
+                "--",
+                "12345",
+            ]
         );
     }
 
     #[test]
     fn gh_pr_status_command_without_pr_number() {
-        let input = GhPrStatusInput { pr: None };
-        let argv = build_pr_status_argv(&input);
+        let argv = build_pr_status_argv(None);
         assert_eq!(
             argv.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            vec!["pr", "view", "--json", "number,title,state,statusCheckRollup,reviewDecision,url", "--no-browser"]
+            vec!["pr", "view", "--json", PR_STATUS_JSON_FIELDS]
         );
     }
 
     #[test]
     fn gh_ci_status_command_with_run_id() {
-        let input = GhCiStatusInput { run: Some("12345".to_string()) };
-        let argv = build_ci_status_argv(&input);
+        let argv = build_ci_run_view_argv("12345");
         assert_eq!(
             argv.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            vec!["run", "view", "12345", "--json", "databaseId,name,status,conclusion,headBranch,event,url", "--no-browser"]
+            vec![
+                "run",
+                "view",
+                "--json",
+                CI_RUN_VIEW_JSON_FIELDS,
+                "--",
+                "12345",
+            ]
         );
     }
 
     #[test]
-    fn gh_ci_status_command_without_run_id() {
-        let input = GhCiStatusInput { run: None };
-        let argv = build_ci_status_argv(&input);
+    fn gh_ci_status_command_without_run_id_uses_branch_filter() {
+        let argv = build_ci_run_list_argv(Some("feature/phase5"));
         assert_eq!(
             argv.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            vec!["run", "list", "--limit", "1", "--json", "databaseId,name,status,conclusion,headBranch,event,url", "--no-browser"]
+            vec![
+                "run",
+                "list",
+                "--limit",
+                "1",
+                "--branch",
+                "feature/phase5",
+                "--json",
+                CI_RUN_JSON_FIELDS,
+            ]
+        );
+    }
+
+    #[test]
+    fn gh_ci_status_command_without_branch_filter_is_repo_wide() {
+        let argv = build_ci_run_list_argv(None);
+        assert_eq!(
+            argv.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["run", "list", "--limit", "1", "--json", CI_RUN_JSON_FIELDS]
         );
     }
 
     #[test]
     fn gh_ci_rerun_command_exact_argv() {
-        let input = GhCiRerunInput { run: "12345".to_string(), failed_only: true };
-        let argv = build_ci_rerun_argv(&input);
+        let argv = build_ci_rerun_argv("12345", true);
         assert_eq!(
             argv,
-            vec!["run", "rerun", "12345", "--failed", "--no-browser"]
+            vec!["run", "rerun", "--failed", "--", "12345"]
                 .iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn gh_ci_rerun_command_without_failed_only() {
-        let input = GhCiRerunInput { run: "12345".to_string(), failed_only: false };
-        let argv = build_ci_rerun_argv(&input);
+        let argv = build_ci_rerun_argv("12345", false);
         assert_eq!(
             argv,
-            vec!["run", "rerun", "12345", "--no-browser"]
+            vec!["run", "rerun", "--", "12345"]
                 .iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn gh_ci_rerun_command_uses_trimmed_run() {
-        let input = GhCiRerunInput { run: "  12345  ".to_string(), failed_only: false };
-        let argv = build_ci_rerun_argv(&input);
+    fn user_tokens_reject_empty_and_flag_like_values() {
+        for value in ["", "  ", "-12345"] {
+            assert!(validate_user_token(value, "invalid", "Run ID").is_err());
+        }
         assert_eq!(
-            argv,
-            vec!["run", "rerun", "12345", "--no-browser"]
-                .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            validate_user_token(" 12345 ", "invalid", "Run ID").unwrap(),
+            "12345"
         );
     }
 
@@ -1197,52 +1303,6 @@ mod tests {
         let truncated = truncate_for_display(s, 20);
         assert!(truncated.ends_with("[truncated]"));
         assert!(truncated.len() < s.len());
-    }
-
-    // --- Build argv helper functions for testing (no process spawn) ---
-
-    fn build_pr_status_argv(input: &GhPrStatusInput) -> Vec<String> {
-        let mut argv: Vec<String> = vec!["pr".to_string(), "view".to_string()];
-        if let Some(pr) = &input.pr {
-            argv.push(pr.clone());
-        }
-        argv.extend([
-            "--json".to_string(),
-            "number,title,state,statusCheckRollup,reviewDecision,url".to_string(),
-        ]);
-        argv.push("--no-browser".to_string());
-        argv
-    }
-
-    fn build_ci_status_argv(input: &GhCiStatusInput) -> Vec<String> {
-        let mut argv: Vec<String> = vec!["run".to_string()];
-        if let Some(run_id) = &input.run {
-            argv.push("view".to_string());
-            argv.push(run_id.clone());
-        } else {
-            argv.push("list".to_string());
-            argv.push("--limit".to_string());
-            argv.push("1".to_string());
-        }
-        argv.extend([
-            "--json".to_string(),
-            "databaseId,name,status,conclusion,headBranch,event,url".to_string(),
-        ]);
-        argv.push("--no-browser".to_string());
-        argv
-    }
-
-    fn build_ci_rerun_argv(input: &GhCiRerunInput) -> Vec<String> {
-        let mut argv: Vec<String> = vec![
-            "run".to_string(),
-            "rerun".to_string(),
-            input.run.trim().to_string(),
-        ];
-        if input.failed_only {
-            argv.push("--failed".to_string());
-        }
-        argv.push("--no-browser".to_string());
-        argv
     }
 
     // --- Tool metadata tests ---
