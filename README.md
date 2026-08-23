@@ -545,7 +545,7 @@ Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
 
 ## Changelog & known issues
 
-- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **RC14** (`0.2.114-r14`) is current
+- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **1.0.0-rc.8** is current
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
 - [`docs/workspace-tree.md`](docs/workspace-tree.md) — Workspace Tree (RC12–RC13)
 - [`docs/archive/RC11_RELEASE_NOTES.md`](docs/archive/RC11_RELEASE_NOTES.md) — Game Mode (historical)

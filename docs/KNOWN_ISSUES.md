@@ -3,7 +3,18 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-03 (RC13 Game Mode perf + worktree soft-preserve docs).
+Last reviewed: 2026-08-23 (1.0.0-rc.8 scheduled tasks, Meeting R2, Browser R3).
+
+## 1.0.0-rc.8 — standing jobs, Meeting R2, Browser R3
+
+Shipped on wire `1.0.0-rc.8`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+| Topic | Notes |
+|-------|--------|
+| `/schedule` fires only while pager is up | Standing jobs have no 7-day expiry, but they do **not** run as a Windows service. Quitting Turbo pauses fires until the pager is open again. |
+| Teams `[Turbo]` chat posts | Still need `GROK_GRAPH_TOKEN`. Capture + work-only recap work without it. |
+| chrome-devtools daily Chrome | Opt-in via `GROK_CHROME_MCP=1`. Agent WebView (`browser_*`) is the default headed browser. |
+| Restart after install | An older pager will not have `/schedule`, Meeting R2 pins, or GitHub log sync. |
 
 ## RC2 — Game Mode audit fixes
 
