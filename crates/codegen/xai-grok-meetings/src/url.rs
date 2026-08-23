@@ -188,6 +188,35 @@ pub fn first_https_url(text: &str) -> Option<&str> {
     None
 }
 
+/// Strip join-link secrets (`p`, `pwd`, `passcode`, `password`) from a URL.
+///
+/// Keeps host + path (and non-secret query) so Graph lookup can still match
+/// on `JoinWebUrl` host/path. Never used as a substitute for not storing
+/// the raw URL in memory during `meeting_join`.
+pub fn redact_join_secrets(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url.trim()) else {
+        return url.to_string();
+    };
+    const SECRETS: &[&str] = &["p", "pwd", "passcode", "password"];
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| !SECRETS.iter().any(|s| k.eq_ignore_ascii_case(s)))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear();
+        {
+            let mut pairs = parsed.query_pairs_mut();
+            for (k, v) in &kept {
+                pairs.append_pair(k, v);
+            }
+        }
+    }
+    parsed.to_string()
+}
+
 fn has_join_intent(text: &str) -> bool {
     let l = text.to_ascii_lowercase();
     const PHRASES: &[&str] = &[
@@ -201,6 +230,12 @@ fn has_join_intent(text: &str) -> bool {
         "hop in",
         "listen in",
         "listen to",
+        "meeting link",
+        "link to test",
+        "q&a",
+        "q and a",
+        "on meetings",
+        "on meeting",
     ];
     if PHRASES.iter().any(|p| l.contains(p)) {
         return true;
@@ -337,5 +372,31 @@ mod tests {
             .is_none(),
             "substring 'join' inside 'enjoy' must not start capture"
         );
+    }
+
+    #[test]
+    fn detect_join_operator_meeting_link_and_qa_phrasing() {
+        let prompt = "Here is a meeting link to test with: https://teams.microsoft.com/meet/2907709513066?p=abc\nRun a full round of Q&A on Meetings.";
+        let (url, _) = detect_join_request(prompt).expect("operator phrasing must join");
+        assert!(url.contains("2907709513066"), "{url}");
+        let qa = detect_join_request(
+            "Run a full round of Q&A on Meetings https://teams.microsoft.com/meet/1?p=x",
+        );
+        assert!(qa.is_some(), "Q&A on Meetings + Teams URL must join");
+    }
+
+    #[test]
+    fn redact_join_secrets_strips_passcode_query() {
+        let teams = redact_join_secrets("https://teams.microsoft.com/meet/2907709513066?p=secret");
+        assert!(!teams.contains("secret"), "{teams}");
+        assert!(!teams.contains("p="), "{teams}");
+        assert!(teams.contains("teams.microsoft.com/meet/2907709513066"), "{teams}");
+        let zoom = redact_join_secrets("https://us02web.zoom.us/j/123456789?pwd=secret&foo=1");
+        assert!(!zoom.contains("secret"), "{zoom}");
+        assert!(!zoom.to_ascii_lowercase().contains("pwd="), "{zoom}");
+        assert!(zoom.contains("foo=1"), "{zoom}");
+        let passcode = redact_join_secrets("https://meet.google.com/abc-defg-hij?passcode=s3cret&password=also");
+        assert!(!passcode.contains("s3cret"), "{passcode}");
+        assert!(!passcode.contains("also"), "{passcode}");
     }
 }

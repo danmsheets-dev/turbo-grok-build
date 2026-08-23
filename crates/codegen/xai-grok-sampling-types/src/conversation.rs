@@ -2428,8 +2428,10 @@ impl From<ConversationRequest> for ChatCompletionRequest {
         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
             None
         } else {
+            let mut specs = req.tools;
+            pin_meeting_tool_specs(&mut specs);
             Some(
-                req.tools
+                specs
                     .into_iter()
                     .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
                     .collect(),
@@ -2985,8 +2987,83 @@ fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputCo
 /// Function tools whose name collides with a hosted tool are dropped (the
 /// backend rejects the request with `Duplicate tool names: <name>` otherwise);
 /// the hosted tool wins.
+fn is_meeting_notetaker_spec_name(name: &str) -> bool {
+    matches!(
+        name.rsplit([':', '/']).next().unwrap_or(name),
+        "meeting_join"
+            | "meeting_stop"
+            | "meeting_status"
+            | "meeting_transcript"
+            | "meeting_notes"
+            | "meeting_knowledge"
+            | "meeting_ask"
+            | "meeting_reply"
+    )
+}
+
+/// Move meeting_* to just after core file/shell tools so a trailing-tool
+/// truncation / hosted crowding cannot drop them from the model `tools` array.
+fn pin_meeting_tool_specs(specs: &mut Vec<ToolSpec>) {
+    let mut meeting = Vec::new();
+    specs.retain(|s| {
+        if is_meeting_notetaker_spec_name(&s.name) {
+            meeting.push(s.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if meeting.is_empty() {
+        return;
+    }
+    const CORE: &[&str] = &[
+        "run_terminal_command",
+        "run_terminal_cmd",
+        "bash",
+        "read_file",
+    ];
+    let mut insert_at = 0;
+    for (i, spec) in specs.iter().enumerate().take(16) {
+        let short = spec.name.rsplit([':', '/']).next().unwrap_or(&spec.name);
+        if CORE.contains(&short) {
+            insert_at = i + 1;
+        }
+    }
+    specs.splice(insert_at..insert_at, meeting);
+}
+
+#[cfg(test)]
+mod meeting_pin_tests {
+    use super::*;
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn pin_moves_meeting_join_ahead_of_trailing_tools() {
+        let mut specs = vec![
+            spec("read_file"),
+            spec("search_replace"),
+            spec("browser_save"),
+            spec("meeting_join"),
+            spec("meeting_stop"),
+        ];
+        pin_meeting_tool_specs(&mut specs);
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        let join = names.iter().position(|n| *n == "meeting_join").unwrap();
+        let browser = names.iter().position(|n| *n == "browser_save").unwrap();
+        assert!(join < browser, "{names:?}");
+        assert!(join < 8, "{names:?}");
+    }
+}
+
 fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
-    let mut tools: Vec<rs::Tool> = req
+    let mut specs: Vec<ToolSpec> = req
         .tools
         .iter()
         .filter(|t| {
@@ -2999,11 +3076,16 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
             }
             !collides
         })
+        .cloned()
+        .collect();
+    pin_meeting_tool_specs(&mut specs);
+    let mut tools: Vec<rs::Tool> = specs
+        .into_iter()
         .map(|t| {
             rs::Tool::Function(rs::FunctionTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: Some(t.parameters.clone()),
+                name: t.name,
+                description: t.description,
+                parameters: Some(t.parameters),
                 strict: None,
             })
         })

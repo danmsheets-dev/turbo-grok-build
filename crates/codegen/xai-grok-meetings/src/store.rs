@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::url::{MeetingKind, MeetingPlatform, MeetingUrl};
+use crate::url::{MeetingKind, MeetingPlatform, MeetingUrl, redact_join_secrets};
 
 /// Where audio is coming from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,7 +98,7 @@ impl MeetingStore {
         let store = Self { dir, id: id.clone() };
         let meta = MeetingMeta {
             id,
-            url: url.raw.clone(),
+            url: redact_join_secrets(&url.raw),
             platform: url.platform,
             kind: url.kind,
             capture_source,
@@ -433,8 +433,11 @@ mod tests {
         let root = env::temp_dir().join(format!("turbo-meeting-store-{}", Utc::now().timestamp_nanos_opt().unwrap_or(1)));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        let url = parse("https://teams.microsoft.com/l/meetup-join/x").unwrap();
+        let url = parse("https://teams.microsoft.com/l/meetup-join/x?p=secret").unwrap();
         let store = MeetingStore::create(&root, "teams-1", &url, CaptureSource::Microphone).unwrap();
+        let created = store.read_meta().unwrap();
+        assert!(!created.url.contains("secret"), "{}", created.url);
+        assert!(!created.url.contains("p="), "{}", created.url);
         store
             .append_segment(&TranscriptSegment {
                 at: Utc::now(),

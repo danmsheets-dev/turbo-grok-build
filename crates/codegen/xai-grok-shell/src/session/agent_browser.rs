@@ -204,6 +204,9 @@ pub fn inject_browser_tools(config: &mut xai_grok_tools::registry::types::ToolSe
             config.tools.push(extra);
         }
     }
+    // Browser tools append after the static preset. Re-pin meeting_* so a
+    // trailing-tool cap cannot drop them from the live handshake.
+    xai_grok_agent::config::pin_meeting_notetaker_tools(&mut config.tools);
 }
 
 /// Install the process-wide `BrowserHandle` ensure hook (idempotent replace).

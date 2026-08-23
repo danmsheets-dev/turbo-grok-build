@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use xai_grok_meetings::{
-    CaptureSource, MeetingMeta, MeetingStore, briefing, compose_summary_markdown,
+    CaptureSource, MeetingMeta, MeetingStatus, MeetingStore, briefing, compose_summary_markdown,
     default_meeting_title, extract_title_from_markdown, local_date_stamp, meeting_dir,
-    new_meeting_id, parse_meeting_url, read_current_id, read_knowledge_dir, summary_filename,
-    unique_summary_path, workspace_meetings_dir, write_current, write_knowledge_dir,
-    write_workspace_summary,
+    new_meeting_id, parse_meeting_url, read_current_id, read_knowledge_dir, redact_join_secrets,
+    summary_filename, unique_summary_path, workspace_meetings_dir, write_current,
+    write_knowledge_dir, write_workspace_summary,
 };
 use xai_grok_voice::auth::{SharedVoiceAuth, StaticVoiceAuth, VoiceAuthProvider};
 use xai_grok_voice::config::VoiceConfig;
@@ -84,6 +84,24 @@ struct LiveMeeting {
     capture: Option<xai_grok_voice::audio::CaptureHandle>,
 }
 
+impl LiveMeeting {
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(cap) = self.capture.take() {
+            cap.stop();
+        }
+        self._task.abort();
+        self._watch.abort();
+        let _ = self.store.mark_stopped();
+    }
+}
+
+impl Drop for LiveMeeting {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 static LIVE: OnceLock<Mutex<HashMap<String, LiveMeeting>>> = OnceLock::new();
 
 fn live_map() -> &'static Mutex<HashMap<String, LiveMeeting>> {
@@ -94,13 +112,51 @@ fn lock_live() -> std::sync::MutexGuard<'static, HashMap<String, LiveMeeting>> {
     live_map().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Session resource so tools can start/stop the notetaker.
-#[derive(Clone)]
-pub struct MeetingHandle {
+fn drain_live_meetings() {
+    let meetings: Vec<LiveMeeting> = {
+        let mut map = lock_live();
+        map.drain().map(|(_, live)| live).collect()
+    };
+    drop(meetings);
+}
+
+extern "C" fn meeting_atexit() {
+    drain_live_meetings();
+}
+
+unsafe extern "C" {
+    fn atexit(cb: extern "C" fn()) -> i32;
+}
+
+fn ensure_meeting_atexit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: once per process; handler only drains the live map.
+        let _ = unsafe { atexit(meeting_atexit) };
+    });
+}
+
+fn stop_live_session(session_id: &str) -> Option<MeetingStore> {
+    if session_id.trim().is_empty() {
+        return None;
+    }
+    let live = lock_live().remove(session_id)?;
+    let store = live.store.clone();
+    drop(live);
+    Some(store)
+}
+
+struct MeetingHandleInner {
     session_id: String,
     session_folder: Option<PathBuf>,
     api_key_provider: Option<SharedApiKeyProvider>,
     notification: Option<ToolNotificationHandle>,
+}
+
+/// Session resource so tools can start/stop the notetaker.
+#[derive(Clone)]
+pub struct MeetingHandle {
+    inner: Arc<MeetingHandleInner>,
 }
 
 impl MeetingHandle {
@@ -111,24 +167,28 @@ impl MeetingHandle {
         notification: Option<ToolNotificationHandle>,
     ) -> Self {
         Self {
-            session_id: session_id.into(),
-            session_folder,
-            api_key_provider,
-            notification,
+            inner: Arc::new(MeetingHandleInner {
+                session_id: session_id.into(),
+                session_folder,
+                api_key_provider,
+                notification,
+            }),
         }
     }
 
     pub fn unbound() -> Self {
         Self {
-            session_id: String::new(),
-            session_folder: None,
-            api_key_provider: None,
-            notification: None,
+            inner: Arc::new(MeetingHandleInner {
+                session_id: String::new(),
+                session_folder: None,
+                api_key_provider: None,
+                notification: None,
+            }),
         }
     }
 
     fn folder(&self) -> Result<&PathBuf, xai_tool_runtime::ToolError> {
-        self.session_folder.as_ref().ok_or_else(|| {
+        self.inner.session_folder.as_ref().ok_or_else(|| {
             xai_tool_runtime::ToolError::custom(
                 "meeting_no_session",
                 "meeting_* tools need a session folder",
@@ -137,7 +197,7 @@ impl MeetingHandle {
     }
 
     fn voice_auth(&self) -> Result<SharedVoiceAuth, xai_tool_runtime::ToolError> {
-        if let Some(p) = &self.api_key_provider {
+        if let Some(p) = &self.inner.api_key_provider {
             return Ok(Arc::new(KeyVoiceAuth(Arc::clone(p))));
         }
         StaticVoiceAuth::shared(std::env::var("XAI_API_KEY").unwrap_or_default()).ok_or_else(|| {
@@ -153,7 +213,7 @@ impl MeetingHandle {
         url: &str,
         title: Option<&str>,
     ) -> Result<String, xai_tool_runtime::ToolError> {
-        if self.session_id.trim().is_empty() {
+        if self.inner.session_id.trim().is_empty() {
             return Err(xai_tool_runtime::ToolError::custom(
                 "meeting_no_session",
                 "meeting_* tools require a pager session id",
@@ -166,7 +226,7 @@ impl MeetingHandle {
 
         {
             let map = lock_live();
-            if map.contains_key(&self.session_id) {
+            if map.contains_key(&self.inner.session_id) {
                 return Err(xai_tool_runtime::ToolError::custom(
                     "meeting_busy",
                     "a meeting is already being recorded in this session — /meeting stop first",
@@ -217,13 +277,14 @@ impl MeetingHandle {
         let join_url = parsed.raw.clone();
         let watch_store = store.clone();
         let watch_stop = stop.clone();
-        let watch_notif = self.notification.clone();
+        let watch_notif = self.inner.notification.clone();
         let watch = tokio::spawn(async move {
             watch::run_watch(watch_store, join_url, watch_stop, watch_notif).await;
         });
 
+        ensure_meeting_atexit();
         lock_live().insert(
-            self.session_id.clone(),
+            self.inner.session_id.clone(),
             LiveMeeting {
                 store: store.clone(),
                 capture_source: source,
@@ -244,7 +305,7 @@ impl MeetingHandle {
                 "name: {}",
                 title.as_deref().unwrap_or("(will use Graph subject or recap title)")
             ),
-            format!("url: {}", parsed.raw),
+            format!("url: {}", redact_join_secrets(&parsed.raw)),
             format!("capture: {:?}", source),
             format!("transcript: {}", store.transcript_path().display()),
         ];
@@ -325,7 +386,7 @@ impl MeetingHandle {
             );
         }
 
-        let stt_notif = self.notification.clone();
+        let stt_notif = self.inner.notification.clone();
         let task = tokio::spawn(async move {
             pipeline::run_stt_loop(store, auth, config, pcm_rx, stop, stt_notif).await;
         });
@@ -333,20 +394,13 @@ impl MeetingHandle {
     }
 
     pub fn stop(&self) -> Result<String, xai_tool_runtime::ToolError> {
-        let live = lock_live().remove(&self.session_id);
-        let Some(live) = live else {
+        let Some(store) = stop_live_session(&self.inner.session_id) else {
             return Err(xai_tool_runtime::ToolError::custom(
                 "meeting_idle",
                 "no active meeting recording in this session",
             ));
         };
-        live.stop.store(true, Ordering::Release);
-        if let Some(cap) = live.capture {
-            cap.stop();
-        }
-        live._task.abort();
-        live._watch.abort();
-        let meta = live.store.mark_stopped().map_err(|e| {
+        let meta = store.read_meta().map_err(|e| {
             xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
         })?;
         // Keep current.txt so /meeting notes can still write the work-folder summary.
@@ -355,12 +409,12 @@ impl MeetingHandle {
             meta.id,
             meta.title.as_deref().unwrap_or("(untitled)"),
             meta.final_segments,
-            live.store.transcript_path().display(),
+            store.transcript_path().display(),
         ))
     }
 
     pub fn status_text(&self) -> Result<String, xai_tool_runtime::ToolError> {
-        if let Some(live) = lock_live().get(&self.session_id) {
+        if let Some(live) = lock_live().get(&self.inner.session_id) {
             let meta = live.store.read_meta().map_err(|e| {
                 xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
             })?;
@@ -549,7 +603,7 @@ impl MeetingHandle {
     }
 
     fn active_or_current_store(&self) -> Result<MeetingStore, xai_tool_runtime::ToolError> {
-        if let Some(live) = lock_live().get(&self.session_id) {
+        if let Some(live) = lock_live().get(&self.inner.session_id) {
             return Ok(live.store.clone());
         }
         let folder = self.folder()?;
@@ -565,17 +619,37 @@ impl MeetingHandle {
     }
 }
 
+fn graph_status_label() -> &'static str {
+    if graph::graph_token().is_some() {
+        "configured"
+    } else {
+        "missing"
+    }
+}
+
+fn format_status_line(meta: &MeetingMeta, live: bool) -> String {
+    if live {
+        "recording".into()
+    } else if meta.status == MeetingStatus::Recording {
+        "stale recording — capture is not running; meeting_notes can still recap".into()
+    } else {
+        format!("{:?}", meta.status).to_ascii_lowercase()
+    }
+}
+
 fn format_meta(meta: &MeetingMeta, live_source: Option<CaptureSource>, store: &MeetingStore) -> String {
+    let live = live_source.is_some();
     let source = live_source.unwrap_or(meta.capture_source);
     format!(
-        "id: {}\nstatus: {:?}\nname: {}\nplatform: {}\nkind: {:?}\ncapture: {:?}\nurl: {}\nstarted: {}\nstopped: {}\nfinal_segments: {}\ntranscript: {}\nnotes: {}\nwork_summary: {}\nqa: launch workspace + meeting notes (full tools, including MCP)\nextra_notes: {}\npending_turbo_questions: {}",
+        "id: {}\nstatus: {}\nname: {}\nplatform: {}\nkind: {:?}\ncapture: {:?}\nurl: {}\ngraph: {}\nstarted: {}\nstopped: {}\nfinal_segments: {}\ntranscript: {}\nnotes: {}\nwork_summary: {}\nqa: launch workspace + meeting notes (full tools, including MCP)\nextra_notes: {}\npending_turbo_questions: {}",
         meta.id,
-        meta.status,
+        format_status_line(meta, live),
         meta.title.as_deref().unwrap_or("(untitled)"),
         meta.platform.label(),
         meta.kind,
         source,
-        meta.url,
+        redact_join_secrets(&meta.url),
+        graph_status_label(),
         meta.started_at.to_rfc3339(),
         meta.stopped_at
             .map(|t| t.to_rfc3339())
@@ -659,6 +733,41 @@ fn text_output(text: String) -> ToolOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use xai_grok_meetings::parse_meeting_url;
+
+    fn unique(tag: &str) -> String {
+        let ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{tag}-{}-{ns}", std::process::id())
+    }
+
+    fn temp_session(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(unique(tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn secret_url() -> xai_grok_meetings::MeetingUrl {
+        parse_meeting_url("https://teams.microsoft.com/meet/2907709513066?p=secret").unwrap()
+    }
+
+    fn insert_live(session_id: &str, store: MeetingStore) {
+        lock_live().insert(
+            session_id.to_string(),
+            LiveMeeting {
+                store,
+                capture_source: CaptureSource::None,
+                stop: Arc::new(AtomicBool::new(false)),
+                _task: tokio::spawn(async {}),
+                _watch: tokio::spawn(async {}),
+                capture: None,
+            },
+        );
+    }
 
     #[test]
     fn join_tool_id() {
@@ -666,5 +775,67 @@ mod tests {
             xai_tool_runtime::Tool::id(&MeetingJoinTool).as_str(),
             "meeting_join"
         );
+    }
+
+    #[tokio::test]
+    async fn live_drop_marks_disk_stopped() {
+        let root = temp_session("meet-drop");
+        let store = MeetingStore::create(&root, "teams-drop-1", &secret_url(), CaptureSource::None)
+            .unwrap();
+        write_current(&root, "teams-drop-1").unwrap();
+        let session = unique("sess-drop");
+        insert_live(&session, store.clone());
+        assert_eq!(store.read_meta().unwrap().status, MeetingStatus::Recording);
+        let _ = stop_live_session(&session);
+        let meta = store.read_meta().unwrap();
+        assert_eq!(meta.status, MeetingStatus::Stopped);
+        assert!(meta.stopped_at.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn handle_drop_does_not_stop_live_recording() {
+        let root = temp_session("meet-handle-drop");
+        let store = MeetingStore::create(&root, "teams-keep-1", &secret_url(), CaptureSource::None)
+            .unwrap();
+        write_current(&root, "teams-keep-1").unwrap();
+        let session = unique("sess-keep");
+        insert_live(&session, store.clone());
+        {
+            let handle = MeetingHandle::new(session.clone(), Some(root.clone()), None, None);
+            drop(handle);
+        }
+        assert_eq!(store.read_meta().unwrap().status, MeetingStatus::Recording);
+        assert!(lock_live().contains_key(&session));
+        let _ = stop_live_session(&session);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stale_disk_recording_is_not_live_and_redacts_passcode() {
+        let root = temp_session("meet-stale");
+        let store = MeetingStore::create(&root, "teams-stale-1", &secret_url(), CaptureSource::None)
+            .unwrap();
+        write_current(&root, "teams-stale-1").unwrap();
+        let created = store.read_meta().unwrap();
+        assert!(!created.url.contains("secret"), "{}", created.url);
+        assert!(!created.url.contains("p="), "{}", created.url);
+        let handle = MeetingHandle::new(unique("sess-stale"), Some(root.clone()), None, None);
+        let text = handle.status_text().unwrap();
+        assert!(
+            text.contains("stale recording"),
+            "disk leftover must not claim live Recording: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("status: recording\n"),
+            "must not claim live recording: {text}"
+        );
+        assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("p=secret"), "{text}");
+        assert!(
+            text.contains("graph: configured") || text.contains("graph: missing"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

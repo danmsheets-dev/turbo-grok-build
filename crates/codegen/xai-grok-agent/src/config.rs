@@ -188,6 +188,7 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
     tools.push((&grok_build::LspTool).into());
+    pin_meeting_notetaker_tools(&mut tools);
     ToolServerConfig {
         tools,
         behavior_preset: None,
@@ -319,16 +320,93 @@ fn meeting_notetaker_tools() -> Vec<xai_grok_tools::registry::types::ToolConfig>
     ]
 }
 
-fn extend_meeting_notetaker_tools(tools: &mut Vec<xai_grok_tools::registry::types::ToolConfig>) {
-    for tool in meeting_notetaker_tools() {
-        let name = tool.id.rsplit(':').next().unwrap_or(tool.id.as_str());
-        if !tools
-            .iter()
-            .any(|t| t.id.rsplit(':').next() == Some(name))
-        {
-            tools.push(tool);
+fn is_meeting_notetaker_tool_id(id: &str) -> bool {
+    matches!(
+        short_tool_name(id),
+        "meeting_join"
+            | "meeting_stop"
+            | "meeting_status"
+            | "meeting_transcript"
+            | "meeting_notes"
+            | "meeting_knowledge"
+            | "meeting_ask"
+            | "meeting_reply"
+    )
+}
+
+fn meeting_pin_index(tools: &[xai_grok_tools::registry::types::ToolConfig]) -> usize {
+    const CORE: &[&str] = &[
+        "run_terminal_command",
+        "run_terminal_cmd",
+        "bash",
+        "read_file",
+    ];
+    let mut last = 0;
+    for (i, tool) in tools.iter().enumerate().take(16) {
+        if CORE.contains(&short_tool_name(&tool.id)) {
+            last = i + 1;
         }
     }
+    last
+}
+
+/// Keep `meeting_*` on the advertised list: insert them after the core
+/// file/shell cluster so a trailing-tool truncation (hosted crowding,
+/// model schema cap) cannot drop them. Existing entries are moved, not
+/// duplicated.
+pub fn pin_meeting_notetaker_tools(
+    tools: &mut Vec<xai_grok_tools::registry::types::ToolConfig>,
+) {
+    let mut existing: Vec<xai_grok_tools::registry::types::ToolConfig> = Vec::new();
+    tools.retain(|t| {
+        if is_meeting_notetaker_tool_id(&t.id) {
+            existing.push(t.clone());
+            false
+        } else {
+            true
+        }
+    });
+    let mut to_insert = Vec::new();
+    for stock in meeting_notetaker_tools() {
+        let name = short_tool_name(&stock.id);
+        if let Some(found) = existing
+            .iter()
+            .find(|t| short_tool_name(&t.id) == name)
+        {
+            to_insert.push(found.clone());
+        } else {
+            to_insert.push(stock);
+        }
+    }
+    let insert_at = meeting_pin_index(tools);
+    tools.splice(insert_at..insert_at, to_insert);
+}
+
+/// If `tools` exceeds `cap`, drop trailing non-meeting tools first.
+/// Meeting tools are re-pinned so a cap never removes `meeting_join`.
+pub fn truncate_tool_configs_preserving_meeting(
+    tools: &mut Vec<xai_grok_tools::registry::types::ToolConfig>,
+    cap: usize,
+) {
+    pin_meeting_notetaker_tools(tools);
+    if tools.len() <= cap {
+        return;
+    }
+    let meeting_count = tools
+        .iter()
+        .filter(|t| is_meeting_notetaker_tool_id(&t.id))
+        .count();
+    if meeting_count >= cap {
+        tools.retain(|t| is_meeting_notetaker_tool_id(&t.id));
+        tools.truncate(cap);
+        return;
+    }
+    tools.truncate(cap);
+    pin_meeting_notetaker_tools(tools);
+}
+
+fn extend_meeting_notetaker_tools(tools: &mut Vec<xai_grok_tools::registry::types::ToolConfig>) {
+    pin_meeting_notetaker_tools(tools);
 }
 fn grok_build_concise_toolset() -> ToolServerConfig {
     let mut cfg = ToolServerConfig {
@@ -2748,6 +2826,24 @@ description: Test default tool config
         assert!(
             ids.iter().any(|id| id.contains("meeting_join")),
             "default toolset must expose meeting_join; got {ids:?}"
+        );
+        let join_pos = ids
+            .iter()
+            .position(|id| id.rsplit(':').next() == Some("meeting_join"))
+            .expect("meeting_join");
+        assert!(
+            join_pos < 16,
+            "meeting_join must be pinned early on the handshake, got index {join_pos}: {ids:?}"
+        );
+        let mut crowded = default_grok_build_toolset().tools;
+        crowded.extend((0..80).map(|i| ToolConfig::from_id(format!("GrokBuild:filler_{i}"))));
+        truncate_tool_configs_preserving_meeting(&mut crowded, 24);
+        assert!(
+            crowded
+                .iter()
+                .any(|t| t.id.rsplit(':').next() == Some("meeting_join")),
+            "a tool-list cap must never drop meeting_join; got {:?}",
+            crowded.iter().map(|t| &t.id).collect::<Vec<_>>()
         );
         for (name, toolset) in [
             ("default", default_grok_build_toolset()),

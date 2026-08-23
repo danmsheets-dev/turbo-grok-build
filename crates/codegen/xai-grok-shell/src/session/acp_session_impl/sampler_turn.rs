@@ -107,6 +107,52 @@ where
         result
     }
 }
+
+fn is_meeting_notetaker_spec_name(name: &str) -> bool {
+    matches!(
+        name.rsplit([':', '/']).next().unwrap_or(name),
+        "meeting_join"
+            | "meeting_stop"
+            | "meeting_status"
+            | "meeting_transcript"
+            | "meeting_notes"
+            | "meeting_knowledge"
+            | "meeting_ask"
+            | "meeting_reply"
+    )
+}
+
+/// Move meeting_* specs after the core file/shell cluster so a trailing-tool
+/// cap cannot drop them from the model `tools` array.
+fn pin_meeting_tool_specs(specs: &mut Vec<ToolSpec>) {
+    let mut meeting = Vec::new();
+    specs.retain(|s| {
+        if is_meeting_notetaker_spec_name(&s.name) {
+            meeting.push(s.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if meeting.is_empty() {
+        return;
+    }
+    const CORE: &[&str] = &[
+        "run_terminal_command",
+        "run_terminal_cmd",
+        "bash",
+        "read_file",
+    ];
+    let mut insert_at = 0;
+    for (i, spec) in specs.iter().enumerate().take(16) {
+        let short = spec.name.rsplit([':', '/']).next().unwrap_or(&spec.name);
+        if CORE.contains(&short) {
+            insert_at = i + 1;
+        }
+    }
+    specs.splice(insert_at..insert_at, meeting);
+}
+
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
         let mcp_wait_start = std::time::Instant::now();
@@ -137,11 +183,14 @@ impl SessionActor {
     /// under backend search and the `ToolSpec::from` mapping.
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
         let backend_search_active = self.backend_search_active();
-        defs.iter()
+        let mut specs: Vec<ToolSpec> = defs
+            .iter()
             .filter(|td| !backend_search_active || td.function.name != "web_search")
             .cloned()
             .map(ToolSpec::from)
-            .collect()
+            .collect();
+        pin_meeting_tool_specs(&mut specs);
+        specs
     }
     /// Hosted tools with overrides applied, plus the applied overrides to echo, in one pass.
     fn resolve_hosted(

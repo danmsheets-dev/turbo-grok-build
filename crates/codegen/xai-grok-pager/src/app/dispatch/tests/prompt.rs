@@ -2900,6 +2900,17 @@ fn nl_join_this_meeting_injects_meeting_join() {
     }
 }
 
+/// Operator phrasing from the rc.7 Q&A: meeting link to test + Q&A on Meetings.
+#[test]
+fn nl_join_operator_meeting_link_and_qa_phrasing() {
+    let mut app = test_app_with_agent();
+    let prompt = "Here is a meeting link to test with: https://teams.microsoft.com/meet/2907709513066?p=abc\nRun a full round of Q&A on Meetings.";
+    let effects = dispatch(Action::SendPrompt(prompt.into()), &mut app);
+    let text = meeting_join_blocks_text(&effects);
+    assert!(text.contains("meeting_join"), "{text}");
+    assert!(text.contains("2907709513066"), "{text}");
+}
+
 /// A Teams URL mentioned in a ticket without join intent stays a coding prompt.
 #[test]
 fn ticket_link_without_join_intent_is_plain_prompt() {

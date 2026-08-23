@@ -10,6 +10,24 @@ pub const MEETING_KNOWLEDGE_TOOL_NAME: &str = "meeting_knowledge";
 pub const MEETING_ASK_TOOL_NAME: &str = "meeting_ask";
 pub const MEETING_REPLY_TOOL_NAME: &str = "meeting_reply";
 
+/// Short client-facing names that must stay on the live handshake.
+pub const MEETING_NOTETAKER_TOOL_NAMES: &[&str] = &[
+    MEETING_JOIN_TOOL_NAME,
+    MEETING_STOP_TOOL_NAME,
+    MEETING_STATUS_TOOL_NAME,
+    MEETING_TRANSCRIPT_TOOL_NAME,
+    MEETING_NOTES_TOOL_NAME,
+    MEETING_KNOWLEDGE_TOOL_NAME,
+    MEETING_ASK_TOOL_NAME,
+    MEETING_REPLY_TOOL_NAME,
+];
+
+/// True for `meeting_join` or a qualified id (`GrokBuild:meeting_join`).
+pub fn is_meeting_notetaker_tool_name(id: &str) -> bool {
+    let short = id.rsplit([':', '/']).next().unwrap_or(id);
+    MEETING_NOTETAKER_TOOL_NAMES.contains(&short)
+}
+
 /// Shown when `/meeting` is run with no / unknown args.
 pub fn usage_message() -> &'static str {
     "Usage:\n\
