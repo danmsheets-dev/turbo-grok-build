@@ -40,6 +40,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc5** | **`1.0.0-rc.5`** | Harness Q&A: spawn catalog, WebView save, logs/redaction |
 | **1.0 rc6** | **`1.0.0-rc.6`** | Providers ACP, isolation, Poolside hosted Chat API |
 | **1.0 rc7** | **`1.0.0-rc.7`** | Phase 5 control plane + Meeting Join Hardening |
+| **1.0 rc8** | **`1.0.0-rc.8`** | Scheduled tasks, Meeting R2, Browser R3, GitHub log sync |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -48,20 +49,31 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
-**RC8 (in progress):** scheduled tasks product surface (`/schedule` + `turbo schedule`), Meeting R2 harden, Browser R3, opt-in GitHub log sync, stock workflows (`bug-sweep`, `perf-optimize`, `feature-planning`, `security-sweep`, `test-gap`).
+---
+
+## [1.0.0-rc.8] - 2026-08-23
+
+**Scheduled tasks, Meeting R2, Browser R3, shared GitHub logs.** rc.7 made the scheduler a control-plane primitive and closed the first meeting-join holes. rc.8 turns that into standing jobs an operator actually uses, takes `/meeting` and the Agent WebView through another Q&A + harden pass, and stops leaving incidents and feature requests stranded on one disk.
 
 ### Added
 - **`/schedule`** standing jobs (interval, `at` datetime, optional weekday clock). No 7-day expiry. Recipes: `search`, `stat`, `meeting join`. Results under `{workspace}/Schedules/`. Index: `{workspace}/.grok/schedules.json`. Headless: `turbo schedule list|show|cancel` (works with Turbo closed; fires only while the pager is up). `/loop` still expires at 7 days.
-- **`turbo issues sync` / `turbo features sync`** — opt-in GitHub Issues upsert/pull (`github_repo` in developer-log.toml / feature-request-log.toml). Local JSON remains write-ahead; default is no cloud upload.
+- **`turbo issues sync` / `turbo features sync`** — opt-in GitHub Issues upsert/pull (`github_repo` in developer-log.toml / feature-request-log.toml). Local JSON remains write-ahead; default is no cloud upload. Default private repo name `danmsheets-dev/turbo-field-logs`.
 - Workflows: `.grok/workflows/bug-sweep.rhai`, `perf-optimize.rhai`, `feature-planning.rhai`, `security-sweep.rhai`, `test-gap.rhai`.
 
 ### Fixed
 - **Meeting R2:** pin `meeting_*` early on the live tool handshake; process exit marks capture stopped; stale disk recording is not live; join `?p=` redacted from meta/status; NL join accepts “meeting link to test with”; spoken `Turbo, …` auto-ask; status `graph: configured|missing`.
+- **Meeting untrusted Q&A:** coworker/spoken `Turbo:` text cannot authorize writes; Graph chat lookup falls back when `?p=` is redacted.
+- **Meeting-join shell:** `meeting_*` is `ToolKind::Meeting` (ReadWrite, not All), so scheduled joins no longer get bash. First scheduled meeting-join requires `confirm=true`; writes jailed to `Meetings/` + `Schedules/`.
 - **Browser R3:** NavigationStarting fail-closed, eval confirm, pane mirror from last snapshot, download jail helper, `docs/BROWSER-R3-QA.md`.
-- **Deep-audit follow-up:** `/schedule` search/stat fires get ReadWrite + `allowed_paths=["Schedules/"]` (host jail); meeting-join requires `confirm=true` and write-jails `Meetings/`+`Schedules/`; STT append cannot restore `status=recording`; `meeting_ask` briefing forbids mutate; eval gate covers `location['href']` / `.submit.call`; downloads check hop policy on source URI.
 - **C9 OAuth popups:** host-owned HWND + `SetNewWindow` so later hops still hit NavigationStarting/DownloadStarting (no `SetHandled(false)` policy skip).
 - **C12 chrome-devtools:** MCP tools omitted unless `GROK_CHROME_MCP=1`; Agent WebView remains the default headed browser.
-- **Meeting-join shell:** `meeting_*` is `ToolKind::Meeting` (ReadWrite, not All), so scheduled joins no longer get bash.
+- **`/schedule` jail:** search/stat fires get ReadWrite + `allowed_paths=["Schedules/"]` (host jail, not prompt-only).
+
+### Known
+- Standing `/schedule` jobs do **not** fire if the pager process is quit (no Windows service).
+- Teams `[Turbo]` chat posts still need `GROK_GRAPH_TOKEN`.
+- chrome-devtools daily Chrome is opt-in: `GROK_CHROME_MCP=1`.
+- Restart Turbo after installing rc.8; an older pager will not have `/schedule`, Meeting R2, or GitHub log sync.
 
 ---
 
