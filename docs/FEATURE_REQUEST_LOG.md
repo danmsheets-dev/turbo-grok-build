@@ -38,6 +38,11 @@ turbo features decline <id>
 # Configure storage
 turbo features set-dir D:/HyperLogs/feature-request-log
 turbo features clear-dir
+
+# Opt-in GitHub Issues sync (never the default)
+turbo features sync --repo owner/name
+turbo features sync --push
+turbo features sync --pull
 ```
 
 Disable writes:
@@ -58,6 +63,31 @@ $env:GROK_FEATURE_REQUEST_LOG = "0"
 | 2 | Env `GROK_FEATURE_REQUEST_LOG_DIR` |
 | 3 | File `$GROK_HOME/feature-request-log.toml` → `dir = "..."` |
 | 4 (default) | `$GROK_HOME/feature-request-log` |
+
+Example `~/.grok/feature-request-log.toml`:
+
+```toml
+dir = "D:\\HyperLogs\\feature-request-log"
+# Opt-in GitHub Issues inbox (default off — no cloud upload)
+# github_sync = "off" | "manual" | "on-file"
+github_repo = "danmsheets-dev/turbo-field-logs"
+github_sync = "off"
+```
+
+`set-dir` / `clear-dir` preserve `github_repo` and `github_sync`.
+
+## GitHub Issues sync (opt-in)
+
+Local JSON is the write-ahead log. `turbo features sync` mirrors one GitHub
+issue per fingerprint (`type:feature`). Default is local-only. Auth is `gh`.
+Agent `feature_request_log` never waits on the network; `github_sync = "on-file"`
+is a fail-open background push after the local write.
+
+Same private-repo flow as [Auto Developer Log](./AUTO_DEVELOPER_LOG.md): set
+`github_repo`, run `gh auth login`, then `turbo features sync`. First private
+sync warns. Local planned/ack stay open with labels; ship/decline close the
+issue (`shipped` / `declined`). `turbo features ship <id> --sha` posts a
+proving-commit comment. Pull maps those closes back onto local status.
 
 ## Storage layout
 
@@ -119,6 +149,13 @@ Rules:
 
 `open` → `acknowledged` → `planned` → `shipped`  
 or `declined`.
+
+## Privacy
+
+- Secrets and home-path segments are redacted (same sanitizers as ADL).
+- **No cloud upload by default.** GitHub sync is opt-in. Missing `gh` or
+  unauthenticated `gh` fails `turbo features sync`. Agent tools never block
+  on the network.
 
 ## Related
 

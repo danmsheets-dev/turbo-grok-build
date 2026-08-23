@@ -75,6 +75,21 @@ pub fn fr_config_file_path() -> PathBuf {
     xai_grok_config::grok_home().join(CONFIG_FILE)
 }
 
+/// Load `$GROK_HOME/feature-request-log.toml` (`dir`, `github_repo`, `github_sync`).
+///
+/// Missing file → default (local-only, `github_sync = "off"`).
+pub fn load_feature_log_file_config() -> crate::log_config::LogFileConfig {
+    crate::log_config::load_log_toml_file(&fr_config_file_path())
+}
+
+fn persist_feature_log_file_config(
+    cfg: &crate::log_config::LogFileConfig,
+) -> Result<(), FrStoreError> {
+    let body = crate::log_config::render_log_toml(crate::log_config::LogConfigKind::Feature, cfg);
+    crate::log_config::write_log_toml_file(&fr_config_file_path(), &body)?;
+    Ok(())
+}
+
 /// Default on-disk location: `$GROK_HOME/feature-request-log`.
 pub fn fr_builtin_default_root() -> PathBuf {
     xai_grok_config::grok_home().join(ROOT_DIR)
@@ -134,32 +149,24 @@ pub fn fr_set_configured_dir(path: &Path) -> Result<PathBuf, FrStoreError> {
     };
     fs::create_dir_all(&target)?;
     let _ = FeatureRequestStore::new(target.clone()).ensure_layout();
-    let cfg_path = fr_config_file_path();
-    if let Some(parent) = cfg_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let escaped = target.display().to_string().replace('\\', "\\\\");
-    let body = format!(
-        "# Turbo Feature Request Log — root for agent product-capability requests\n\
-         # Override with env {FR_DIR_ENV}=...\n\
-         # Managed by `turbo features set-dir`\n\
-         dir = \"{escaped}\"\n"
-    );
-    let tmp = cfg_path.with_extension("toml.tmp");
-    fs::write(&tmp, body)?;
-    // Windows cannot rename over an existing file — remove dest first.
-    if cfg_path.exists() {
-        let _ = fs::remove_file(&cfg_path);
-    }
-    fs::rename(&tmp, &cfg_path)?;
+    let mut cfg = load_feature_log_file_config();
+    cfg.dir = Some(target.clone());
+    persist_feature_log_file_config(&cfg)?;
     fr_set_root_override(Some(target.clone()));
     Ok(target)
 }
 
+/// Clear the persisted dir. Preserves `github_repo` / `github_sync`.
 pub fn fr_clear_configured_dir() -> Result<(), FrStoreError> {
-    let cfg = fr_config_file_path();
-    if cfg.is_file() {
-        fs::remove_file(&cfg)?;
+    let mut cfg = load_feature_log_file_config();
+    cfg.dir = None;
+    if cfg.github_repo.is_none() && cfg.github_sync.is_off() {
+        let path = fr_config_file_path();
+        if path.is_file() {
+            fs::remove_file(&path)?;
+        }
+    } else {
+        persist_feature_log_file_config(&cfg)?;
     }
     fr_set_root_override(None);
     Ok(())
@@ -174,26 +181,7 @@ fn path_looks_like_app_source_tree(path: &Path) -> bool {
 }
 
 fn read_config_dir() -> Option<PathBuf> {
-    let cfg = fr_config_file_path();
-    let raw = fs::read_to_string(cfg).ok()?;
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let rest = line.strip_prefix("dir")?;
-        let rest = rest.trim().strip_prefix('=')?.trim();
-        let unquoted = rest
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-            .unwrap_or(rest);
-        let unescaped = unquoted.replace("\\\\", "\\");
-        if !unescaped.is_empty() {
-            return Some(PathBuf::from(unescaped));
-        }
-    }
-    None
+    load_feature_log_file_config().dir
 }
 
 fn expand_dir(path: &Path) -> PathBuf {
@@ -310,7 +298,19 @@ impl FeatureRequestStore {
         if request.summary.trim().is_empty() {
             return Err(FrStoreError::Invalid("summary is required".into()));
         }
+        let result = self.report_locked(request)?;
+        crate::github_sync::spawn_on_file_if_enabled(
+            crate::github_sync::LogKind::Feature,
+            self.root(),
+            &result.fingerprint,
+        );
+        Ok(result)
+    }
 
+    fn report_locked(
+        &self,
+        request: FeatureRequestReport,
+    ) -> Result<FeatureRequestResult, FrStoreError> {
         let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         self.ensure_layout()?;
@@ -505,6 +505,22 @@ impl FeatureRequestStore {
         if !fr_is_enabled() {
             return Err(FrStoreError::Disabled);
         }
+        let fr = self.set_status_locked(id_or_fingerprint, status, sha, note)?;
+        crate::github_sync::spawn_on_file_if_enabled(
+            crate::github_sync::LogKind::Feature,
+            self.root(),
+            &fr.fingerprint,
+        );
+        Ok(fr)
+    }
+
+    fn set_status_locked(
+        &self,
+        id_or_fingerprint: &str,
+        status: RequestStatus,
+        sha: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<FeatureRequest, FrStoreError> {
         let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut index = self.load_index()?;
         let entry = index
@@ -525,7 +541,10 @@ impl FeatureRequestStore {
         fr = sanitize_request_doc(fr);
         self.write_at(&self.root.join(&entry.path), &fr)?;
         self.upsert_index(&mut index, &fr, &entry.path)?;
-        let detail = match (sha.map(str::trim).filter(|s| !s.is_empty()), status.as_str()) {
+        let detail = match (
+            sha.map(str::trim).filter(|s| !s.is_empty()),
+            status.as_str(),
+        ) {
             (Some(sha), st) => Some(format!("{st} sha={sha}")),
             (None, st) => Some(st.to_string()),
         };
@@ -742,6 +761,11 @@ fn sanitize_report(mut req: FeatureRequestReport) -> FeatureRequestReport {
     }
     req.evidence = sanitize_evidence(req.evidence);
     req
+}
+
+/// Re-sanitize a stored feature request (export / GitHub body).
+pub fn sanitize_feature_request(fr: FeatureRequest) -> FeatureRequest {
+    sanitize_request_doc(fr)
 }
 
 pub(super) fn sanitize_request_doc(mut fr: FeatureRequest) -> FeatureRequest {

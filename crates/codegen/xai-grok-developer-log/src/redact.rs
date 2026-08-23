@@ -156,7 +156,11 @@ pub fn sanitize_incident(mut inc: Incident) -> Incident {
 }
 
 fn redact_cwd_hash(raw: &str) -> String {
-    let decoded = raw.replace("%5C", "\\").replace("%5c", "\\").replace("%3A", ":").replace("%3a", ":");
+    let decoded = raw
+        .replace("%5C", "\\")
+        .replace("%5c", "\\")
+        .replace("%3A", ":")
+        .replace("%3a", ":");
     truncate_field(&redact_text(&decoded), 255)
 }
 
@@ -181,11 +185,16 @@ mod tests {
     #[test]
     fn sanitize_evidence_redacts_snapshot_ref() {
         let mut evidence = Evidence {
-            snapshot_ref: Some("refs/grok/subagents/sa Authorization: Bearer sk-CANARYabcdefghij1234567890".into()),
+            snapshot_ref: Some(
+                "refs/grok/subagents/sa Authorization: Bearer sk-CANARYabcdefghij1234567890".into(),
+            ),
             ..Evidence::default()
         };
         evidence = super::sanitize_evidence(evidence);
         let snap = evidence.snapshot_ref.expect("kept");
-        assert!(!snap.contains("CANARY"), "snapshot_ref secret survived: {snap}");
+        assert!(
+            !snap.contains("CANARY"),
+            "snapshot_ref secret survived: {snap}"
+        );
     }
 }

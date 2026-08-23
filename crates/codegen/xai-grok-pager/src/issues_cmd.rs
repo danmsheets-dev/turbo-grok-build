@@ -3,9 +3,10 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use xai_grok_developer_log::{
-    DIR_ENV, DeveloperLogStore, Environment, ErrorClass, ExportOptions, IncidentStatus, ListFilter,
-    ReportRequest, ReporterKind, Severity, Source, clear_configured_dir, config_file_path,
-    export_pack, root_resolution_note, set_configured_dir,
+    DIR_ENV, DeveloperLogStore, Environment, ErrorClass, ExportOptions, GhCli, IncidentStatus,
+    ListFilter, ReportRequest, ReporterKind, Severity, Source, SyncOptions, clear_configured_dir,
+    config_file_path, export_pack, load_developer_log_file_config, resolve_repo, root_resolution_note,
+    set_configured_dir, sync_direction, sync_incidents,
 };
 
 #[derive(Debug, clap::Args, Clone)]
@@ -117,6 +118,21 @@ pub enum IssuesCommand {
         /// Suggested fix
         #[arg(long)]
         suggested_fix: Option<String>,
+    },
+    /// Push/pull this log to GitHub Issues (opt-in; default off / local-only)
+    Sync {
+        /// `owner/name` (overrides `github_repo` in developer-log.toml)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Push local JSON → GitHub Issues
+        #[arg(long)]
+        push: bool,
+        /// Pull GitHub close/status → local JSON
+        #[arg(long)]
+        pull: bool,
+        /// Push and pull (default when neither `--push` nor `--pull` is given)
+        #[arg(long)]
+        both: bool,
     },
 }
 
@@ -283,6 +299,7 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             let root = store.root();
             let note = root_resolution_note();
             if json {
+                let gh = load_developer_log_file_config();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
@@ -291,9 +308,12 @@ pub fn run(args: IssuesArgs) -> Result<()> {
                         "config_file": config_file_path().display().to_string(),
                         "env": DIR_ENV,
                         "enabled": xai_grok_developer_log::is_enabled(),
+                        "github_repo": gh.github_repo,
+                        "github_sync": gh.github_sync.as_str(),
                     }))?
                 );
             } else {
+                let gh = load_developer_log_file_config();
                 println!("{}", root.display());
                 println!("resolved via: {note}");
                 println!("config file:  {}", config_file_path().display());
@@ -302,6 +322,11 @@ pub fn run(args: IssuesArgs) -> Result<()> {
                     "enabled:      {} (set GROK_DEVELOPER_LOG=0 to disable)",
                     xai_grok_developer_log::is_enabled()
                 );
+                println!(
+                    "github_repo:  {}",
+                    gh.github_repo.as_deref().unwrap_or("(unset — local only)")
+                );
+                println!("github_sync:  {}", gh.github_sync.as_str());
             }
             Ok(())
         }
@@ -374,6 +399,27 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             );
             Ok(())
         }
+        IssuesCommand::Sync {
+            repo,
+            push,
+            pull,
+            both,
+        } => {
+            let cfg = load_developer_log_file_config();
+            let repo = resolve_repo(repo.as_deref(), &cfg)?;
+            let direction = sync_direction(push, pull, both);
+            let gh = GhCli::new();
+            let report = sync_incidents(
+                &store,
+                &gh,
+                &SyncOptions {
+                    repo,
+                    direction,
+                },
+            )?;
+            println!("{}", report.human_summary("incidents"));
+            Ok(())
+        }
     }
 }
 
@@ -398,4 +444,68 @@ fn parse_severities(raw: &[String]) -> Result<Option<Vec<Severity>>> {
         bail!("no valid severities");
     }
     Ok(Some(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Command, PagerArgs};
+    use clap::Parser as _;
+
+    fn parse_issues(argv: &[&str]) -> IssuesCommand {
+        let args = PagerArgs::try_parse_from(argv).expect("args should parse");
+        match args.command {
+            Some(Command::Issues(IssuesArgs { command })) => command,
+            other => panic!("expected issues, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_defaults_to_both_when_no_direction_flags() {
+        let cmd = parse_issues(&["turbo", "issues", "sync"]);
+        match cmd {
+            IssuesCommand::Sync {
+                repo,
+                push,
+                pull,
+                both,
+            } => {
+                assert!(repo.is_none());
+                assert!(!push && !pull && !both);
+                assert_eq!(
+                    xai_grok_developer_log::sync_direction(push, pull, both),
+                    xai_grok_developer_log::SyncDirection::Both
+                );
+            }
+            other => panic!("expected Sync, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_parses_repo_and_push() {
+        let cmd = parse_issues(&[
+            "turbo",
+            "issues",
+            "sync",
+            "--repo",
+            "danmsheets-dev/turbo-field-logs",
+            "--push",
+        ]);
+        match cmd {
+            IssuesCommand::Sync {
+                repo,
+                push,
+                pull,
+                both,
+            } => {
+                assert_eq!(repo.as_deref(), Some("danmsheets-dev/turbo-field-logs"));
+                assert!(push && !pull && !both);
+                assert_eq!(
+                    xai_grok_developer_log::sync_direction(push, pull, both),
+                    xai_grok_developer_log::SyncDirection::Push
+                );
+            }
+            other => panic!("expected Sync, got {other:?}"),
+        }
+    }
 }

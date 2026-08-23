@@ -75,6 +75,21 @@ pub fn config_file_path() -> PathBuf {
     xai_grok_config::grok_home().join(CONFIG_FILE)
 }
 
+/// Load `$GROK_HOME/developer-log.toml` (`dir`, `github_repo`, `github_sync`).
+///
+/// Missing file → default (local-only, `github_sync = "off"`).
+pub fn load_developer_log_file_config() -> crate::log_config::LogFileConfig {
+    crate::log_config::load_log_toml_file(&config_file_path())
+}
+
+fn persist_developer_log_file_config(
+    cfg: &crate::log_config::LogFileConfig,
+) -> Result<(), StoreError> {
+    let body = crate::log_config::render_log_toml(crate::log_config::LogConfigKind::Incident, cfg);
+    crate::log_config::write_log_toml_file(&config_file_path(), &body)?;
+    Ok(())
+}
+
 /// Default on-disk location when nothing is configured: `$GROK_HOME/developer-log`.
 pub fn builtin_default_root() -> PathBuf {
     xai_grok_config::grok_home().join(ROOT_DIR)
@@ -144,25 +159,9 @@ pub fn set_configured_dir(path: &Path) -> Result<PathBuf, StoreError> {
     fs::create_dir_all(&target).map_err(StoreError::Io)?;
     // Ensure real store layout exists so empty stores are not "healthy" ghosts.
     let _ = DeveloperLogStore::new(target.clone()).ensure_layout();
-    let cfg_path = config_file_path();
-    if let Some(parent) = cfg_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // Minimal TOML — no extra dep. Quote path for spaces/backslashes.
-    let escaped = target.display().to_string().replace('\\', "\\\\");
-    let body = format!(
-        "# Turbo Auto Developer Log — root directory for product incidents\n\
-         # Override with env {DIR_ENV}=...\n\
-         # Managed by `turbo issues set-dir`\n\
-         dir = \"{escaped}\"\n"
-    );
-    let tmp = cfg_path.with_extension("toml.tmp");
-    fs::write(&tmp, body)?;
-    // Windows cannot rename over an existing file — remove dest first.
-    if cfg_path.exists() {
-        let _ = fs::remove_file(&cfg_path);
-    }
-    fs::rename(&tmp, &cfg_path)?;
+    let mut cfg = load_developer_log_file_config();
+    cfg.dir = Some(target.clone());
+    persist_developer_log_file_config(&cfg)?;
     set_root_override(Some(target.clone()));
     Ok(target)
 }
@@ -177,37 +176,26 @@ fn path_looks_like_app_source_tree(path: &Path) -> bool {
 }
 
 /// Clear the persisted dir config (revert to builtin default). Also clears override.
+///
+/// Preserves `github_repo` / `github_sync` so `set-dir` / `clear-dir` cannot
+/// silently disable an opt-in GitHub inbox.
 pub fn clear_configured_dir() -> Result<(), StoreError> {
-    let cfg = config_file_path();
-    if cfg.is_file() {
-        fs::remove_file(&cfg)?;
+    let mut cfg = load_developer_log_file_config();
+    cfg.dir = None;
+    if cfg.github_repo.is_none() && cfg.github_sync.is_off() {
+        let path = config_file_path();
+        if path.is_file() {
+            fs::remove_file(&path)?;
+        }
+    } else {
+        persist_developer_log_file_config(&cfg)?;
     }
     set_root_override(None);
     Ok(())
 }
 
 fn read_config_dir() -> Option<PathBuf> {
-    let cfg = config_file_path();
-    let raw = fs::read_to_string(cfg).ok()?;
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // dir = "..." or dir = '...'
-        let rest = line.strip_prefix("dir")?;
-        let rest = rest.trim().strip_prefix('=')?.trim();
-        let unquoted = rest
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-            .unwrap_or(rest);
-        let unescaped = unquoted.replace("\\\\", "\\");
-        if !unescaped.is_empty() {
-            return Some(PathBuf::from(unescaped));
-        }
-    }
-    None
+    load_developer_log_file_config().dir
 }
 
 fn expand_dir(path: &Path) -> PathBuf {
@@ -324,7 +312,16 @@ impl DeveloperLogStore {
         if request.summary.trim().is_empty() {
             return Err(StoreError::Invalid("summary is required".into()));
         }
+        let result = self.report_locked(request)?;
+        crate::github_sync::spawn_on_file_if_enabled(
+            crate::github_sync::LogKind::Incident,
+            self.root(),
+            &result.fingerprint,
+        );
+        Ok(result)
+    }
 
+    fn report_locked(&self, request: ReportRequest) -> Result<ReportResult, StoreError> {
         let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         self.ensure_layout()?;
@@ -538,6 +535,22 @@ impl DeveloperLogStore {
         if !is_enabled() {
             return Err(StoreError::Disabled);
         }
+        let incident = self.set_status_locked(id_or_fingerprint, status, sha, note)?;
+        crate::github_sync::spawn_on_file_if_enabled(
+            crate::github_sync::LogKind::Incident,
+            self.root(),
+            &incident.fingerprint,
+        );
+        Ok(incident)
+    }
+
+    fn set_status_locked(
+        &self,
+        id_or_fingerprint: &str,
+        status: IncidentStatus,
+        sha: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<Incident, StoreError> {
         let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut index = self.load_index()?;
         let entry = index
@@ -558,7 +571,10 @@ impl DeveloperLogStore {
         incident = crate::redact::sanitize_incident(incident);
         self.write_incident_at(&self.root.join(&entry.path), &incident)?;
         self.upsert_index_entry(&mut index, &incident, &entry.path)?;
-        let detail = match (sha.map(str::trim).filter(|s| !s.is_empty()), status.as_str()) {
+        let detail = match (
+            sha.map(str::trim).filter(|s| !s.is_empty()),
+            status.as_str(),
+        ) {
             (Some(sha), st) => Some(format!("{st} sha={sha}")),
             (None, st) => Some(st.to_string()),
         };

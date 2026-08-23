@@ -138,9 +138,9 @@ pub enum Command {
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// List, open, diff, land, discard, or prune subagent worktrees
     Subagent(crate::subagent_cmd::SubagentArgs),
-    /// List, show, export, or resolve Auto Developer Log product incidents
+    /// List, show, export, resolve, or sync Auto Developer Log product incidents
     Issues(crate::issues_cmd::IssuesArgs),
-    /// Feature Request Log — list / show / export capability requests from agents
+    /// Feature Request Log — list / show / export / sync capability requests from agents
     Features(crate::features_cmd::FeaturesArgs),
     /// Workspace directory atlas: status, doctor, inject-preview, build, resolve
     Tree(crate::tree_cmd::TreeArgs),

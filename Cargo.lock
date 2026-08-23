@@ -16127,9 +16127,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "wait-timeout",
+ "which",
  "xai-grok-config",
  "xai-grok-secrets",
  "xai-grok-version",
+ "xai-tty-utils",
 ]
 
 [[package]]

@@ -17,4 +17,5 @@ pub use store::{
     FR_DIR_ENV, FR_ENABLED_ENV, FeatureRequestStore, FrIndexEntry, FrListFilter, FrStoreError,
     fr_builtin_default_root, fr_clear_configured_dir, fr_config_file_path, fr_default_root,
     fr_is_enabled, fr_root_resolution_note, fr_set_configured_dir, fr_set_root_override,
+    load_feature_log_file_config, sanitize_feature_request,
 };

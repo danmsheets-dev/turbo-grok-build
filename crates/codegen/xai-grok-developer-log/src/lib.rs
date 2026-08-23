@@ -13,11 +13,18 @@
 //! via the `feature_request_log` tool when harness work needs a product
 //! surface that does not exist yet. Operators triage with `turbo features`.
 //! Disable with `GROK_FEATURE_REQUEST_LOG=0`.
+//!
+//! ## GitHub Issues sync (opt-in)
+//! Local JSON is the write-ahead log. `turbo issues sync` / `turbo features sync`
+//! can mirror fingerprints to GitHub Issues when `github_repo` is set. Default
+//! `github_sync = "off"` — no cloud upload. Agent tools never wait on the network.
 
 pub mod detectors;
 pub mod export;
 pub mod feature_request;
 pub mod fingerprint;
+pub mod github_sync;
+pub mod log_config;
 pub mod redact;
 pub mod schema;
 pub mod store;
@@ -34,12 +41,21 @@ pub use feature_request::{
     RequestClass, RequestPriority, RequestStatus, agent_source, compute_fr_fingerprint,
     export_feature_requests, fr_builtin_default_root, fr_clear_configured_dir, fr_config_file_path,
     fr_default_root, fr_is_enabled, fr_root_resolution_note, fr_set_configured_dir,
-    fr_set_root_override,
+    fr_set_root_override, load_feature_log_file_config,
 };
 pub use fingerprint::compute_fingerprint;
+pub use github_sync::{
+    GhCli, GithubTransport, LogKind, SyncDirection, SyncError, SyncOptions, SyncReport,
+    resolve_repo, spawn_on_file_if_enabled, sync_direction, sync_features, sync_incidents,
+};
+pub use log_config::{
+    GithubSyncMode, LogConfigKind, LogFileConfig, parse_log_toml, render_log_toml,
+    should_spawn_on_file, validate_github_repo,
+};
 pub use schema::*;
 pub use store::{
     DIR_ENV, DeveloperLogStore, ENABLED_ENV, IndexEntry, ListFilter, StoreError,
     builtin_default_root, clear_configured_dir, config_file_path, default_root, is_enabled,
-    report_best_effort, root_resolution_note, set_configured_dir, set_root_override,
+    load_developer_log_file_config, report_best_effort, root_resolution_note, set_configured_dir,
+    set_root_override,
 };

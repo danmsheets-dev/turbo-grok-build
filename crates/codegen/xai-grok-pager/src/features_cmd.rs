@@ -3,9 +3,11 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use xai_grok_developer_log::{
-    FR_DIR_ENV, FeatureRequestReport, FeatureRequestStore, FrExportOptions, FrListFilter,
-    ReporterKind, RequestClass, RequestPriority, RequestStatus, Source, export_feature_requests,
-    fr_clear_configured_dir, fr_config_file_path, fr_root_resolution_note, fr_set_configured_dir,
+    FR_DIR_ENV, FeatureRequestReport, FeatureRequestStore, FrExportOptions, FrListFilter, GhCli,
+    ReporterKind, RequestClass, RequestPriority, RequestStatus, Source, SyncOptions,
+    export_feature_requests, fr_clear_configured_dir, fr_config_file_path, fr_root_resolution_note,
+    fr_set_configured_dir, load_feature_log_file_config, resolve_repo, sync_direction,
+    sync_features,
 };
 
 #[derive(Debug, clap::Args, Clone)]
@@ -107,6 +109,21 @@ pub enum FeaturesCommand {
         workaround: Option<String>,
         #[arg(long = "proposed")]
         proposed_behavior: Option<String>,
+    },
+    /// Push/pull this log to GitHub Issues (opt-in; default off / local-only)
+    Sync {
+        /// `owner/name` (overrides `github_repo` in feature-request-log.toml)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Push local JSON → GitHub Issues
+        #[arg(long)]
+        push: bool,
+        /// Pull GitHub close/status → local JSON
+        #[arg(long)]
+        pull: bool,
+        /// Push and pull (default when neither `--push` nor `--pull` is given)
+        #[arg(long)]
+        both: bool,
     },
 }
 
@@ -269,6 +286,7 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
             let root = store.root();
             let note = fr_root_resolution_note();
             if json {
+                let gh = load_feature_log_file_config();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
@@ -277,9 +295,12 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
                         "config_file": fr_config_file_path().display().to_string(),
                         "env": FR_DIR_ENV,
                         "enabled": xai_grok_developer_log::fr_is_enabled(),
+                        "github_repo": gh.github_repo,
+                        "github_sync": gh.github_sync.as_str(),
                     }))?
                 );
             } else {
+                let gh = load_feature_log_file_config();
                 println!("{}", root.display());
                 println!("resolved via: {note}");
                 println!("config file:  {}", fr_config_file_path().display());
@@ -288,6 +309,11 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
                     "enabled:      {} (set GROK_FEATURE_REQUEST_LOG=0 to disable)",
                     xai_grok_developer_log::fr_is_enabled()
                 );
+                println!(
+                    "github_repo:  {}",
+                    gh.github_repo.as_deref().unwrap_or("(unset — local only)")
+                );
+                println!("github_sync:  {}", gh.github_sync.as_str());
             }
             Ok(())
         }
@@ -358,6 +384,27 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
             );
             Ok(())
         }
+        FeaturesCommand::Sync {
+            repo,
+            push,
+            pull,
+            both,
+        } => {
+            let cfg = load_feature_log_file_config();
+            let repo = resolve_repo(repo.as_deref(), &cfg)?;
+            let direction = sync_direction(push, pull, both);
+            let gh = GhCli::new();
+            let report = sync_features(
+                &store,
+                &gh,
+                &SyncOptions {
+                    repo,
+                    direction,
+                },
+            )?;
+            println!("{}", report.human_summary("features"));
+            Ok(())
+        }
     }
 }
 
@@ -378,4 +425,40 @@ fn parse_priorities(raw: &[String]) -> Result<Option<Vec<RequestPriority>>> {
         bail!("no valid priorities");
     }
     Ok(Some(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Command, PagerArgs};
+    use clap::Parser as _;
+
+    fn parse_features(argv: &[&str]) -> FeaturesCommand {
+        let args = PagerArgs::try_parse_from(argv).expect("args should parse");
+        match args.command {
+            Some(Command::Features(FeaturesArgs { command })) => command,
+            other => panic!("expected features, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_defaults_to_both_when_no_direction_flags() {
+        let cmd = parse_features(&["turbo", "features", "sync"]);
+        match cmd {
+            FeaturesCommand::Sync {
+                repo,
+                push,
+                pull,
+                both,
+            } => {
+                assert!(repo.is_none());
+                assert!(!push && !pull && !both);
+                assert_eq!(
+                    xai_grok_developer_log::sync_direction(push, pull, both),
+                    xai_grok_developer_log::SyncDirection::Both
+                );
+            }
+            other => panic!("expected Sync, got {other:?}"),
+        }
+    }
 }
