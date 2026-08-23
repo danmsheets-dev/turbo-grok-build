@@ -42,6 +42,7 @@ pub mod live;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
+pub mod schedule_cmd;
 pub mod mcps;
 pub mod meeting;
 pub mod model;
@@ -159,6 +160,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         #[cfg(feature = "codex-live")]
         Arc::new(live::LiveCommand),
         Arc::new(loop_cmd::LoopCommand),
+        Arc::new(schedule_cmd::ScheduleCommand),
         Arc::new(imagine::ImagineCommand),
         Arc::new(imagine_video::ImagineVideoCommand),
         Arc::new(timestamps::TimestampsCommand),
@@ -278,6 +280,24 @@ mod tests {
             "scheduler_create".to_string()
         ]));
         assert!(reg.get("loop").is_some());
+        assert!(
+            reg.get("schedule").is_none(),
+            "/schedule needs list+delete too"
+        );
+        reg.set_available_tools(std::collections::HashSet::from([
+            "scheduler_create".to_string(),
+            "scheduler_list".to_string(),
+            "scheduler_delete".to_string(),
+        ]));
+        assert!(reg.get("schedule").is_some(), "/schedule should be registered");
+    }
+    #[test]
+    fn schedule_command_declares_scheduler_tool_requirements() {
+        let cmd = schedule_cmd::ScheduleCommand;
+        assert_eq!(
+            cmd.required_tools(),
+            &["scheduler_create", "scheduler_list", "scheduler_delete"]
+        );
     }
     #[test]
     fn shell_collision_contract_covers_every_pager_command_and_alias() {
@@ -342,6 +362,7 @@ mod tests {
             "logout",
             "log",
             "loop",
+            "schedule",
             "m",
             "marketplace",
             "mcps",
@@ -373,6 +394,7 @@ mod tests {
             "resume",
             "review",
             "rewind",
+            "schedule",
             "scoped",
             "scoped-models",
             "scope-models",

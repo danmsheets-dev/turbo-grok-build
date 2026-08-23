@@ -325,6 +325,21 @@ Run a prompt on a recurring interval. Give the interval as `30m`, `1 hour`, or `
 
 Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` (days); anything under 60 seconds is raised to the minimum. Recurring tasks expire after 7 days, and you can cancel one with `scheduler_delete` using the job ID reported when the loop is created.
 
+### `/schedule [at|every] <when> <prompt-or-recipe>`
+
+Standing product jobs on the same scheduler. They do **not** expire after 7 days. Results go to `Schedules/YYYY-MM-DD - <title>.md`.
+
+```
+/schedule 1h search rust async
+/schedule at 2026-08-24T09:00 meeting join https://teams.microsoft.com/l/meetup-join/… Standup
+/schedule every weekday 08:00 stat https://status.example.com
+/schedule list
+/schedule show <id>
+/schedule cancel <id>
+```
+
+Recipes: `search <query>`, `stat <url-or-query>`, `meeting join <url> [name]` (must call `meeting_join`, not Start-Process). Default fire is a background worktree subagent (read-only unless meeting join). Human jobs are durable.
+
 ---
 
 ## Workflows and Goals

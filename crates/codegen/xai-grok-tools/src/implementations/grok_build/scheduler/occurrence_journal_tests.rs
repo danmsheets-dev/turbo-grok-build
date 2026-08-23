@@ -23,6 +23,12 @@ fn task(id: &str, recurring: bool, durable: bool) -> ScheduledTask {
         last_subagent_id: None,
         iterations_since_fresh: 0,
         chain_reset_pending: false,
+        title: None,
+        standing: false,
+        weekdays_only: false,
+        meeting_join: false,
+        isolation: None,
+        capability_mode: None,
     }
 }
 

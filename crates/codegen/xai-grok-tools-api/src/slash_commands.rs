@@ -1,4 +1,4 @@
-//! Canonical slash-command wording (`/loop`, `/imagine`, `/imagine-video`, `/goal`),
+//! Canonical slash-command wording (`/loop`, `/schedule`, `/imagine`, `/imagine-video`, `/goal`),
 //! shared by every front-end (Grok Build shell/pager and other hosts) so
 //! expansions cannot drift.
 
@@ -180,6 +180,296 @@ After assembly, mention the final output path.
 - **Real people:** reference-first — drive the video from a verified reference image; never animate a named person without one.
 - Don't loop the same clip unless asked.";
 
+/// Canonical tool name advertised by the scheduler list tool. Gates `/schedule list`.
+pub const SCHEDULER_LIST_TOOL_NAME: &str = "scheduler_list";
+
+/// Canonical tool name advertised by the scheduler delete tool. Gates `/schedule cancel`.
+pub const SCHEDULER_DELETE_TOOL_NAME: &str = "scheduler_delete";
+
+/// Advertised name of the /schedule command.
+pub const SCHEDULE_COMMAND_NAME: &str = "schedule";
+
+/// Usage hint shown when `/schedule` is invoked with no arguments.
+pub fn schedule_usage_message() -> &'static str {
+    "Usage: /schedule [at|every] <when> <prompt-or-recipe>\n\
+     /schedule list\n\
+     /schedule show <id>\n\
+     /schedule cancel <id>\n\n\
+     When: 5m, 1h, 1d, at 2026-08-24T09:00, every weekday 08:00\n\
+     Recipes: search <query> | stat <url-or-query> | meeting join <url> [name]\n\n\
+     Standing jobs do not auto-expire (unlike /loop's 7-day cap). \
+     Results go to Schedules/YYYY-MM-DD - <title>.md."
+}
+
+/// `/schedule` verb after the slash command name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleVerb<'a> {
+    List,
+    Show { id: &'a str },
+    Cancel { id: &'a str },
+    Create { rest: &'a str },
+}
+
+/// Split `/schedule` args into list/show/cancel vs create.
+pub fn parse_schedule_verb(args: &str) -> ScheduleVerb<'_> {
+    let trimmed = args.trim();
+    let (first, rest) = trimmed
+        .split_once(char::is_whitespace)
+        .map(|(a, b)| (a, b.trim()))
+        .unwrap_or((trimmed, ""));
+    match first.to_ascii_lowercase().as_str() {
+        "list" | "ls" => ScheduleVerb::List,
+        "show" if !rest.is_empty() => ScheduleVerb::Show { id: rest },
+        "cancel" | "delete" | "rm" if !rest.is_empty() => ScheduleVerb::Cancel { id: rest },
+        _ => ScheduleVerb::Create { rest: trimmed },
+    }
+}
+
+/// Recipe parsed from the prompt body (after the when-clause).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleRecipe<'a> {
+    Search { query: &'a str },
+    Stat { target: &'a str },
+    MeetingJoin { url: &'a str, name: Option<&'a str> },
+    Freeform { prompt: &'a str },
+}
+
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+/// Parse a recipe token at the start of `body`.
+pub fn parse_schedule_recipe(body: &str) -> ScheduleRecipe<'_> {
+    let body = body.trim();
+    if let Some(query) = strip_prefix_ci(body, "search ") {
+        let query = query.trim();
+        if !query.is_empty() {
+            return ScheduleRecipe::Search { query };
+        }
+    }
+    if let Some(target) = strip_prefix_ci(body, "stat ") {
+        let target = target.trim();
+        if !target.is_empty() {
+            return ScheduleRecipe::Stat { target };
+        }
+    }
+    if let Some(rest) = strip_prefix_ci(body, "meeting join ") {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            let (url, name) = rest
+                .split_once(char::is_whitespace)
+                .map(|(u, n)| (u, Some(n.trim())))
+                .unwrap_or((rest, None));
+            return ScheduleRecipe::MeetingJoin { url, name };
+        }
+    }
+    ScheduleRecipe::Freeform { prompt: body }
+}
+
+fn recipe_title(recipe: &ScheduleRecipe<'_>) -> String {
+    match recipe {
+        ScheduleRecipe::Search { query } => truncate_title(query),
+        ScheduleRecipe::Stat { target } => truncate_title(target),
+        ScheduleRecipe::MeetingJoin { name, url } => name
+            .filter(|n| !n.is_empty())
+            .map(|n| truncate_title(n))
+            .unwrap_or_else(|| truncate_title(url)),
+        ScheduleRecipe::Freeform { prompt } => truncate_title(prompt.lines().next().unwrap_or(prompt)),
+    }
+}
+
+fn truncate_title(s: &str) -> String {
+    let t = s.trim();
+    if t.chars().count() <= 60 {
+        t.to_string()
+    } else {
+        t.chars().take(60).collect()
+    }
+}
+
+fn schedules_write_blurb(title: &str) -> String {
+    format!(
+        "Write the result to `Schedules/YYYY-MM-DD - {title}.md` in the launch workspace \
+         (today's local date). Do not use `..` in the path. Do not write if `Schedules` \
+         is a symlink. Prefer the write tool."
+    )
+}
+
+/// Expand a recipe into the stored fire prompt, title, and meeting-join flag.
+pub fn expand_schedule_recipe(body: &str) -> (String, String, bool) {
+    let recipe = parse_schedule_recipe(body);
+    let title = recipe_title(&recipe);
+    let meeting_join = matches!(recipe, ScheduleRecipe::MeetingJoin { .. });
+    let prompt = match recipe {
+        ScheduleRecipe::Search { query } => format!(
+            "Search the web for: {query}\n\n\
+             Produce a concise briefing: what you found, notable sources, and what is new. \
+             Do not invent citations.\n\n\
+             {}",
+            schedules_write_blurb(&title)
+        ),
+        ScheduleRecipe::Stat { target } => format!(
+            "Fetch and summarize current status/metrics for: {target}\n\n\
+             Produce a metric snapshot: headline numbers, status, timestamp, and source URL if any.\n\n\
+             {}",
+            schedules_write_blurb(&title)
+        ),
+        ScheduleRecipe::MeetingJoin { url, name } => {
+            let title_line = name
+                .filter(|n| !n.is_empty())
+                .map(|n| format!(" title: {n}"))
+                .unwrap_or_default();
+            format!(
+                "Call meeting_join with url: {url}{title_line}.\n\
+                 Do NOT use bash, Start-Process, or open the URL yourself — only meeting_join.\n\
+                 After joining, confirm the notetaker is running."
+            )
+        }
+        ScheduleRecipe::Freeform { prompt } => {
+            format!("{prompt}\n\n{}", schedules_write_blurb(&title))
+        }
+    };
+    (prompt, title, meeting_join)
+}
+
+/// Build the model instruction that `/schedule` expands into.
+pub fn schedule_instruction(args: &str) -> String {
+    match parse_schedule_verb(args) {
+        ScheduleVerb::List => {
+            "# /schedule list\n\n\
+             Call scheduler_list now. Summarize each task: id, title or prompt, cadence, \
+             next fire, and whether it expires. Do not create or cancel anything."
+                .into()
+        }
+        ScheduleVerb::Show { id } => format!(
+            "# /schedule show {id}\n\n\
+             Call scheduler_list and show the task whose id is {id} in full \
+             (prompt, cadence, next fire, expiry). If it is missing, say so."
+        ),
+        ScheduleVerb::Cancel { id } => format!(
+            "# /schedule cancel {id}\n\n\
+             Call scheduler_delete with id: {id}. Confirm cancellation. \
+             If it is missing, say so and suggest scheduler_list."
+        ),
+        ScheduleVerb::Create { rest } => {
+            let (expanded, title, meeting_join) = expand_schedule_recipe(strip_leading_when(rest));
+            format!(
+                "# /schedule -- standing product job\n\n\
+                 Turn the input below into a scheduler_create call for a **standing** job.\n\n\
+                 ## Defaults (do not change unless the user asked)\n\
+                 - durable: true\n\
+                 - standing: true  (no 7-day expiry — unlike /loop)\n\
+                 - fire_immediately: false  (wait for the first interval or `at`)\n\
+                 - Each fire runs as a **background subagent**, isolation=worktree, \
+                   capability read-only unless this is a meeting-join recipe.\n\
+                 - Overlap skip is already handled by the scheduler (in-flight last_subagent_id).\n\n\
+                 ## When\n\
+                 - Interval: compact `<number><unit>` (`5m`, `1h`, `1d`, `60s`; min 60s).\n\
+                 - One-shot: pass `at` as ISO-8601 / `2026-08-24T09:00` (local if no timezone). \
+                   Do not pass `interval`. The tool sets interval = seconds until then (min 60s) \
+                   and recurring=false. The time MUST be in the future.\n\
+                 - Weekday clock: pass `at` as `weekday 08:00` or `monday 09:00` (SHOULD).\n\
+                 - If no when is given, ask — never invent a cadence.\n\n\
+                 ## Recipes (expand the stored prompt; do not store the raw recipe token alone)\n\
+                 - `search <query>` — web briefing; must write `Schedules/YYYY-MM-DD - <title>.md`.\n\
+                 - `stat <url-or-query>` — metric snapshot; must write the same Schedules path.\n\
+                 - `meeting join <url> [name]` — stored prompt MUST call `meeting_join` \
+                   (not Start-Process / bash). Set meeting_join: true.\n\
+                 Confirm-once for meeting/write is a prompt concern; do not open URLs yourself.\n\n\
+                 ## Suggested stored prompt\n\
+                 Title: {title}\n\
+                 meeting_join: {meeting_join}\n\
+                 Prompt:\n\
+                 {expanded}\n\n\
+                 ## Action\n\
+                 1. Call scheduler_create with standing: true, durable: true, fire_immediately: false, \
+                    title, the expanded prompt, and interval and/or at as derived. \
+                    Set meeting_join: true only for the meeting-join recipe.\n\
+                 2. Confirm what's scheduled, the cadence, that it does **not** auto-expire, \
+                    that results go under Schedules/, and the task_id to cancel with \
+                    `/schedule cancel` or scheduler_delete.\n\
+                 3. Do NOT execute the prompt inline. The scheduler fires it later.\n\n\
+                 ## Input\n\
+                 {rest}"
+            )
+        }
+    }
+}
+
+/// Best-effort strip of a leading when-clause so recipe expansion can see `search`/`stat`.
+fn strip_leading_when(rest: &str) -> &str {
+    let t = rest.trim();
+    let (first, after) = t
+        .split_once(char::is_whitespace)
+        .map(|(a, b)| (a, b.trim()))
+        .unwrap_or((t, ""));
+    let lower = first.to_ascii_lowercase();
+    if matches!(lower.as_str(), "at" | "every") && !after.is_empty() {
+        // `at <datetime> <prompt>` or `every weekday 08:00 <prompt>` / `every 1h <prompt>`
+        if lower == "at" {
+            if let Some((_, body)) = after.split_once(char::is_whitespace) {
+                return body.trim();
+            }
+            return after;
+        }
+        // every <interval|weekday ...>
+        return strip_every_clause(after);
+    }
+    if is_compact_interval_token(first) && !after.is_empty() {
+        return after;
+    }
+    t
+}
+
+fn strip_every_clause(after: &str) -> &str {
+    let lower = after.to_ascii_lowercase();
+    if lower.starts_with("weekday ") || lower.starts_with("weekdays ") {
+        // every weekday HH:MM <prompt>
+        let rest = after
+            .split_once(char::is_whitespace)
+            .map(|(_, r)| r.trim())
+            .unwrap_or("");
+        if let Some((_, body)) = rest.split_once(char::is_whitespace) {
+            return body.trim();
+        }
+        return rest;
+    }
+    // every 1h <prompt> / every monday 08:00 <prompt>
+    if let Some((_, body)) = after.split_once(char::is_whitespace) {
+        let body = body.trim();
+        // monday 08:00 <prompt> — skip clock token if present
+        if let Some((clock, rest)) = body.split_once(char::is_whitespace)
+            && looks_like_clock(clock)
+        {
+            return rest.trim();
+        }
+        return body;
+    }
+    after
+}
+
+fn is_compact_interval_token(s: &str) -> bool {
+    if s.len() < 2 {
+        return false;
+    }
+    let (digits, suffix) = s.split_at(s.len() - 1);
+    matches!(suffix, "s" | "m" | "h" | "d")
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && digits.parse::<u64>().is_ok_and(|n| n > 0)
+}
+
+fn looks_like_clock(s: &str) -> bool {
+    let mut parts = s.split(':');
+    let (Some(h), Some(m)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    h.bytes().all(|b| b.is_ascii_digit()) && m.bytes().all(|b| b.is_ascii_digit())
+}
+
 pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 
 pub const WORKFLOW_TOOL_NAME: &str = "workflow";
@@ -305,5 +595,59 @@ mod tests {
     fn usage_message_has_no_default_claim() {
         assert!(loop_usage_message().contains("Usage: /loop"));
         assert!(!loop_usage_message().contains("10m"));
+    }
+
+    #[test]
+    fn schedule_usage_lists_verbs_and_recipes() {
+        let u = schedule_usage_message();
+        assert!(u.contains("Usage: /schedule"));
+        assert!(u.contains("/schedule list"));
+        assert!(u.contains("search <query>"));
+        assert!(u.contains("meeting join"));
+        assert!(u.contains("Schedules/"));
+    }
+
+    #[test]
+    fn parse_schedule_verbs() {
+        assert_eq!(parse_schedule_verb("list"), ScheduleVerb::List);
+        assert_eq!(parse_schedule_verb("show abc"), ScheduleVerb::Show { id: "abc" });
+        assert_eq!(
+            parse_schedule_verb("cancel abc123"),
+            ScheduleVerb::Cancel { id: "abc123" }
+        );
+        assert_eq!(
+            parse_schedule_verb("1h search rust"),
+            ScheduleVerb::Create { rest: "1h search rust" }
+        );
+    }
+
+    #[test]
+    fn expand_search_recipe_writes_schedules() {
+        let (prompt, title, meeting) = expand_schedule_recipe("search rust async");
+        assert!(prompt.contains("Search the web for: rust async"));
+        assert!(prompt.contains("Schedules/YYYY-MM-DD"));
+        assert_eq!(title, "rust async");
+        assert!(!meeting);
+    }
+
+    #[test]
+    fn expand_meeting_join_forbids_start_process() {
+        let (prompt, _, meeting) =
+            expand_schedule_recipe("meeting join https://example.com/join Standup");
+        assert!(prompt.contains("meeting_join"));
+        assert!(prompt.contains("https://example.com/join"));
+        assert!(prompt.contains("Start-Process"));
+        assert!(meeting);
+    }
+
+    #[test]
+    fn schedule_instruction_standing_and_no_inline() {
+        let text = schedule_instruction("1h search rust async");
+        assert!(text.contains("standing: true"));
+        assert!(text.contains("durable: true"));
+        assert!(text.contains("fire_immediately: false"));
+        assert!(text.contains("Do NOT execute the prompt inline"));
+        assert!(text.contains("1h search rust async"));
+        assert!(!text.contains("auto-expire after 7 days"));
     }
 }

@@ -1,4 +1,4 @@
-use super::types::SchedulerError;
+use super::types::{ScheduledTask, SchedulerError};
 
 const MINIMUM_INTERVAL_SECS: u64 = 60;
 
@@ -73,6 +73,17 @@ pub fn interval_to_human(secs: u64) -> String {
     } else {
         format!("every {secs} seconds")
     }
+}
+
+/// Human schedule for a task: one-shot `at`, weekday clock, or interval.
+pub fn task_human_schedule(task: &ScheduledTask) -> String {
+    if !task.recurring {
+        return format!("at {}", task.next_fire_at().to_rfc3339());
+    }
+    if task.weekdays_only {
+        return format!("every weekday ({})", interval_to_human(task.interval_secs));
+    }
+    interval_to_human(task.interval_secs)
 }
 
 #[cfg(test)]

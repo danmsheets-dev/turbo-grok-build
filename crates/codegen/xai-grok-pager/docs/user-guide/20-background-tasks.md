@@ -1,6 +1,6 @@
 # Background Tasks and Monitoring
 
-Grok runs long-lived processes without blocking the conversation. This document covers background commands, the `/loop` command, the `monitor` tool, and the scheduler.
+Grok runs long-lived processes without blocking the conversation. This document covers background commands, the `/loop` and `/schedule` commands, the `monitor` tool, and the scheduler.
 
 ---
 
@@ -93,6 +93,50 @@ The interval format supports:
 
 ---
 
+## The /schedule Command
+
+`/schedule` creates **standing** product jobs on the same scheduler as `/loop`. They do **not** auto-expire after 7 days. Results are written to `{workspace}/Schedules/YYYY-MM-DD - <title>.md` (same path jail as Meetings/: no `..`, no symlinked folder).
+
+### Syntax
+
+```
+/schedule [at|every] <when> <prompt-or-recipe>
+/schedule list
+/schedule show <id>
+/schedule cancel <id>
+```
+
+When:
+
+| Form | Example | Behavior |
+| ---- | ------- | -------- |
+| Interval | `5m`, `1h`, `1d` | Recurring, min 60s |
+| One-shot `at` | `at 2026-08-24T09:00` | Fires once at that time (ISO-8601; naive = local) |
+| Weekday clock | `every weekday 08:00` | Recurring Mon–Fri (weekend fires are skipped) |
+
+### Recipes
+
+These wrap the stored prompt:
+
+```
+/schedule 1h search rust async traits
+/schedule 1d stat https://status.example.com
+/schedule at 2026-08-24T09:00 meeting join https://teams.microsoft.com/l/meetup-join/… Standup
+```
+
+- `search <query>` — web briefing; must write the Schedules file
+- `stat <url-or-query>` — metric snapshot; must write the Schedules file
+- `meeting join <url> [name]` — stored prompt calls `meeting_join` (not Start-Process / bash)
+
+### Behavior
+
+- Default fire: background subagent, `isolation=worktree`, read-only capability (meeting-join is the exception: full tools, isolation none)
+- `durable=true` for human `/schedule` jobs
+- Overlap skip: if the previous iteration is still running, this tick is skipped
+- Cancel with `/schedule cancel <id>` or `scheduler_delete`
+
+---
+
 ## The monitor Tool
 
 The `monitor` tool streams events from a long-running script. Each line of output becomes a notification in the conversation. The `monitor` tool is the streaming counterpart to `/loop`: use `/loop` for periodic checks, and use `monitor` for real-time event streams.
@@ -149,7 +193,7 @@ If a monitor produces too many events, Grok stops it automatically. When this ha
 
 ## The Scheduler
 
-The scheduler provides a lower-level API for creating recurring tasks. `/loop` is a convenience wrapper around the scheduler.
+The scheduler provides a lower-level API for creating tasks. `/loop` and `/schedule` are convenience wrappers around it.
 
 ### scheduler_create
 
@@ -158,10 +202,13 @@ Create a scheduled task:
 | Parameter        | Description                                              |
 | ---------------- | -------------------------------------------------------- |
 | `interval`       | How often to run: `"5m"`, `"2h"`, `"1d"`, `"60s"`       |
+| `at`             | One-shot datetime or weekday clock (`weekday 08:00`)     |
 | `prompt`         | The prompt text to execute on each fire                  |
+| `title`          | Optional title for `Schedules/YYYY-MM-DD - <title>.md`   |
+| `standing`       | Skip the 7-day expiry (`expires_at = None`). `/schedule` sets this; `/loop` does not |
 | `fire_immediately`| Fire on creation in addition to the interval (default: `false`) |
-| `recurring`      | Repeat (default: `true`) or fire once (`false`)          |
-| `durable`        | Persist across sessions (default: `false`)               |
+| `durable`        | Persist across sessions (default: `false`; `/schedule` sets `true`) |
+| `meeting_join`   | Meeting-join recipe: fire with meeting tools, not read-only |
 
 ### scheduler_list
 
@@ -248,9 +295,10 @@ Each error or warning appears as a notification in the conversation.
 ## Best Practices
 
 - **Use `background` for one-shot long commands** (builds, test suites, server starts)
-- **Use `/loop` for periodic checks** (CI status, test runs, health checks)
+- **Use `/loop` for periodic checks** (CI status, test runs, health checks; 7-day expiry)
+- **Use `/schedule` for standing jobs** (search/stat/meeting, at-time, no 7-day expiry)
 - **Use `monitor` for real-time event streams** (log tailing, file watching)
-- **Use `scheduler_create` with `recurring: false`** for delayed one-shot tasks
+- **Use `/schedule at <datetime>`** for delayed one-shot product jobs
 - **Keep monitor filters tight** — prefer `grep --line-buffered` over raw log streams
 - **Do not use sleep loops** in normal commands to poll — use `get_command_or_subagent_output` with `timeout_ms` instead
 - **Set reasonable poll intervals** — 30s+ for remote APIs to avoid rate limits, shorter for local checks

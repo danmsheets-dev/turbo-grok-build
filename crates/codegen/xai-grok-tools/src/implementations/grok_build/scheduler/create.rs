@@ -2,13 +2,19 @@ use crate::types::requirements::{Expr, ToolRequirement};
 
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-use super::interval::{interval_to_human, parse_interval};
+use super::interval::{interval_to_human, parse_interval, task_human_schedule};
 use super::types::{ScheduledTask, SchedulerCommand, SchedulerHandle, scheduler_tool_error};
+use super::when::{
+    AtSpec, next_weekday_clock, next_weekly_clock, parse_at, seconds_until,
+};
 
-// Canonical /loop wording lives in the light API crate so other consumers can
-// link it without the tools implementation crate; re-exported to keep paths stable.
+// Canonical /loop and /schedule wording lives in the light API crate so other
+// consumers can link it without the tools implementation crate; re-exported
+// to keep paths stable.
 pub use xai_grok_tools_api::slash_commands::{
-    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    LoopFireMode, SCHEDULE_COMMAND_NAME, SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_LIST_TOOL_NAME,
+    ScheduleVerb, expand_schedule_recipe, loop_schedule_instruction, loop_usage_message,
+    parse_schedule_verb, schedule_instruction, schedule_usage_message,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -74,6 +80,44 @@ pub struct SchedulerCreateInput {
                        interval (false). Default: false. Create-only: ignored with task_id"
     )]
     pub fire_immediately: bool,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Optional human title for Schedules/YYYY-MM-DD - <title>.md result files."
+    )]
+    pub title: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "One-shot datetime (ISO-8601 / 2026-08-24T09:00) or a weekday clock \
+                       (`weekday 08:00`, `monday 09:00`). One-shot: interval = seconds until \
+                       then (min 60s), fires once. Weekday clocks are standing. \
+                       Create-only: ignored with task_id."
+    )]
+    pub at: Option<String>,
+
+    /// Standing `/schedule` jobs skip the 7-day `/loop` expiry.
+    #[serde(
+        default,
+        alias = "no_expire",
+        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
+    )]
+    #[schemars(
+        description = "If true, the job does not auto-expire after 7 days (`expires_at = None`). \
+                       Use for /schedule. /loop leaves this unset and keeps the 7-day cap. \
+                       Create-only: ignored with task_id."
+    )]
+    pub standing: Option<bool>,
+
+    #[serde(
+        default,
+        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
+    )]
+    #[schemars(
+        description = "Meeting-join recipe: fire with meeting tools (not read-only). \
+                       Create-only: ignored with task_id."
+    )]
+    pub meeting_join: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -112,9 +156,12 @@ To change an existing task, pass its task_id: provided fields replace old values
 
 Usage notes:
 - Interval format: "5m" (minutes), "2h" (hours), "1d" (days), "60s" (seconds, min 60)
+- Optional `at`: one-shot datetime (ISO-8601 / 2026-08-24T09:00) or weekday clock (`weekday 08:00`)
+- Optional `standing`/`no_expire`: skip the 7-day expiry (use for /schedule; /loop keeps the cap)
+- Optional `title`: used for Schedules/YYYY-MM-DD - <title>.md result files
 - Maximum 50 scheduled tasks at once
-- Tasks auto-expire after 7 days
-- For one-time delayed work, run a background terminal command (e.g. `sleep 1800 && <command>`) instead; its completion notifies you"#
+- /loop jobs auto-expire after 7 days; standing /schedule jobs do not
+- One-shot `at` fires once (interval = seconds until then, min 60s)"#
         // TODO: scheduler tools share ToolKind::Other so they can't be template-ized
         // via ${{ tools.by_kind.* }}. If tool name randomization is needed, add
         // dedicated ToolKind variants (SchedulerCreate, SchedulerDelete, SchedulerList).
@@ -228,33 +275,107 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             });
         }
 
-        if !input.recurring {
+        let at_spec = input
+            .at
+            .as_deref()
+            .map(parse_at)
+            .transpose()
+            .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+
+        if !input.recurring && at_spec.is_none() {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                "one-shot tasks are not supported; run a background terminal command instead \
+                "one-shot tasks require `at` (ISO-8601 / 2026-08-24T09:00); \
+                 otherwise run a background terminal command \
                  (`sleep <secs> && <command>`, background: true) or do the work now",
             ));
         }
 
-        let interval_secs = interval_secs.ok_or_else(|| {
-            xai_tool_runtime::ToolError::invalid_arguments(
-                "interval is required when creating a task",
-            )
-        })?;
+        if at_spec.is_none() && interval_secs.is_none() {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "interval is required when creating a task (or pass `at` for a one-shot)",
+            ));
+        }
+
         let prompt = input.prompt.ok_or_else(|| {
             xai_tool_runtime::ToolError::invalid_arguments(
                 "prompt is required when creating a task",
             )
         })?;
 
+        let now = chrono::Utc::now();
+        let standing = input.standing.unwrap_or(false);
+        let meeting_join = input.meeting_join.unwrap_or(false);
+        let mut weekdays_only = false;
+        let mut first_fire: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut recurring = true;
+
+        let interval_secs = match at_spec {
+            Some(AtSpec::Once(dt)) => {
+                let delay = seconds_until(now, dt)
+                    .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+                first_fire = Some(dt);
+                if let Some(secs) = interval_secs {
+                    // Recurring standing job whose first fire is `at`.
+                    secs
+                } else {
+                    recurring = false;
+                    delay
+                }
+            }
+            Some(AtSpec::Weekdays(time)) => {
+                weekdays_only = true;
+                first_fire = Some(next_weekday_clock(now, time));
+                interval_secs.unwrap_or(86_400)
+            }
+            Some(AtSpec::Weekly(weekday, time)) => {
+                first_fire = Some(next_weekly_clock(now, weekday, time));
+                interval_secs.unwrap_or(86_400 * 7)
+            }
+            None => interval_secs.ok_or_else(|| {
+                xai_tool_runtime::ToolError::invalid_arguments(
+                    "interval is required when creating a task (or pass `at` for a one-shot)",
+                )
+            })?,
+        };
+
         let durable = input.durable.unwrap_or(false);
         let mut task = ScheduledTask::with_fire_immediately(
             interval_secs,
             prompt,
-            true,
+            recurring,
             durable,
-            input.fire_immediately,
+            input.fire_immediately && first_fire.is_none(),
         );
         task.foreground = input.foreground.unwrap_or(false);
+        task.title = input.title.filter(|t| !t.trim().is_empty());
+        task.weekdays_only = weekdays_only;
+        task.meeting_join = meeting_join;
+        if standing || !recurring || weekdays_only || at_spec.is_some() {
+            // /schedule jobs: no 7-day expiry. /loop leaves standing unset.
+            if standing || !recurring || weekdays_only {
+                task.apply_standing();
+            }
+        }
+        if standing || weekdays_only || at_spec.is_some() {
+            // Default fire: worktree + read-only unless meeting-join.
+            task.isolation = Some(xai_tool_types::SubagentIsolationMode::Worktree);
+            task.capability_mode = Some(if meeting_join {
+                task.isolation = Some(xai_tool_types::SubagentIsolationMode::None);
+                xai_tool_types::SubagentCapabilityMode::All
+            } else {
+                xai_tool_types::SubagentCapabilityMode::ReadOnly
+            });
+        }
+        if let Some(first) = first_fire {
+            if first <= now {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    "at time must be in the future",
+                ));
+            }
+            task.anchor_first_fire(first);
+        }
+
+        let human_schedule = task_human_schedule(&task);
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let created = send_and_wait(
@@ -268,7 +389,7 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
 
         Ok(SchedulerCreateOutput {
             id: created.id,
-            human_schedule: interval_to_human(interval_secs),
+            human_schedule,
             updated: false,
         })
     }
@@ -486,5 +607,152 @@ mod tests {
         assert!(instr.contains("Do NOT execute the prompt inline"));
         // Raw request forwarded verbatim for the model to parse.
         assert!(instr.contains(args));
+    }
+
+    async fn created_task(
+        resources: &crate::types::resources::SharedResources,
+        id: &str,
+    ) -> super::super::types::ScheduledTask {
+        let res = resources.lock().await;
+        res.get::<crate::types::resources::State<super::super::types::SchedulerState>>()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+            .expect("task")
+    }
+
+    #[tokio::test]
+    async fn standing_job_has_no_7_day_expiry() {
+        let (resources, cancel) = scheduler_resources();
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "interval": "5m",
+                    "prompt": "search rust async",
+                    "standing": true,
+                    "durable": true,
+                    "title": "rust async"
+                })),
+            )
+            .await
+            .expect("create succeeds");
+        let task = created_task(&resources, &created.id).await;
+        assert!(task.standing);
+        assert!(task.expires_at.is_none(), "standing job must not expire");
+        assert!(task.durable);
+        assert_eq!(
+            task.isolation,
+            Some(xai_tool_types::SubagentIsolationMode::Worktree)
+        );
+        assert_eq!(
+            task.capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn one_shot_at_is_in_the_future() {
+        let (resources, cancel) = scheduler_resources();
+        let at = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "at": at,
+                    "prompt": "brief the morning",
+                    "standing": true,
+                    "durable": true,
+                    "title": "morning brief"
+                })),
+            )
+            .await
+            .expect("create succeeds");
+        let task = created_task(&resources, &created.id).await;
+        assert!(!task.recurring);
+        assert!(task.expires_at.is_none());
+        assert!(task.next_fire_at() > chrono::Utc::now());
+        assert!(
+            created.human_schedule.starts_with("at "),
+            "one-shot schedule: {}",
+            created.human_schedule
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn past_at_is_rejected() {
+        let (resources, cancel) = scheduler_resources();
+        let at = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let err = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "at": at,
+                    "prompt": "too late"
+                })),
+            )
+            .await
+            .expect_err("past at must fail");
+        assert!(
+            err.to_string().contains("future"),
+            "steers to future: {err}"
+        );
+        assert_eq!(task_count(&resources).await, 0);
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn meeting_join_sets_flag_and_write_capability() {
+        let (resources, cancel) = scheduler_resources();
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "interval": "1d",
+                    "prompt": "call meeting_join",
+                    "standing": true,
+                    "meeting_join": true,
+                    "durable": true
+                })),
+            )
+            .await
+            .expect("create succeeds");
+        let task = created_task(&resources, &created.id).await;
+        assert!(task.meeting_join);
+        assert_eq!(
+            task.isolation,
+            Some(xai_tool_types::SubagentIsolationMode::None)
+        );
+        assert_eq!(
+            task.capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::All)
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn loop_create_keeps_7_day_expiry_and_no_worktree() {
+        let (resources, cancel) = scheduler_resources();
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "interval": "5m",
+                    "prompt": "check deploy",
+                    "fire_immediately": true
+                })),
+            )
+            .await
+            .expect("create succeeds");
+        let task = created_task(&resources, &created.id).await;
+        assert!(!task.standing);
+        assert!(task.expires_at.is_some());
+        assert!(task.isolation.is_none());
+        assert!(task.capability_mode.is_none());
+        cancel.cancel();
     }
 }

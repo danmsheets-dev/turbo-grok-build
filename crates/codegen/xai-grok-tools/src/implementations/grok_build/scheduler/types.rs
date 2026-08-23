@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +161,9 @@ pub enum SchedulerError {
     #[error("invalid interval: {0}")]
     InvalidInterval(String),
 
+    #[error("invalid schedule time: {0}")]
+    InvalidAt(String),
+
     #[error("maximum of {0} scheduled tasks reached")]
     TaskLimitReached(usize),
 
@@ -188,6 +192,7 @@ pub enum SchedulerError {
 pub fn scheduler_tool_error(error: SchedulerError) -> xai_tool_runtime::ToolError {
     let code = match &error {
         SchedulerError::InvalidInterval(_)
+        | SchedulerError::InvalidAt(_)
         | SchedulerError::TaskLimitReached(_)
         | SchedulerError::TaskNotFound(_) => "scheduler_invalid_request",
         SchedulerError::Persistence(_) => "scheduler_persistence",
@@ -225,6 +230,24 @@ pub struct ScheduledTask {
     /// iteration.
     #[serde(default)]
     pub chain_reset_pending: bool,
+    /// Optional human title used in `{workspace}/Schedules/YYYY-MM-DD - <title>.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Standing `/schedule` jobs skip the 7-day `/loop` expiry (`expires_at = None`).
+    #[serde(default)]
+    pub standing: bool,
+    /// Skip Saturday/Sunday fires (weekday clock schedules). Cadence still advances.
+    #[serde(default)]
+    pub weekdays_only: bool,
+    /// Meeting-join recipe: fire with write/meeting tools instead of read-only.
+    #[serde(default)]
+    pub meeting_join: bool,
+    /// Isolation for the fire subagent. `None` keeps `/loop` behavior (`none`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<SubagentIsolationMode>,
+    /// Capability for the fire subagent. `None` keeps `/loop` (unclamped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_mode: Option<SubagentCapabilityMode>,
 }
 
 pub const LOOP_FRESH_CHAIN_EVERY: u32 = 10;
@@ -274,7 +297,25 @@ impl ScheduledTask {
             last_subagent_id: None,
             iterations_since_fresh: 0,
             chain_reset_pending: false,
+            title: None,
+            standing: false,
+            weekdays_only: false,
+            meeting_join: false,
+            isolation: None,
+            capability_mode: None,
         }
+    }
+
+    /// `/schedule` standing jobs never auto-expire (unlike `/loop`'s 7-day cap).
+    pub fn apply_standing(&mut self) {
+        self.standing = true;
+        self.expires_at = None;
+    }
+
+    /// Anchor `created_at` so [`Self::next_fire_at`] equals `first` (never-fired).
+    pub fn anchor_first_fire(&mut self, first: DateTime<Utc>) {
+        self.created_at = first - chrono::Duration::seconds(self.interval_secs as i64);
+        self.last_fired_at = None;
     }
 
     /// Next fire time, computed from `last_fired_at` (or `created_at` if never fired).
@@ -286,6 +327,14 @@ impl ScheduledTask {
     /// Whether this task has expired (recurring tasks only).
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|exp| now >= exp)
+    }
+
+    /// Product `/schedule` job: worktree isolation, standing, or a meeting-join recipe.
+    pub fn is_product_schedule(&self) -> bool {
+        self.standing
+            || self.meeting_join
+            || self.title.is_some()
+            || matches!(self.isolation, Some(SubagentIsolationMode::Worktree))
     }
 }
 
@@ -354,6 +403,28 @@ mod tests {
     fn new_one_shot_task_has_no_expiry() {
         let task = ScheduledTask::new(300, "check deploy".into(), false, false);
         assert!(task.expires_at.is_none());
+    }
+
+    #[test]
+    fn standing_recurring_task_has_no_7_day_expiry() {
+        let mut task = ScheduledTask::new(300, "check deploy".into(), true, true);
+        assert!(task.expires_at.is_some());
+        task.apply_standing();
+        assert!(task.standing);
+        assert!(task.expires_at.is_none());
+        assert!(!task.is_expired(Utc::now() + chrono::Duration::days(30)));
+    }
+
+    #[test]
+    fn anchor_first_fire_puts_next_fire_in_the_future() {
+        let mut task = ScheduledTask::new(3600, "once".into(), false, true);
+        let first = Utc::now() + chrono::Duration::hours(2);
+        task.anchor_first_fire(first);
+        let delta = (task.next_fire_at() - first)
+            .num_seconds()
+            .unsigned_abs();
+        assert!(delta <= 1, "next_fire_at should match first, delta={delta}");
+        assert!(task.next_fire_at() > Utc::now());
     }
 
     #[test]

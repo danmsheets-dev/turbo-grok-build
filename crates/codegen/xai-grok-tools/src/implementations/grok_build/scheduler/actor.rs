@@ -16,9 +16,10 @@ use crate::notification::{
 };
 use crate::reminders::{LoopParentStamp, format_loop_iteration_prompt_with_parent};
 use crate::types::resources::{Cwd, SharedResources, State};
-use xai_tool_types::SubagentIsolationMode;
+use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 
-use super::interval::interval_to_human;
+use super::interval::{interval_to_human, task_human_schedule};
+use super::when::is_local_weekend;
 use super::types::{
     LOOP_COMPLETION_OUTPUT_CAP, LOOP_FRESH_CHAIN_EVERY, ScheduledTask, SchedulerClock,
     SchedulerCommand, SchedulerError, SchedulerSnapshot, SchedulerState, SchedulerVersion,
@@ -304,6 +305,11 @@ impl SchedulerActor {
         debug_assert!(self.pending_removal.is_none());
         let now = Utc::now();
         let mut res = self.resources.lock().await;
+        let background_enabled = res
+            .get::<crate::types::resources::SchedulerBackgroundLoops>()
+            .is_none_or(|v| v.0);
+        let events = res.get::<SubagentEventSender>().cloned();
+        let session = res.get::<SessionIdResource>().map(|s| s.0.clone());
         let state = res.get_or_default::<State<SchedulerState>>();
         let idx = state.tasks.iter().position(|task| {
             task.next_fire_at() <= now && !self.blocked_expiries.contains(&task.id)
@@ -318,12 +324,17 @@ impl SchedulerActor {
         let is_expired = task.recurring && task.is_expired(now);
         let should_remove = !task.recurring;
         let prompt = task.prompt.clone();
-        let human_schedule = interval_to_human(task.interval_secs);
+        let human_schedule = task_human_schedule(task);
         let is_durable = task.durable;
         let foreground = task.foreground;
         let last_subagent_id = task.last_subagent_id.clone();
         let iterations_since_fresh = task.iterations_since_fresh;
         let chain_reset_pending = task.chain_reset_pending;
+        let isolation = task.isolation.unwrap_or(SubagentIsolationMode::None);
+        let capability_mode = task.capability_mode;
+        let product_schedule = task.is_product_schedule();
+        let title = task.title.clone();
+        let weekdays_only = task.weekdays_only;
         let transition_count = if is_expired {
             1
         } else if should_remove {
@@ -432,19 +443,26 @@ impl SchedulerActor {
         let task = &mut state.tasks[idx];
         task.last_fired_at = Some(now);
         let next_fire_at = task.recurring.then(|| task.next_fire_at().to_rfc3339());
-        if should_remove {
-            state.tasks.remove(idx);
+
+        if weekdays_only && is_local_weekend(now) {
+            drop(res);
+            tracing::info!(
+                task_id = %task_id,
+                "Skipping weekday-clock fire: weekend (cadence advanced)"
+            );
+            return;
         }
 
-        let background_enabled = res
-            .get::<crate::types::resources::SchedulerBackgroundLoops>()
-            .is_none_or(|v| v.0);
-        let spawn_deps = if foreground || should_remove || !background_enabled {
-            None
-        } else {
-            let events = res.get::<SubagentEventSender>().cloned();
-            let session = res.get::<SessionIdResource>().map(|s| s.0.clone());
+        // One-shot product jobs still spawn a background subagent; drop the
+        // task only after dispatch so last_subagent_id can be recorded.
+        let spawn_background = !foreground && background_enabled;
+        if should_remove && !spawn_background {
+            state.tasks.remove(idx);
+        }
+        let spawn_deps = if spawn_background {
             events.zip(session)
+        } else {
+            None
         };
 
         drop(res);
@@ -455,8 +473,6 @@ impl SchedulerActor {
             background = spawn_deps.is_some(),
             "Firing scheduled task"
         );
-
-        let removed_task_id = should_remove.then(|| task_id.clone());
 
         let outcome = match spawn_deps {
             Some((events, parent_session_id)) => {
@@ -469,6 +485,10 @@ impl SchedulerActor {
                     last_subagent_id,
                     iterations_since_fresh,
                     chain_reset_pending,
+                    isolation,
+                    capability_mode,
+                    product_schedule,
+                    title.as_deref(),
                 )
                 .await
             }
@@ -487,6 +507,13 @@ impl SchedulerActor {
                 self.notification_handle
                     .send_scheduled_task_created(payload);
             }
+            if should_remove {
+                self.remove_task_by_id(&task_id).await;
+                let removal = reservation.commit_next(&mut self.clock);
+                debug_assert!(removal.rollover.is_none());
+                self.notification_handle
+                    .send_scheduled_task_removed(task_removed_payload(task_id, removal.version));
+            }
             return;
         }
 
@@ -498,7 +525,7 @@ impl SchedulerActor {
                 let fire_version = commit.version;
                 self.notification_handle
                     .send_scheduled_task_fired(ScheduledTaskFired {
-                        task_id,
+                        task_id: task_id.clone(),
                         prompt,
                         human_schedule,
                         next_fire_at,
@@ -513,7 +540,7 @@ impl SchedulerActor {
                 let fire_version = commit.version;
                 self.notification_handle
                     .send_scheduled_task_fired(ScheduledTaskFired {
-                        task_id,
+                        task_id: task_id.clone(),
                         prompt,
                         human_schedule,
                         next_fire_at,
@@ -524,12 +551,21 @@ impl SchedulerActor {
             }
         }
 
-        if let Some(task_id) = removed_task_id {
+        if should_remove {
+            if spawn_background {
+                self.remove_task_by_id(&task_id).await;
+            }
             let removal = reservation.commit_next(&mut self.clock);
             debug_assert!(removal.rollover.is_none());
             self.notification_handle
                 .send_scheduled_task_removed(task_removed_payload(task_id, removal.version));
         }
+    }
+
+    async fn remove_task_by_id(&self, task_id: &str) {
+        let mut res = self.resources.lock().await;
+        let state = res.get_or_default::<State<SchedulerState>>();
+        state.tasks.retain(|t| t.id != task_id);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -543,6 +579,10 @@ impl SchedulerActor {
         last_subagent_id: Option<String>,
         iterations_since_fresh: u32,
         chain_reset_pending: bool,
+        isolation: SubagentIsolationMode,
+        capability_mode: Option<SubagentCapabilityMode>,
+        product_schedule: bool,
+        title: Option<&str>,
     ) -> LoopFireOutcome {
         let prev_snapshot = match &last_subagent_id {
             Some(prev_id) => {
@@ -671,15 +711,38 @@ impl SchedulerActor {
             let stamp = cwd.as_ref().map(|p| capture_loop_parent_stamp(p));
             (cwd, stamp)
         };
-        let framed_prompt = format_loop_iteration_prompt_with_parent(
+        // /loop check-jobs must stamp parent isolation=none. Product /schedule
+        // fires use worktree (or meeting-join none) and must not claim otherwise.
+        let stamp = if product_schedule {
+            None
+        } else {
+            parent_stamp.as_ref()
+        };
+        let mut framed_prompt = format_loop_iteration_prompt_with_parent(
             prompt,
             task_id,
             human_schedule,
             prior_summary.as_deref(),
-            parent_stamp.as_ref(),
+            stamp,
         );
+        if product_schedule
+            && let Some(cwd) = parent_cwd.as_ref()
+        {
+            let title = title.unwrap_or("schedule");
+            let dest = super::schedules::workspace_schedules_dir(cwd).join(
+                super::schedules::schedule_filename(
+                    &super::schedules::local_date_stamp(Utc::now()),
+                    title,
+                ),
+            );
+            framed_prompt.push_str(&format!(
+                "\n\nWrite your result to {} (Schedules jail: no `..`, folder must not be a symlink).",
+                dest.display()
+            ));
+        }
+        let kind = if product_schedule { "schedule" } else { "loop" };
         let description = format!(
-            "loop: {} ({human_schedule})",
+            "{kind}: {} ({human_schedule})",
             truncate_chars(prompt.lines().next().unwrap_or(prompt), 60)
         );
 
@@ -711,8 +774,9 @@ impl SchedulerActor {
                 spawn_depth: Some(0),
                 loop_task_id: Some(task_id.to_string()),
                 timeout_ms: None,
-                // Isolation none: check-loops must see parent main, not densify WTs.
-                isolation: Some(SubagentIsolationMode::None),
+                // /loop: isolation none (parent main). /schedule: worktree unless meeting-join.
+                isolation: Some(isolation),
+                capability_mode,
                 ..Default::default()
             },
             run_in_background: true,
@@ -1928,6 +1992,11 @@ mod tests {
             Some(LOOP_COMPLETION_OUTPUT_CAP)
         );
         assert_eq!(request.runtime_overrides.spawn_depth, Some(0));
+        assert_eq!(
+            request.runtime_overrides.isolation,
+            Some(SubagentIsolationMode::None)
+        );
+        assert!(request.runtime_overrides.capability_mode.is_none());
         assert!(request.description.starts_with("loop: "));
 
         let mut fired_subagent_id = None;
@@ -1952,6 +2021,105 @@ mod tests {
         assert_eq!(task.last_subagent_id.as_deref(), Some(request.id.as_str()));
         assert_eq!(task.iterations_since_fresh, 1);
 
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn product_schedule_fire_uses_worktree_and_readonly() {
+        let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
+        let mut task = ScheduledTask::new(1, "search rust async".into(), true, true);
+        task.apply_standing();
+        task.title = Some("rust async".into());
+        task.isolation = Some(SubagentIsolationMode::Worktree);
+        task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadOnly);
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            })
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+
+        let request = next_subagent_spawn(&mut subagent_rx).await;
+        assert!(request.description.starts_with("schedule: "));
+        assert_eq!(
+            request.runtime_overrides.isolation,
+            Some(SubagentIsolationMode::Worktree)
+        );
+        assert_eq!(
+            request.runtime_overrides.capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+        );
+        assert!(
+            request.prompt.contains("Schedules"),
+            "product fire must name the Schedules path: {}",
+            request.prompt
+        );
+        let mut fired = false;
+        for _ in 0..4 {
+            if matches!(
+                next_event(&mut notif_rx).await,
+                ToolNotification::ScheduledTaskFired(_)
+            ) {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired);
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn one_shot_spawns_background_then_removes() {
+        let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
+        let mut task = ScheduledTask::new(1, "morning brief".into(), false, true);
+        task.apply_standing();
+        task.isolation = Some(SubagentIsolationMode::Worktree);
+        task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadOnly);
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            })
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+
+        let request = next_subagent_spawn(&mut subagent_rx).await;
+        assert!(request.run_in_background);
+        assert_eq!(
+            request.runtime_overrides.isolation,
+            Some(SubagentIsolationMode::Worktree)
+        );
+
+        let mut saw_fired = false;
+        let mut saw_removed = false;
+        for _ in 0..6 {
+            match next_event(&mut notif_rx).await {
+                ToolNotification::ScheduledTaskFired(_) => saw_fired = true,
+                ToolNotification::ScheduledTaskRemoved(_) => saw_removed = true,
+                _ => {}
+            }
+            if saw_fired && saw_removed {
+                break;
+            }
+        }
+        assert!(saw_fired && saw_removed, "one-shot must fire then remove");
+
+        let (list_tx, list_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::List { reply: list_tx })
+            .unwrap();
+        assert!(
+            list_rx.await.unwrap().tasks.is_empty(),
+            "one-shot must be gone after spawn"
+        );
         cancel.cancel();
     }
 

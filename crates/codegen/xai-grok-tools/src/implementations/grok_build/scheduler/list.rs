@@ -2,7 +2,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-use super::interval::interval_to_human;
+use super::interval::task_human_schedule;
 use super::types::{SchedulerCommand, SchedulerHandle};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -17,6 +17,12 @@ pub struct ScheduledTaskSummary {
     pub next_fire_at: String,
     pub created_at: String,
     pub recurring: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub standing: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -124,6 +130,7 @@ impl xai_tool_runtime::Tool for SchedulerListTool {
             .map(|t| {
                 let next_fire = t.next_fire_at().to_rfc3339();
                 let created = t.created_at.to_rfc3339();
+                let interval_human = task_human_schedule(&t);
                 let prompt = if t.prompt.len() > 80 {
                     let cut = crate::util::floor_char_boundary(&t.prompt, 80);
                     format!("{}...", &t.prompt[..cut])
@@ -133,10 +140,13 @@ impl xai_tool_runtime::Tool for SchedulerListTool {
                 ScheduledTaskSummary {
                     id: t.id,
                     prompt,
-                    interval_human: interval_to_human(t.interval_secs),
+                    interval_human,
                     next_fire_at: next_fire,
                     created_at: created,
                     recurring: t.recurring,
+                    title: t.title,
+                    expires_at: t.expires_at.map(|e| e.to_rfc3339()),
+                    standing: t.standing,
                 }
             })
             .collect();
