@@ -13,9 +13,9 @@ pub struct MeetingJoinInput {
         description = "Zoom, Teams, Meet, or Webex join URL (https). Opens the link and starts recording/transcription."
     )]
     pub url: String,
-    #[serde(default)]
+    #[serde(default, alias = "name")]
     #[schemars(
-        description = "Optional meeting name for the work-folder summary (e.g. Weekly website standup). Graph subject is used when omitted."
+        description = "Optional meeting name for the work-folder summary (e.g. Weekly website standup). Graph subject is used when omitted. Alias: `name`."
     )]
     pub title: Option<String>,
 }
@@ -81,5 +81,25 @@ impl xai_tool_runtime::Tool for MeetingJoinTool {
             .filter(|s| !s.is_empty());
         let text = handle.join(input.url.trim(), title).await?;
         Ok(text_output(text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_alias_deserializes_to_title() {
+        let v: MeetingJoinInput = serde_json::from_str(
+            r#"{"url":"https://teams.microsoft.com/meet/1","name":"Standup"}"#,
+        )
+        .unwrap();
+        assert_eq!(v.url, "https://teams.microsoft.com/meet/1");
+        assert_eq!(v.title.as_deref(), Some("Standup"));
+        let v2: MeetingJoinInput = serde_json::from_str(
+            r#"{"url":"https://zoom.us/j/1","title":"Retro"}"#,
+        )
+        .unwrap();
+        assert_eq!(v2.title.as_deref(), Some("Retro"));
     }
 }

@@ -187,7 +187,9 @@ Fathom-style meeting notetaker (built into Turbo, not a third-party bot vendor).
 /meeting ask [question]
 ```
 
-`join` opens the Zoom/Teams/Meet/Webex link and starts capture. On Windows that is **WASAPI loopback of system playback** (everyone you hear in Teams/Zoom) **mixed with the microphone** (you, on a headset). If loopback cannot open, it falls back to the mic. Optional `[name]` is the meeting title (otherwise Teams Graph `subject` if `GROK_GRAPH_TOKEN` is set). Grok STT writes a transcript under the session folder (`meetings/<id>/transcript.jsonl`). Set `GROK_MEETING_CAPTURE=mic` to force microphone-only, or `GROK_MEETING_CAPTURE=loopback` for playback mix without the mic.
+`join` opens the Zoom/Teams/Meet/Webex link **and** starts capture. Opening Teams without capture (for example `Start-Process` on the URL) is not the feature. On Windows that is **WASAPI loopback of system playback** (everyone you hear in Teams/Zoom) **mixed with the microphone** (you, on a headset). If loopback cannot open, it falls back to the mic. Optional `[name]` is the meeting title (otherwise Teams Graph `subject` if `GROK_GRAPH_TOKEN` is set). Grok STT writes a transcript under the session folder (`meetings/<id>/transcript.jsonl`). Set `GROK_MEETING_CAPTURE=mic` to force microphone-only, or `GROK_MEETING_CAPTURE=loopback` for playback mix without the mic.
+
+You do **not** have to type the slash command. Pasting a Teams/Zoom/Meet/Webex URL, or saying “join this meeting / listen in / take notes” with the URL, calls `meeting_join` immediately. Bare `/meeting <url>` also means join. `/meeting` is handled by the pager and is never sent to the model as a coding prompt.
 
 **When the meeting is done**, `/meeting stop` (or `/meeting notes`) writes a **work-only** summary into the folder you launched Turbo from:
 

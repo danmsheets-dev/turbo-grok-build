@@ -117,6 +117,24 @@ pub fn denial(tool: &str, rule: &str, detail: &str) -> String {
     format!("policy denied ({tool}): rule `{rule}` matched {detail}")
 }
 
+/// True when `path` is a `$GROK_HOME` credential file that must not be mutated.
+pub fn grok_home_credential_denied(path: &std::path::Path) -> bool {
+    xai_grok_sandbox::write_denied_grok_home_credential(path)
+}
+
+/// Model-facing refusal for grok-home credential writes.
+pub fn grok_home_credential_denial(tool: &str, path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("credential");
+    denial(
+        tool,
+        "grok_home_credentials",
+        &format!("`{}` (`{name}` under $GROK_HOME)", path.display()),
+    ) + " — use `/providers` or the platform login flow, not file edits"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +164,10 @@ mod tests {
                 .is_none()
         );
         assert!(p.path_denied(std::path::Path::new("src/main.rs")).is_none());
+        assert!(
+            p.path_denied(std::path::Path::new("src\\production\\main.rs"))
+                .is_some()
+        );
     }
 
     #[test]

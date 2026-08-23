@@ -80,9 +80,10 @@ pub use meeting::{
     MEETING_KNOWLEDGE_TOOL_NAME, MEETING_NOTES_TOOL_NAME, MEETING_REPLY_TOOL_NAME,
     MEETING_STATUS_TOOL_NAME, MEETING_STOP_TOOL_NAME, MEETING_TRANSCRIPT_TOOL_NAME, MeetingAskTool,
     MeetingHandle, MeetingJoinTool, MeetingKnowledgeTool, MeetingNotesTool, MeetingReplyTool,
-    MeetingStatusTool, MeetingStopTool, MeetingTranscriptTool, ask_instruction, join_instruction,
-    knowledge_instruction, notes_instruction, reply_instruction, split_join_args,
-    status_instruction, stop_instruction, transcript_instruction, usage_message,
+    MeetingStatusTool, MeetingStopTool, MeetingTranscriptTool, ask_instruction,
+    detect_join_request, join_instruction, knowledge_instruction, notes_instruction,
+    reply_instruction, split_join_args, status_instruction, stop_instruction,
+    transcript_instruction, usage_message,
 };
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;

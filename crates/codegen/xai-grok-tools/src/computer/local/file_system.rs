@@ -11,6 +11,27 @@ use crate::computer::types::{AsyncFileSystem, ComputerError};
 /// Creates a local FS access which allows writing and reading from the local files
 pub struct LocalFs;
 
+/// Userspace write-deny for `$GROK_HOME` credential files. Kernel sandbox is
+/// advisory on Windows; this is the choke point that still fires there.
+fn grok_home_credential_write_error(path: &Path, op: &str) -> Option<ComputerError> {
+    if !xai_grok_sandbox::write_denied_grok_home_credential(path) {
+        return None;
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("credential");
+    Some(ComputerError::io_with_kind(
+        format!(
+            "Denied: {op} of grok-home credential `{name}` is blocked \
+             (auth.json / keys under $GROK_HOME). Use `/providers` or the \
+             platform login flow — not file edits. Windows sandbox is advisory; \
+             this userspace deny is the write jail."
+        ),
+        io::ErrorKind::PermissionDenied,
+    ))
+}
+
 // Keep the window short: these retries absorb brief Windows editor/indexer/AV
 // races without hiding persistent locks, ACL failures, or sandbox denials.
 const WRITE_RETRY_DELAYS: &[Duration] = &[
@@ -330,6 +351,10 @@ impl AsyncFileSystem for LocalFs {
         // the tool layer via `enforce_write_path`.
         crate::types::resources::enforce_process_confine_root_exists()
             .map_err(|e| e.into_computer_error())?;
+        if let Some(err) = grok_home_credential_write_error(path, "write") {
+            xai_grok_sandbox::log_violation(&path.display().to_string(), "write");
+            return Err(err);
+        }
 
         // implicitly creates the missing directories if any
         if let Some(dir) = path.parent()
@@ -412,6 +437,10 @@ impl AsyncFileSystem for LocalFs {
 
     #[tracing::instrument(name = "fs.delete_file", skip_all)]
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError> {
+        if let Some(err) = grok_home_credential_write_error(path, "delete") {
+            xai_grok_sandbox::log_violation(&path.display().to_string(), "delete");
+            return Err(err);
+        }
         if let Err(e) = fs::remove_file(path).await {
             if is_permission_error(&e) {
                 xai_grok_sandbox::log_violation(&path.display().to_string(), "delete");

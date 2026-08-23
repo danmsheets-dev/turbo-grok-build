@@ -257,6 +257,14 @@ pub(crate) async fn run_search_replace(
             ) + &format!(" — matched deny-path fragment `{frag}`"),
         ));
     }
+    if crate::implementations::grok_build::policy::grok_home_credential_denied(&path) {
+        return Ok(SearchReplaceOutput::InvalidInput(
+            crate::implementations::grok_build::policy::grok_home_credential_denial(
+                "search_replace",
+                &path,
+            ),
+        ));
+    }
     // Execution receipts (Phase 5): snapshot pre-edit contents so a rollback
     // receipt can restore them. Storage failures degrade to no-receipt.
     let session_folder = {
@@ -398,14 +406,9 @@ async fn handle_new_file_creation(
     empty_old_string_does_not_override: bool,
     policy: &crate::implementations::grok_build::policy::PolicyParams,
 ) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
-    let file_exists = match fs.read_file(path).await {
-        Ok(bytes) => !bytes.is_empty(),
-        Err(_) => false,
-    };
-    let old_text = match fs.read_file(path).await {
-        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
-        Err(_) => None,
-    };
+    let existing = fs.read_file(path).await.ok();
+    let file_exists = existing.as_ref().is_some_and(|bytes| !bytes.is_empty());
+    let old_text = existing.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     if file_exists && empty_old_string_does_not_override {
         let old_string_name;
         {

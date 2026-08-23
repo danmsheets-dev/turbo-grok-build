@@ -13,6 +13,10 @@ use crate::types::tool_index::ToolIndex;
 
 pub const MCP_SERVER_HEALTH_TOOL_NAME: &str = "mcp_server_health";
 
+fn redact_mcp_reason(reason: &str) -> String {
+    xai_grok_secrets::redact_secrets(reason).into_owned()
+}
+
 fn failure_diagnostic(reason: &str) -> &'static str {
     let reason = reason.to_ascii_lowercase();
     if reason.contains("docker") {
@@ -154,11 +158,12 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
         // Include failed servers that may not appear in list_server_summaries.
         for failed in &snapshot.failed_servers {
             if !summaries.iter().any(|s| s.name == failed.name) {
+                let reason = redact_mcp_reason(&failed.reason);
                 servers.push(serde_json::json!({
                     "name": failed.name,
                     "tool_count": 0,
                     "status": "failed",
-                    "reason": failed.reason,
+                    "reason": reason,
                     "diagnostic": failure_diagnostic(&failed.reason),
                 }));
             }
@@ -170,7 +175,7 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
             .map(|f| {
                 serde_json::json!({
                     "name": f.name,
-                    "reason": f.reason,
+                    "reason": redact_mcp_reason(&f.reason),
                     "diagnostic": failure_diagnostic(&f.reason),
                 })
             })
@@ -195,7 +200,7 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
             let failed_line = snapshot
                 .failed_servers
                 .iter()
-                .map(|f| format!("{} ({})", f.name, f.reason))
+                .map(|f| format!("{} ({})", f.name, redact_mcp_reason(&f.reason)))
                 .collect::<Vec<_>>()
                 .join("; ");
             let extra = format!(

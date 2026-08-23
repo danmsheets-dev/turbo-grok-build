@@ -3172,29 +3172,69 @@ pub(crate) fn ensure_live_worktree_cap_for_new_marker(dest: &Path) -> Result<(),
 ///
 /// Multiple nested git directories without an explicit `cwd` / env selection
 /// do **not** guess — isolation stays fail-closed.
+fn path_is_under_workspace(path: &Path, workspace: &Path) -> bool {
+    let norm = |p: &Path| {
+        dunce::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let child = norm(path);
+    let parent = norm(workspace);
+    if parent.is_empty() {
+        return false;
+    }
+    child == parent || child.starts_with(&format!("{parent}/"))
+}
+
 pub(crate) fn resolve_worktree_source_cwd(
     parent_cwd: &Path,
     spawn_cwd: Option<&str>,
 ) -> PathBuf {
     if let Some(raw) = spawn_cwd {
         let explicit = PathBuf::from(raw.trim());
-        if explicit.is_dir() {
+        if explicit.is_dir() && path_is_under_workspace(&explicit, parent_cwd) {
             if let Ok(root) =
                 xai_grok_workspace::session::git::find_main_repo_root_from_path(&explicit)
             {
-                return root;
+                if path_is_under_workspace(&root, parent_cwd) {
+                    return root;
+                }
             }
             if explicit.join(".git").exists() {
                 return explicit;
             }
+        } else if explicit.is_dir() {
+            tracing::warn!(
+                spawn_cwd = %explicit.display(),
+                parent = %parent_cwd.display(),
+                "Ignoring spawn cwd outside the parent workspace (rc7 C7)"
+            );
         }
     }
-    if let Ok(root) = xai_grok_workspace::session::git::find_main_repo_root_from_path(parent_cwd) {
-        return root;
+    // Prefer a git dir *here* or a unique nested child over walking to an
+    // ancestor repo (umbrella-inside-another-git / nested checkout).
+    if parent_cwd.join(".git").exists() {
+        if let Ok(root) =
+            xai_grok_workspace::session::git::find_main_repo_root_from_path(parent_cwd)
+        {
+            return root;
+        }
+        return parent_cwd.to_path_buf();
+    }
+    if let Some(nested) = discover_unique_nested_git(parent_cwd) {
+        tracing::info!(
+            source = %parent_cwd.display(),
+            repo_root = %nested.display(),
+            "Using unique nested git repository for subagent isolation"
+        );
+        return nested;
     }
     if let Ok(raw) = std::env::var("GROK_SUBAGENT_REPO_ROOT") {
         let explicit = PathBuf::from(raw.trim());
-        if explicit.is_dir() {
+        if explicit.is_dir() && path_is_under_workspace(&explicit, parent_cwd) {
             tracing::info!(
                 source = %parent_cwd.display(),
                 repo_root = %explicit.display(),
@@ -3204,16 +3244,8 @@ pub(crate) fn resolve_worktree_source_cwd(
         }
         tracing::warn!(
             repo_root = %explicit.display(),
-            "GROK_SUBAGENT_REPO_ROOT is not an existing directory; retaining parent cwd"
+            "GROK_SUBAGENT_REPO_ROOT is outside the parent workspace or missing; retaining parent cwd"
         );
-    }
-    if let Some(nested) = discover_unique_nested_git(parent_cwd) {
-        tracing::info!(
-            source = %parent_cwd.display(),
-            repo_root = %nested.display(),
-            "Using unique nested git repository for subagent isolation"
-        );
-        return nested;
     }
     parent_cwd.to_path_buf()
 }

@@ -120,6 +120,16 @@ impl xai_tool_runtime::Tool for MonitorTool {
                 ),
             ));
         }
+        if xai_grok_sandbox::command_mentions_grok_home_credential(&input.command) {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "policy_denied",
+                crate::implementations::grok_build::policy::denial(
+                    "monitor",
+                    "grok_home_credentials",
+                    "command names a $GROK_HOME credential file (auth.json / keys)",
+                ),
+            ));
+        }
 
         // Output file lives in the session folder alongside bash terminal logs.
         let output_file = session_folder

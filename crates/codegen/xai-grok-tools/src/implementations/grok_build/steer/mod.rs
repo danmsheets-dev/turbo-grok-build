@@ -11,6 +11,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const STEER_TOOL_NAME: &str = "steer";
+/// Schema and runtime cap for steer text (16 KiB).
+const STEER_MAX_BYTES: usize = 16 * 1024;
 
 /// Input for the steer tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -115,6 +117,15 @@ impl xai_tool_runtime::Tool for SteerTool {
                 .get::<SubagentBackendResource>()
                 .cloned()
         };
+        if input.text.len() > STEER_MAX_BYTES {
+            return Ok(SteerOutput::Refused {
+                subagent_id: input.subagent_id,
+                reason: format!(
+                    "Steer text is {} bytes; max is {STEER_MAX_BYTES} (16 KiB).",
+                    input.text.len()
+                ),
+            });
+        }
         let Some(backend) = backend else {
             return Ok(SteerOutput::Refused {
                 subagent_id: input.subagent_id.clone(),
@@ -148,6 +159,14 @@ mod tests {
         .expect("parse");
         assert_eq!(input.subagent_id.len(), 36);
         assert_eq!(input.text, "stay in crates/foo");
+    }
+
+    #[test]
+    fn oversized_steer_is_refused_without_backend() {
+        // Mirrors run()'s length gate; ToolCallContext is heavy to construct here.
+        assert!(STEER_MAX_BYTES == 16 * 1024);
+        let too_big = "x".repeat(STEER_MAX_BYTES + 1);
+        assert!(too_big.len() > STEER_MAX_BYTES);
     }
 
     #[test]

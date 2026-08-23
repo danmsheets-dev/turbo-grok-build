@@ -2573,6 +2573,39 @@ fn gpt55_openai_slash_slug_aliases_to_openai_codex() {
 }
 
 #[test]
+fn exact_openai_catalog_key_wins_over_codex_alias() {
+    let mut models = IndexMap::new();
+    models.insert("openai/gpt-5.5".to_string(), make_model_entry("gpt-5.5"));
+    models.insert(
+        "openai-codex/gpt-5.5".to_string(),
+        make_model_entry("gpt-5.5"),
+    );
+    let (key, _) = find_task_model_entry(&models, "openai/gpt-5.5").expect("exact key");
+    assert_eq!(key, "openai/gpt-5.5");
+}
+
+#[test]
+fn exact_openrouter_laguna_is_not_remapped_to_nvidia() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "openrouter/poolside/laguna-xs-2.1".to_string(),
+        make_model_entry("poolside/laguna-xs-2.1"),
+    );
+    models.insert(
+        "nvidia/poolside/laguna-xs-2.1".to_string(),
+        nvidia_catalog_entry(
+            "nvidia/poolside/laguna-xs-2.1",
+            "poolside/laguna-xs-2.1",
+            true,
+            true,
+        ),
+    );
+    let (key, _) =
+        find_task_model_entry(&models, "openrouter/poolside/laguna-xs-2.1").expect("exact key");
+    assert_eq!(key, "openrouter/poolside/laguna-xs-2.1");
+}
+
+#[test]
 fn glm_52_nvidia_spawn_is_http_410() {
     let mut models = IndexMap::new();
     models.insert(

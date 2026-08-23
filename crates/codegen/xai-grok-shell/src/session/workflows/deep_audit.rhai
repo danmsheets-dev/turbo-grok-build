@@ -423,8 +423,12 @@ if successful_finders < targets.len() {
 task_complete("investigate", "Evidence-backed findings collected");
 if candidate_claims.len() == 0 {
     partial = true;
+    let status_word = if successful_finders == 0 { "failed" } else { "partial" };
     coverage_notes.push("No finding had both a concrete claim and inspectable evidence.");
-    let report = "# Deep audit\n\n**Status: Partial**\n\n"
+    if successful_finders == 0 {
+        coverage_notes.push("All finders failed (rate-limit, schema, or infra). This is not a clean bill of health.");
+    }
+    let report = "# Deep audit\n\n**Status: " + status_word + "**\n\n"
         + "No supported findings could be produced for scope: " + json_encode(scope) + "\n\n"
         + "## Scope\n" + json_encode(scope_summary) + "\n\n"
         + "## Coverage and uncertainty\n";
@@ -435,8 +439,8 @@ if candidate_claims.len() == 0 {
     task_start("verify");
     task_complete("verify", "No findings required verification");
     task_start("report");
-    task_complete("report", "Partial audit report written");
-    complete(#{ path: path, report: report, status: "partial", verified_claim_ids: [] });
+    task_complete("report", "Audit report written");
+    complete(#{ path: path, report: report, status: status_word, verified_claim_ids: [] });
 }
 log("investigate complete: " + candidate_claims.len().to_string() + " candidate finding(s) require verification");
 

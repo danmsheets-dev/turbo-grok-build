@@ -54,8 +54,9 @@ pub use transcript::{
 };
 
 pub use xai_grok_meetings::{
-    MEETING_COMMAND_NAME, ask_instruction, join_instruction, knowledge_instruction,
-    notes_instruction, reply_instruction, split_join_args, status_instruction, stop_instruction,
+    MEETING_COMMAND_NAME, ask_instruction, detect_join_request, first_https_url,
+    is_joinable_platform, join_instruction, knowledge_instruction, notes_instruction,
+    reply_instruction, split_join_args, status_instruction, stop_instruction,
     transcript_instruction, usage_message,
 };
 

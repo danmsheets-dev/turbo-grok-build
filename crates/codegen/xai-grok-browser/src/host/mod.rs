@@ -808,7 +808,26 @@ pub(crate) fn decode_host_call(
                             },
                         });
                     }
-                    let canon_path = dunce::canonicalize(&path).unwrap_or(path);
+                    let canon_path = dunce::canonicalize(&path).map_err(|e| DecodedRpcError {
+                        id: Some(id.clone()),
+                        error: JsonRpcError {
+                            code: RPC_HOST_ERROR,
+                            message: format!(
+                                "file path could not be canonicalized under the session folder: {e}"
+                            ),
+                            data: None,
+                        },
+                    })?;
+                    if !path_is_under_session_folder(&canon_path, folder) {
+                        return Err(DecodedRpcError {
+                            id: Some(id),
+                            error: JsonRpcError {
+                                code: RPC_HOST_ERROR,
+                                message: "canonical file path escaped the session folder".into(),
+                                data: None,
+                            },
+                        });
+                    }
                     Ok((
                         id,
                         HostCall::SetFile {

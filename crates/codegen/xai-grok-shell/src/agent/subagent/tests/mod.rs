@@ -2611,10 +2611,20 @@ fn sol_openai_slash_slug_aliases_to_openai_codex() {
 #[test]
 fn worktree_source_cwd_uses_spawn_cwd_when_it_is_a_git_dir() {
     let parent = tempfile::tempdir().unwrap();
-    let source = tempfile::tempdir().unwrap();
-    std::fs::create_dir(source.path().join(".git")).unwrap();
-    let got = resolve_worktree_source_cwd(parent.path(), source.path().to_str());
-    assert_eq!(got, source.path());
+    let source = parent.path().join("nested-src");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(source.join(".git")).unwrap();
+    let got = resolve_worktree_source_cwd(parent.path(), source.to_str());
+    assert_eq!(got, source);
+}
+
+#[test]
+fn worktree_source_cwd_ignores_spawn_cwd_outside_parent() {
+    let parent = tempfile::tempdir().unwrap();
+    let outsider = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outsider.path().join(".git")).unwrap();
+    let got = resolve_worktree_source_cwd(parent.path(), outsider.path().to_str());
+    assert_eq!(got, parent.path());
 }
 
 #[test]

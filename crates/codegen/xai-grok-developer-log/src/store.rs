@@ -555,6 +555,7 @@ impl DeveloperLogStore {
         if let Some(note) = note.map(str::trim).filter(|s| !s.is_empty()) {
             incident.resolution_note = Some(note.to_owned());
         }
+        incident = crate::redact::sanitize_incident(incident);
         self.write_incident_at(&self.root.join(&entry.path), &incident)?;
         self.upsert_index_entry(&mut index, &incident, &entry.path)?;
         let detail = match (sha.map(str::trim).filter(|s| !s.is_empty()), status.as_str()) {

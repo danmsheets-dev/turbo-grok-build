@@ -126,6 +126,8 @@ mod tests {
                 let text = format!("{prompt_blocks:?}");
                 assert!(text.contains("meetup-join"));
                 assert!(text.contains("meeting_join"));
+                assert!(text.contains("Start-Process"));
+                assert!(text.contains("Do NOT use bash"));
             }
             other => panic!("expected inject, got {other:?}"),
         }
@@ -163,6 +165,25 @@ mod tests {
                 assert!(text.contains("Meetings/"));
                 assert!(text.contains("For you"));
                 assert!(text.contains("Projects"));
+            }
+            other => panic!("expected inject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_url_means_join() {
+        let models = crate::acp::model_state::ModelState::default();
+        let mut ctx = super::super::tests::make_ctx(&models);
+        let result = MeetingCommand.run(
+            &mut ctx,
+            "https://teams.microsoft.com/meet/2907709513066?p=abc Weekly standup",
+        );
+        match result {
+            CommandResult::InjectSkill { prompt_blocks, .. } => {
+                let text = format!("{prompt_blocks:?}");
+                assert!(text.contains("2907709513066"));
+                assert!(text.contains("meeting_join"));
+                assert!(text.contains("Weekly standup"));
             }
             other => panic!("expected inject, got {other:?}"),
         }

@@ -49,6 +49,9 @@ pub struct SubagentMetaView {
     /// When non-empty, land refuses paths outside these prefixes.
     #[serde(default)]
     pub allowed_paths: Option<Vec<String>>,
+    /// Isolation DisplayCwd (source git repo under an umbrella workspace).
+    #[serde(default)]
+    pub display_cwd: Option<String>,
     /// On-disk meta schema. v1 always writes `allowed_paths`; missing
     /// `allowed_paths` on v1 is fail-closed at land (not unrestricted).
     #[serde(default)]
@@ -254,6 +257,7 @@ fn empty_meta_view(subagent_id: &str) -> SubagentMetaView {
         patch_path: None,
         worktree_state: None,
         child_cwd: None,
+        display_cwd: None,
         diffstat: None,
         changed_paths: None,
         allowed_paths: None,
@@ -406,11 +410,11 @@ pub async fn resolve_subagent_work(
         ));
     }
 
-    let parent_git_root = find_git_root(&parent_cwd).await.map_err(|e| {
+    let parent_git_root = resolve_land_git_root(&meta, &parent_cwd).await.map_err(|e| {
         xai_tool_runtime::ToolError::custom(
             "not_a_git_repo",
             format!(
-                "parent cwd {} is not inside a git repository: {e}",
+                "could not resolve isolation/parent git root from cwd {}: {e}",
                 parent_cwd.display()
             ),
         )
@@ -428,6 +432,35 @@ pub async fn resolve_subagent_work(
         parent_cwd,
         session_id,
     })
+}
+
+/// Prefer isolation DisplayCwd / child_cwd git root over the umbrella session cwd.
+async fn resolve_land_git_root(
+    meta: &SubagentMetaView,
+    parent_cwd: &Path,
+) -> Result<PathBuf, String> {
+    let child_is_worktree = match (meta.child_cwd.as_deref(), meta.worktree_path.as_deref()) {
+        (Some(c), Some(w)) => {
+            let a = c.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
+            let b = w.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
+            a == b
+        }
+        _ => false,
+    };
+    let child = if child_is_worktree {
+        None
+    } else {
+        meta.child_cwd.as_deref()
+    };
+    for candidate in [meta.display_cwd.as_deref(), child].into_iter().flatten() {
+        let path = PathBuf::from(candidate.trim());
+        if path.is_dir()
+            && let Ok(root) = find_git_root(&path).await
+        {
+            return Ok(root);
+        }
+    }
+    find_git_root(parent_cwd).await
 }
 
 pub async fn find_git_root(cwd: &Path) -> Result<PathBuf, String> {
@@ -559,6 +592,26 @@ pub async fn git_capture_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, Str
     Ok(output.stdout)
 }
 
+/// Refuse absolute / drive / `..` land paths (live and snapshot, not only patch).
+pub fn refuse_rel_land_path(rel: &str) -> Result<(), String> {
+    let s = rel.trim().replace('\\', "/");
+    if s.is_empty() {
+        return Err("land refused: empty relative path".into());
+    }
+    if s.starts_with('/')
+        || s.starts_with("//")
+        || (s.len() >= 2 && s.as_bytes()[1] == b':')
+        || s.split('/').any(|part| part == "..")
+        || Path::new(rel).is_absolute()
+        || normalize_allowlist_path(rel).is_none()
+    {
+        return Err(format!(
+            "land refused: path `{rel}` is absolute or escapes the repository"
+        ));
+    }
+    Ok(())
+}
+
 /// Write or delete a file under `root` relative to `rel`.
 ///
 /// Content is raw bytes so binary land is exact. Kit manifests still get
@@ -586,6 +639,7 @@ pub async fn apply_file_content_with_union(
     if is_harness_land_path(rel) {
         return Ok(());
     }
+    refuse_rel_land_path(rel)?;
     let dest = root.join(rel);
     match content {
         Some(data) => {
@@ -1066,6 +1120,7 @@ mod manifest_merge_tests {
             patch_path: None,
             worktree_state: None,
             child_cwd: None,
+            display_cwd: None,
             diffstat: None,
             changed_paths: None,
             allowed_paths: Some(vec!["assets/manifest/".into(), "tools/blender/".into()]),
@@ -1173,6 +1228,7 @@ mod allowlist_tests {
             patch_path: None,
             worktree_state: None,
             child_cwd: None,
+            display_cwd: None,
             diffstat: None,
             changed_paths: None,
             allowed_paths: Some(vec!["crates/a/".into(), "docs".into()]),

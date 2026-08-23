@@ -51,6 +51,7 @@ async fn run_gh(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    xai_tty_utils::detach_command(&mut cmd);
 
     let timeout = timeout_secs
         .map(Duration::from_secs)
@@ -111,6 +112,7 @@ async fn current_git_branch() -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    xai_tty_utils::detach_command(&mut cmd);
 
     let output = tokio::time::timeout(GH_TIMEOUT, cmd.output())
         .await

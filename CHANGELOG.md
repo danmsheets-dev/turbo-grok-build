@@ -39,6 +39,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc4** | **`1.0.0-rc.4`** | Fathom-style `/meeting` notetaker |
 | **1.0 rc5** | **`1.0.0-rc.5`** | Harness Q&A: spawn catalog, WebView save, logs/redaction |
 | **1.0 rc6** | **`1.0.0-rc.6`** | Providers ACP, isolation, Poolside hosted Chat API |
+| **1.0 rc7** | **`1.0.0-rc.7`** | Phase 5 control plane + Meeting Join Hardening |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -46,6 +47,46 @@ Older release notes (r1–r13 detail) are archived under
 ---
 
 ## Unreleased
+
+---
+
+## [1.0.0-rc.7] - 2026-08-23
+
+**RC6 Phase 5 + Meeting Join Hardening.** Control-plane v1 (steer, receipts, policy, gh, secrets, scheduler) plus spawn-catalog identity, land isolation source, browser save jail, Windows userspace credential write-deny, and the first round of `/meeting` join hardening.
+
+Two join entry points, one implementation (`meeting_join`): pager slash never leaks as a coding `<user_query>`; natural-language “join this meeting” + a Teams/Zoom/Meet/Webex URL calls `meeting_join` in that turn. Opening Teams with `Start-Process` is not the feature.
+
+### Added
+- **Meeting Join Hardening (round 1):** `meeting_*` on every grok-build primary toolset (default, workspace, concise, plan, plan-no-subagents, ask-user, orchestrator, hashline). `meeting_join` accepts `title` or alias `name`. NL join detector (`detect_join_request`) treats a bare Teams/Zoom/Meet/Webex URL as join, and longer text only with join/listen/notes intent.
+- Phase 5 tools: `steer`, `receipts`, `rollback`, `gh_pr_status`, `gh_ci_status`, `gh_ci_rerun` on default/workspace/concise toolsets.
+- Session policy `GROK_POLICY_DENY_PATHS` / `DENY_COMMANDS` / `MAX_DIFF_LINES`.
+- Resource-aware spawn gates (disk + live-children) with named errors.
+
+### Fixed
+- **`/meeting` never PassThrough:** typed `/meeting join <url>` is handled by the pager builtin even when `meeting_join` is missing from the advertised tool handshake (or advertised as `GrokBuild:meeting_join`). It is not forwarded as a coding `<user_query>`.
+- **Live schema vs `turbo tools list`:** `meeting_join` is injected on grok-build primary toolsets so the model’s available tools match `turbo tools list --require meeting_join`.
+- **NL join:** “Join this meeting: https://teams.microsoft.com/meet/…” injects `meeting_join` immediately (WASAPI+mic capture). Do not ask the user to retype a slash command. Do not `Start-Process` the URL.
+- **Slash tool gate suffix match:** `required_tools()` names match advertised `Namespace:short` ids.
+- **Spawn identity (C1–C5):** exact catalog key wins over Codex/NVIDIA aliases; `openai/` aliases are not advertised when that key already exists; suffix match requires a `/` boundary.
+- **Land (C6–C9):** land git root prefers `display_cwd` / `child_cwd`; live/snapshot land refuse absolute/`..` paths.
+- **Worktree source (C7–C8):** spawn cwd and `GROK_SUBAGENT_REPO_ROOT` must sit under the parent workspace; unique nested git before ancestor walk.
+- **MCP inherit (C10):** `isolation=worktree` coerces default `mcpInheritance=all` to `none`.
+- **Windows `$GROK_HOME` credentials:** userspace write-deny at LocalFs + write/search_replace/apply_patch/bash/monitor (kernel sandbox remains advisory).
+- **browser_save:** size cap on `file:` copy and streamed HTTP bodies; reserved-device filenames; downloads folder symlink/canonical jail.
+- **browser_set_file:** refuse symlink sources; host SetFile fail-closes canonicalize.
+- **developer-log:** `sanitize_incident` covers component/tags/environment/cwd_hash; `set_status` re-sanitizes; MCP health reasons run `redact_secrets`.
+- **gh:** `CREATE_NO_WINDOW`; no `--no-browser` argv; `--` before user ids.
+
+### Known
+- Windows kernel sandbox is still advisory (userspace credential deny is the jail).
+- Linux bwrap cannot block *create* of a missing `auth.json`.
+- Meeting Join Hardening is in this binary. Restart Turbo after installing rc.7 before live Teams Q&A; an rc.6 process will still Start-Process without capture.
+
+- **Windows grok-home credential write-deny:** `auth.json` / keys under `$GROK_HOME` are refused at LocalFs, write/search_replace/apply_patch, bash, and monitor even when kernel sandbox is advisory. Same matcher as Seatbelt/bwrap.
+- **gh/git `CREATE_NO_WINDOW`:** Phase 5 `gh_*` tools and branch probe detach via `xai_tty_utils::detach_command` (no console flash on Windows).
+- **steer:** 16 KiB cap is now enforced at runtime, not only in the schema text.
+- **receipts:** undo payloads skip `.key` / grok-home credential suffixes, not just `.pem` / `.env`.
+- **search_replace:** new-file path reads the target once (was twice).
 
 Phase 5 control-plane follow-up (post-audit):
 

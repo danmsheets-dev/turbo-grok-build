@@ -221,12 +221,17 @@ fn spawn_catalog_candidate(
     config_keys.is_some_and(|keys| keys.contains(key)) && entry.has_own_credentials()
 }
 
-fn openai_codex_spawn_aliases(slugs: &[String]) -> Vec<String> {
+fn openai_codex_spawn_aliases(slugs: &[String], existing_keys: &[String]) -> Vec<String> {
     slugs
         .iter()
         .filter_map(|key| {
-            key.strip_prefix("openai-codex/")
-                .map(|rest| format!("openai/{rest}"))
+            let rest = key.strip_prefix("openai-codex/")?;
+            let alias = format!("openai/{rest}");
+            if existing_keys.iter().any(|k| k == &alias) {
+                None
+            } else {
+                Some(alias)
+            }
         })
         .collect()
 }
@@ -252,9 +257,12 @@ pub(crate) fn spawnable_task_model_catalog(
             }
         }
     }
-    agent_ready.extend(openai_codex_spawn_aliases(&agent_ready));
-    chat_only.extend(openai_codex_spawn_aliases(&chat_only));
-    configured_chat_only.extend(openai_codex_spawn_aliases(&configured_chat_only));
+    agent_ready.extend(openai_codex_spawn_aliases(&agent_ready, &agent_ready));
+    chat_only.extend(openai_codex_spawn_aliases(&chat_only, &agent_ready));
+    configured_chat_only.extend(openai_codex_spawn_aliases(
+        &configured_chat_only,
+        &agent_ready,
+    ));
     agent_ready.sort_unstable();
     agent_ready.dedup();
     chat_only.sort_unstable();
@@ -387,19 +395,25 @@ pub(crate) fn find_task_model_entry<'a>(
         None
     }
 
-    // Known remaps first so a non-selectable OpenRouter `openai/gpt-5.6-luna`
-    // row cannot shadow the spawnable ChatGPT Codex slug.
+    // Exact catalog / routing-slug match first so a spawnable
+    // `openai/gpt-5.5` or `openrouter/poolside/laguna-xs-2.1` row is not
+    // stolen by Codex / NVIDIA aliases (rc7 C1–C3).
+    if let Some(entry) = config::find_model_by_id(available, requested) {
+        if let Some(key) = key_for(available, entry, Some(requested)) {
+            return Some((key, entry));
+        }
+    }
+    if let Some((key, entry)) = available.get_key_value(requested) {
+        return Some((key.as_str(), entry));
+    }
+
+    // Aliases only when the requested string is not itself a catalog key.
     for alias in task_model_aliases(requested) {
         if let Some(entry) = config::find_model_by_id(available, &alias) {
             if let Some(key) = key_for(available, entry, Some(alias.as_str())) {
                 return Some((key, entry));
             }
         }
-    }
-
-    if let Some(entry) = config::find_model_by_id(available, requested) {
-        let key = key_for(available, entry, Some(requested))?;
-        return Some((key, entry));
     }
 
     const PROVIDER_PREFIXES: &[&str] = &[
@@ -430,9 +444,9 @@ pub(crate) fn find_task_model_entry<'a>(
             // requested `amazon-bedrock/openai.gpt-5.6-luna` → try suffix match.
             if let Some((key, entry)) = available.iter().find(|(key, entry)| {
                 let routing = entry.info.model.as_str();
+                let slash_rest = format!("/{rest}");
                 *key == requested
-                    || key.ends_with(&format!("/{rest}"))
-                    || key.ends_with(rest)
+                    || key.ends_with(&slash_rest)
                     || routing == rest
                     || routing == requested
             }) {

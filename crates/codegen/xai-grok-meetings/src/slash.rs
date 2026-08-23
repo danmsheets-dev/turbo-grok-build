@@ -48,8 +48,12 @@ pub fn join_instruction(url: &str, title: Option<&str>) -> String {
     };
     format!(
         "Call the {MEETING_JOIN_TOOL_NAME} tool immediately with this meeting URL. \
-         Do not rewrite the URL. Pass title if provided. After it returns, briefly confirm \
-         the meeting id, name, platform, and capture source. Do not start coding.\n\n\
+         Do not rewrite the URL. Pass title if provided (field `title` or `name`). \
+         Do NOT use bash, Start-Process, explorer.exe, or open the URL yourself — \
+         opening Teams without capture is not the feature. {MEETING_JOIN_TOOL_NAME} \
+         opens the link AND starts WASAPI loopback+mic capture on Windows. \
+         After it returns, briefly confirm the meeting id, name, platform, and capture source. \
+         Do not start coding.\n\n\
          url: {url}{title_line}"
     )
 }
@@ -185,6 +189,17 @@ mod tests {
         let (url2, title2) = split_join_args("https://zoom.us/j/1");
         assert_eq!(title2, None);
         assert!(url2.contains("zoom"));
+    }
+
+    #[test]
+    fn join_instruction_forbids_shell_open() {
+        let t = join_instruction("https://teams.microsoft.com/meet/1?p=x", Some("Standup"));
+        assert!(t.contains(MEETING_JOIN_TOOL_NAME));
+        assert!(t.contains("teams.microsoft.com/meet/1"));
+        assert!(t.contains("Standup"));
+        assert!(t.contains("Start-Process"));
+        assert!(t.contains("WASAPI"));
+        assert!(t.contains("Do NOT use bash"));
     }
 
     #[test]

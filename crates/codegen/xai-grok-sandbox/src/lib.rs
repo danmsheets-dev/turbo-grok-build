@@ -44,6 +44,11 @@ pub use profiles::{
     ProfileName, SandboxConfig, SandboxProfile, load_sandbox_config, sandbox_profile_conflicts,
 };
 pub use types::{SandboxEvent, SandboxEventType, SandboxMetrics};
+pub use paths::{
+    command_mentions_grok_home_credential, command_mentions_grok_home_credential_in,
+    is_grok_home_credential_file, write_denied_grok_home_credential,
+    write_denied_grok_home_credential_in,
+};
 /// Whether this profile requires direct-hook write protection (non-devbox
 /// enforcing profiles). Shell fails closed when protection cannot be applied.
 pub fn requires_hook_write_deny(profile: &ProfileName, workspace: &Path) -> bool {

@@ -130,17 +130,23 @@ pub(crate) async fn broker_http_or_file(
     url: &str,
     session_folder: &Path,
 ) -> Result<PathBuf, xai_tool_runtime::ToolError> {
-    let downloads = session_folder.join("downloads");
-    std::fs::create_dir_all(&downloads).map_err(|e| {
-        xai_tool_runtime::ToolError::custom(
-            "browser_error",
-            format!("browser_save: cannot create {}: {e}", downloads.display()),
-        )
-    })?;
+    let downloads = prepare_session_downloads(session_folder)?;
     if let Some(rest) = url.strip_prefix("file:") {
         let filename = filename_from_url(url);
         let dest = unique_path(&downloads, &filename);
         let src = PathBuf::from(rest.trim_start_matches('/').trim_start_matches('\\'));
+        let meta = std::fs::metadata(&src).map_err(|e| {
+            xai_tool_runtime::ToolError::custom(
+                "browser_error",
+                format!("browser_save: cannot stat {}: {e}", src.display()),
+            )
+        })?;
+        if meta.len() > MAX_SAVE_BYTES {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "browser_save: file is {} bytes (limit {MAX_SAVE_BYTES})",
+                meta.len()
+            )));
+        }
         std::fs::copy(&src, &dest).map_err(|e| {
             xai_tool_runtime::ToolError::custom(
                 "browser_error",
@@ -202,17 +208,21 @@ pub(crate) async fn broker_http_or_file(
         content_disposition.as_deref(),
     );
     let dest = unique_path(&downloads, &filename);
-    let bytes = response.bytes().await.map_err(|e| {
-        xai_tool_runtime::ToolError::custom(
-            "browser_error",
-            format!("browser_save: read body failed: {e}"),
-        )
-    })?;
-    if bytes.len() as u64 > MAX_SAVE_BYTES {
-        return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-            "browser_save: body is {} bytes (limit {MAX_SAVE_BYTES})",
-            bytes.len()
-        )));
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+        let chunk = chunk.map_err(|e| {
+            xai_tool_runtime::ToolError::custom(
+                "browser_error",
+                format!("browser_save: read body failed: {e}"),
+            )
+        })?;
+        if bytes.len() as u64 + chunk.len() as u64 > MAX_SAVE_BYTES {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "browser_save: body exceeds {MAX_SAVE_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     std::fs::write(&dest, &bytes).map_err(|e| {
         xai_tool_runtime::ToolError::custom(
@@ -393,6 +403,47 @@ fn filename_has_extension(name: &str) -> bool {
         .is_some_and(|e| !e.is_empty())
 }
 
+fn prepare_session_downloads(session_folder: &Path) -> Result<PathBuf, xai_tool_runtime::ToolError> {
+    let downloads = session_folder.join("downloads");
+    std::fs::create_dir_all(&downloads).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!("browser_save: cannot create {}: {e}", downloads.display()),
+        )
+    })?;
+    let meta = std::fs::symlink_metadata(&downloads).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!("browser_save: cannot inspect {}: {e}", downloads.display()),
+        )
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            "browser_save: downloads folder is not a real directory",
+        ));
+    }
+    let session_root = dunce::canonicalize(session_folder).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!("browser_save: cannot canonicalize session folder: {e}"),
+        )
+    })?;
+    let folder = dunce::canonicalize(&downloads).map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!("browser_save: cannot canonicalize downloads: {e}"),
+        )
+    })?;
+    if !folder.starts_with(&session_root) {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            "browser_save: downloads folder escapes the session folder",
+        ));
+    }
+    Ok(folder)
+}
+
 fn filename_from_url(url: &str) -> String {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let name = path
@@ -411,10 +462,20 @@ fn sanitize_filename(name: &str) -> String {
         })
         .take(180)
         .collect::<String>();
-    if safe.is_empty() || safe == "." || safe == ".." {
+    let trimmed = safe.trim_end_matches([' ', '.']);
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "download.bin".into();
+    }
+    let stem = trimmed.split('.').next().unwrap_or_default();
+    let upper = stem.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit());
+    if reserved {
         "download.bin".into()
     } else {
-        safe
+        trimmed.to_string()
     }
 }
 

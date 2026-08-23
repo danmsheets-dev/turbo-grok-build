@@ -168,6 +168,14 @@ impl xai_tool_runtime::Tool for WriteTool {
                 ),
             ));
         }
+        if crate::implementations::grok_build::policy::grok_home_credential_denied(&path) {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "policy_denied",
+                crate::implementations::grok_build::policy::grok_home_credential_denial(
+                    "write", &path,
+                ),
+            ));
+        }
 
         // Spawn allowed_paths: fail closed at write time (not only land).
         if let Some(ref prefixes) = allowed_paths {

@@ -434,6 +434,15 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                         ),
                     ));
                 }
+                if crate::implementations::grok_build::policy::grok_home_credential_denied(path) {
+                    return Err(xai_tool_runtime::ToolError::custom(
+                        "policy_denied",
+                        crate::implementations::grok_build::policy::grok_home_credential_denial(
+                            "apply_patch",
+                            path,
+                        ),
+                    ));
+                }
             }
         }
 

@@ -123,7 +123,7 @@ const GROK_HOME_CREDENTIAL_SCAN_SKIP: &[&str] = &[
 ];
 
 /// True when `path`'s basename is a grok-home credential (auth, keys, certs).
-pub(crate) fn is_grok_home_credential_file(path: &Path) -> bool {
+pub fn is_grok_home_credential_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -132,6 +132,68 @@ pub(crate) fn is_grok_home_credential_file(path: &Path) -> bool {
         || GROK_HOME_CREDENTIAL_SUFFIXES
             .iter()
             .any(|suffix| lower.ends_with(suffix))
+}
+
+fn normalize_path_for_prefix(path: &Path) -> String {
+    let mut s = path.to_string_lossy().replace('\\', "/");
+    while s.ends_with('/') && s.len() > 1 {
+        s.pop();
+    }
+    if cfg!(windows) {
+        let lower = s.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("//?/") {
+            return rest.trim_end_matches('/').to_string();
+        }
+        return lower;
+    }
+    s
+}
+
+fn path_is_under_home(path: &Path, home: &Path) -> bool {
+    let path_n = normalize_path_for_prefix(path);
+    let home_n = normalize_path_for_prefix(home);
+    if home_n.is_empty() {
+        return false;
+    }
+    path_n == home_n || path_n.starts_with(&format!("{home_n}/"))
+}
+
+/// True when `path` is a credential file under `$GROK_HOME` and must not be written.
+pub fn write_denied_grok_home_credential(path: &Path) -> bool {
+    write_denied_grok_home_credential_in(path, &grok_home())
+}
+
+/// Same as [`write_denied_grok_home_credential`] for an explicit home (tests).
+pub fn write_denied_grok_home_credential_in(path: &Path, home: &Path) -> bool {
+    is_grok_home_credential_file(path) && path_is_under_home(path, home)
+}
+
+/// True when a shell command names a grok-home credential path (read or write).
+pub fn command_mentions_grok_home_credential(command: &str) -> bool {
+    command_mentions_grok_home_credential_in(command, &grok_home())
+}
+
+/// Same as [`command_mentions_grok_home_credential`] for an explicit home (tests).
+pub fn command_mentions_grok_home_credential_in(command: &str, home: &Path) -> bool {
+    let cmd = command.replace('\\', "/").to_ascii_lowercase();
+    let home_n = normalize_path_for_prefix(home);
+    let mentions_home = (!home_n.is_empty() && cmd.contains(&home_n))
+        || cmd.contains("/.grok/")
+        || cmd.contains("~/.grok")
+        || cmd.contains("%userprofile%/.grok")
+        || cmd.contains("$env:userprofile/.grok")
+        || cmd.contains("$home/.grok");
+    if !mentions_home {
+        return false;
+    }
+    let names_cred = GROK_HOME_CREDENTIAL_BASENAMES.iter().any(|b| {
+        let needle = format!("/{b}");
+        cmd.contains(&needle) || cmd.ends_with(*b)
+    });
+    let names_suffix = GROK_HOME_CREDENTIAL_SUFFIXES
+        .iter()
+        .any(|suffix| cmd.contains(&format!("{suffix}")));
+    names_cred || names_suffix
 }
 
 /// Credential paths under `$GROK_HOME` that confining profiles must write-deny.
@@ -257,5 +319,69 @@ mod tests {
             "sessions/ must not be scanned: {denied:?}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn write_denied_only_under_home() {
+        let home = Path::new("/home/u/.grok");
+        assert!(write_denied_grok_home_credential_in(
+            Path::new("/home/u/.grok/auth.json"),
+            home
+        ));
+        assert!(write_denied_grok_home_credential_in(
+            Path::new("/home/u/.grok/keys/id.key"),
+            home
+        ));
+        assert!(!write_denied_grok_home_credential_in(
+            Path::new("/home/u/.grok/config.toml"),
+            home
+        ));
+        assert!(!write_denied_grok_home_credential_in(
+            Path::new("/tmp/auth.json"),
+            home
+        ));
+        assert!(!write_denied_grok_home_credential_in(
+            Path::new("/home/u/project/tls.pem"),
+            home
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn write_denied_windows_backslash_and_drive_case() {
+        let home = Path::new(r"C:\Users\Dan\.grok");
+        assert!(write_denied_grok_home_credential_in(
+            Path::new(r"C:\Users\Dan\.grok\auth.json"),
+            home
+        ));
+        assert!(write_denied_grok_home_credential_in(
+            Path::new(r"c:\users\dan\.grok\credentials.json"),
+            home
+        ));
+        assert!(!write_denied_grok_home_credential_in(
+            Path::new(r"C:\Apps\project\auth.json"),
+            home
+        ));
+    }
+
+    #[test]
+    fn bash_command_mentions_home_credentials() {
+        let home = Path::new("/home/u/.grok");
+        assert!(command_mentions_grok_home_credential_in(
+            "Set-Content ~/.grok/auth.json 'stolen'",
+            home
+        ));
+        assert!(command_mentions_grok_home_credential_in(
+            "echo hi > /home/u/.grok/credentials.json",
+            home
+        ));
+        assert!(!command_mentions_grok_home_credential_in(
+            "cargo test -p xai-grok-auth",
+            home
+        ));
+        assert!(!command_mentions_grok_home_credential_in(
+            "cat /tmp/auth.json",
+            home
+        ));
     }
 }

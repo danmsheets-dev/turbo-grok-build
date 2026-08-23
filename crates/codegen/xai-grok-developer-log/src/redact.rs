@@ -126,7 +126,38 @@ pub fn sanitize_incident(mut inc: Incident) -> Incident {
     }
     inc.repro = sanitize_repro(inc.repro);
     inc.evidence = sanitize_evidence(inc.evidence);
+    inc.component = inc
+        .component
+        .into_iter()
+        .map(|c| truncate_field(&redact_text(&c), 64))
+        .filter(|c| !c.is_empty())
+        .take(16)
+        .collect();
+    inc.tags = inc
+        .tags
+        .into_iter()
+        .map(|t| truncate_field(&redact_text(&t), 64))
+        .filter(|t| !t.is_empty())
+        .take(16)
+        .collect();
+    if let Some(m) = inc.environment.model.as_mut() {
+        *m = truncate_field(&redact_text(m), 128);
+    }
+    if let Some(p) = inc.environment.provider.as_mut() {
+        *p = truncate_field(&redact_text(p), 128);
+    }
+    if let Some(cwd) = inc.environment.cwd_hash.as_mut() {
+        *cwd = redact_cwd_hash(cwd);
+    }
+    if let Some(m) = inc.source.reporter_model.as_mut() {
+        *m = truncate_field(&redact_text(m), 128);
+    }
     inc
+}
+
+fn redact_cwd_hash(raw: &str) -> String {
+    let decoded = raw.replace("%5C", "\\").replace("%5c", "\\").replace("%3A", ":").replace("%3a", ":");
+    truncate_field(&redact_text(&decoded), 255)
 }
 
 #[cfg(test)]

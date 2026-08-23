@@ -66,7 +66,7 @@ Notable unit tests:
 
 ## Remaining gaps
 
-1. **Windows kernel enforcement.** Sandbox `apply()` is advisory on Windows (`applied=false`). Credential write-deny is in the resolved profile and Seatbelt/bwrap paths, but a Windows agent can still rewrite `~/.grok/auth.json` unless a later Windows jail lands.
+1. **Windows kernel enforcement.** Sandbox `apply()` is still advisory on Windows (`applied=false`) — no Job Object / AppContainer jail. RC6.1 adds a **userspace write-deny** at LocalFs + write/search_replace/apply_patch/bash/monitor so agents cannot rewrite `$GROK_HOME/auth.json` (or `*.pem`/`*.key`) even without kernel enforcement. Remaining gap: a child process that is not spawned through those tools.
 2. **Linux create-if-missing.** bwrap `--ro-bind` only overlays files that already exist. A missing `auth.json` can still be *created* under the writable `~/.grok` grant. Seatbelt can deny the literal path even when missing; Landlock cannot deny a subpath of an allowed tree.
 3. **Host token refresh.** Write-deny applies to the same process that may need to refresh OAuth tokens into `auth.json`. That is the incident’s intent (agent/child must not write credentials); token refresh inside a confined process is still a product question.
 4. **OAuth popup after open.** Exact-origin stops `evil.test/?ux_mode=popup` from getting a real window. A legitimate Google/Microsoft popup is still a runtime-owned WebView2 that this host does not policy-check after `SetHandled(false)`.

@@ -31,4 +31,7 @@ pub use summary::{
     summary_filename, unique_summary_path, workspace_meetings_dir, write_workspace_summary,
 };
 pub use trigger::extract_turbo_question;
-pub use url::{MeetingKind, MeetingPlatform, MeetingUrl, ParseError, parse as parse_meeting_url};
+pub use url::{
+    MeetingKind, MeetingPlatform, MeetingUrl, ParseError, detect_join_request, first_https_url,
+    is_joinable_platform, parse as parse_meeting_url,
+};

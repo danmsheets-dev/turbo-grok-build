@@ -162,6 +162,93 @@ fn classify_host(host: &str, path: &str, query: &str) -> (MeetingPlatform, Meeti
     (MeetingPlatform::Other, MeetingKind::Meeting)
 }
 
+/// True when this is a real conferencing platform (not a random https link).
+pub fn is_joinable_platform(platform: MeetingPlatform) -> bool {
+    !matches!(platform, MeetingPlatform::Other)
+}
+
+/// First https URL token in `text` (stops at whitespace).
+pub fn first_https_url(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 8 <= bytes.len() {
+        let rest = &text[i..];
+        let lower_prefix = rest.get(..8).unwrap_or("");
+        if lower_prefix.eq_ignore_ascii_case("https://") {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '"' || c == '\'')
+                .unwrap_or(rest.len());
+            let url = rest[..end].trim_end_matches(['.', ',', ';', ')', ']']);
+            if url.len() > 8 {
+                return Some(url);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn has_join_intent(text: &str) -> bool {
+    let l = text.to_ascii_lowercase();
+    const PHRASES: &[&str] = &[
+        "note taker",
+        "take notes",
+        "taking notes",
+        "record this",
+        "record the",
+        "sit in",
+        "drop in",
+        "hop in",
+        "listen in",
+        "listen to",
+    ];
+    if PHRASES.iter().any(|p| l.contains(p)) {
+        return true;
+    }
+    // Word match so "enjoy" does not count as "join".
+    const WORDS: &[&str] = &["join", "listen", "notetaker", "capture"];
+    l.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| WORDS.contains(&w))
+}
+
+/// Detect a natural-language (or URL-only) request to join a meeting.
+///
+/// Returns `(url, optional_title)`. A bare Teams/Zoom/Meet/Webex https URL
+/// counts. A longer message counts only with join/listen/notes intent so a
+/// pasted ticket link does not start capture.
+pub fn detect_join_request(text: &str) -> Option<(String, Option<String>)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('/') {
+        return None;
+    }
+    let url = first_https_url(trimmed)?;
+    let parsed = parse(url).ok()?;
+    if !is_joinable_platform(parsed.platform) {
+        return None;
+    }
+    let remainder = trimmed.replacen(url, "", 1);
+    let remainder = remainder.trim();
+    let url_only = remainder.is_empty();
+    if !url_only && !has_join_intent(trimmed) {
+        return None;
+    }
+    let title = remainder
+        .trim_matches(|c: char| c == ':' || c == '-' || c == ',')
+        .trim();
+    let title = if title.is_empty() || has_join_intent(title) && title.split_whitespace().count() <= 6
+    {
+        None
+    } else if title.chars().count() > 80 {
+        None
+    } else {
+        Some(title.to_string())
+    };
+    Some((parsed.raw, title))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +301,41 @@ mod tests {
         assert_eq!(u.platform, MeetingPlatform::Other);
         let z = parse("https://us02web.zoom.us/j/1").unwrap();
         assert_eq!(z.platform, MeetingPlatform::Zoom);
+    }
+
+    #[test]
+    fn parses_teams_short_meet_id() {
+        let u = parse("https://teams.microsoft.com/meet/2907709513066?p=abc").unwrap();
+        assert_eq!(u.platform, MeetingPlatform::Teams);
+        assert_eq!(u.kind, MeetingKind::Meeting);
+    }
+
+    #[test]
+    fn detect_join_bare_teams_url() {
+        let (url, title) =
+            detect_join_request("https://teams.microsoft.com/meet/2907709513066?p=abc").unwrap();
+        assert!(url.contains("2907709513066"));
+        assert!(title.is_none());
+    }
+
+    #[test]
+    fn detect_join_natural_language() {
+        let (url, _) = detect_join_request(
+            "Join this meeting and take notes: https://teams.microsoft.com/meet/1?p=x",
+        )
+        .unwrap();
+        assert!(url.contains("teams.microsoft.com"));
+        assert!(detect_join_request(
+            "see the recording later at https://teams.microsoft.com/meet/1?p=x in the ticket"
+        )
+        .is_none());
+        assert!(detect_join_request("/meeting join https://teams.microsoft.com/meet/1").is_none());
+        assert!(
+            detect_join_request(
+                "enjoy this writeup https://teams.microsoft.com/meet/1?p=x in the ticket"
+            )
+            .is_none(),
+            "substring 'join' inside 'enjoy' must not start capture"
+        );
     }
 }

@@ -456,7 +456,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - CLI: `{bin} issues|features file --class …` (aliases `--error-class` / `--request-class`)
 - disk: `{bin} disk report|check|clean --safe [--include …]` · `{bin} disk prune` · `{bin} subagent prune` · `{bin} tree prune`
 - tools: `{bin} tools list [--require spawn_subagent]` (headless schema assert){browser}
-- meeting: `/meeting join <url> [name]` notes (Windows: WASAPI loopback + mic); `Turbo: …` in chat/audio auto-asks the workspace (MCP ok) and replies `[Turbo]`; `/meeting stop` writes work-only `Meetings/YYYY-MM-DD - Name.md` with For you + Projects.
+- meeting: `/meeting join <url> [name]` notes (Windows: WASAPI loopback + mic). If the user pastes a Teams/Zoom/Meet/Webex URL with join/listen/notes intent, call `meeting_join` in that turn — do not ask for a slash command and do not Start-Process the URL. `Turbo: …` in chat/audio auto-asks the workspace (MCP ok) and replies `[Turbo]`; `/meeting stop` writes work-only `Meetings/YYYY-MM-DD - Name.md` with For you + Projects.
 
 {workflows}
 {adl}
@@ -679,6 +679,14 @@ mod tests {
                 || card.text.contains("Do not reimplement")
                 || card.text.contains("ad-hoc spawn_subagent"),
             "boot card must forbid DIY deep-audit via subagents"
+        );
+        assert!(
+            card.text.contains("meeting_join"),
+            "boot card must name meeting_join so NL join does not require a slash command"
+        );
+        assert!(
+            card.text.contains("Start-Process"),
+            "boot card must forbid Start-Process as a substitute for meeting_join"
         );
         assert!(
             card.token_estimate <= 1650,

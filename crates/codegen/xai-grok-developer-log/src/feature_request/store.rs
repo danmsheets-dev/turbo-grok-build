@@ -522,6 +522,7 @@ impl FeatureRequestStore {
         if let Some(note) = note.map(str::trim).filter(|s| !s.is_empty()) {
             fr.ship_note = Some(note.to_owned());
         }
+        fr = sanitize_request_doc(fr);
         self.write_at(&self.root.join(&entry.path), &fr)?;
         self.upsert_index(&mut index, &fr, &entry.path)?;
         let detail = match (sha.map(str::trim).filter(|s| !s.is_empty()), status.as_str()) {

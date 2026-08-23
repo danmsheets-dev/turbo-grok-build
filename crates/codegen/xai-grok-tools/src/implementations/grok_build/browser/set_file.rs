@@ -154,6 +154,17 @@ fn broker_into_session(
         .and_then(|n| n.to_str())
         .unwrap_or("upload.bin");
     let dest = unique_upload_path(&uploads, name);
+    let src_meta = src.symlink_metadata().map_err(|e| {
+        xai_tool_runtime::ToolError::custom(
+            "browser_error",
+            format!("browser_set_file: cannot inspect {}: {e}", src.display()),
+        )
+    })?;
+    if src_meta.file_type().is_symlink() || !src_meta.is_file() {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "browser_set_file: source must be a regular file (symlinks are refused)",
+        ));
+    }
     std::fs::copy(src, &dest).map_err(|e| {
         xai_tool_runtime::ToolError::custom(
             "browser_error",

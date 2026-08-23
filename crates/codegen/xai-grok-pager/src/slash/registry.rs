@@ -319,6 +319,12 @@ impl CommandRegistry {
     ///
     /// When `available_tools == None` (pre-session bootstrap), commands
     /// with non-empty `required_tools()` are hidden -- see field doc.
+    ///
+    /// Names match exactly **or** by suffix after `:` / `/` so a live
+    /// schema that advertises `GrokBuild:meeting_join` still satisfies
+    /// `/meeting`'s `required_tools() = ["meeting_join"]`. Exact-only
+    /// matching hid `/meeting` while `turbo tools list` reported the
+    /// short name (RC7 Meeting Join Hardening).
     fn tools_satisfied(&self, cmd: &Arc<dyn SlashCommand>) -> bool {
         let required = cmd.required_tools();
         if required.is_empty() {
@@ -326,8 +332,24 @@ impl CommandRegistry {
         }
         match &self.available_tools {
             None => false,
-            Some(set) => required.iter().all(|t| set.contains(*t)),
+            Some(set) => required.iter().all(|t| advertised_tool_covers(set, t)),
         }
+    }
+
+    /// Look up a command for typed dispatch while **ignoring** the
+    /// advertised-tool gate. Hidden / restricted commands still return
+    /// `None`.
+    ///
+    /// Used so `/meeting` never PassThrough as a coding `<user_query>`
+    /// when the toolset handshake is late or uses qualified names the
+    /// menu gate did not yet accept. Callers must still inject
+    /// `meeting_join` (or tell the user the session has no notetaker).
+    pub(crate) fn get_ignoring_tool_gate(&self, key: &str) -> Option<&Arc<dyn SlashCommand>> {
+        self.key_to_index
+            .get(key)
+            .and_then(|idx| self.commands.get(*idx))
+            .filter(|cmd| !self.hidden.contains(cmd.name()))
+            .filter(|cmd| !self.restricted_match(cmd))
     }
 
     /// Returns true if the command (by canonical name or alias) is a builtin.
@@ -553,14 +575,26 @@ impl CommandRegistry {
             let source = self.sources[idx];
             let canonical = command.name();
 
-            // Skip commands gated by missing tools, using the same
-            // skip pattern as `hidden`.
-            if !self.tools_satisfied(command) {
+            // Skip hidden commands — they don't get triggers or key_to_index entries.
+            if self.hidden.contains(canonical) {
                 continue;
             }
 
-            // Skip hidden commands — they don't get triggers or key_to_index entries.
-            if self.hidden.contains(canonical) {
+            // Tool-gated commands stay out of the menu (no triggers) until
+            // the advertised toolset satisfies `required_tools()`. Keep the
+            // key anyway so a fully typed `/meeting` still resolves via
+            // `get_ignoring_tool_gate` instead of PassThrough as chat.
+            if !self.tools_satisfied(command) {
+                self.key_to_index.insert(canonical.to_string(), idx);
+                for alias in command.aliases() {
+                    if source == CommandSource::Builtin && self.key_to_index.contains_key(*alias) {
+                        panic!(
+                            "slash command alias '{}' is already registered (builtin collision)",
+                            alias
+                        );
+                    }
+                    self.key_to_index.insert(alias.to_string(), idx);
+                }
                 continue;
             }
 
@@ -601,6 +635,20 @@ impl CommandRegistry {
             }
         }
     }
+}
+
+/// True when `required` is advertised as-is or as a `Namespace:required` /
+/// `namespace/required` suffix. Short CLI names (`meeting_join`) must match
+/// the live schema's qualified ids (`GrokBuild:meeting_join`).
+fn advertised_tool_covers(advertised: &HashSet<String>, required: &str) -> bool {
+    if advertised.contains(required) {
+        return true;
+    }
+    advertised.iter().any(|name| {
+        name.rsplit([':', '/'])
+            .next()
+            .is_some_and(|suffix| suffix == required)
+    })
 }
 
 #[cfg(test)]
@@ -1175,6 +1223,39 @@ mod tests {
         // Superset is fine.
         reg.set_available_tools(tool_set(["a", "b", "c"]));
         assert!(reg.get("multi").is_some());
+    }
+
+    #[test]
+    fn qualified_advertised_name_satisfies_short_required_tool() {
+        let gated: Arc<dyn SlashCommand> = Arc::new(ToolGatedCommand {
+            name: "meeting",
+            required: &["meeting_join"],
+        });
+        let mut reg = CommandRegistry::new(vec![gated]);
+        reg.set_available_tools(tool_set(["GrokBuild:meeting_join"]));
+        assert!(
+            reg.get("meeting").is_some(),
+            "GrokBuild:meeting_join must satisfy required meeting_join"
+        );
+        assert!(reg.get_for_dispatch("meeting").is_some());
+        reg.set_available_tools(tool_set(["read_file"]));
+        assert!(reg.get("meeting").is_none());
+        assert!(
+            reg.get_ignoring_tool_gate("meeting").is_some(),
+            "/meeting must still resolve when the tool handshake is missing"
+        );
+    }
+
+    #[test]
+    fn tool_gated_command_resolves_ignoring_gate_when_toolset_unknown() {
+        let gated: Arc<dyn SlashCommand> = Arc::new(ToolGatedCommand {
+            name: "meeting",
+            required: &["meeting_join"],
+        });
+        let reg = CommandRegistry::new(vec![gated]);
+        assert!(reg.get("meeting").is_none());
+        assert!(reg.get_for_dispatch("meeting").is_none());
+        assert!(reg.get_ignoring_tool_gate("meeting").is_some());
     }
 
     /// Builds a registry with `always-approve` (+ a `yolo` alias to cover

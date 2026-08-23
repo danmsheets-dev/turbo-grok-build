@@ -1790,8 +1790,22 @@ pub(crate) async fn run_shell_child(
                 })
                 .collect()
     };
+    let mcp_inheritance = if isolation_requested
+        && !isolation_fallback
+        && matches!(
+            definition.mcp_inheritance,
+            xai_grok_agent::config::McpInheritance::All
+        ) {
+        tracing::info!(
+            subagent_id = %request.id,
+            "worktree isolation: default MCP inherit All coerced to None (rc7 C10)"
+        );
+        xai_grok_agent::config::McpInheritance::None
+    } else {
+        definition.mcp_inheritance.clone()
+    };
     let parent_mcp_pool =
-        resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
+        resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &mcp_inheritance);
     let mcp_inherited_count = parent_mcp_pool
         .as_ref()
         .map(|p| p.len() as u32)

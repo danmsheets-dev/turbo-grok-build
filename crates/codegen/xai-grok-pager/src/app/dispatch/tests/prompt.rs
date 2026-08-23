@@ -2815,6 +2815,105 @@ fn slash_compact_with_context_enqueues_command() {
     assert!(matches!(&effects[0], Effect::Compact { .. }));
 }
 
+fn meeting_join_blocks_text(effects: &[Effect]) -> String {
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::SendPromptBlocks { blocks, .. } => Some(format!("{blocks:?}")),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected SendPromptBlocks for meeting join, got {effects:?}"))
+}
+
+/// `/meeting join` must never PassThrough as a coding user_query — even when
+/// the session has not advertised meeting_join yet (fail-closed tool gate).
+#[test]
+fn slash_meeting_join_never_passthrough_when_tools_unknown() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let url = "https://teams.microsoft.com/meet/2907709513066?p=x";
+    let effects = dispatch(
+        Action::SendPrompt(format!("/meeting join {url}")),
+        &mut app,
+    );
+    let text = meeting_join_blocks_text(&effects);
+    assert!(text.contains("meeting_join"), "{text}");
+    assert!(text.contains("2907709513066"), "{text}");
+    assert!(text.contains("Start-Process"), "{text}");
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text.starts_with("/meeting")
+        )),
+        "/meeting must not leak as a plain prompt: {effects:?}"
+    );
+    match &app.agents[&id].scrollback.get(0).unwrap().block {
+        RenderBlock::UserPrompt(b) => {
+            assert!(b.text.starts_with("/meeting join"), "{}", b.text);
+        }
+        other => panic!("expected UserPrompt, got {other:?}"),
+    }
+}
+
+/// Qualified live-schema ids (`GrokBuild:meeting_join`) must un-hide `/meeting`.
+#[test]
+fn slash_meeting_join_accepts_qualified_advertised_tool() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .slash_controller
+        .registry_mut()
+        .set_available_tools(
+            ["GrokBuild:meeting_join".to_string()]
+                .into_iter()
+                .collect(),
+        );
+    let effects = dispatch(
+        Action::SendPrompt(
+            "/meeting join https://teams.microsoft.com/meet/1?p=x Standup".into(),
+        ),
+        &mut app,
+    );
+    let text = meeting_join_blocks_text(&effects);
+    assert!(text.contains("meeting_join"), "{text}");
+    assert!(text.contains("Standup"), "{text}");
+}
+
+/// Natural language + Teams URL must call meeting_join without slash syntax.
+#[test]
+fn nl_join_this_meeting_injects_meeting_join() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let prompt =
+        "Join this meeting and take notes: https://teams.microsoft.com/meet/2907709513066?p=x";
+    let effects = dispatch(Action::SendPrompt(prompt.into()), &mut app);
+    let text = meeting_join_blocks_text(&effects);
+    assert!(text.contains("meeting_join"), "{text}");
+    assert!(text.contains("2907709513066"), "{text}");
+    assert!(text.contains("Do NOT use bash"), "{text}");
+    match &app.agents[&id].scrollback.get(0).unwrap().block {
+        RenderBlock::UserPrompt(b) => assert_eq!(b.text, prompt),
+        other => panic!("expected UserPrompt, got {other:?}"),
+    }
+}
+
+/// A Teams URL mentioned in a ticket without join intent stays a coding prompt.
+#[test]
+fn ticket_link_without_join_intent_is_plain_prompt() {
+    let mut app = test_app_with_agent();
+    let prompt =
+        "see the recording later at https://teams.microsoft.com/meet/1?p=x in the ticket";
+    let effects = dispatch(Action::SendPrompt(prompt.into()), &mut app);
+    assert_eq!(effects.len(), 1);
+    assert!(
+        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == prompt),
+        "ticket link must stay a plain prompt: {effects:?}"
+    );
+}
+
 #[test]
 fn slash_unknown_command_passthrough_enqueues_prompt() {
     let mut app = test_app_with_agent();

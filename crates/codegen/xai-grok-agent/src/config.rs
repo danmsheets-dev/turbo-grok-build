@@ -209,6 +209,7 @@ fn grok_computer_toolset() -> ToolServerConfig {
         (&grok_build::DeveloperLogTool).into(),
         (&grok_build::FeatureRequestLogTool).into(),
     ];
+    extend_meeting_notetaker_tools(&mut tools);
     ToolServerConfig {
         tools,
         behavior_preset: None,
@@ -265,7 +266,7 @@ pub fn toolset_for_preset(preset: &str) -> Option<ToolServerConfig> {
         .or_else(|| registered_toolset_preset(&normalized))
 }
 fn default_grok_build_toolset() -> ToolServerConfig {
-    ToolServerConfig {
+    let mut cfg = ToolServerConfig {
         tools: vec![
             bash_tool_config(),
             (&grok_build::ReadFileTool).into(),
@@ -298,20 +299,39 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             // Workspace tree atlas (Phase 1 MVP).
             (&grok_build::WorkspaceTreeTool).into(),
             (&grok_build::ResolvePathTool).into(),
-            (&grok_build::MeetingJoinTool).into(),
-            (&grok_build::MeetingStopTool).into(),
-            (&grok_build::MeetingStatusTool).into(),
-            (&grok_build::MeetingTranscriptTool).into(),
-            (&grok_build::MeetingNotesTool).into(),
-            (&grok_build::MeetingKnowledgeTool).into(),
-            (&grok_build::MeetingAskTool).into(),
-            (&grok_build::MeetingReplyTool).into(),
         ],
         behavior_preset: None,
+    };
+    extend_meeting_notetaker_tools(&mut cfg.tools);
+    cfg
+}
+
+fn meeting_notetaker_tools() -> Vec<xai_grok_tools::registry::types::ToolConfig> {
+    vec![
+        (&grok_build::MeetingJoinTool).into(),
+        (&grok_build::MeetingStopTool).into(),
+        (&grok_build::MeetingStatusTool).into(),
+        (&grok_build::MeetingTranscriptTool).into(),
+        (&grok_build::MeetingNotesTool).into(),
+        (&grok_build::MeetingKnowledgeTool).into(),
+        (&grok_build::MeetingAskTool).into(),
+        (&grok_build::MeetingReplyTool).into(),
+    ]
+}
+
+fn extend_meeting_notetaker_tools(tools: &mut Vec<xai_grok_tools::registry::types::ToolConfig>) {
+    for tool in meeting_notetaker_tools() {
+        let name = tool.id.rsplit(':').next().unwrap_or(tool.id.as_str());
+        if !tools
+            .iter()
+            .any(|t| t.id.rsplit(':').next() == Some(name))
+        {
+            tools.push(tool);
+        }
     }
 }
 fn grok_build_concise_toolset() -> ToolServerConfig {
-    ToolServerConfig {
+    let mut cfg = ToolServerConfig {
         tools: vec![
             (&grok_build_concise::BashConciseTool).into(),
             (&grok_build_concise::ReadFileConciseTool).into(),
@@ -340,7 +360,9 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
             (&grok_build::ResolvePathTool).into(),
         ],
         behavior_preset: None,
-    }
+    };
+    extend_meeting_notetaker_tools(&mut cfg.tools);
+    cfg
 }
 /// Hashline toolset: anchor-based read/edit/search + standard utilities.
 ///
@@ -375,6 +397,7 @@ pub fn grok_build_hashline_toolset(
         (&grok_build::WorkspaceTreeTool).into(),
         (&grok_build::ResolvePathTool).into(),
     ]);
+    extend_meeting_notetaker_tools(&mut tools);
     ToolServerConfig {
         tools,
         behavior_preset: None,
@@ -470,7 +493,7 @@ fn plan_toolset() -> ToolServerConfig {
 /// This allows the agent to enter a structured planning phase before
 /// writing code, with user-approved plans.
 fn grok_build_plan_toolset() -> ToolServerConfig {
-    ToolServerConfig {
+    let mut cfg = ToolServerConfig {
         tools: vec![
             // Standard grok-build tools
             bash_tool_config(),
@@ -499,7 +522,9 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::AskUserQuestionTool).into(),
         ],
         behavior_preset: None,
-    }
+    };
+    extend_meeting_notetaker_tools(&mut cfg.tools);
+    cfg
 }
 /// Orchestrator toolset: read/search/orchestration tools only.
 ///
@@ -508,7 +533,7 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
 /// grep, list_dir for research, plus the full subagent/skill/MCP/plan
 /// stack for orchestration.
 fn orchestrator_toolset() -> ToolServerConfig {
-    ToolServerConfig {
+    let mut cfg = ToolServerConfig {
         tools: vec![
             // Research tools
             bash_tool_config(),
@@ -556,7 +581,9 @@ fn orchestrator_toolset() -> ToolServerConfig {
             // - OpenCodeWriteTool (no file writing — delegate to subagents)
         ],
         behavior_preset: None,
-    }
+    };
+    extend_meeting_notetaker_tools(&mut cfg.tools);
+    cfg
 }
 /// Grok Build + plan mode toolset WITHOUT subagent tools.
 ///
@@ -564,7 +591,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
 /// `TaskOutputTool`, and `KillTaskTool`. Use this when the shell
 /// does not have subagent infrastructure wired up.
 fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
-    ToolServerConfig {
+    let mut cfg = ToolServerConfig {
         tools: vec![
             // Standard grok-build tools (minus TaskTool only — KillTaskTool and
             // TaskOutputTool are kept because BashTool's background mode requires them)
@@ -593,14 +620,16 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::AskUserQuestionTool).into(),
         ],
         behavior_preset: None,
-    }
+    };
+    extend_meeting_notetaker_tools(&mut cfg.tools);
+    cfg
 }
 /// Default Grok Build toolset + `ask_user_question`.
 ///
 /// Same as `default_grok_build_toolset` with the `AskUserQuestionTool` added,
 /// allowing the agent to ask structured questions without full plan mode.
 fn grok_build_ask_user_toolset() -> ToolServerConfig {
-    ToolServerConfig {
+    let mut cfg = ToolServerConfig {
         tools: vec![
             bash_tool_config(),
             (&grok_build::ReadFileTool).into(),
@@ -627,7 +656,9 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&grok_build::AskUserQuestionTool).into(),
         ],
         behavior_preset: None,
-    }
+    };
+    extend_meeting_notetaker_tools(&mut cfg.tools);
+    cfg
 }
 fn opencode_toolset() -> ToolServerConfig {
     ToolServerConfig {
@@ -2718,6 +2749,20 @@ description: Test default tool config
             ids.iter().any(|id| id.contains("meeting_join")),
             "default toolset must expose meeting_join; got {ids:?}"
         );
+        for (name, toolset) in [
+            ("default", default_grok_build_toolset()),
+            ("workspace", workspace_grok_build_toolset()),
+            ("concise", grok_build_concise_toolset()),
+            ("plan", grok_build_plan_toolset()),
+            ("plan-no-subagents", grok_build_plan_no_subagents_toolset()),
+            ("ask-user", grok_build_ask_user_toolset()),
+            ("orchestrator", orchestrator_toolset()),
+        ] {
+            assert!(
+                toolset.tools.iter().any(|t| t.id.rsplit(':').next() == Some("meeting_join")),
+                "{name} grok-build toolset must expose meeting_join so live schema matches turbo tools list"
+            );
+        }
         for (name, toolset) in [
             ("default", default_grok_build_toolset()),
             ("workspace", workspace_grok_build_toolset()),

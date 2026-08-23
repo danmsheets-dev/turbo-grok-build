@@ -120,17 +120,18 @@ fn is_transient_windows_lock(e: &std::io::Error) -> bool {
 }
 
 fn credential_path(path: Option<&str>) -> bool {
-    let Some(name) = path
-        .and_then(|path| std::path::Path::new(path).file_name())
-        .and_then(|name| name.to_str())
-    else {
+    let Some(path) = path else {
+        return false;
+    };
+    let path = std::path::Path::new(path);
+    if xai_grok_sandbox::is_grok_home_credential_file(path) {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
     let name = name.to_ascii_lowercase();
-    name == ".env"
-        || name.starts_with(".env.")
-        || matches!(name.as_str(), "auth.json" | "id_rsa" | "credentials.json")
-        || name.ends_with(".pem")
+    name == ".env" || name.starts_with(".env.") || name == "id_rsa"
 }
 
 fn secret_payload(payload: &[u8]) -> bool {
@@ -903,6 +904,23 @@ mod tests {
             .await
             .unwrap();
 
+        let loaded = load_receipt(dir.path(), &id).await.unwrap().unwrap();
+        assert!(!loaded.undoable);
+        assert!(
+            !receipts_dir(dir.path())
+                .join(format!("{id}.before"))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn grok_home_key_file_does_not_store_undo_payload() {
+        let dir = temp_session();
+        let mut receipt = sample("edit");
+        receipt.file = Some("C:/Users/x/.grok/tls.key".to_owned());
+        let id = record_receipt(dir.path(), receipt, Some(b"ordinary content"))
+            .await
+            .unwrap();
         let loaded = load_receipt(dir.path(), &id).await.unwrap().unwrap();
         assert!(!loaded.undoable);
         assert!(
