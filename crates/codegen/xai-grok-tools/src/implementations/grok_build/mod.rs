@@ -91,8 +91,9 @@ pub use receipts::{RECEIPTS_TOOL_NAME, ReceiptsTool, ROLLBACK_TOOL_NAME, Rollbac
 pub use steer::{STEER_TOOL_NAME, SteerTool};
 pub use resolve_path::{RESOLVE_PATH_TOOL_NAME, ResolvePathTool};
 pub use scheduler::create::{
-    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,
-    loop_usage_message,
+    LoopFireMode, SCHEDULE_COMMAND_NAME, SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_LIST_TOOL_NAME,
+    ScheduleVerb, SchedulerCreateTool, loop_schedule_instruction, loop_usage_message,
+    parse_schedule_verb, schedule_instruction, schedule_usage_message,
 };
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;

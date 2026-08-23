@@ -593,6 +593,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "resume",
     "review",
     "rewind",
+    "schedule",
     "scoped",
     "scoped-models",
     "scope-models",

@@ -48,6 +48,17 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
+**RC8 (in progress):** scheduled tasks product surface, Meeting R2 harden, Browser R3, opt-in GitHub log sync, stock workflows (`bug-sweep`, `perf-optimize`, `feature-planning`).
+
+### Added
+- **`/schedule`** standing jobs (interval, `at` datetime, optional weekday clock). No 7-day expiry. Recipes: `search`, `stat`, `meeting join`. Results under `{workspace}/Schedules/`. `/loop` still expires at 7 days.
+- **`turbo issues sync` / `turbo features sync`** — opt-in GitHub Issues upsert/pull (`github_repo` in developer-log.toml / feature-request-log.toml). Local JSON remains write-ahead; default is no cloud upload.
+- Workflows: `.grok/workflows/bug-sweep.rhai`, `perf-optimize.rhai`, `feature-planning.rhai`.
+
+### Fixed
+- **Meeting R2:** pin `meeting_*` early on the live tool handshake; process exit marks capture stopped; stale disk recording is not live; join `?p=` redacted from meta/status; NL join accepts “meeting link to test with”; spoken `Turbo, …` auto-ask; status `graph: configured|missing`.
+- **Browser R3:** NavigationStarting fail-closed, eval confirm, pane mirror from last snapshot, download jail helper, `docs/BROWSER-R3-QA.md`.
+
 ---
 
 ## [1.0.0-rc.7] - 2026-08-23

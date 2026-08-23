@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::mapping::{
-    LogKind, RemoteState, feature_issue_body, feature_labels, feature_remote_status,
+    LogKind, feature_issue_body, feature_labels, feature_remote_status,
     feature_status_from_remote, fingerprint_from_labels, incident_issue_body, incident_labels,
     incident_remote_status, incident_status_from_remote, label_diff, parse_marker,
     proving_sha_comment, seen_comment,
