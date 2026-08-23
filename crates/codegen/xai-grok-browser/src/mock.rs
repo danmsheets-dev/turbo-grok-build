@@ -13,7 +13,8 @@ use crate::client::{BrowserClientError, BrowserTransport};
 use crate::protocol::{
     AxNode, BrowserRequest, ClickResult, DownloadsResult, JsonRpcId, JsonRpcRequest,
     JsonRpcVersion, NavigateResult, ScreenshotResult, SnapshotResult, TabInfo, TabsResult,
-    WaitResult, check_eval_result, check_fill, check_url,
+    WaitResult, check_eval_confirm, check_eval_result, check_fill, check_navigation_hop,
+    single_tab_v1_error,
 };
 
 /// Recorded click/fill from the mock host.
@@ -41,6 +42,7 @@ struct MockState {
     last_action: Option<MockAction>,
     calls: Vec<String>,
     shutdown: bool,
+    session_folder: Option<std::path::PathBuf>,
 }
 
 impl MockState {
@@ -52,6 +54,7 @@ impl MockState {
             last_action: None,
             calls: Vec::new(),
             shutdown: false,
+            session_folder: None,
         }
     }
 }
@@ -113,6 +116,11 @@ impl MockBrowserHost {
         self.lock().nodes.push(node);
     }
 
+    /// Session folder used to list brokered downloads in tests.
+    pub fn set_session_folder(&self, folder: impl Into<std::path::PathBuf>) {
+        self.lock().session_folder = Some(folder.into());
+    }
+
     fn lock(&self) -> MutexGuard<'_, MockState> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -147,7 +155,7 @@ fn dispatch(
 
     match request {
         BrowserRequest::Navigate { url } => {
-            check_url(&url)?;
+            check_navigation_hop(Some(&url), None)?;
             apply_navigate(&mut state, url);
             to_value(NavigateResult {
                 url: state.url.clone(),
@@ -155,30 +163,18 @@ fn dispatch(
             })
         }
         BrowserRequest::Tabs {} => to_value(current_tabs(&state)),
-        BrowserRequest::NewTab { url } => {
-            if let Some(url) = url {
-                check_url(&url)?;
-                apply_navigate(&mut state, url);
-            }
-            to_value(current_tabs(&state))
-        }
-        BrowserRequest::SelectTab { tab_id } => {
-            if tab_id != 1 {
-                return Err(BrowserClientError::InvalidResult(format!(
-                    "unknown tab {tab_id}"
-                )));
-            }
-            Ok(empty_object())
-        }
-        BrowserRequest::CloseTab { tab_id } => {
-            if tab_id != 1 {
-                return Err(BrowserClientError::InvalidResult(format!(
-                    "unknown tab {tab_id}"
-                )));
-            }
-            apply_navigate(&mut state, "about:blank".into());
-            Ok(empty_object())
-        }
+        BrowserRequest::NewTab { .. } => Err(BrowserClientError::Rpc {
+            code: -32601,
+            message: single_tab_v1_error("browser.new_tab"),
+        }),
+        BrowserRequest::SelectTab { .. } => Err(BrowserClientError::Rpc {
+            code: -32601,
+            message: single_tab_v1_error("browser.select_tab"),
+        }),
+        BrowserRequest::CloseTab { .. } => Err(BrowserClientError::Rpc {
+            code: -32601,
+            message: single_tab_v1_error("browser.close_tab"),
+        }),
         BrowserRequest::Snapshot {
             verbose: _,
             include_text,
@@ -210,10 +206,8 @@ fn dispatch(
             state.last_action = Some(MockAction::Fill { uid, value });
             Ok(empty_object())
         }
-        BrowserRequest::Eval {
-            function: _,
-            confirm: _,
-        } => {
+        BrowserRequest::Eval { function, confirm } => {
+            check_eval_confirm(&function, confirm)?;
             let payload = serde_json::json!({ "title": state.title });
             let serialized =
                 serde_json::to_string(&payload).map_err(BrowserClientError::from_json)?;
@@ -225,7 +219,20 @@ fn dispatch(
             width: 1280,
             height: 800,
         }),
-        BrowserRequest::Downloads {} => to_value(DownloadsResult::default()),
+        BrowserRequest::Downloads {} => {
+            let folder = state.session_folder.clone();
+            match folder.as_deref() {
+                Some(folder) => {
+                    let listed = crate::host::download::list_brokered_downloads(
+                        folder,
+                        &std::collections::HashSet::new(),
+                    )
+                    .map_err(BrowserClientError::Transport)?;
+                    to_value(listed)
+                }
+                None => to_value(DownloadsResult::default()),
+            }
+        }
         BrowserRequest::Raise {} => Ok(empty_object()),
         BrowserRequest::Shutdown {} => {
             state.shutdown = true;
@@ -379,5 +386,47 @@ mod tests {
             })
         );
         assert_eq!(host.nodes()[1].value.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn mock_rejects_mutating_eval_without_confirm() {
+        let host = MockBrowserHost::new();
+        let err = host
+            .call(
+                crate::protocol::METHOD_EVAL,
+                serde_json::json!({
+                    "function": "() => location.assign('https://evil.test')",
+                    "confirm": false
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BrowserClientError::Eval(crate::protocol::EvalPolicyError::NeedsConfirm)
+            ),
+            "{err:?}"
+        );
+        host.call(
+            crate::protocol::METHOD_EVAL,
+            serde_json::json!({
+                "function": "() => location.assign('https://evil.test')",
+                "confirm": true
+            }),
+        )
+        .await
+        .expect("confirmed mutating eval");
+    }
+
+    #[tokio::test]
+    async fn mock_new_tab_is_honest_single_tab() {
+        let host = MockBrowserHost::new();
+        let err = host
+            .call(crate::protocol::METHOD_NEW_TAB, serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("v1 is a single tab"), "{err}");
+        assert_eq!(host.url(), "about:blank");
     }
 }

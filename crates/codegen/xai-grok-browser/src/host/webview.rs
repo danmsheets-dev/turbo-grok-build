@@ -40,12 +40,13 @@ use super::ax::{
     compact_ax_tree, interpret_uid_action, parse_collected_nodes, parse_eval_cdp,
     parse_world_result, snapshot_cap, turbo_ax_js_injected,
 };
+use super::download::{broker_attachment, list_brokered_downloads, recent_completed_download};
 use super::window::{attach_controller, client_rect, set_title};
 use super::{HostError, next_screenshot_path, screenshot_dir};
 use crate::protocol::{
-    AxNode, ClickResult, DownloadInfo, DownloadsResult, FillTarget, NavigateResult,
-    ScreenshotResult, SnapshotResult, SnapshotSource, TabInfo, TabsResult, WaitResult,
-    check_fill_target, check_url_in_session, is_oauth_popup_url,
+    AxNode, ClickResult, DownloadsResult, FillTarget, NavigateResult, ScreenshotResult,
+    SnapshotResult, SnapshotSource, TabInfo, TabsResult, WaitResult, check_fill_target,
+    check_navigation_hop, is_oauth_popup_url,
 };
 
 /// Ceiling on a single script / CDP round trip before the host gives up.
@@ -875,12 +876,14 @@ fn register_navigation_policy(
             return Ok(());
         };
         let mut uri = PWSTR::null();
-        if unsafe { args.Uri(&mut uri) }.is_err() {
-            return Ok(());
-        }
-        let url = take_pwstr(uri);
-        if let Err(err) = check_url_in_session(&url, folder_main.as_deref()) {
-            let message = format!("blocked navigation to {url}: {err}");
+        let url = if unsafe { args.Uri(&mut uri) }.is_err() {
+            None
+        } else {
+            Some(take_pwstr(uri))
+        };
+        if let Err(err) = check_navigation_hop(url.as_deref(), folder_main.as_deref()) {
+            let shown = url.as_deref().unwrap_or("<missing>");
+            let message = format!("blocked navigation to {shown}: {err}");
             eprintln!("turbo browser-host: {message}");
             blocked_main.set(message);
             let _ = unsafe { args.SetCancel(true) };
@@ -898,12 +901,14 @@ fn register_navigation_policy(
             return Ok(());
         };
         let mut uri = PWSTR::null();
-        if unsafe { args.Uri(&mut uri) }.is_err() {
-            return Ok(());
-        }
-        let url = take_pwstr(uri);
-        if let Err(err) = check_url_in_session(&url, folder_frame.as_deref()) {
-            let message = format!("blocked frame navigation to {url}: {err}");
+        let url = if unsafe { args.Uri(&mut uri) }.is_err() {
+            None
+        } else {
+            Some(take_pwstr(uri))
+        };
+        if let Err(err) = check_navigation_hop(url.as_deref(), folder_frame.as_deref()) {
+            let shown = url.as_deref().unwrap_or("<missing>");
+            let message = format!("blocked frame navigation to {shown}: {err}");
             eprintln!("turbo browser-host: {message}");
             blocked_frame.set(message);
             let _ = unsafe { args.SetCancel(true) };
@@ -928,23 +933,27 @@ fn register_popup_download_permission(
     // still report one tab. Redirect it into this view instead.
     let nav_target = webview.clone();
     let popup_blocked = Rc::clone(&blocked);
+    let popup_folder = session_folder.clone();
     let popup = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
         let Some(args) = args else {
             return Ok(());
         };
         let _ = unsafe { args.SetHandled(true) };
         let mut uri = PWSTR::null();
-        if unsafe { args.Uri(&mut uri) }.is_err() {
-            return Ok(());
-        }
-        let url = take_pwstr(uri);
+        let url = if unsafe { args.Uri(&mut uri) }.is_err() {
+            None
+        } else {
+            Some(take_pwstr(uri))
+        };
         // The policy check still applies: a popup is a navigation.
-        if let Err(err) = crate::protocol::check_url(&url) {
-            let message = format!("blocked popup to {url}: {err}");
+        if let Err(err) = check_navigation_hop(url.as_deref(), popup_folder.as_deref()) {
+            let shown = url.as_deref().unwrap_or("<missing>");
+            let message = format!("blocked popup to {shown}: {err}");
             eprintln!("turbo browser-host: {message}");
             popup_blocked.set(message);
             return Ok(());
         }
+        let url = url.unwrap_or_default();
         // GSI / OAuth popups postMessage back to the opener and then close.
         // Navigating them into the only tab leaves a white gsi/select page
         // with no opener. Let WebView2 own a real popup for those URLs; the
@@ -977,14 +986,6 @@ fn register_popup_download_permission(
             download_blocked.set("download cancelled: no session folder is configured".to_owned());
             return Ok(());
         };
-        let folder = match prepare_download_folder(session_folder) {
-            Ok(folder) => folder,
-            Err(error) => {
-                let _ = unsafe { args.SetCancel(true) };
-                download_blocked.set(format!("download cancelled: {error}"));
-                return Ok(());
-            }
-        };
         let operation = unsafe { args.DownloadOperation() }.ok();
         let suggested = {
             let mut path = PWSTR::null();
@@ -998,30 +999,20 @@ fn register_popup_download_permission(
                 None
             }
         };
-        let filename = suggested
-            .and_then(|name| safe_download_filename(&name))
-            .or_else(|| {
-                operation.as_ref().and_then(|operation| {
-                    let mut uri = PWSTR::null();
-                    unsafe { operation.Uri(&mut uri) }.ok()?;
-                    let uri = take_pwstr(uri);
-                    uri.split('?')
-                        .next()
-                        .and_then(|path| path.rsplit('/').next())
-                        .map(str::to_owned)
-                        .and_then(|name| safe_download_filename(&name))
-                })
-            })
-            .unwrap_or_else(|| "download.bin".to_owned());
-        let final_destination = unique_download_path(&folder, &filename);
-        let partial_name = format!(
-            ".{}.part",
-            final_destination
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("download.bin")
-        );
-        let partial_destination = unique_download_path(&folder, &partial_name);
+        let source_uri = operation.as_ref().and_then(|operation| {
+            let mut uri = PWSTR::null();
+            unsafe { operation.Uri(&mut uri) }.ok()?;
+            Some(take_pwstr(uri))
+        });
+        let (partial_destination, final_destination) =
+            match broker_attachment(session_folder, suggested.as_deref(), source_uri.as_deref()) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    let _ = unsafe { args.SetCancel(true) };
+                    download_blocked.set(format!("download cancelled: {error}"));
+                    return Ok(());
+                }
+            };
         let destination_string = partial_destination.to_string_lossy().into_owned();
         let destination_wide = CoTaskMemPWSTR::from(destination_string.as_str());
         if unsafe { args.SetResultFilePath(*destination_wide.as_ref().as_pcwstr()) }.is_err() {
@@ -1111,201 +1102,6 @@ fn register_popup_download_permission(
     unsafe { webview.add_PermissionRequested(&permission, &mut token) }
         .map_err(|e| HostError::Failed(format!("add_PermissionRequested: {e}")))?;
     Ok(())
-}
-
-fn prepare_download_folder(session_folder: &Path) -> Result<PathBuf, String> {
-    reject_symlink_components(session_folder)?;
-    if !session_folder.is_dir() {
-        return Err(format!(
-            "session folder is not an existing directory: {}",
-            session_folder.display()
-        ));
-    }
-    let session_root = session_folder
-        .canonicalize()
-        .map_err(|error| format!("cannot canonicalize session folder: {error}"))?;
-    let folder = session_folder.join("downloads");
-    if folder.exists() {
-        let metadata = std::fs::symlink_metadata(&folder)
-            .map_err(|error| format!("cannot inspect broker folder: {error}"))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err("broker folder is not a real directory".to_owned());
-        }
-    } else {
-        std::fs::create_dir(&folder)
-            .map_err(|error| format!("cannot create broker folder: {error}"))?;
-    }
-    reject_symlink_components(&folder)?;
-    let canonical_folder = folder
-        .canonicalize()
-        .map_err(|error| format!("cannot canonicalize broker folder: {error}"))?;
-    if !canonical_folder.starts_with(&session_root) {
-        return Err("broker folder escapes the session folder".to_owned());
-    }
-    Ok(canonical_folder)
-}
-
-fn reject_symlink_components(path: &Path) -> Result<(), String> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!(
-                    "path contains symlink component: {}",
-                    current.display()
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("cannot inspect path component: {error}")),
-        }
-    }
-    Ok(())
-}
-
-fn recent_completed_download(
-    session_folder: Option<&Path>,
-    active_downloads: &HashSet<PathBuf>,
-) -> Option<DownloadInfo> {
-    let folder = session_folder?;
-    let list = list_brokered_downloads(folder, active_downloads).ok()?;
-    let now = std::time::SystemTime::now();
-    list.downloads.into_iter().rev().find(|download| {
-        if !download.completed {
-            return false;
-        }
-        let Ok(meta) = std::fs::metadata(&download.path) else {
-            return false;
-        };
-        let Ok(modified) = meta.modified() else {
-            return false;
-        };
-        now.duration_since(modified)
-            .map(|age| age.as_secs() < 15)
-            .unwrap_or(false)
-    })
-}
-
-fn list_brokered_downloads(
-    session_folder: &Path,
-    active_downloads: &HashSet<PathBuf>,
-) -> Result<DownloadsResult, String> {
-    reject_symlink_components(session_folder)?;
-    let session_root = session_folder
-        .canonicalize()
-        .map_err(|error| format!("cannot canonicalize session folder: {error}"))?;
-    let folder = session_folder.join("downloads");
-    let folder_metadata = match std::fs::symlink_metadata(&folder) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DownloadsResult::default());
-        }
-        Err(error) => {
-            return Err(format!("cannot inspect broker folder: {error}"));
-        }
-    };
-    if folder_metadata.file_type().is_symlink() || !folder_metadata.is_dir() {
-        return Err("broker folder is not a real directory".to_owned());
-    }
-    let folder = folder
-        .canonicalize()
-        .map_err(|error| format!("cannot canonicalize broker folder: {error}"))?;
-    if !folder.starts_with(&session_root) {
-        return Err("broker folder escapes the session folder".to_owned());
-    }
-    let entries = match std::fs::read_dir(&folder) {
-        Ok(entries) => entries,
-        Err(error) => {
-            return Err(format!("cannot list brokered downloads: {error}"));
-        }
-    };
-    let mut downloads = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot read brokered download: {error}"))?;
-        // Do not follow links while exposing brokered files. A symlink in the
-        // broker directory must not turn this read-only listing into a path
-        // disclosure outside the session folder.
-        let metadata = entry
-            .path()
-            .symlink_metadata()
-            .map_err(|error| format!("cannot inspect brokered download: {error}"))?;
-        if !metadata.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.ends_with(".part") {
-            continue;
-        }
-        downloads.push(DownloadInfo {
-            name: name.to_owned(),
-            path: path.to_string_lossy().into_owned(),
-            bytes: metadata.len(),
-            completed: !active_downloads.contains(&path),
-        });
-    }
-    downloads.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(DownloadsResult { downloads })
-}
-
-fn safe_download_filename(name: &str) -> Option<String> {
-    let name = name.trim();
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name
-            .chars()
-            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
-    {
-        return None;
-    }
-    let trimmed = name.trim_end_matches([' ', '.']);
-    if trimmed.is_empty() {
-        return None;
-    }
-    let stem = trimmed.split('.').next().unwrap_or_default();
-    let upper_stem = stem.to_ascii_uppercase();
-    let reserved_device = matches!(upper_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (upper_stem.len() == 4
-            && (upper_stem.starts_with("COM") || upper_stem.starts_with("LPT"))
-            && upper_stem.as_bytes()[3].is_ascii_digit());
-    if reserved_device {
-        return None;
-    }
-    Some(trimmed.chars().take(180).collect())
-}
-
-fn unique_download_path(folder: &Path, filename: &str) -> PathBuf {
-    let candidate = folder.join(filename);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let path = Path::new(filename);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("download");
-    let extension = path.extension().and_then(|s| s.to_str());
-    for index in 1..=10_000u32 {
-        let name = match extension {
-            Some(extension) => format!("{stem} ({index}).{extension}"),
-            None => format!("{stem} ({index})"),
-        };
-        let candidate = folder.join(name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    folder.join(format!(
-        "download-{}-{}.bin",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos())
-    ))
 }
 
 fn apply_settings(webview: &ICoreWebView2) -> Result<(), HostError> {
@@ -1474,92 +1270,6 @@ fn is_runtime_missing(err: &windows::core::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn download_listing_returns_sorted_regular_files_only() {
-        let session = std::env::temp_dir().join(format!(
-            "turbo-browser-download-list-test-{}",
-            std::process::id()
-        ));
-        let downloads = session.join("downloads");
-        let _ = std::fs::remove_dir_all(&session);
-        std::fs::create_dir_all(&downloads).unwrap();
-        std::fs::write(downloads.join("zeta.txt"), b"123").unwrap();
-        std::fs::write(downloads.join("alpha.pdf"), b"12").unwrap();
-        std::fs::create_dir(downloads.join("nested")).unwrap();
-
-        let canonical_downloads = downloads.canonicalize().unwrap();
-        let result = list_brokered_downloads(&session, &HashSet::new()).unwrap();
-        assert_eq!(
-            result.downloads,
-            vec![
-                DownloadInfo {
-                    name: "alpha.pdf".into(),
-                    path: canonical_downloads
-                        .join("alpha.pdf")
-                        .to_string_lossy()
-                        .into_owned(),
-                    bytes: 2,
-                    completed: true,
-                },
-                DownloadInfo {
-                    name: "zeta.txt".into(),
-                    path: canonical_downloads
-                        .join("zeta.txt")
-                        .to_string_lossy()
-                        .into_owned(),
-                    bytes: 3,
-                    completed: true,
-                },
-            ]
-        );
-        let _ = std::fs::remove_dir_all(session);
-    }
-
-    #[test]
-    fn active_downloads_are_not_reported_complete() {
-        let session = std::env::temp_dir().join(format!(
-            "turbo-browser-active-download-test-{}",
-            std::process::id()
-        ));
-        let downloads = session.join("downloads");
-        let path = downloads.join("partial.bin.part");
-        let _ = std::fs::remove_dir_all(&session);
-        std::fs::create_dir_all(&downloads).unwrap();
-        std::fs::write(&path, b"partial").unwrap();
-
-        let active = HashSet::from([path.canonicalize().unwrap()]);
-        let result = list_brokered_downloads(&session, &active).unwrap();
-        assert!(result.downloads.is_empty());
-        let _ = std::fs::remove_dir_all(session);
-    }
-
-    #[test]
-    fn download_filename_rejects_traversal_and_devices() {
-        for name in ["", ".", "..", "..\\secret.txt", "CON", "LPT1.txt"] {
-            assert!(safe_download_filename(name).is_none(), "accepted {name:?}");
-        }
-        assert_eq!(
-            safe_download_filename(" report.pdf. "),
-            Some("report.pdf".to_owned())
-        );
-    }
-
-    #[test]
-    fn download_path_adds_collision_suffix() {
-        let dir = std::env::temp_dir().join(format!(
-            "turbo-browser-download-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("report.pdf"), b"existing").unwrap();
-        assert_eq!(
-            unique_download_path(&dir, "report.pdf"),
-            dir.join("report (1).pdf")
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
     #[test]
     fn task_canceled_means_nested_pump_consumed_quit() {

@@ -88,6 +88,9 @@ mod policy_tests {
             "() => localStorage.getItem('token')",
             "() => el.dispatchEvent(new MouseEvent('click'))",
             "() => document.body.innerHTML = ''",
+            "() => location.assign('https://evil.test')",
+            "() => history.back()",
+            "() => el.value = 'hunter2'",
         ] {
             assert!(mutates_page(f), "must flag {f}");
             let err = check_eval_is_read_only(f, false).unwrap_err();

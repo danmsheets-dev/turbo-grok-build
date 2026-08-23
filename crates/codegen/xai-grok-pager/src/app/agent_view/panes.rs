@@ -524,36 +524,24 @@ impl AgentView {
             self.browser_pane.host_running = false;
             return;
         };
+        // Re-read the cache on every toggle/refresh so a stale host_running
+        // flag cannot keep the pane stuck on about:blank after a snapshot.
+        // Probe the pipe only when there is nothing cached (same as before:
+        // the common path does no blocking I/O on the UI thread).
         let snapshot =
             xai_grok_tools::implementations::grok_build::browser::last_snapshot_for(&sid);
-        // A snapshot means the host answered; only probe the pipe when there is
-        // nothing cached, so the common path does no blocking I/O on the UI
-        // thread.
-        self.browser_pane.host_running = match &snapshot {
-            Some(_) => true,
+        let pipe_up = match &snapshot {
+            Some(_) => false,
             None => xai_grok_shell::session::agent_browser::pipe_connectable(&sid),
         };
-        let Some(snapshot) = snapshot else {
-            self.browser_pane.last_url = None;
-            self.browser_pane.last_snapshot_lines.clear();
-            return;
-        };
-        self.browser_pane.last_url = Some(snapshot.url.clone());
-        let mut lines = Vec::with_capacity(snapshot.nodes.len() + 1);
-        if !snapshot.title.is_empty() {
-            lines.push(format!("title: {}", snapshot.title));
-        }
-        for node in &snapshot.nodes {
-            let mut line = format!("[{}] {} {}", node.uid, node.role, node.name);
-            if let Some(value) = &node.value {
-                line.push_str(&format!(" = {value}"));
-            }
-            if node.focused {
-                line.push_str(" *");
-            }
-            lines.push(line);
-        }
-        self.browser_pane.last_snapshot_lines = lines;
+        let mirror =
+            xai_grok_tools::implementations::grok_build::browser::populate_browser_pane_mirror(
+                snapshot.as_ref(),
+                pipe_up,
+            );
+        self.browser_pane.last_url = mirror.last_url;
+        self.browser_pane.last_snapshot_lines = mirror.last_snapshot_lines;
+        self.browser_pane.host_running = mirror.host_running;
     }
     /// Browser-mirror-focused key handling. Esc / toggle close the pane only.
     pub(super) fn handle_browser_key(

@@ -26,7 +26,8 @@ pub use protocol::{
     METHOD_RAISE, METHOD_SCREENSHOT, METHOD_SCROLL, METHOD_SELECT, METHOD_SELECT_TAB,
     METHOD_SET_FILE, METHOD_SHUTDOWN, METHOD_SNAPSHOT, METHOD_TABS, METHOD_WAIT, NavigateResult,
     ProtocolError, ScreenshotResult, SnapshotResult, SnapshotSource, TabInfo, TabsResult,
-    UrlPolicyError, WaitResult, check_eval_result, check_eval_result_len, check_fill,
-    check_fill_target, check_fill_value, check_url, check_url_in_session, eval_looks_mutating,
-    is_oauth_popup_url, oauth_popup_host, path_is_under_session_folder,
+    UrlPolicyError, WaitResult, check_eval_confirm, check_eval_result, check_eval_result_len,
+    check_fill, check_fill_target, check_fill_value, check_navigation_hop, check_url,
+    check_url_in_session, eval_looks_mutating, is_oauth_popup_url, oauth_popup_host,
+    path_is_under_session_folder, single_tab_v1_error,
 };

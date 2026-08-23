@@ -22,8 +22,8 @@ use crate::protocol::{
     METHOD_FILL, METHOD_HOVER, METHOD_NAVIGATE, METHOD_NEW_TAB, METHOD_PRESS_KEY, METHOD_RAISE,
     METHOD_SCREENSHOT, METHOD_SCROLL, METHOD_SELECT, METHOD_SELECT_TAB, METHOD_SET_FILE,
     METHOD_SHUTDOWN, METHOD_SNAPSHOT, METHOD_TABS, METHOD_WAIT, NavigateResult, ProtocolError,
-    ScreenshotResult, SnapshotResult, TabsResult, UrlPolicyError, WaitResult, check_eval_result,
-    check_fill, check_url_in_session,
+    ScreenshotResult, SnapshotResult, TabsResult, UrlPolicyError, WaitResult, check_eval_confirm,
+    check_eval_result, check_fill, check_url_in_session, single_tab_v1_error,
 };
 
 /// Client / transport failure (policy, RPC, or I/O).
@@ -327,25 +327,31 @@ impl<T: BrowserTransport> BrowserClient<T> {
             .await
     }
 
-    /// `browser.new_tab`. Optional URL is checked before send.
+    /// `browser.new_tab`. v1 is a single tab; this fails closed without sending.
     pub async fn new_tab(&self, url: Option<String>) -> Result<TabsResult, BrowserClientError> {
-        if let Some(url) = url.as_deref() {
-            check_url_in_session(url, self.session_folder.as_deref())?;
-        }
-        self.roundtrip(METHOD_NEW_TAB, serde_json::json!({ "url": url }))
-            .await
+        let _ = url;
+        Err(BrowserClientError::Rpc {
+            code: -32601,
+            message: single_tab_v1_error(METHOD_NEW_TAB),
+        })
     }
 
-    /// `browser.select_tab`.
+    /// `browser.select_tab`. v1 is a single tab; this fails closed without sending.
     pub async fn select_tab(&self, tab_id: u32) -> Result<(), BrowserClientError> {
-        self.send_ok(METHOD_SELECT_TAB, serde_json::json!({ "tab_id": tab_id }))
-            .await
+        let _ = tab_id;
+        Err(BrowserClientError::Rpc {
+            code: -32601,
+            message: single_tab_v1_error(METHOD_SELECT_TAB),
+        })
     }
 
-    /// `browser.close_tab`.
+    /// `browser.close_tab`. v1 is a single tab; this fails closed without sending.
     pub async fn close_tab(&self, tab_id: u32) -> Result<(), BrowserClientError> {
-        self.send_ok(METHOD_CLOSE_TAB, serde_json::json!({ "tab_id": tab_id }))
-            .await
+        let _ = tab_id;
+        Err(BrowserClientError::Rpc {
+            code: -32601,
+            message: single_tab_v1_error(METHOD_CLOSE_TAB),
+        })
     }
 
     /// `browser.snapshot`.
@@ -399,11 +405,13 @@ impl<T: BrowserTransport> BrowserClient<T> {
         function: impl Into<String>,
         confirm: bool,
     ) -> Result<Value, BrowserClientError> {
+        let function = function.into();
+        check_eval_confirm(&function, confirm)?;
         let value = self
             .transport
             .call(
                 METHOD_EVAL,
-                serde_json::json!({ "function": function.into(), "confirm": confirm }),
+                serde_json::json!({ "function": function, "confirm": confirm }),
             )
             .await?;
         let serialized = serde_json::to_string(&value).map_err(BrowserClientError::from_json)?;
@@ -631,6 +639,46 @@ mod tests {
             "denied file: URL must not be sent to the host"
         );
         assert_eq!(client.transport().url(), "about:blank");
+    }
+
+    #[tokio::test]
+    async fn mutating_eval_is_not_sent_without_confirm() {
+        let client = BrowserClient::with_transport("sess", MockBrowserHost::new());
+        let err = client
+            .eval_ex("() => document.querySelector('button').click()", false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BrowserClientError::Eval(EvalPolicyError::NeedsConfirm)),
+            "{err:?}"
+        );
+        assert!(
+            client.transport().call_log().is_empty(),
+            "mutating eval must not reach the host without confirm"
+        );
+        client
+            .eval_ex("() => document.title", false)
+            .await
+            .expect("read eval");
+        assert_eq!(client.transport().call_log(), vec![METHOD_EVAL]);
+    }
+
+    #[tokio::test]
+    async fn multi_tab_methods_fail_closed_without_send() {
+        let client = BrowserClient::with_transport("sess", MockBrowserHost::new());
+        let err = client
+            .new_tab(Some("https://example.com/".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("v1 is a single tab"), "{err}");
+        let err = client.select_tab(2).await.unwrap_err();
+        assert!(err.to_string().contains("v1 is a single tab"), "{err}");
+        let err = client.close_tab(1).await.unwrap_err();
+        assert!(err.to_string().contains("v1 is a single tab"), "{err}");
+        assert!(
+            client.transport().call_log().is_empty(),
+            "multi-tab RPCs must not be sent"
+        );
     }
 
     #[tokio::test]

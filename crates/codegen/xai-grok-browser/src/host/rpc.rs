@@ -417,6 +417,7 @@ mod tests {
         let err = decode_host_call(&new_tab, None).unwrap_err();
         assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND);
         assert!(err.error.message.contains("not implemented"));
+        assert!(err.error.message.contains("v1 is a single tab"));
     }
 }
 

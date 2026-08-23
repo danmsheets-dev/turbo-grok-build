@@ -21,15 +21,19 @@ pub fn agent_browser_user_data_dir() -> PathBuf {
 /// `GROK_BROWSER_PROFILE=durable` (or `shared`) uses
 /// `$GROK_HOME/agent-browser/durable` instead, for job-hunt continuity.
 pub fn agent_browser_profile_dir(session_id: &str) -> PathBuf {
+    profile_dir_for(
+        session_id,
+        std::env::var(GROK_BROWSER_PROFILE_ENV).ok().as_deref(),
+    )
+}
+
+fn profile_dir_for(session_id: &str, profile_env: Option<&str>) -> PathBuf {
     let root = agent_browser_user_data_dir();
-    match std::env::var(GROK_BROWSER_PROFILE_ENV) {
-        Ok(value) => {
-            let kind = value.trim().to_ascii_lowercase();
-            if kind == "durable" || kind == "shared" || kind == "1" {
-                return root.join("durable");
-            }
+    if let Some(value) = profile_env {
+        let kind = value.trim().to_ascii_lowercase();
+        if kind == "durable" || kind == "shared" || kind == "1" {
+            return root.join("durable");
         }
-        Err(_) => {}
     }
     let sid = session_id.trim();
     if sid.is_empty() {
@@ -71,6 +75,30 @@ mod tests {
             agent_browser_user_data_dir()
                 .join("sessions")
                 .join("abc-session")
+        );
+    }
+
+    #[test]
+    fn durable_profile_is_shared_cookies_path() {
+        let durable = profile_dir_for("abc-session", Some("durable"));
+        assert_eq!(durable, agent_browser_user_data_dir().join("durable"));
+        assert_eq!(
+            profile_dir_for("abc-session", Some("shared")),
+            agent_browser_user_data_dir().join("durable")
+        );
+        assert_eq!(
+            profile_dir_for("abc-session", Some("1")),
+            agent_browser_user_data_dir().join("durable")
+        );
+        assert_eq!(
+            profile_dir_for("abc-session", Some("session")),
+            agent_browser_user_data_dir()
+                .join("sessions")
+                .join("abc-session")
+        );
+        assert_eq!(
+            durable.file_name().and_then(|n| n.to_str()),
+            Some("durable")
         );
     }
 }

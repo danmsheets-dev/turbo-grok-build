@@ -606,6 +606,11 @@ pub enum EvalPolicyError {
         /// Observed size in bytes.
         len: usize,
     },
+    /// Mutating script without `confirm=true`.
+    #[error(
+        "eval writes to the page (click / submit / navigate / assign); retry with confirm=true"
+    )]
+    NeedsConfirm,
 }
 
 /// Optional comma-separated host allowlist (`example.com` allows `www.example.com`).
@@ -617,6 +622,28 @@ pub const GROK_BROWSER_ALLOW_ENV: &str = "GROK_BROWSER_ALLOW";
 /// Allow `https:`, local `http:`, and `about:blank`. Deny `file:` by default.
 pub fn check_url(url: &str) -> Result<(), UrlPolicyError> {
     check_url_in_session(url, None)
+}
+
+/// Fail-closed hop check used by `NavigationStarting`, `FrameNavigationStarting`,
+/// `NewWindowRequested`, and `browser.navigate`.
+///
+/// A missing or empty URI is cancelled: failing open when WebView2 cannot
+/// report the destination would let a redirect, iframe, or click walk out of
+/// the allowlist. All three hop kinds share this function so a gap in one
+/// event cannot bypass the others.
+pub fn check_navigation_hop(
+    uri: Option<&str>,
+    session_folder: Option<&Path>,
+) -> Result<(), UrlPolicyError> {
+    let Some(url) = uri.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(UrlPolicyError::Empty);
+    };
+    check_url_in_session(url, session_folder)
+}
+
+/// JSON-RPC / client error when a multi-tab method is requested.
+pub fn single_tab_v1_error(method: &str) -> String {
+    format!("{method} is not implemented (v1 is a single tab)")
 }
 
 /// Like [`check_url`], but `file:` under `session_folder` may be allowed.
@@ -813,12 +840,26 @@ pub fn eval_looks_mutating(function: &str) -> bool {
         "document.write",
         "history.pushstate",
         "history.replacestate",
+        "history.back",
+        "history.go",
+        "history.forward",
+        "['submit']",
+        "[\"submit\"]",
         "new function",
         "function(\"",
         "function('",
         "function(`",
     ];
     NEEDLES.iter().any(|needle| f.contains(needle))
+}
+
+/// Require `confirm=true` for a mutating `browser.eval` expression.
+pub fn check_eval_confirm(function: &str, confirm: bool) -> Result<(), EvalPolicyError> {
+    if confirm || !eval_looks_mutating(function) {
+        Ok(())
+    } else {
+        Err(EvalPolicyError::NeedsConfirm)
+    }
 }
 
 fn split_scheme(url: &str) -> Option<(&str, &str)> {
@@ -1663,6 +1704,47 @@ mod tests {
     }
 
     #[test]
+    fn navigation_starting_cancels_disallowed_hops() {
+        // Redirect, iframe, and click-driven hops all share this check.
+        for url in [
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "http://example.com/",
+            "file:///C:/Windows/notepad.exe",
+            "blob:https://example.com/uuid",
+            "about:srcdoc",
+        ] {
+            assert!(
+                check_navigation_hop(Some(url), None).is_err(),
+                "hop must cancel: {url}"
+            );
+        }
+        assert_eq!(
+            check_navigation_hop(None, None),
+            Err(UrlPolicyError::Empty),
+            "missing URI must fail closed, not allow the hop"
+        );
+        assert_eq!(
+            check_navigation_hop(Some(""), None),
+            Err(UrlPolicyError::Empty)
+        );
+        assert_eq!(
+            check_navigation_hop(Some("   "), None),
+            Err(UrlPolicyError::Empty)
+        );
+        assert!(check_navigation_hop(Some("https://example.com/next"), None).is_ok());
+        assert!(check_navigation_hop(Some("about:blank"), None).is_ok());
+        assert!(check_navigation_hop(Some("http://127.0.0.1/"), None).is_ok());
+        with_browser_allow("example.com", || {
+            assert!(check_navigation_hop(Some("https://example.com/"), None).is_ok());
+            assert_eq!(
+                check_navigation_hop(Some("https://evil.test/"), None),
+                Err(UrlPolicyError::AllowlistDenied("evil.test".into()))
+            );
+        });
+    }
+
+    #[test]
     fn location_href_read_is_not_mutating() {
         assert!(!eval_looks_mutating(
             "() => ({ url: location.href, title: document.title })"
@@ -1685,6 +1767,17 @@ mod tests {
         assert!(!eval_looks_mutating(
             "() => document.querySelectorAll('a').length"
         ));
+        assert!(eval_looks_mutating("() => document.forms[0]['submit']()"));
+        assert!(eval_looks_mutating("() => history.back()"));
+        assert!(eval_looks_mutating(
+            "() => location.assign('https://evil.test')"
+        ));
+        assert!(check_eval_confirm("() => document.title", false).is_ok());
+        assert_eq!(
+            check_eval_confirm("() => document.forms[0].submit()", false),
+            Err(EvalPolicyError::NeedsConfirm)
+        );
+        assert!(check_eval_confirm("() => document.forms[0].submit()", true).is_ok());
     }
 
     #[test]

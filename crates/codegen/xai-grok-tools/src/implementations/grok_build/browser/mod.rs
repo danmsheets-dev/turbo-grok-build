@@ -226,6 +226,59 @@ pub fn last_snapshot_for(session_id: &str) -> Option<SnapshotResult> {
     lock(snapshots()).get(session_id).cloned()
 }
 
+/// TUI Agent Browser pane fields derived from the last snapshot.
+///
+/// `host_running` is true when a snapshot is cached (the host answered) even
+/// if a stale `pipe_connectable=false` is passed in — pane toggle must not
+/// stick on `about:blank` after a successful snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BrowserPaneMirror {
+    /// URL from the last snapshot, if any.
+    pub last_url: Option<String>,
+    /// Rendered snapshot lines (`title:` then `[uid] role name`).
+    pub last_snapshot_lines: Vec<String>,
+    /// Whether the pane should treat the host as up.
+    pub host_running: bool,
+}
+
+/// Mirror state for Ctrl+Shift+B from the session cache (no second RPC).
+pub fn browser_pane_mirror(session_id: &str, pipe_connectable: bool) -> BrowserPaneMirror {
+    populate_browser_pane_mirror(last_snapshot_for(session_id).as_ref(), pipe_connectable)
+}
+
+/// Pure mapping used by [`browser_pane_mirror`] and tests.
+pub fn populate_browser_pane_mirror(
+    snapshot: Option<&SnapshotResult>,
+    pipe_connectable: bool,
+) -> BrowserPaneMirror {
+    let Some(snapshot) = snapshot else {
+        return BrowserPaneMirror {
+            last_url: None,
+            last_snapshot_lines: Vec::new(),
+            host_running: pipe_connectable,
+        };
+    };
+    let mut lines = Vec::with_capacity(snapshot.nodes.len() + 1);
+    if !snapshot.title.is_empty() {
+        lines.push(format!("title: {}", snapshot.title));
+    }
+    for node in &snapshot.nodes {
+        let mut line = format!("[{}] {} {}", node.uid, node.role, node.name);
+        if let Some(value) = &node.value {
+            line.push_str(&format!(" = {value}"));
+        }
+        if node.focused {
+            line.push_str(" *");
+        }
+        lines.push(line);
+    }
+    BrowserPaneMirror {
+        last_url: Some(snapshot.url.clone()),
+        last_snapshot_lines: lines,
+        host_running: true,
+    }
+}
+
 /// Forget a session's cached snapshot and host-up flag (session teardown).
 pub fn forget_session(session_id: &str) {
     lock(snapshots()).remove(session_id);
@@ -282,7 +335,10 @@ impl BrowserHandle {
     #[cfg(test)]
     pub fn mock_with_folder(session_id: impl Into<String>, folder: PathBuf) -> Self {
         let session_id = session_id.into();
-        let client = BrowserClient::mock(session_id.clone()).with_session_folder(folder.clone());
+        let host = xai_grok_browser::MockBrowserHost::new();
+        host.set_session_folder(folder.clone());
+        let client = BrowserClient::with_transport(session_id.clone(), host)
+            .with_session_folder(folder.clone());
         Self {
             session_id: session_id.clone(),
             session_folder: Some(folder),
@@ -1051,6 +1107,126 @@ mod tests {
         assert!(click::click_name_needs_confirm("Delete account"));
         assert!(click::click_name_needs_confirm("Apply now"));
         assert!(click::click_name_needs_confirm("Connect"));
+    }
+
+    #[tokio::test]
+    async fn refresh_browser_pane_populates_last_url_from_cached_snapshot() {
+        let sid = "sess-pane-mirror-last-url";
+        forget_session(sid);
+        let handle = BrowserHandle::mock(sid);
+        handle.navigate("https://example.com/jobs").await.unwrap();
+        handle.snapshot(false).await.unwrap();
+
+        let stale_pipe = false;
+        let mirror = browser_pane_mirror(sid, stale_pipe);
+        assert_eq!(mirror.last_url.as_deref(), Some("https://example.com/jobs"));
+        assert!(
+            mirror.host_running,
+            "cached snapshot must mark the host up even if pipe probe is stale"
+        );
+        assert!(
+            mirror.last_snapshot_lines.iter().any(|l| l.contains("1-1")),
+            "{:?}",
+            mirror.last_snapshot_lines
+        );
+        assert_ne!(
+            mirror.last_url.as_deref().unwrap_or("about:blank"),
+            "about:blank"
+        );
+
+        forget_session(sid);
+        let empty = browser_pane_mirror(sid, false);
+        assert_eq!(empty.last_url, None);
+        assert!(!empty.host_running);
+        let empty_but_pipe = browser_pane_mirror(sid, true);
+        assert!(empty_but_pipe.host_running);
+        assert_eq!(empty_but_pipe.last_url, None);
+    }
+
+    #[tokio::test]
+    async fn successful_navigate_invalidates_previous_snapshot_uids() {
+        let handle = BrowserHandle::mock("sess-nav-clears-epoch-uids");
+        handle.navigate("https://example.com/").await.unwrap();
+        let snap = handle.snapshot(false).await.unwrap();
+        assert_eq!(snap.nodes[0].uid, "1-1");
+        handle.navigate("https://example.com/other").await.unwrap();
+        let err = handle
+            .click("1-1", false)
+            .await
+            .expect_err("click after navigate must fail closed");
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(msg.contains("snapshot"), "{msg}");
+        assert_eq!(handle.mock_last_action(), None);
+    }
+
+    #[tokio::test]
+    async fn stale_epoch_uid_after_new_snapshot_fails_closed() {
+        let snap = SnapshotResult {
+            url: "https://example.com/".into(),
+            title: "Example".into(),
+            source: xai_grok_browser::SnapshotSource::Dom,
+            nodes: vec![xai_grok_browser::AxNode {
+                uid: "2-1".into(),
+                role: "link".into(),
+                name: "More information".into(),
+                value: None,
+                focused: false,
+            }],
+            ..Default::default()
+        };
+        let err = click::check_click_against_snapshot(Some(&snap), "1-1", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown snapshot uid") || msg.contains("1-1"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_eval_mutating_without_confirm_never_hits_host() {
+        let handle = BrowserHandle::mock("sess-eval-confirm-gate");
+        handle.navigate("https://example.com/").await.unwrap();
+        let err = handle
+            .eval(
+                "() => document.querySelector('button[type=submit]').click()",
+                false,
+            )
+            .await
+            .expect_err("mutating eval needs confirm");
+        assert!(err.to_string().contains("confirm=true"), "{err}");
+        assert!(
+            handle
+                .mock_host()
+                .unwrap()
+                .call_log()
+                .iter()
+                .all(|m| m != "browser.eval")
+        );
+        handle
+            .eval("() => document.title", false)
+            .await
+            .expect("read eval");
+    }
+
+    #[tokio::test]
+    async fn attachment_is_listed_by_browser_downloads() {
+        let tmp = std::env::temp_dir().join(format!(
+            "turbo-browser-tools-dl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let session = tmp.join("session");
+        std::fs::create_dir_all(session.join("downloads")).unwrap();
+        std::fs::write(session.join("downloads").join("report.pdf"), b"%PDF").unwrap();
+        let handle = BrowserHandle::mock_with_folder("sess-dl-attachment-list", session);
+        let listed = handle.downloads().await.unwrap();
+        assert_eq!(listed.downloads.len(), 1);
+        assert_eq!(listed.downloads[0].name, "report.pdf");
+        assert!(listed.downloads[0].completed);
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[tokio::test]

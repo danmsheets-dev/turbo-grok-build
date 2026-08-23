@@ -12,10 +12,12 @@ use serde_json::Value;
 use crate::profile::{agent_browser_profile_dir, pipe_name};
 use crate::protocol::{
     BrowserRequest, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
-    check_fill, check_url_in_session, eval_looks_mutating, path_is_under_session_folder,
+    check_eval_confirm, check_fill, check_navigation_hop, eval_looks_mutating,
+    path_is_under_session_folder, single_tab_v1_error,
 };
 
 mod ax;
+pub(crate) mod download;
 #[cfg(windows)]
 mod rpc;
 #[cfg(windows)]
@@ -622,7 +624,7 @@ pub(crate) fn decode_host_call(
 
     match request {
         BrowserRequest::Navigate { url } => {
-            if let Err(err) = check_url_in_session(&url, session_folder) {
+            if let Err(err) = check_navigation_hop(Some(&url), session_folder) {
                 return Err(DecodedRpcError {
                     id: Some(id),
                     error: JsonRpcError {
@@ -692,6 +694,16 @@ pub(crate) fn decode_host_call(
                     error: JsonRpcError {
                         code: RPC_INVALID_PARAMS,
                         message: "eval function is empty".into(),
+                        data: None,
+                    },
+                });
+            }
+            if let Err(err) = check_eval_confirm(&function, confirm) {
+                return Err(DecodedRpcError {
+                    id: Some(id),
+                    error: JsonRpcError {
+                        code: RPC_HOST_ERROR,
+                        message: err.to_string(),
                         data: None,
                     },
                 });
@@ -844,7 +856,7 @@ pub(crate) fn decode_host_call(
             id: Some(id),
             error: JsonRpcError {
                 code: RPC_METHOD_NOT_FOUND,
-                message: format!("{} is not implemented (single-tab v1)", req.method),
+                message: single_tab_v1_error(&req.method),
                 data: None,
             },
         }),
@@ -960,8 +972,8 @@ mod tests {
     use super::*;
     use crate::client::encode_rpc_request;
     use crate::protocol::{
-        METHOD_CLICK, METHOD_EVAL, METHOD_FILL, METHOD_NAVIGATE, METHOD_NEW_TAB, METHOD_SCREENSHOT,
-        METHOD_SET_FILE, METHOD_SNAPSHOT,
+        METHOD_CLICK, METHOD_CLOSE_TAB, METHOD_EVAL, METHOD_FILL, METHOD_NAVIGATE, METHOD_NEW_TAB,
+        METHOD_SCREENSHOT, METHOD_SELECT_TAB, METHOD_SET_FILE, METHOD_SNAPSHOT,
     };
 
     #[test]
@@ -1236,10 +1248,87 @@ mod tests {
             err.error.message
         );
         assert!(
+            err.error.message.contains("v1 is a single tab"),
+            "{}",
+            err.error.message
+        );
+        assert!(
             !err.error.message.contains("Task 4"),
             "{}",
             err.error.message
         );
+    }
+
+    #[test]
+    fn decode_select_and_close_tab_are_honest_single_tab() {
+        for method in [METHOD_SELECT_TAB, METHOD_CLOSE_TAB] {
+            let line = encode_rpc_request(
+                JsonRpcId::Number(12),
+                method,
+                serde_json::json!({ "tab_id": 2 }),
+            )
+            .unwrap();
+            let err = decode_host_call(&line, None).unwrap_err();
+            assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND, "{method}");
+            assert!(
+                err.error.message.contains("v1 is a single tab"),
+                "{method}: {}",
+                err.error.message
+            );
+        }
+    }
+
+    #[test]
+    fn decode_mutating_eval_without_confirm_fails_closed() {
+        let line = encode_rpc_request(
+            JsonRpcId::Number(13),
+            METHOD_EVAL,
+            serde_json::json!({
+                "function": "() => document.forms[0].submit()",
+                "confirm": false
+            }),
+        )
+        .unwrap();
+        let err = decode_host_call(&line, None).unwrap_err();
+        assert_eq!(err.error.code, RPC_HOST_ERROR);
+        assert!(
+            err.error.message.contains("confirm=true"),
+            "{}",
+            err.error.message
+        );
+
+        let allowed = encode_rpc_request(
+            JsonRpcId::Number(14),
+            METHOD_EVAL,
+            serde_json::json!({
+                "function": "() => document.forms[0].submit()",
+                "confirm": true
+            }),
+        )
+        .unwrap();
+        match decode_host_call(&allowed, None).unwrap() {
+            (_, HostCall::Eval { confirm: true, .. }) => {}
+            other => panic!("{other:?}"),
+        }
+
+        let read = encode_rpc_request(
+            JsonRpcId::Number(15),
+            METHOD_EVAL,
+            serde_json::json!({ "function": "() => document.title" }),
+        )
+        .unwrap();
+        match decode_host_call(&read, None).unwrap() {
+            (
+                _,
+                HostCall::Eval {
+                    confirm: false,
+                    function,
+                },
+            ) => {
+                assert_eq!(function, "() => document.title");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

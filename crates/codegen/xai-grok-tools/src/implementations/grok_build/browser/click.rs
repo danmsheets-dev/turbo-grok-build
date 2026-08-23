@@ -279,6 +279,18 @@ mod tests {
     }
 
     #[test]
+    fn stale_epoch_uid_fails_closed() {
+        let snap = snapshot(SnapshotSource::Dom, "2-1", "More information");
+        let err = check_click_against_snapshot(Some(&snap), "1-1", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("1-1"), "{msg}");
+        assert!(
+            msg.contains("Unknown snapshot uid") || msg.contains("current uid"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn positional_uid_is_explained() {
         let snap = snapshot(SnapshotSource::Dom, "1-1", "Search");
         let err = check_click_against_snapshot(Some(&snap), "2", false).unwrap_err();

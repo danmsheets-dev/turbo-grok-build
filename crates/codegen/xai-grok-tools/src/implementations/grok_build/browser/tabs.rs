@@ -22,7 +22,7 @@ impl crate::types::tool_metadata::ToolMetadata for BrowserTabsTool {
     }
 
     fn description_template(&self) -> &str {
-        "List tabs in the Turbo Agent WebView (url, title, tab_id, active). v1 may be a single tab."
+        "List tabs in the Turbo Agent WebView (url, title, tab_id, active). v1 is a single tab."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
