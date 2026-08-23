@@ -15,7 +15,7 @@ pub struct MeetingStopTool;
 
 impl crate::types::tool_metadata::ToolMetadata for MeetingStopTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Other
+        ToolKind::Meeting
     }
 
     fn tool_namespace(&self) -> ToolNamespace {

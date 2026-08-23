@@ -393,6 +393,7 @@ impl SchedulerActor {
         let isolation = task.isolation.unwrap_or(SubagentIsolationMode::None);
         let capability_mode = task.capability_mode;
         let product_schedule = task.is_product_schedule();
+        let meeting_join = task.meeting_join;
         let title = task.title.clone();
         let weekdays_only = task.weekdays_only;
         let transition_count = if is_expired {
@@ -555,6 +556,7 @@ impl SchedulerActor {
                     isolation,
                     capability_mode,
                     product_schedule,
+                    meeting_join,
                     title.as_deref(),
                 )
                 .await
@@ -649,6 +651,7 @@ impl SchedulerActor {
         isolation: SubagentIsolationMode,
         capability_mode: Option<SubagentCapabilityMode>,
         product_schedule: bool,
+        meeting_join: bool,
         title: Option<&str>,
     ) -> LoopFireOutcome {
         let prev_snapshot = match &last_subagent_id {
@@ -853,11 +856,7 @@ impl SchedulerActor {
             fork_context: false,
             owner: SubagentOwner::Task,
             allowed_paths: if product_schedule {
-                if matches!(
-                    capability_mode,
-                    Some(xai_tool_types::SubagentCapabilityMode::All)
-                ) {
-                    // meeting_join is ToolKind::Other (needs All). Jail writes.
+                if meeting_join {
                     Some(vec!["Meetings/".into(), "Schedules/".into()])
                 } else {
                     Some(vec!["Schedules/".into()])
@@ -2178,7 +2177,7 @@ mod tests {
         task.apply_standing();
         task.meeting_join = true;
         task.isolation = Some(SubagentIsolationMode::None);
-        task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::All);
+        task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadWrite);
         task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         handle
@@ -2193,7 +2192,7 @@ mod tests {
         let request = next_subagent_spawn(&mut subagent_rx).await;
         assert_eq!(
             request.runtime_overrides.capability_mode,
-            Some(xai_tool_types::SubagentCapabilityMode::All)
+            Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
         );
         assert_eq!(
             request.allowed_paths.as_deref(),

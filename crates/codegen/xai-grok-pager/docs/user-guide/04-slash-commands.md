@@ -338,7 +338,7 @@ Standing product jobs on the same scheduler. They do **not** expire after 7 days
 /schedule cancel <id>
 ```
 
-Recipes: `search <query>`, `stat <url-or-query>`, `meeting join <url> [name]` (must call `meeting_join`, not Start-Process). Default fire is a background subagent on the parent cwd with `read-write` jailed to `Schedules/`. Meeting-join needs `confirm=true` once and uses full tools jailed to `Meetings/` + `Schedules/`. Human jobs are durable (no 7-day expiry) and persist in `{workspace}/.grok/schedules.json`. Headless twin: `turbo schedule list|show|cancel`.
+Recipes: `search <query>`, `stat <url-or-query>`, `meeting join <url> [name]` (must call `meeting_join`, not Start-Process). Default fire is a background subagent on the parent cwd with `read-write` jailed to `Schedules/`. Meeting-join needs `confirm=true` once; it stays ReadWrite (`ToolKind::Meeting`, no bash) and jails writes to `Meetings/` + `Schedules/`. Human jobs are durable (no 7-day expiry) and persist in `{workspace}/.grok/schedules.json`. Headless twin: `turbo schedule list|show|cancel`.
 
 ---
 

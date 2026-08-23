@@ -22,7 +22,7 @@ pub struct MeetingKnowledgeTool;
 
 impl crate::types::tool_metadata::ToolMetadata for MeetingKnowledgeTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Other
+        ToolKind::Meeting
     }
 
     fn tool_namespace(&self) -> ToolNamespace {

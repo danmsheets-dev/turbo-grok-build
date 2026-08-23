@@ -104,6 +104,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
     ToolKind::Workflow,
+    ToolKind::Meeting,
     ToolKind::Other,
 ];
 
@@ -145,7 +146,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
 
         // Edit class.
         Edit | Write | Delete | Move | ImageGen | VideoGen | ImageToVideo | ReferenceToVideo
-        | DeployApp => matches!(mode, M::ReadWrite),
+        | DeployApp | Meeting => matches!(mode, M::ReadWrite),
 
         // Bash / shell.
         Execute => matches!(mode, M::Execute),

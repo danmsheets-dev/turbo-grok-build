@@ -101,6 +101,10 @@ pub enum ToolKind {
     Monitor,
     GoalUpdate,
     Workflow,
+    /// `/meeting` notetaker (`meeting_join` / `ask` / `reply` / …). Mutating
+    /// (opens a URL, starts capture) but not shell. ReadWrite keeps it; Execute
+    /// does not.
+    Meeting,
     #[serde(other)]
     Other,
 }

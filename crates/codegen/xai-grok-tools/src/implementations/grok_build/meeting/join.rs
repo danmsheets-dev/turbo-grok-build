@@ -25,7 +25,7 @@ pub struct MeetingJoinTool;
 
 impl crate::types::tool_metadata::ToolMetadata for MeetingJoinTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Other
+        ToolKind::Meeting
     }
 
     fn tool_namespace(&self) -> ToolNamespace {

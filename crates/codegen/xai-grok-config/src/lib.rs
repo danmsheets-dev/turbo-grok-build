@@ -82,3 +82,33 @@ pub fn env_bool(name: &str) -> Option<bool> {
         _ => None,
     }
 }
+
+/// Opt-in: expose chrome-devtools MCP tools to the model.
+///
+/// Unset/false: those tools are stripped so Agent WebView (`browser_*`) is the
+/// only headed browser. The MCP server pin may still be connected.
+pub fn chrome_devtools_mcp_opted_in() -> bool {
+    env_bool("GROK_CHROME_MCP") == Some(true)
+}
+
+/// True when a tool id, qualified name, or MCP server is chrome-devtools
+/// (not the product Agent WebView).
+pub fn is_chrome_devtools_mcp_id(id: &str) -> bool {
+    let s = id.trim().to_ascii_lowercase();
+    s.contains("chrome-devtools") || s.contains("chrome_devtools")
+}
+
+#[cfg(test)]
+mod chrome_devtools_gate_tests {
+    use super::*;
+
+    #[test]
+    fn chrome_devtools_ids_match_pin_and_qualified_names() {
+        assert!(is_chrome_devtools_mcp_id("chrome-devtools"));
+        assert!(is_chrome_devtools_mcp_id("chrome-devtools__navigate_page"));
+        assert!(is_chrome_devtools_mcp_id("mcp__chrome-devtools__click"));
+        assert!(is_chrome_devtools_mcp_id("Chrome_DevTools"));
+        assert!(!is_chrome_devtools_mcp_id("GrokBuild:browser_navigate"));
+        assert!(!is_chrome_devtools_mcp_id("chrome-mcp-skill"));
+    }
+}

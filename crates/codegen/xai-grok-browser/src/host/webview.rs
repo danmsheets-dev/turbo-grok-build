@@ -19,7 +19,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED,
     COREWEBVIEW2_PERMISSION_STATE_DENY, CreateCoreWebView2EnvironmentWithOptions,
     GetAvailableCoreWebView2BrowserVersionString, ICoreWebView2, ICoreWebView2_4,
-    ICoreWebView2Controller, ICoreWebView2Environment,
+    ICoreWebView2Controller, ICoreWebView2Deferral, ICoreWebView2Environment,
+    ICoreWebView2NewWindowRequestedEventArgs,
 };
 use webview2_com::{
     CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR,
@@ -41,7 +42,10 @@ use super::ax::{
     parse_world_result, snapshot_cap, turbo_ax_js_injected,
 };
 use super::download::{broker_attachment, list_brokered_downloads, recent_completed_download};
-use super::window::{attach_controller, client_rect, set_title};
+use super::window::{
+    attach_controller, attach_controller_ex, client_rect, create_oauth_popup_window, set_title,
+    show,
+};
 use super::{HostError, next_screenshot_path, screenshot_dir};
 use crate::protocol::{
     AxNode, ClickResult, DownloadsResult, FillTarget, NavigateResult, ScreenshotResult,
@@ -138,6 +142,8 @@ impl AgentWebView {
         register_navigation_policy(&webview, session_folder.clone(), Rc::clone(&blocked))?;
         register_popup_download_permission(
             &webview,
+            environment.clone(),
+            session_id,
             session_folder.clone(),
             Rc::clone(&blocked),
             Rc::clone(&active_downloads),
@@ -924,6 +930,8 @@ fn register_navigation_policy(
 /// Keep `window.open` in the same view, broker downloads, and deny permissions.
 fn register_popup_download_permission(
     webview: &ICoreWebView2,
+    environment: ICoreWebView2Environment,
+    session_id: &str,
     session_folder: Option<PathBuf>,
     blocked: Rc<BlockLog>,
     active_downloads: Rc<RefCell<HashSet<PathBuf>>>,
@@ -934,6 +942,8 @@ fn register_popup_download_permission(
     let nav_target = webview.clone();
     let popup_blocked = Rc::clone(&blocked);
     let popup_folder = session_folder.clone();
+    let popup_downloads = Rc::clone(&active_downloads);
+    let popup_session = session_id.to_owned();
     let popup = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
         let Some(args) = args else {
             return Ok(());
@@ -956,11 +966,22 @@ fn register_popup_download_permission(
         let url = url.unwrap_or_default();
         // GSI / OAuth popups postMessage back to the opener and then close.
         // Navigating them into the only tab leaves a white gsi/select page
-        // with no opener. Let WebView2 own a real popup for those URLs; the
-        // human finishes sign-in there.
+        // with no opener. Own a real HWND + CoreWebView2 so later hops still
+        // hit NavigationStarting / DownloadStarting.
         if is_oauth_popup_url(&url) {
-            let _ = unsafe { args.SetHandled(false) };
-            eprintln!("turbo browser-host: oauth popup left as a real window: {url}");
+            if let Err(err) = open_host_owned_oauth_popup(
+                &environment,
+                &popup_session,
+                popup_folder.clone(),
+                Rc::clone(&popup_blocked),
+                Rc::clone(&popup_downloads),
+                &args,
+                &url,
+            ) {
+                let message = format!("oauth popup failed ({err}); cancelled: {url}");
+                eprintln!("turbo browser-host: {message}");
+                popup_blocked.set(message);
+            }
             return Ok(());
         }
         let wide = CoTaskMemPWSTR::from(url.as_str());
@@ -1108,6 +1129,76 @@ fn register_popup_download_permission(
     let mut token = 0i64;
     unsafe { webview.add_PermissionRequested(&permission, &mut token) }
         .map_err(|e| HostError::Failed(format!("add_PermissionRequested: {e}")))?;
+    Ok(())
+}
+
+/// Host-owned OAuth HWND + CoreWebView2. `SetHandled` stays true; the runtime
+/// navigates the provided NewWindow so `window.opener` still works. Every hop
+/// on that view is gated the same way as the agent tab.
+fn open_host_owned_oauth_popup(
+    environment: &ICoreWebView2Environment,
+    session_id: &str,
+    session_folder: Option<PathBuf>,
+    blocked: Rc<BlockLog>,
+    active_downloads: Rc<RefCell<HashSet<PathBuf>>>,
+    args: &ICoreWebView2NewWindowRequestedEventArgs,
+    url: &str,
+) -> Result<(), HostError> {
+    let deferral: ICoreWebView2Deferral = unsafe { args.GetDeferral() }
+        .map_err(|e| HostError::Failed(format!("oauth GetDeferral: {e}")))?;
+    let complete = || {
+        let _ = unsafe { deferral.Complete() };
+    };
+
+    let hwnd = match create_oauth_popup_window(session_id, url) {
+        Ok(h) => h,
+        Err(e) => {
+            complete();
+            return Err(e);
+        }
+    };
+    let controller = match create_controller(environment, hwnd) {
+        Ok(c) => c,
+        Err(e) => {
+            complete();
+            super::window::destroy(hwnd);
+            return Err(e);
+        }
+    };
+    if let Err(e) = (|| -> Result<(), HostError> {
+        let bounds = client_rect(hwnd);
+        unsafe {
+            controller
+                .SetBounds(bounds)
+                .map_err(|e| HostError::Failed(format!("oauth SetBounds: {e}")))?;
+            controller
+                .SetIsVisible(true)
+                .map_err(|e| HostError::Failed(format!("oauth SetIsVisible: {e}")))?;
+        }
+        let webview = unsafe { controller.CoreWebView2() }
+            .map_err(|e| HostError::Failed(format!("oauth CoreWebView2: {e}")))?;
+        apply_settings(&webview)?;
+        register_navigation_policy(&webview, session_folder.clone(), Rc::clone(&blocked))?;
+        register_popup_download_permission(
+            &webview,
+            environment.clone(),
+            session_id,
+            session_folder,
+            blocked,
+            active_downloads,
+        )?;
+        unsafe { args.SetNewWindow(&webview) }
+            .map_err(|e| HostError::Failed(format!("oauth SetNewWindow: {e}")))?;
+        attach_controller_ex(hwnd, controller, false);
+        show(hwnd);
+        Ok(())
+    })() {
+        complete();
+        super::window::destroy(hwnd);
+        return Err(e);
+    }
+    complete();
+    eprintln!("turbo browser-host: host-owned oauth popup: {url}");
     Ok(())
 }
 

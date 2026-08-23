@@ -23,10 +23,16 @@ use super::HostError;
 pub const WINDOW_TITLE: &str = "Turbo Agent Browser";
 /// `RegisterClassW` / `CreateWindowExW` class name.
 pub const WINDOW_CLASS: &str = "TurboAgentBrowser";
+/// Host-owned OAuth popup (GSI / Microsoft / Apple). Close destroys; does not
+/// quit the host message loop.
+pub const WINDOW_CLASS_OAUTH: &str = "TurboAgentBrowserOauth";
 /// Client-area width.
 pub const CLIENT_WIDTH: i32 = 1280;
 /// Client-area height.
 pub const CLIENT_HEIGHT: i32 = 800;
+/// OAuth popup client size (login chooser, not the agent tab).
+pub const OAUTH_CLIENT_WIDTH: i32 = 720;
+pub const OAUTH_CLIENT_HEIGHT: i32 = 780;
 /// Longest host label the title bar carries.
 const TITLE_HOST_MAX: usize = 64;
 /// Longest session tag the title bar carries (ids run to 64 chars).
@@ -227,13 +233,89 @@ pub fn create_frame_window(session_id: &str) -> Result<HWND, HostError> {
     Ok(hwnd)
 }
 
+/// Smaller overlapped window for a host-owned OAuth popup.
+///
+/// Close **destroys** this HWND (the sign-in dialog is done). It must not use
+/// the main class: that one hides on WM_CLOSE and posts WM_QUIT on destroy.
+pub fn create_oauth_popup_window(session_id: &str, url: &str) -> Result<HWND, HostError> {
+    let class_name = wide_nul(WINDOW_CLASS_OAUTH);
+    let title = wide_nul(&format!("{} \u{2014} sign-in", frame_title(session_id, url)));
+    let instance = unsafe { GetModuleHandleW(None) }
+        .ok()
+        .map(|h| HINSTANCE(h.0));
+
+    let class = WNDCLASSW {
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(oauth_window_proc),
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
+        lpszClassName: PCWSTR(class_name.as_ptr()),
+        hInstance: instance.unwrap_or_default(),
+        ..Default::default()
+    };
+    let atom = unsafe { RegisterClassW(&class) };
+    if atom == 0 {
+        const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+        let err = windows::core::Error::from_win32();
+        if err.code().0 as u32 & 0xFFFF != ERROR_CLASS_ALREADY_EXISTS {
+            return Err(HostError::Failed(format!("RegisterClassW oauth: {err}")));
+        }
+    }
+
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: OAUTH_CLIENT_WIDTH,
+        bottom: OAUTH_CLIENT_HEIGHT,
+    };
+    unsafe {
+        AdjustWindowRectEx(
+            &mut rect,
+            WS_OVERLAPPEDWINDOW,
+            false,
+            WINDOW_EX_STYLE::default(),
+        )
+        .map_err(|e| HostError::Failed(format!("AdjustWindowRectEx oauth: {e}")))?;
+    }
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            None,
+            None,
+            instance,
+            None,
+        )
+    }
+    .map_err(|e| HostError::Failed(format!("CreateWindowExW oauth: {e}")))?;
+    if hwnd.is_invalid() {
+        return Err(HostError::Failed("CreateWindowExW oauth returned NULL".into()));
+    }
+    Ok(hwnd)
+}
+
 /// Store the WebView2 controller pointer for `WM_SIZE` / `WM_DESTROY`.
 pub fn attach_controller(
     hwnd: HWND,
     controller: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
 ) {
+    attach_controller_ex(hwnd, controller, true);
+}
+
+/// `close_hides`: main agent frame hides on X. OAuth popups pass `false`.
+pub fn attach_controller_ex(
+    hwnd: HWND,
+    controller: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+    close_hides: bool,
+) {
     let state = Box::new(WindowState {
         controller: Some(controller),
+        close_hides,
     });
     let ptr = Box::into_raw(state);
     // SAFETY: we own `ptr` until WM_DESTROY / detach. UI thread only.
@@ -354,6 +436,9 @@ pub fn client_rect(hwnd: HWND) -> RECT {
 
 struct WindowState {
     controller: Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller>,
+    /// Main frame hides on X; OAuth popups destroy. Stored for attach parity.
+    #[allow(dead_code)]
+    close_hides: bool,
 }
 
 extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
@@ -405,20 +490,67 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: L
             }
             LRESULT::default()
         }
-        WM_DESTROY => {
-            if let Some(mut state) = take_window_state(hwnd)
-                && let Some(controller) = state.controller.take()
+        WM_DESTROY => destroy_controller(hwnd, true),
+        _ => unsafe { DefWindowProcW(hwnd, msg, w_param, l_param) },
+    }
+}
+
+/// OAuth popup: X closes the dialog. Must not PostQuitMessage (that kills the host).
+extern "system" fn oauth_window_proc(
+    hwnd: HWND,
+    msg: u32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_SIZE => {
+            if let Some(state) = window_state(hwnd)
+                && let Some(controller) = state.controller.as_ref()
             {
-                let _ = unsafe { controller.Close() };
-            }
-            // SAFETY: ends the host message loop.
-            unsafe {
-                PostQuitMessage(0);
+                let rect = client_rect(hwnd);
+                let _ = unsafe { controller.SetBounds(rect) };
             }
             LRESULT::default()
         }
+        WM_DPICHANGED => {
+            let suggested = l_param.0 as *const RECT;
+            if !suggested.is_null() {
+                let r = unsafe { *suggested };
+                let _ = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    )
+                };
+            }
+            LRESULT::default()
+        }
+        WM_CLOSE => {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            LRESULT::default()
+        }
+        WM_DESTROY => destroy_controller(hwnd, false),
         _ => unsafe { DefWindowProcW(hwnd, msg, w_param, l_param) },
     }
+}
+
+fn destroy_controller(hwnd: HWND, quit_host: bool) -> LRESULT {
+    if let Some(mut state) = take_window_state(hwnd)
+        && let Some(controller) = state.controller.take()
+    {
+        let _ = unsafe { controller.Close() };
+    }
+    if quit_host {
+        unsafe {
+            PostQuitMessage(0);
+        }
+    }
+    LRESULT::default()
 }
 
 fn window_state(hwnd: HWND) -> Option<&'static mut WindowState> {
@@ -471,6 +603,8 @@ mod tests {
 
     #[test]
     fn window_identity_is_turbo_agent_browser() {
+        assert_ne!(WINDOW_CLASS, WINDOW_CLASS_OAUTH);
+        assert!(WINDOW_CLASS_OAUTH.contains("Oauth"));
         assert_eq!(WINDOW_TITLE, "Turbo Agent Browser");
         assert_eq!(WINDOW_CLASS, "TurboAgentBrowser");
         assert!(!WINDOW_TITLE.contains("Chrome"));

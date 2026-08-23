@@ -370,7 +370,9 @@ docs. Never automate passwords or 2FA — the human signs in in the Agent window
 
 **chrome-devtools MCP** is the user's Chrome (the pin above). Use it **only**
 when the user explicitly wants **their** daily Chrome tabs or cookies.
-Discover tools with `search_tool` (`chrome-devtools`); do not invent names.
+The pin may stay connected; **tools are omitted from the model toolset**
+unless `GROK_CHROME_MCP=1` (true/yes/on). Then discover them with
+`search_tool` (`chrome-devtools`); do not invent names.
 
 A dedicated MCP `--userDataDir` profile is a third, isolated Chrome — still
 MCP, still not Agent WebView. Prefer Agent WebView over that pin.

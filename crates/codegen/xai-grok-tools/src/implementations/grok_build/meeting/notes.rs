@@ -20,7 +20,7 @@ pub struct MeetingNotesTool;
 
 impl crate::types::tool_metadata::ToolMetadata for MeetingNotesTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Other
+        ToolKind::Meeting
     }
 
     fn tool_namespace(&self) -> ToolNamespace {

@@ -59,7 +59,7 @@ cargo test -p xai-grok-tools --lib browser --offline -- --test-threads=4
 
 | # | Q / Action | Expected | Provenance | Observed | Pass? |
 |---|------------|----------|------------|----------|-------|
-| C.5.1 | `accounts.google.com` / Microsoft login popup | Real window (`SetHandled(false)`), not the only tab | Unit (URL detect) + Human | | |
+| C.5.1 | `accounts.google.com` / Microsoft login popup | Host-owned popup HWND (`SetNewWindow` + hop policy); not the only tab | Unit (URL detect) + Human | | |
 | C.5.2 | `https://evil.test/accounts.google.com/gsi` | **Not** treated as OAuth; policy applies | Unit | | |
 | C.5.3 | Ordinary `target=_blank` | Same window (single tab) | Human | | |
 

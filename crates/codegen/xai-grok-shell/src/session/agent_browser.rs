@@ -204,6 +204,15 @@ pub fn inject_browser_tools(config: &mut xai_grok_tools::registry::types::ToolSe
             config.tools.push(extra);
         }
     }
+    if !xai_grok_config::chrome_devtools_mcp_opted_in() {
+        config.tools.retain(|tool| {
+            !xai_grok_config::is_chrome_devtools_mcp_id(&tool.id)
+                && !tool
+                    .name_override
+                    .as_deref()
+                    .is_some_and(xai_grok_config::is_chrome_devtools_mcp_id)
+        });
+    }
     // Browser tools append after the static preset. Re-pin meeting_* so a
     // trailing-tool cap cannot drop them from the live handshake.
     xai_grok_agent::config::pin_meeting_notetaker_tools(&mut config.tools);
@@ -386,6 +395,34 @@ mod tests {
         assert!(ids.contains(&"GrokBuild:browser_navigate"));
         assert!(ids.contains(&"GrokBuild:browser_downloads"));
         assert!(ids.contains(&"GrokBuild:browser_save"));
+    }
+
+    #[test]
+    fn inject_browser_tools_strips_chrome_devtools_unless_opted_in() {
+        let mut config = xai_grok_tools::registry::types::ToolServerConfig::default();
+        config.tools.push(xai_grok_tools::registry::types::ToolConfig {
+            id: "chrome-devtools__click".into(),
+            params: None,
+            name_override: None,
+            params_name_overrides: None,
+            description_override: None,
+            behavior_version: None,
+            kind: Some(xai_grok_tools::types::tool::ToolKind::Other),
+        });
+        inject_browser_tools(&mut config);
+        assert!(
+            !config
+                .tools
+                .iter()
+                .any(|t| t.id.contains("chrome-devtools")),
+            "inject must strip chrome-devtools when GROK_CHROME_MCP is off"
+        );
+        assert!(
+            config
+                .tools
+                .iter()
+                .any(|t| t.id == "GrokBuild:browser_navigate")
+        );
     }
 
     #[test]

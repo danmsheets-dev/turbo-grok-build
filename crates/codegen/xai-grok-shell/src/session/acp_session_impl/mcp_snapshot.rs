@@ -54,6 +54,10 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
     let mut mcp_tools: Vec<ToolMetadata> = all_defs
         .iter()
         .filter(|d| d.function.name.contains("__"))
+        .filter(|d| {
+            xai_grok_config::chrome_devtools_mcp_opted_in()
+                || !xai_grok_config::is_chrome_devtools_mcp_id(&d.function.name)
+        })
         .filter(|d| seen_tools.insert(d.function.name.clone()))
         .map(|d| {
             let (server, tool) = split_qualified_name(&d.function.name);

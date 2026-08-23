@@ -189,6 +189,20 @@ pub(crate) fn merge_and_filter(
         baseline.tools.iter().cloned().map(|t| (t, false)).collect();
     let mut mcp_tool_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for mcp_tool in mcp_snapshot {
+        if !xai_grok_config::chrome_devtools_mcp_opted_in()
+            && (xai_grok_config::is_chrome_devtools_mcp_id(&mcp_tool.id)
+                || mcp_tool
+                    .name_override
+                    .as_deref()
+                    .is_some_and(xai_grok_config::is_chrome_devtools_mcp_id))
+        {
+            tracing::info!(
+                mcp_id = %mcp_tool.id,
+                session = %session_id,
+                "omitting chrome-devtools MCP tool (set GROK_CHROME_MCP=1 to expose daily Chrome)"
+            );
+            continue;
+        }
         if baseline_ids.contains(mcp_tool.id.as_str()) {
             tracing::warn!(
                 mcp_id = %mcp_tool.id,
@@ -1002,6 +1016,40 @@ mod tests {
             !ids.contains(&"hub:read_file_v2"),
             "remote tool with colliding client name must be skipped: {ids:?}"
         );
+    }
+    #[test]
+    fn chrome_devtools_mcp_tools_are_omitted_unless_opted_in() {
+        let _guard = super::TOOL_STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("GROK_CHROME_MCP") };
+        let baseline = ToolServerConfig {
+            tools: vec![test_support::tc(
+                "GrokBuild:browser_navigate",
+                Some(ToolKind::Other),
+            )],
+            behavior_preset: None,
+        };
+        let mcp = vec![
+            test_support::tc("chrome-devtools__navigate_page", Some(ToolKind::Other)),
+            test_support::tc("docs-mcp__search", Some(ToolKind::Read)),
+        ];
+        let filtered = merge_and_filter(&baseline, &mcp, &[], CapabilityMode::All, "test");
+        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            !ids.iter().any(|id| id.contains("chrome-devtools")),
+            "chrome-devtools must be omitted by default: {ids:?}"
+        );
+        assert!(ids.contains(&"docs-mcp__search"), "{ids:?}");
+
+        unsafe { std::env::set_var("GROK_CHROME_MCP", "1") };
+        let opted = merge_and_filter(&baseline, &mcp, &[], CapabilityMode::All, "test");
+        let opted_ids: Vec<&str> = opted.tools.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            opted_ids.contains(&"chrome-devtools__navigate_page"),
+            "GROK_CHROME_MCP=1 must restore the tools: {opted_ids:?}"
+        );
+        unsafe { std::env::remove_var("GROK_CHROME_MCP") };
     }
     #[test]
     fn empty_hub_snapshot_is_noop() {

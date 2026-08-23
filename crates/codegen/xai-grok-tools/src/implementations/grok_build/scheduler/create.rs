@@ -393,9 +393,9 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
         }
         if standing || weekdays_only || at_spec.is_some() {
             if meeting_join {
-                // Meeting tools are ToolKind::Other (clamped by ReadOnly/ReadWrite).
+                // Meeting tools are ToolKind::Meeting (ReadWrite keeps them; Execute/bash is not granted).
                 task.isolation = Some(xai_tool_types::SubagentIsolationMode::None);
-                task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::All);
+                task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadWrite);
             } else {
                 // Parent cwd + Write/WebSearch, jailed to Schedules/ at write time.
                 task.isolation = Some(xai_tool_types::SubagentIsolationMode::None);
@@ -881,7 +881,7 @@ mod tests {
         );
         assert_eq!(
             task.capability_mode,
-            Some(xai_tool_types::SubagentCapabilityMode::All)
+            Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
         );
         cancel.cancel();
     }

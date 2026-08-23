@@ -15,7 +15,7 @@ pub struct MeetingTranscriptTool;
 
 impl crate::types::tool_metadata::ToolMetadata for MeetingTranscriptTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Other
+        ToolKind::Meeting
     }
 
     fn tool_namespace(&self) -> ToolNamespace {

@@ -777,6 +777,10 @@ mod tests {
             xai_tool_runtime::Tool::id(&MeetingJoinTool).as_str(),
             "meeting_join"
         );
+        assert_eq!(
+            crate::types::tool_metadata::ToolMetadata::kind(&MeetingJoinTool),
+            crate::types::tool::ToolKind::Meeting
+        );
     }
 
     #[tokio::test]

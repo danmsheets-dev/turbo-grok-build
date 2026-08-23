@@ -12,9 +12,10 @@ metadata:
 # Chrome MCP
 
 Use **`browser_*` (Agent WebView)** unless the user asked for their **daily
-Chrome**. Discover chrome-devtools tools with `search_tool` (`chrome-devtools`)
-and use the returned schemas only. Do not prefer this MCP just because a page
-is "the web."
+Chrome**. chrome-devtools MCP tools are **omitted** from the model toolset
+unless `GROK_CHROME_MCP=1`. When that is set, discover them with
+`search_tool` (`chrome-devtools`) and use the returned schemas only. Do not
+prefer this MCP just because a page is "the web."
 
 ## Loop
 

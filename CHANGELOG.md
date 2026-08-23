@@ -59,6 +59,9 @@ Older release notes (r1–r13 detail) are archived under
 - **Meeting R2:** pin `meeting_*` early on the live tool handshake; process exit marks capture stopped; stale disk recording is not live; join `?p=` redacted from meta/status; NL join accepts “meeting link to test with”; spoken `Turbo, …` auto-ask; status `graph: configured|missing`.
 - **Browser R3:** NavigationStarting fail-closed, eval confirm, pane mirror from last snapshot, download jail helper, `docs/BROWSER-R3-QA.md`.
 - **Deep-audit follow-up:** `/schedule` search/stat fires get ReadWrite + `allowed_paths=["Schedules/"]` (host jail); meeting-join requires `confirm=true` and write-jails `Meetings/`+`Schedules/`; STT append cannot restore `status=recording`; `meeting_ask` briefing forbids mutate; eval gate covers `location['href']` / `.submit.call`; downloads check hop policy on source URI.
+- **C9 OAuth popups:** host-owned HWND + `SetNewWindow` so later hops still hit NavigationStarting/DownloadStarting (no `SetHandled(false)` policy skip).
+- **C12 chrome-devtools:** MCP tools omitted unless `GROK_CHROME_MCP=1`; Agent WebView remains the default headed browser.
+- **Meeting-join shell:** `meeting_*` is `ToolKind::Meeting` (ReadWrite, not All), so scheduled joins no longer get bash.
 
 ---
 

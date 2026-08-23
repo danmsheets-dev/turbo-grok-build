@@ -359,6 +359,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                ToolKind::Meeting,
             ],
             Self::Execute => &[
                 ToolKind::Read,
@@ -407,6 +408,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                ToolKind::Meeting,
             ],
         }
     }

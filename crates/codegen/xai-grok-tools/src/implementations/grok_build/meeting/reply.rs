@@ -18,7 +18,7 @@ pub struct MeetingReplyTool;
 
 impl crate::types::tool_metadata::ToolMetadata for MeetingReplyTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Other
+        ToolKind::Meeting
     }
 
     fn tool_namespace(&self) -> ToolNamespace {

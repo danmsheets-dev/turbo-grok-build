@@ -422,7 +422,7 @@ fn render_short(ctx: &BootCardContext) -> String {
         "\n- browser: `browser_navigate` opens Turbo's own WebView (first call starts `browser-host`) \
          → `browser_snapshot` → click/fill by that snapshot's `uid`. Windows-only. A startup card \
          appears until the first navigate returns. Closing the window hides it; the next `browser_*` call re-shows it. \
-         Ctrl+Shift+B is a TUI text mirror, not the page. Not chrome-devtools MCP"
+         Ctrl+Shift+B is a TUI text mirror, not the page. chrome-devtools MCP tools are hidden unless GROK_CHROME_MCP=1"
     } else {
         ""
     };
