@@ -18,6 +18,7 @@ use crate::reminders::{LoopParentStamp, format_loop_iteration_prompt_with_parent
 use crate::types::resources::{Cwd, SharedResources, State};
 use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 
+use super::disk;
 use super::interval::{interval_to_human, task_human_schedule};
 use super::when::is_local_weekend;
 use super::types::{
@@ -161,6 +162,63 @@ impl SchedulerActor {
         .await
     }
 
+    /// Launch-workspace cwd from resources only (no process-cwd fallback: tests
+    /// must not write `{repo}/.grok/schedules.json`).
+    async fn schedule_workspace(&self) -> Option<std::path::PathBuf> {
+        self.resources.lock().await.get::<Cwd>().map(|c| c.0.clone())
+    }
+
+    async fn persist_standing_index(&self) {
+        let Some(cwd) = self.schedule_workspace().await else {
+            return;
+        };
+        let tasks = {
+            let res = self.resources.lock().await;
+            res.get::<State<SchedulerState>>()
+                .map(|s| {
+                    s.tasks
+                        .iter()
+                        .filter(|t| t.is_product_schedule())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        if let Err(err) = disk::upsert_live_tasks(&cwd, &tasks) {
+            tracing::warn!(error = %err, "failed to persist .grok/schedules.json");
+        }
+    }
+
+    /// Drop CLI-cancelled ids from memory; restore standing jobs after restart.
+    async fn apply_disk_index(&self) {
+        let Some(cwd) = self.schedule_workspace().await else {
+            return;
+        };
+        let index = match disk::load_schedule_index(&cwd) {
+            Ok(i) => i,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to read .grok/schedules.json");
+                return;
+            }
+        };
+        if index.tasks.is_empty() && index.cancelled.is_empty() {
+            return;
+        }
+        let cancelled: std::collections::HashSet<String> =
+            index.cancelled.iter().cloned().collect();
+        let mut res = self.resources.lock().await;
+        let state = res.get_or_default::<State<SchedulerState>>();
+        state.tasks.retain(|t| !cancelled.contains(&t.id));
+        for task in index.tasks {
+            if cancelled.contains(&task.id) {
+                continue;
+            }
+            if !state.tasks.iter().any(|e| e.id == task.id) {
+                state.tasks.push(task);
+            }
+        }
+    }
+
     async fn publish_durable_removal(
         &self,
         task_id: String,
@@ -205,6 +263,7 @@ impl SchedulerActor {
     }
 
     pub async fn run(mut self) {
+        self.apply_disk_index().await;
         self.await_subagent_wiring_for_due_tasks().await;
         self.announce_existing_tasks().await;
 
@@ -303,6 +362,7 @@ impl SchedulerActor {
 
     async fn fire_next_task(&mut self) {
         debug_assert!(self.pending_removal.is_none());
+        self.apply_disk_index().await;
         let now = Utc::now();
         let mut res = self.resources.lock().await;
         let background_enabled = res
@@ -423,6 +483,10 @@ impl SchedulerActor {
             }
             let commit = reservation.commit_next(&mut self.clock);
             log_rollover(transition, Some(&task_id), commit.rollover);
+            if let Some(cwd) = self.schedule_workspace().await {
+                let _ = disk::cancel_task(&cwd, &task_id);
+            }
+            self.persist_standing_index().await;
             return;
         }
 
@@ -436,6 +500,7 @@ impl SchedulerActor {
             log_rollover(transition, Some(&task_id), commit.rollover);
             self.notification_handle
                 .send_scheduled_task_removed(task_removed_payload(task_id, commit.version));
+            self.persist_standing_index().await;
             return;
         }
 
@@ -450,6 +515,7 @@ impl SchedulerActor {
                 task_id = %task_id,
                 "Skipping weekday-clock fire: weekend (cadence advanced)"
             );
+            self.persist_standing_index().await;
             return;
         }
 
@@ -466,6 +532,7 @@ impl SchedulerActor {
         };
 
         drop(res);
+        self.persist_standing_index().await;
 
         tracing::info!(
             task_id = %task_id,
@@ -736,7 +803,8 @@ impl SchedulerActor {
                 ),
             );
             framed_prompt.push_str(&format!(
-                "\n\nWrite your result to {} (Schedules jail: no `..`, folder must not be a symlink).",
+                "\n\nWrite your result with the write tool to {} — spawn allowed_paths is \
+                 `Schedules/` only (no `..`, folder must not be a symlink). Do not write elsewhere.",
                 dest.display()
             ));
         }
@@ -784,7 +852,19 @@ impl SchedulerActor {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
-            allowed_paths: None,
+            allowed_paths: if product_schedule {
+                if matches!(
+                    capability_mode,
+                    Some(xai_tool_types::SubagentCapabilityMode::All)
+                ) {
+                    // meeting_join is ToolKind::Other (needs All). Jail writes.
+                    Some(vec!["Meetings/".into(), "Schedules/".into()])
+                } else {
+                    Some(vec!["Schedules/".into()])
+                }
+            } else {
+                None
+            },
             // A child of the actor's token, so shutdown cancels a fire the
             // coordinator still has queued at the concurrent limit.
             cancel_token: self.cancel_token.child_token(),
@@ -879,6 +959,7 @@ impl SchedulerActor {
     }
 
     async fn handle_command(&mut self, cmd: SchedulerCommand) {
+        self.apply_disk_index().await;
         match cmd {
             SchedulerCommand::Create { task, reply } => {
                 if let Some(pending) = &self.pending_removal {
@@ -898,6 +979,15 @@ impl SchedulerActor {
                 log_rollover("create", Some(&task.id), commit.rollover);
                 self.notification_handle
                     .send_scheduled_task_created(task_created_payload(&task, commit.version));
+                let persist = task.is_product_schedule();
+                let persist_id = task.id.clone();
+                drop(res);
+                if persist {
+                    if let Some(cwd) = self.schedule_workspace().await {
+                        let _ = disk::uncancel_task(&cwd, &persist_id);
+                    }
+                    self.persist_standing_index().await;
+                }
                 let _ = reply.send(Ok(task));
             }
             SchedulerCommand::Update {
@@ -943,6 +1033,7 @@ impl SchedulerActor {
                 log_rollover("update", Some(&id), commit.rollover);
                 self.notification_handle
                     .send_scheduled_task_created(task_created_payload(&updated, commit.version));
+                self.persist_standing_index().await;
                 let _ = reply.send(Ok(updated));
             }
             SchedulerCommand::Delete { id, reply } => {
@@ -997,9 +1088,13 @@ impl SchedulerActor {
                     }
                 }
                 self.pending_removal = Some(PendingDurableRemoval {
-                    task_id: id,
+                    task_id: id.clone(),
                     reservation: self.clock.prepare_transition(1),
                 });
+                if let Some(cwd) = self.schedule_workspace().await {
+                    let _ = disk::cancel_task(&cwd, &id);
+                }
+                self.persist_standing_index().await;
                 let _ = reply.send(self.complete_pending_removal().await);
             }
             SchedulerCommand::List { reply } => {
@@ -2025,13 +2120,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn product_schedule_fire_uses_worktree_and_readonly() {
+    async fn product_schedule_fire_uses_parent_cwd_and_schedules_jail() {
         let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
         let mut task = ScheduledTask::new(1, "search rust async".into(), true, true);
         task.apply_standing();
         task.title = Some("rust async".into());
-        task.isolation = Some(SubagentIsolationMode::Worktree);
-        task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadOnly);
+        task.isolation = Some(SubagentIsolationMode::None);
+        task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadWrite);
         task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         handle
@@ -2047,16 +2142,62 @@ mod tests {
         assert!(request.description.starts_with("schedule: "));
         assert_eq!(
             request.runtime_overrides.isolation,
-            Some(SubagentIsolationMode::Worktree)
+            Some(SubagentIsolationMode::None)
         );
         assert_eq!(
             request.runtime_overrides.capability_mode,
-            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+            Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
+        );
+        assert_eq!(
+            request.allowed_paths.as_deref(),
+            Some(["Schedules/".to_string()].as_slice())
         );
         assert!(
             request.prompt.contains("Schedules"),
             "product fire must name the Schedules path: {}",
             request.prompt
+        );
+        let mut fired = false;
+        for _ in 0..4 {
+            if matches!(
+                next_event(&mut notif_rx).await,
+                ToolNotification::ScheduledTaskFired(_)
+            ) {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired);
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn meeting_join_fire_jails_meetings_and_schedules() {
+        let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
+        let mut task = ScheduledTask::new(1, "call meeting_join".into(), true, true);
+        task.apply_standing();
+        task.meeting_join = true;
+        task.isolation = Some(SubagentIsolationMode::None);
+        task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::All);
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            })
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+
+        let request = next_subagent_spawn(&mut subagent_rx).await;
+        assert_eq!(
+            request.runtime_overrides.capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::All)
+        );
+        assert_eq!(
+            request.allowed_paths.as_deref(),
+            Some(["Meetings/".to_string(), "Schedules/".to_string()].as_slice())
         );
         let mut fired = false;
         for _ in 0..4 {

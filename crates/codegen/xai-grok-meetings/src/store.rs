@@ -162,8 +162,22 @@ impl MeetingStore {
         f.write_all(b"\n")?;
         if segment.is_final {
             let mut meta = self.read_meta()?;
-            meta.final_segments = meta.final_segments.saturating_add(1);
-            self.write_meta(&meta)?;
+            let next = meta.final_segments.saturating_add(1);
+            meta.final_segments = next;
+            if meta.status == MeetingStatus::Stopped || meta.stopped_at.is_some() {
+                meta.status = MeetingStatus::Stopped;
+                self.write_meta(&meta)?;
+            } else if let Ok(disk) = self.read_meta() {
+                if disk.status == MeetingStatus::Stopped || disk.stopped_at.is_some() {
+                    let mut stopped = disk;
+                    stopped.final_segments = stopped.final_segments.max(next);
+                    self.write_meta(&stopped)?;
+                } else {
+                    self.write_meta(&meta)?;
+                }
+            } else {
+                self.write_meta(&meta)?;
+            }
         }
         Ok(())
     }
@@ -460,6 +474,17 @@ mod tests {
         assert!(store.read_notes().unwrap().unwrap().contains("Notes"));
         write_current(&root, "teams-1").unwrap();
         assert_eq!(read_current_id(&root).unwrap().as_deref(), Some("teams-1"));
+        store
+            .append_segment(&TranscriptSegment {
+                at: Utc::now(),
+                text: "late final".into(),
+                is_final: true,
+            })
+            .unwrap();
+        let after = store.read_meta().unwrap();
+        assert_eq!(after.status, MeetingStatus::Stopped);
+        assert!(after.stopped_at.is_some());
+        assert_eq!(after.final_segments, 2);
         store
             .enqueue_question("alice", "How is the new website project going")
             .unwrap();

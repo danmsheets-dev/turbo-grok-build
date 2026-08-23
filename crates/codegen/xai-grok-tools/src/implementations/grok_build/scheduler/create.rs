@@ -13,8 +13,9 @@ use super::when::{
 // to keep paths stable.
 pub use xai_grok_tools_api::slash_commands::{
     LoopFireMode, SCHEDULE_COMMAND_NAME, SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_LIST_TOOL_NAME,
-    ScheduleVerb, expand_schedule_recipe, loop_schedule_instruction, loop_usage_message,
-    parse_schedule_verb, schedule_instruction, schedule_usage_message,
+    ScheduleRecipe, ScheduleVerb, expand_schedule_recipe, loop_schedule_instruction,
+    loop_usage_message, parse_schedule_recipe, parse_schedule_verb, schedule_instruction,
+    schedule_usage_message,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -118,6 +119,17 @@ pub struct SchedulerCreateInput {
                        Create-only: ignored with task_id."
     )]
     pub meeting_join: Option<bool>,
+
+    #[serde(
+        default,
+        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
+    )]
+    #[schemars(
+        description = "Required true when creating a meeting-join schedule. The operator must \
+                       approve the first join; later fires reuse this confirmation. \
+                       Create-only: ignored with task_id."
+    )]
+    pub confirm: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -296,15 +308,29 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             ));
         }
 
-        let prompt = input.prompt.ok_or_else(|| {
+        let prompt_in = input.prompt.ok_or_else(|| {
             xai_tool_runtime::ToolError::invalid_arguments(
                 "prompt is required when creating a task",
             )
         })?;
+        let recipe = parse_schedule_recipe(&prompt_in);
+        let is_recipe = !matches!(recipe, ScheduleRecipe::Freeform { .. });
+        let (expanded, recipe_title, recipe_meeting) = expand_schedule_recipe(&prompt_in);
 
         let now = chrono::Utc::now();
         let standing = input.standing.unwrap_or(false);
-        let meeting_join = input.meeting_join.unwrap_or(false);
+        let meeting_join = input.meeting_join.unwrap_or(false) || recipe_meeting;
+        let prompt = if is_recipe || standing {
+            expanded
+        } else {
+            prompt_in
+        };
+        if meeting_join && !input.confirm.unwrap_or(false) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "meeting-join schedules require confirm=true after the operator approved \
+                 this job (one-time). Do not create the timer until they confirm.",
+            ));
+        }
         let mut weekdays_only = false;
         let mut first_fire: Option<chrono::DateTime<chrono::Utc>> = None;
         let mut recurring = true;
@@ -347,7 +373,16 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             input.fire_immediately && first_fire.is_none(),
         );
         task.foreground = input.foreground.unwrap_or(false);
-        task.title = input.title.filter(|t| !t.trim().is_empty());
+        task.title = input
+            .title
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| {
+                if is_recipe || standing {
+                    Some(recipe_title)
+                } else {
+                    None
+                }
+            });
         task.weekdays_only = weekdays_only;
         task.meeting_join = meeting_join;
         if standing || !recurring || weekdays_only || at_spec.is_some() {
@@ -357,14 +392,15 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             }
         }
         if standing || weekdays_only || at_spec.is_some() {
-            // Default fire: worktree + read-only unless meeting-join.
-            task.isolation = Some(xai_tool_types::SubagentIsolationMode::Worktree);
-            task.capability_mode = Some(if meeting_join {
+            if meeting_join {
+                // Meeting tools are ToolKind::Other (clamped by ReadOnly/ReadWrite).
                 task.isolation = Some(xai_tool_types::SubagentIsolationMode::None);
-                xai_tool_types::SubagentCapabilityMode::All
+                task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::All);
             } else {
-                xai_tool_types::SubagentCapabilityMode::ReadOnly
-            });
+                // Parent cwd + Write/WebSearch, jailed to Schedules/ at write time.
+                task.isolation = Some(xai_tool_types::SubagentIsolationMode::None);
+                task.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadWrite);
+            }
         }
         if let Some(first) = first_fire {
             if first <= now {
@@ -407,6 +443,34 @@ mod tests {
     fn scheduler_resources() -> (SharedResources, tokio_util::sync::CancellationToken) {
         let mut resources = Resources::new();
         resources.register_state::<super::super::types::SchedulerState>();
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        resources.insert(SchedulerHandle(cmd_tx));
+        let shared = resources.into_shared();
+
+        let (notif_handle, _notif_rx) = ToolNotificationHandle::channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let actor = SchedulerActor {
+            resources: shared.clone(),
+            resources_persistence: std::sync::Arc::new(
+                crate::persistence::ResourcesPersistence::noop(),
+            ),
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token: cancel_token.clone(),
+            clock: Default::default(),
+            pending_removal: None,
+            blocked_expiries: Default::default(),
+        };
+        tokio::spawn(actor.run());
+        (shared, cancel_token)
+    }
+
+    fn scheduler_resources_with_cwd(
+        cwd: std::path::PathBuf,
+    ) -> (SharedResources, tokio_util::sync::CancellationToken) {
+        let mut resources = Resources::new();
+        resources.register_state::<super::super::types::SchedulerState>();
+        resources.insert(crate::types::resources::Cwd(cwd));
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         resources.insert(SchedulerHandle(cmd_tx));
         let shared = resources.into_shared();
@@ -645,12 +709,99 @@ mod tests {
         assert!(task.durable);
         assert_eq!(
             task.isolation,
-            Some(xai_tool_types::SubagentIsolationMode::Worktree)
+            Some(xai_tool_types::SubagentIsolationMode::None)
         );
         assert_eq!(
             task.capability_mode,
-            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+            Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
         );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn meeting_join_requires_confirm() {
+        let (resources, cancel) = scheduler_resources();
+        let err = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "interval": "1d",
+                    "prompt": "meeting join https://teams.microsoft.com/meet/1",
+                    "standing": true,
+                    "durable": true
+                })),
+            )
+            .await
+            .expect_err("unconfirmed meeting-join must fail");
+        assert!(
+            err.to_string().contains("confirm=true"),
+            "steers to confirm: {err}"
+        );
+        assert_eq!(task_count(&resources).await, 0);
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn search_recipe_is_expanded() {
+        let (resources, cancel) = scheduler_resources();
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "interval": "1h",
+                    "prompt": "search rust async",
+                    "standing": true,
+                    "durable": true
+                })),
+            )
+            .await
+            .expect("create succeeds");
+        let task = created_task(&resources, &created.id).await;
+        assert!(
+            task.prompt.contains("Search the web"),
+            "stored prompt must be expanded: {}",
+            task.prompt
+        );
+        assert!(!task.meeting_join);
+        assert_eq!(
+            task.capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn standing_job_writes_workspace_index() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (resources, cancel) = scheduler_resources_with_cwd(dir.path().to_path_buf());
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({
+                    "interval": "1h",
+                    "prompt": "search rust async",
+                    "standing": true,
+                    "durable": true,
+                    "title": "rust async"
+                })),
+            )
+            .await
+            .expect("create succeeds");
+        // Actor persist is async after Create; poll the index briefly.
+        let path = super::super::disk::schedule_index_path(dir.path());
+        let mut found = false;
+        for _ in 0..50 {
+            if path.exists() {
+                if let Ok(idx) = super::super::disk::load_schedule_index(dir.path()) {
+                    if idx.tasks.iter().any(|t| t.id == created.id) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(found, "standing create must write {}", path.display());
         cancel.cancel();
     }
 
@@ -716,6 +867,7 @@ mod tests {
                     "prompt": "call meeting_join",
                     "standing": true,
                     "meeting_join": true,
+                    "confirm": true,
                     "durable": true
                 })),
             )

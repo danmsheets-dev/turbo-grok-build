@@ -2307,6 +2307,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 init_tracing_simple("cli");
                 return xai_grok_pager::tools_cmd::run(tools_args);
             }
+            Command::Schedule(schedule_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::schedules_cmd::run(schedule_args);
+            }
             Command::Update {
                 check,
                 json,

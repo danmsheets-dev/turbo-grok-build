@@ -60,6 +60,7 @@ pub mod readiness;
 pub mod recent_dirs;
 pub mod scrollback;
 pub mod search;
+pub mod schedules_cmd;
 pub mod sessions_cmd;
 pub mod settings;
 pub mod share_cmd;

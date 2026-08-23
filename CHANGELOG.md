@@ -48,16 +48,17 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
-**RC8 (in progress):** scheduled tasks product surface, Meeting R2 harden, Browser R3, opt-in GitHub log sync, stock workflows (`bug-sweep`, `perf-optimize`, `feature-planning`).
+**RC8 (in progress):** scheduled tasks product surface (`/schedule` + `turbo schedule`), Meeting R2 harden, Browser R3, opt-in GitHub log sync, stock workflows (`bug-sweep`, `perf-optimize`, `feature-planning`, `security-sweep`, `test-gap`).
 
 ### Added
-- **`/schedule`** standing jobs (interval, `at` datetime, optional weekday clock). No 7-day expiry. Recipes: `search`, `stat`, `meeting join`. Results under `{workspace}/Schedules/`. `/loop` still expires at 7 days.
+- **`/schedule`** standing jobs (interval, `at` datetime, optional weekday clock). No 7-day expiry. Recipes: `search`, `stat`, `meeting join`. Results under `{workspace}/Schedules/`. Index: `{workspace}/.grok/schedules.json`. Headless: `turbo schedule list|show|cancel` (works with Turbo closed; fires only while the pager is up). `/loop` still expires at 7 days.
 - **`turbo issues sync` / `turbo features sync`** — opt-in GitHub Issues upsert/pull (`github_repo` in developer-log.toml / feature-request-log.toml). Local JSON remains write-ahead; default is no cloud upload.
-- Workflows: `.grok/workflows/bug-sweep.rhai`, `perf-optimize.rhai`, `feature-planning.rhai`.
+- Workflows: `.grok/workflows/bug-sweep.rhai`, `perf-optimize.rhai`, `feature-planning.rhai`, `security-sweep.rhai`, `test-gap.rhai`.
 
 ### Fixed
 - **Meeting R2:** pin `meeting_*` early on the live tool handshake; process exit marks capture stopped; stale disk recording is not live; join `?p=` redacted from meta/status; NL join accepts “meeting link to test with”; spoken `Turbo, …` auto-ask; status `graph: configured|missing`.
 - **Browser R3:** NavigationStarting fail-closed, eval confirm, pane mirror from last snapshot, download jail helper, `docs/BROWSER-R3-QA.md`.
+- **Deep-audit follow-up:** `/schedule` search/stat fires get ReadWrite + `allowed_paths=["Schedules/"]` (host jail); meeting-join requires `confirm=true` and write-jails `Meetings/`+`Schedules/`; STT append cannot restore `status=recording`; `meeting_ask` briefing forbids mutate; eval gate covers `location['href']` / `.submit.call`; downloads check hop policy on source URI.
 
 ---
 

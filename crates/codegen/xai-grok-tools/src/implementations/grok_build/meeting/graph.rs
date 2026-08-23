@@ -51,6 +51,20 @@ async fn first_online_meeting(token: &str, join_url: &str) -> Result<Value, Stri
     if arr.len() == 1 && arr[0].get("joinWebUrl").and_then(|x| x.as_str()).is_none() {
         return Ok(arr[0].clone());
     }
+    // Redacted meta.url (no ?p=) often fails exact JoinWebUrl eq. Fall back to
+    // a short list and host+path match (join_urls_match ignores passcodes).
+    let listed = graph_get(token, "/me/onlineMeetings?$top=25").await.ok();
+    if let Some(listed) = listed {
+        if let Some(arr) = listed.get("value").and_then(|x| x.as_array()) {
+            if let Some(m) = arr.iter().find(|m| {
+                m.get("joinWebUrl")
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|got| join_urls_match(join_url, got))
+            }) {
+                return Ok(m.clone());
+            }
+        }
+    }
     Err(
         "Graph found no onlineMeeting for this join URL (need OnlineMeetings.Read on the token)"
             .to_string(),

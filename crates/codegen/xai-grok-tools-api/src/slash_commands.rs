@@ -378,8 +378,9 @@ pub fn schedule_instruction(args: &str) -> String {
                  - `search <query>` — web briefing; must write `Schedules/YYYY-MM-DD - <title>.md`.\n\
                  - `stat <url-or-query>` — metric snapshot; must write the same Schedules path.\n\
                  - `meeting join <url> [name]` — stored prompt MUST call `meeting_join` \
-                   (not Start-Process / bash). Set meeting_join: true.\n\
-                 Confirm-once for meeting/write is a prompt concern; do not open URLs yourself.\n\n\
+                   (not Start-Process / bash). Set meeting_join: true AND confirm: true \
+                   only after the operator approved this scheduled join (one-time).\n\
+                 Do not open URLs yourself.\n\n\
                  ## Suggested stored prompt\n\
                  Title: {title}\n\
                  meeting_join: {meeting_join}\n\
@@ -388,7 +389,8 @@ pub fn schedule_instruction(args: &str) -> String {
                  ## Action\n\
                  1. Call scheduler_create with standing: true, durable: true, fire_immediately: false, \
                     title, the expanded prompt, and interval and/or at as derived. \
-                    Set meeting_join: true only for the meeting-join recipe.\n\
+                    Set meeting_join: true only for the meeting-join recipe (then confirm: true \
+                    after the operator approves).\n\
                  2. Confirm what's scheduled, the cadence, that it does **not** auto-expire, \
                     that results go under Schedules/, and the task_id to cancel with \
                     `/schedule cancel` or scheduler_delete.\n\

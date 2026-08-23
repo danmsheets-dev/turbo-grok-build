@@ -148,6 +148,8 @@ pub enum Command {
     Disk(crate::disk_cmd::DiskArgs),
     /// List registered model-facing tools (headless schema assert)
     Tools(crate::tools_cmd::ToolsArgs),
+    /// List, show, or cancel standing `/schedule` jobs (works with Turbo closed)
+    Schedule(crate::schedules_cmd::ScheduleArgs),
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;

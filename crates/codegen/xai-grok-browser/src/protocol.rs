@@ -806,11 +806,15 @@ pub fn eval_looks_mutating(function: &str) -> bool {
         "[\"click\"]",
         ".submit(",
         ".submit (",
+        ".submit.call",
+        "reflect.set",
         ".focus(",
         "location =",
         "location=",
         "location.href=",
         "location.href =",
+        "location['href']",
+        "location[\"href\"]",
         "location.replace",
         "location.assign",
         "window.open",
@@ -1768,6 +1772,13 @@ mod tests {
             "() => document.querySelectorAll('a').length"
         ));
         assert!(eval_looks_mutating("() => document.forms[0]['submit']()"));
+        assert!(eval_looks_mutating(
+            "() => location['href']='https://evil.test'"
+        ));
+        assert!(eval_looks_mutating(
+            "() => HTMLFormElement.prototype.submit.call(form)"
+        ));
+        assert!(eval_looks_mutating("() => Reflect.set(location, 'href', 'x')"));
         assert!(eval_looks_mutating("() => history.back()"));
         assert!(eval_looks_mutating(
             "() => location.assign('https://evil.test')"

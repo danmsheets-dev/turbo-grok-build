@@ -234,8 +234,6 @@ fn has_join_intent(text: &str) -> bool {
         "link to test",
         "q&a",
         "q and a",
-        "on meetings",
-        "on meeting",
     ];
     if PHRASES.iter().any(|p| l.contains(p)) {
         return true;
@@ -383,6 +381,13 @@ mod tests {
             "Run a full round of Q&A on Meetings https://teams.microsoft.com/meet/1?p=x",
         );
         assert!(qa.is_some(), "Q&A on Meetings + Teams URL must join");
+        assert!(
+            detect_join_request(
+                "comment on meeting notes: https://teams.microsoft.com/meet/1?p=x"
+            )
+            .is_none(),
+            "substring 'on meeting' in ticket text must not start capture"
+        );
     }
 
     #[test]

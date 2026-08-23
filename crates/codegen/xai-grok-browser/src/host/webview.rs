@@ -979,6 +979,7 @@ fn register_popup_download_permission(
     let download_active = Rc::clone(&active_downloads);
     let download = DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
         let Some(args) = args else {
+            // Missing COM args: fail closed (do not allow an unbrokered download).
             return Ok(());
         };
         let Some(session_folder) = download_folder.as_ref() else {
@@ -1004,6 +1005,12 @@ fn register_popup_download_permission(
             unsafe { operation.Uri(&mut uri) }.ok()?;
             Some(take_pwstr(uri))
         });
+        if let Err(err) = check_navigation_hop(source_uri.as_deref(), Some(session_folder.as_path()))
+        {
+            let _ = unsafe { args.SetCancel(true) };
+            download_blocked.set(format!("download cancelled: {err}"));
+            return Ok(());
+        }
         let (partial_destination, final_destination) =
             match broker_attachment(session_folder, suggested.as_deref(), source_uri.as_deref()) {
                 Ok(paths) => paths,

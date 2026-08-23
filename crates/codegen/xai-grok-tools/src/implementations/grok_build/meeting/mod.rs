@@ -87,12 +87,14 @@ struct LiveMeeting {
 impl LiveMeeting {
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Release);
+        // Persist Stopped before aborting STT so an in-flight append_segment
+        // cannot rewrite status=recording.
+        let _ = self.store.mark_stopped();
         if let Some(cap) = self.capture.take() {
             cap.stop();
         }
         self._task.abort();
         self._watch.abort();
-        let _ = self.store.mark_stopped();
     }
 }
 

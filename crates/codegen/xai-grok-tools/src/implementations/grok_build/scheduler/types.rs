@@ -334,7 +334,10 @@ impl ScheduledTask {
         self.standing
             || self.meeting_join
             || self.title.is_some()
-            || matches!(self.isolation, Some(SubagentIsolationMode::Worktree))
+            || matches!(
+                self.capability_mode,
+                Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
+            )
     }
 }
 

@@ -130,10 +130,17 @@ These wrap the stored prompt:
 
 ### Behavior
 
-- Default fire: background subagent, `isolation=worktree`, read-only capability (meeting-join is the exception: full tools, isolation none)
-- `durable=true` for human `/schedule` jobs
+- Default fire: background subagent, parent cwd (`isolation=none`), `read-write` capability jailed to `Schedules/` via spawn `allowed_paths`. Meeting-join is the exception: full tools (so `meeting_join` is not clamped), isolation none, writes jailed to `Meetings/` + `Schedules/`. First meeting-join create requires `confirm=true`.
+- `durable=true` for human `/schedule` jobs. They do **not** expire after 7 days. They **do not fire** if the pager process is not running.
+- Index: `{workspace}/.grok/schedules.json`. `turbo schedule list|show|cancel` reads this with Turbo closed.
 - Overlap skip: if the previous iteration is still running, this tick is skipped
-- Cancel with `/schedule cancel <id>` or `scheduler_delete`
+- Cancel with `/schedule cancel <id>`, `scheduler_delete`, or `turbo schedule cancel <id>`
+
+```
+turbo schedule list
+turbo schedule show <id>
+turbo schedule cancel <id>
+```
 
 ---
 
