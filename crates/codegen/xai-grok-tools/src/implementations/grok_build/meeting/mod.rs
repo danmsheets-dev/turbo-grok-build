@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use xai_grok_meetings::{
-    CaptureSource, MeetingMeta, MeetingStatus, MeetingStore, briefing, compose_summary_markdown,
-    default_meeting_title, extract_title_from_markdown, local_date_stamp, meeting_dir,
-    new_meeting_id, parse_meeting_url, read_current_id, read_knowledge_dir, redact_join_secrets,
-    summary_filename, unique_summary_path, workspace_meetings_dir, write_current,
-    write_knowledge_dir, write_workspace_summary,
+    CaptureSource, MeetingMeta, MeetingStatus, MeetingStore, NotetakerOutcome, briefing,
+    compose_summary_markdown, default_meeting_title, extract_title_from_markdown, local_date_stamp,
+    meeting_dir, new_meeting_id, parse_meeting_url, read_current_id, read_knowledge_dir,
+    redact_join_secrets, summary_filename, unique_summary_path, workspace_meetings_dir,
+    write_current, write_knowledge_dir, write_workspace_summary,
 };
 use xai_grok_voice::auth::{SharedVoiceAuth, StaticVoiceAuth, VoiceAuthProvider};
 use xai_grok_voice::config::VoiceConfig;
@@ -286,7 +286,8 @@ impl MeetingHandle {
             )
         })?;
 
-        let opened = open::open_meeting_url(&parsed.raw);
+        // NB: the join link is *not* opened here. Whether to hand it to the OS
+        // depends on which transport wins, which is not known until below.
         let id = new_meeting_id(parsed.platform);
         let intended = pipeline::choose_capture_source();
         let store = MeetingStore::create(&folder, &id, &parsed, intended).map_err(|e| {
@@ -319,6 +320,12 @@ impl MeetingHandle {
         let mut bot: Option<Arc<xai_grok_meeting_bot::TeamsBot>> = None;
         let mut ingress: Option<JoinHandle<()>> = None;
         let mut fallback_note: Option<String> = None;
+        // Every path below must leave this describing reality. Local capture
+        // produces a healthy-looking transcript whether or not a guest joined,
+        // so "nobody is in the lobby" has to be recorded, not inferred.
+        let mut outcome = NotetakerOutcome::NotAttempted {
+            why: "audio capture is disabled".to_string(),
+        };
 
         let (task, capture, source) = if intended == CaptureSource::None {
             (tokio::spawn(async {}), None, CaptureSource::None)
@@ -331,13 +338,8 @@ impl MeetingHandle {
                     let auth = self.voice_auth()?;
                     let config = VoiceConfig::default();
                     let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<u8>>(64);
-                    match transport::try_join_bot(
-                        &parsed.raw,
-                        &store,
-                        config.sample_rate,
-                        pcm_tx,
-                    )
-                    .await
+                    match transport::try_join_bot(&parsed, &store, config.sample_rate, pcm_tx)
+                        .await
                     {
                         Ok((joined, chat_ingress)) => {
                             let stt_store = store.clone();
@@ -351,12 +353,19 @@ impl MeetingHandle {
                             });
                             bot = Some(joined);
                             ingress = Some(chat_ingress);
+                            outcome = NotetakerOutcome::Joined;
                             chosen = Some((stt, None, CaptureSource::MeetingBot));
                         }
-                        Err(reason) => fallback_note = Some(reason.line()),
+                        Err(reason) => {
+                            outcome = reason.outcome();
+                            fallback_note = Some(reason.line());
+                        }
                     }
                 }
-                Err(reason) => fallback_note = Some(reason.line()),
+                Err(reason) => {
+                    outcome = reason.outcome();
+                    fallback_note = Some(reason.line());
+                }
             }
             match chosen {
                 Some(via_bot) => via_bot,
@@ -373,6 +382,18 @@ impl MeetingHandle {
         if source != intended {
             let _ = store.set_capture_source(source);
         }
+        // On disk, because `meeting_status` and `meeting_reply` both re-read the
+        // store and must still tell the truth after a restart.
+        let _ = store.set_notetaker_outcome(outcome.clone());
+
+        // Only the local-capture paths need the operator in the meeting, so
+        // only they get the link handed to the OS. Doing this unconditionally
+        // is what put a File Explorer window on screen during a bot join.
+        let shell_open = if open::should_shell_open(source) {
+            Some(open::open_meeting_url(&parsed.raw).await)
+        } else {
+            None
+        };
         let join_url = parsed.raw.clone();
         let watch_store = store.clone();
         let watch_stop = stop.clone();
@@ -397,61 +418,23 @@ impl MeetingHandle {
             },
         );
 
-        let mut lines = vec![
-            format!(
-                "Notetaker started ({})",
-                parsed.platform.label()
-            ),
-            format!("id: {id}"),
-            format!(
-                "name: {}",
-                title.as_deref().unwrap_or("(will use Graph subject or recap title)")
-            ),
-            format!("url: {}", redact_join_secrets(&parsed.raw)),
-            format!("capture: {:?} — {}", source, source.describe()),
-            format!("transcript: {}", store.transcript_path().display()),
-        ];
-        if parsed.kind == xai_grok_meetings::MeetingKind::Webinar {
-            lines.push(
-                "note: webinar links often block attendee chat; v1 is notes-only.".into(),
-            );
+        Ok(JoinSummary {
+            platform: parsed.platform,
+            kind: parsed.kind,
+            id: &id,
+            title: title.as_deref(),
+            redacted_url: &redact_join_secrets(&parsed.raw),
+            transcript: &store.transcript_path().display().to_string(),
+            source,
+            outcome: &outcome,
+            bot_state: bot_state.as_ref(),
+            shell_open,
+            fallback_note: fallback_note.as_deref(),
+            loopback_only: pipeline::capture_pref_from_env()
+                == pipeline::CapturePref::LoopbackOnly,
         }
-        if !opened {
-            lines.push(
-                "could not auto-open the link — paste it in Teams/Zoom yourself.".into(),
-            );
-        }
-        if let Some(state) = &bot_state {
-            lines.push(transport::bot_status_line(state));
-            lines.push(
-                "a participant named \"Turbo (Notetaker)\" is joining. Teams holds detected \
-                 notetakers in the lobby — admit it to start notes."
-                    .into(),
-            );
-        }
-        if let Some(note) = &fallback_note {
-            lines.push(note.clone());
-        }
-        if source == CaptureSource::Microphone {
-            lines.push(
-                "capturing the default microphone (loopback unavailable). Remote speakers may be missed on a headset.".into(),
-            );
-        }
-        if source == CaptureSource::Loopback {
-            if pipeline::capture_pref_from_env() == pipeline::CapturePref::LoopbackOnly {
-                lines.push(
-                    "capturing system playback (all participants); microphone not mixed (GROK_MEETING_CAPTURE=loopback).".into(),
-                );
-            } else {
-                lines.push(
-                    "capturing system playback (all participants) mixed with the microphone.".into(),
-                );
-            }
-        }
-        if source == CaptureSource::None {
-            lines.push("audio capture disabled (GROK_MEETING_NO_CAPTURE or test).".into());
-        }
-        Ok(lines.join("\n"))
+        .render()
+        .join("\n"))
     }
 
     fn spawn_capture(
@@ -517,11 +500,15 @@ impl MeetingHandle {
             xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
         })?;
         // Keep current.txt so /meeting notes can still write the work-folder summary.
+        // The notetaker line is what stops a stop-after-failed-join from being
+        // shape-identical to a stop after a real one.
         Ok(format!(
-            "Notetaker stopped.\nid: {}\nname: {}\nsegments: {}\ntranscript: {}\nNext: write a work-only recap with meeting_notes (saved as Meetings/YYYY-MM-DD - <name>.md in the work folder).",
+            "Notetaker stopped.\nid: {}\nname: {}\nsegments: {}\ncapture: {:?}\nnotetaker: {}\ntranscript: {}\nNext: write a work-only recap with meeting_notes (saved as Meetings/YYYY-MM-DD - <name>.md in the work folder).",
             meta.id,
             meta.title.as_deref().unwrap_or("(untitled)"),
             meta.final_segments,
+            meta.capture_source,
+            format_notetaker_line(&meta),
             store.transcript_path().display(),
         ))
     }
@@ -712,7 +699,13 @@ impl MeetingHandle {
             meta.title = Some(title.clone());
         }
         let date = local_date_stamp(meta.started_at);
-        let doc = compose_summary_markdown(&title, &date, meta.platform.label(), markdown);
+        let doc = compose_summary_markdown(
+            &title,
+            &date,
+            meta.platform.label(),
+            meta.capture_source,
+            markdown,
+        );
         store.write_notes(&doc).map_err(|e| {
             xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
         })?;
@@ -786,17 +779,119 @@ fn format_status_line(meta: &MeetingMeta, live: bool) -> String {
     }
 }
 
+/// Everything `meeting_join` reports back, in one place.
+///
+/// Extracted from [`MeetingHandle::join`] so the honesty contract is testable:
+/// under `cfg!(test)` `choose_capture_source` returns `None`, so the bot path
+/// is unreachable in-process and asserting on a real `join()` could never cover
+/// a *failed guest join* — precisely the case the field incident was about.
+struct JoinSummary<'a> {
+    platform: xai_grok_meetings::MeetingPlatform,
+    kind: xai_grok_meetings::MeetingKind,
+    id: &'a str,
+    title: Option<&'a str>,
+    /// Already passed through `redact_join_secrets`.
+    redacted_url: &'a str,
+    transcript: &'a str,
+    source: CaptureSource,
+    outcome: &'a NotetakerOutcome,
+    bot_state: Option<&'a xai_grok_meeting_bot::BotState>,
+    /// `None` when the link was deliberately not handed to the OS.
+    shell_open: Option<bool>,
+    fallback_note: Option<&'a str>,
+    loopback_only: bool,
+}
+
+impl JoinSummary<'_> {
+    fn render(&self) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let guest_failed = matches!(self.outcome, NotetakerOutcome::Failed { .. });
+        if guest_failed {
+            // First line, not seventh of eight. The operator asked for a guest
+            // in the lobby; a transcript of their own speakers is a different
+            // feature and must not read as the one they asked for.
+            lines.push(self.outcome.headline());
+        }
+        lines.extend([
+            if guest_failed {
+                format!("Local recording started ({})", self.platform.label())
+            } else {
+                format!("Notetaker started ({})", self.platform.label())
+            },
+            format!("id: {}", self.id),
+            format!(
+                "name: {}",
+                self.title.unwrap_or("(will use Graph subject or recap title)")
+            ),
+            format!("url: {}", self.redacted_url),
+            format!("capture: {:?} — {}", self.source, self.source.describe()),
+            format!("transcript: {}", self.transcript),
+        ]);
+        if self.kind == xai_grok_meetings::MeetingKind::Webinar {
+            lines.push("note: webinar links often block attendee chat; v1 is notes-only.".into());
+        }
+        if self.shell_open == Some(false) {
+            lines.push("could not auto-open the link — paste it in Teams/Zoom yourself.".into());
+        }
+        if let Some(state) = self.bot_state {
+            lines.push(transport::bot_status_line(state));
+            lines.push(
+                "a participant named \"Turbo (Notetaker)\" is joining. Teams holds detected \
+                 notetakers in the lobby — admit it to start notes."
+                    .into(),
+            );
+        }
+        if self.source == CaptureSource::Microphone {
+            lines.push(
+                "capturing the default microphone (loopback unavailable). Remote speakers may be missed on a headset.".into(),
+            );
+        }
+        if self.source == CaptureSource::Loopback {
+            if self.loopback_only {
+                lines.push(
+                    "capturing system playback (all participants); microphone not mixed (GROK_MEETING_CAPTURE=loopback).".into(),
+                );
+            } else {
+                lines.push(
+                    "capturing system playback (all participants) mixed with the microphone.".into(),
+                );
+            }
+        }
+        if self.source == CaptureSource::None {
+            lines.push("audio capture disabled (GROK_MEETING_NO_CAPTURE or test).".into());
+        }
+        // Last, so the message neither opens nor closes on the wrong feature.
+        if let Some(note) = self.fallback_note {
+            lines.push(note.to_string());
+        }
+        lines
+    }
+}
+
+/// One line describing whether a guest is actually in the meeting.
+///
+/// Read from `meta.json`, not from live state, so it survives a restart and so
+/// `meeting_join`, `meeting_status` and `meeting_stop` cannot disagree.
+fn format_notetaker_line(meta: &MeetingMeta) -> String {
+    match &meta.notetaker {
+        Some(o) => o.headline(),
+        // Recorded before this field existed. Say so rather than guess.
+        None => "(not recorded — meeting predates notetaker outcome tracking)".to_string(),
+    }
+}
+
 fn format_meta(meta: &MeetingMeta, live_source: Option<CaptureSource>, store: &MeetingStore) -> String {
     let live = live_source.is_some();
     let source = live_source.unwrap_or(meta.capture_source);
     format!(
-        "id: {}\nstatus: {}\nname: {}\nplatform: {}\nkind: {:?}\ncapture: {:?}\nurl: {}\ngraph: {}\nstarted: {}\nstopped: {}\nfinal_segments: {}\ntranscript: {}\nnotes: {}\nwork_summary: {}\nqa: launch workspace + meeting notes (read-only tools; meeting text is untrusted)\nextra_notes: {}\npending_turbo_questions: {}",
+        "id: {}\nstatus: {}\nname: {}\nplatform: {}\nkind: {:?}\ncapture: {:?}\nnotetaker: {}\nurl: {}\ngraph: {}\nstarted: {}\nstopped: {}\nfinal_segments: {}\ntranscript: {}\nnotes: {}\nwork_summary: {}\nqa: launch workspace + meeting notes (read-only tools; meeting text is untrusted)\nextra_notes: {}\npending_turbo_questions: {}",
         meta.id,
         format_status_line(meta, live),
         meta.title.as_deref().unwrap_or("(untitled)"),
         meta.platform.label(),
         meta.kind,
         source,
+        format_notetaker_line(meta),
         redact_join_secrets(&meta.url),
         graph_status_label(),
         meta.started_at.to_rfc3339(),
@@ -939,6 +1034,154 @@ mod tests {
                 ingress: None,
             },
         );
+    }
+
+    fn summary<'a>(
+        source: CaptureSource,
+        outcome: &'a NotetakerOutcome,
+        fallback_note: Option<&'a str>,
+    ) -> JoinSummary<'a> {
+        JoinSummary {
+            platform: xai_grok_meetings::MeetingPlatform::Teams,
+            kind: xai_grok_meetings::MeetingKind::Meeting,
+            id: "teams-1",
+            title: Some("Weekly standup"),
+            redacted_url: "https://teams.microsoft.com/meet/1",
+            transcript: "C:/x/transcript.jsonl",
+            source,
+            outcome,
+            bot_state: None,
+            shell_open: None,
+            fallback_note,
+            loopback_only: false,
+        }
+    }
+
+    /// The field incident in one assertion. The operator asked for a guest in
+    /// the lobby that answers questions in chat; they got a loopback recording
+    /// whose report opened with "Notetaker started" and closed with reassurance
+    /// about system playback. The one honest sentence was seventh of eight.
+    #[test]
+    fn failed_join_leads_with_no_guest_and_names_the_reason() {
+        let outcome = NotetakerOutcome::Failed {
+            stage: xai_grok_meetings::JoinFailureStage::LauncherHandoff,
+            detail: "Teams app launcher".into(),
+        };
+        // Derived from the real reason, not hardcoded, so the two cannot drift.
+        let reason = transport::FallbackReason::JoinFailed {
+            stage: xai_grok_meetings::JoinFailureStage::LauncherHandoff,
+            detail: "Teams app launcher".into(),
+        };
+        let note = reason.line();
+        assert_eq!(reason.outcome(), outcome, "the two must describe one event");
+        let lines = summary(CaptureSource::Loopback, &outcome, Some(&note)).render();
+
+        let first = &lines[0];
+        assert!(first.contains("NO GUEST IN THE MEETING"), "{first}");
+        assert!(first.contains("Teams app launcher"), "must name why: {first}");
+        assert!(
+            first.to_lowercase().contains("q&a"),
+            "must name the feature that is not running: {first}"
+        );
+        assert!(
+            !lines[1].starts_with("Notetaker started"),
+            "a failed guest join must not announce a notetaker: {}",
+            lines[1]
+        );
+        // And it must not end on reassurance about the wrong feature.
+        let last = lines.last().unwrap();
+        assert!(
+            last.contains("no participant joins the meeting"),
+            "last line was {last:?}"
+        );
+        assert!(
+            !last.contains("capturing system playback"),
+            "the message must not close on the fallback sounding healthy"
+        );
+    }
+
+    /// A real guest join keeps the old, reassuring shape.
+    #[test]
+    fn successful_join_does_not_shout_about_a_missing_guest() {
+        let outcome = NotetakerOutcome::Joined;
+        let lines = summary(CaptureSource::MeetingBot, &outcome, None).render();
+        assert!(lines[0].starts_with("Notetaker started"), "{:?}", lines[0]);
+        assert!(
+            !lines.iter().any(|l| l.contains("NO GUEST")),
+            "{lines:#?}"
+        );
+    }
+
+    /// The auto-open line only appears when an open was actually attempted and
+    /// failed — never when the bot deliberately kept the link to itself.
+    #[test]
+    fn the_auto_open_warning_only_speaks_when_an_open_was_tried() {
+        let outcome = NotetakerOutcome::Joined;
+        let warning = "could not auto-open";
+
+        let mut bot = summary(CaptureSource::MeetingBot, &outcome, None);
+        bot.shell_open = None;
+        assert!(
+            !bot.render().iter().any(|l| l.contains(warning)),
+            "no open was attempted, so there is nothing to warn about"
+        );
+
+        let mut ok = summary(CaptureSource::Loopback, &outcome, None);
+        ok.shell_open = Some(true);
+        assert!(!ok.render().iter().any(|l| l.contains(warning)));
+
+        let mut failed = summary(CaptureSource::Loopback, &outcome, None);
+        failed.shell_open = Some(false);
+        assert!(failed.render().iter().any(|l| l.contains(warning)));
+    }
+
+    /// Not-attempted is a different thing from attempted-and-failed: the
+    /// operator disabling the bot, or joining a Zoom call, is not an incident.
+    #[test]
+    fn a_platform_without_a_bot_is_not_reported_as_a_failure() {
+        let outcome = NotetakerOutcome::NotAttempted {
+            why: "no joined notetaker for Zoom yet".into(),
+        };
+        let note = "no joined notetaker for Zoom yet — capturing this machine's audio instead; \
+                    no participant joins the meeting.";
+        let lines = summary(CaptureSource::Loopback, &outcome, Some(note)).render();
+        assert!(lines[0].starts_with("Notetaker started"), "{:?}", lines[0]);
+        assert!(!lines[0].contains("NO GUEST"), "{:?}", lines[0]);
+        // The existing honesty line still lands, and still lands last.
+        assert!(
+            lines.last().unwrap().contains("no participant joins the meeting"),
+            "{lines:#?}"
+        );
+    }
+
+    /// `meta.json` written by an older build has no outcome. Say so rather
+    /// than let the absence read as "a guest joined".
+    #[test]
+    fn a_meeting_without_a_recorded_outcome_says_so() {
+        let line = format_notetaker_line(&meta_fixture(None));
+        assert!(line.contains("not recorded"), "{line}");
+        assert!(!line.contains("NO GUEST"), "{line}");
+
+        let joined = format_notetaker_line(&meta_fixture(Some(NotetakerOutcome::Joined)));
+        assert!(joined.contains("Notetaker"), "{joined}");
+    }
+
+    fn meta_fixture(notetaker: Option<NotetakerOutcome>) -> MeetingMeta {
+        MeetingMeta {
+            id: "teams-1".into(),
+            url: "https://teams.microsoft.com/meet/1".into(),
+            platform: xai_grok_meetings::MeetingPlatform::Teams,
+            kind: xai_grok_meetings::MeetingKind::Meeting,
+            capture_source: CaptureSource::Loopback,
+            status: MeetingStatus::Recording,
+            started_at: chrono::Utc::now(),
+            stopped_at: None,
+            final_segments: 0,
+            knowledge_dir: None,
+            title: None,
+            workspace_summary_path: None,
+            notetaker,
+        }
     }
 
     #[test]

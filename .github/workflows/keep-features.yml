@@ -41,6 +41,12 @@ jobs:
           cargo test -p xai-grok-pager --lib views::game_mode -- --test-threads=2
           cargo test -p xai-grok-pager --lib disk_cmd -- --test-threads=2
 
+      - name: Meeting notetaker (join URL, guest bot, CDP)
+        run: |
+          cargo test -p xai-grok-meetings --lib -- --test-threads=2
+          cargo test -p xai-grok-meeting-bot --lib -- --test-threads=2
+          cargo test -p xai-grok-cdp --lib -- --test-threads=2
+
       - name: Agent reporting (ADL/FRL + tools schema)
         run: |
           cargo test -p xai-grok-developer-log --lib -- --test-threads=2

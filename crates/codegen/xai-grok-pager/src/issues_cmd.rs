@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use xai_grok_developer_log::{
     DIR_ENV, DeveloperLogStore, Environment, ErrorClass, ExportOptions, GhCli, IncidentStatus,
-    ListFilter, ReportRequest, ReporterKind, Severity, Source, SyncOptions, clear_configured_dir,
-    config_file_path, export_pack, load_developer_log_file_config, resolve_repo, root_resolution_note,
-    set_configured_dir, sync_direction, sync_incidents,
+    ListFilter, ReportRequest, ReporterKind, Severity, Source, SyncError, SyncOptions,
+    clear_configured_dir, config_file_path, export_pack, load_developer_log_file_config,
+    resolve_repo, root_resolution_note, set_configured_dir, sync_direction, sync_incidents,
 };
 
 #[derive(Debug, clap::Args, Clone)]
@@ -409,17 +409,76 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             let repo = resolve_repo(repo.as_deref(), &cfg)?;
             let direction = sync_direction(push, pull, both);
             let gh = GhCli::new();
-            let report = sync_incidents(
-                &store,
-                &gh,
-                &SyncOptions {
-                    repo,
-                    direction,
-                },
-            )?;
+            let report = match sync_incidents(&store, &gh, &SyncOptions { repo, direction }) {
+                Ok(r) => r,
+                Err(e) if is_repo_capability_error(&e) => {
+                    eprintln!("{e}");
+                    export_fallback_bundle(&store);
+                    bail!("GitHub sync refused; incidents exported locally instead");
+                }
+                Err(e) => return Err(e.into()),
+            };
             println!("{}", report.human_summary("incidents"));
+            if report.actionable_skips() > 0 {
+                // Previously this printed a cheerful summary and exited 0, so a
+                // scripted or CI sync that pushed nothing looked like success.
+                bail!(
+                    "{} incident(s) could not be pushed; see the skip list above",
+                    report.actionable_skips()
+                );
+            }
             Ok(())
         }
+    }
+}
+
+
+/// A GitHub refusal must never strand the log.
+///
+/// The three capability errors mean the remote cannot accept issues at all --
+/// Issues switched off, read-only access, an archived repo. In every case the
+/// incidents are still on disk, so write the maintainer bundle and print where
+/// it is: an operator with a path can paste, attach or mail it, and a CI run
+/// still fails loudly because we exit nonzero either way.
+pub(crate) fn is_repo_capability_error(err: &SyncError) -> bool {
+    matches!(
+        err,
+        SyncError::IssuesDisabled { .. } | SyncError::NoPushAccess { .. } | SyncError::RepoArchived { .. }
+    )
+}
+
+/// Write the maintainer pack and say where it landed.
+///
+/// Reported, never fatal: this runs on an error path, and an export failure
+/// must not hide the GitHub refusal that caused it.
+fn export_fallback_bundle(store: &DeveloperLogStore) {
+    let filter = ListFilter {
+        include_closed: true,
+        ..Default::default()
+    };
+    match export_pack(
+        store,
+        ExportOptions {
+            filter,
+            out_dir: None,
+        },
+    ) {
+        Ok(result) => {
+            eprintln!();
+            eprintln!(
+                "Exported {} incident(s) locally instead:",
+                result.incident_count
+            );
+            eprintln!("  summary:  {}", result.summary_path.display());
+            eprintln!("  ndjson:   {}", result.ndjson_path.display());
+            eprintln!("  manifest: {}", result.manifest_path.display());
+            eprintln!(
+                "Paste summary.md into an issue by hand if you need to. Label it \
+                 `type:incident` so the next successful sync adopts it instead of \
+                 filing a duplicate."
+            );
+        }
+        Err(e) => eprintln!("could not write the local export bundle either: {e}"),
     }
 }
 

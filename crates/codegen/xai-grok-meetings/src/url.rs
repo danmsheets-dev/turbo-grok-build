@@ -168,10 +168,16 @@ pub fn is_joinable_platform(platform: MeetingPlatform) -> bool {
 }
 
 /// First https URL token in `text` (stops at whitespace).
+///
+/// Walks *character* starts, not byte offsets: this runs on every prompt the
+/// operator submits (`detect_join_request`), and slicing at a byte index inside
+/// a multi-byte character panics — which `panic = "abort"` turns into a hard
+/// process death for any paste containing a smart quote or an emoji.
 pub fn first_https_url(text: &str) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 8 <= bytes.len() {
+    for (i, _) in text.char_indices() {
+        if i + 8 > text.len() {
+            break;
+        }
         let rest = &text[i..];
         let lower_prefix = rest.get(..8).unwrap_or("");
         if lower_prefix.eq_ignore_ascii_case("https://") {
@@ -183,7 +189,6 @@ pub fn first_https_url(text: &str) -> Option<&str> {
                 return Some(url);
             }
         }
-        i += 1;
     }
     None
 }
@@ -215,6 +220,115 @@ pub fn redact_join_secrets(url: &str) -> String {
         }
     }
     parsed.to_string()
+}
+
+/// Env kill-switch for [`teams_web_join_url`]. `0`/`false`/`off`/`no` disables
+/// the rewrite, and the notetaker navigates exactly what the operator pasted.
+pub const TEAMS_WEB_ENV: &str = "GROK_MEETING_TEAMS_WEB";
+
+/// True unless the operator turned the web-join rewrite off.
+pub fn teams_web_rewrite_enabled() -> bool {
+    match std::env::var(TEAMS_WEB_ENV) {
+        Ok(s) => !teams_web_env_disables(&s),
+        Err(_) => true,
+    }
+}
+
+/// Shared by [`teams_web_rewrite_enabled`] and its test, so the accepted
+/// spellings cannot drift apart.
+fn teams_web_env_disables(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// Query parameters that keep a Teams join on the anonymous **web** client.
+///
+/// Teams' own redirect to `/dl/launcher/launcher.html` carries
+/// `msLaunch=true&directDl=true&suppressPrompt=true`, which fires the
+/// `ms-teams:` protocol immediately and never renders "Continue on this
+/// browser" - leaving the guest notetaker with no DOM to drive. Negating them
+/// asks for the web client instead.
+///
+/// These names come from an observed redirect chain, not from documentation.
+/// This is one layer of a layered defence, never the fix on its own.
+const WEB_JOIN_PARAMS: &[(&str, &str)] = &[
+    ("anon", "true"),
+    ("msLaunch", "false"),
+    ("directDl", "false"),
+    ("enableMobilePage", "false"),
+    ("suppressPrompt", "false"),
+];
+
+/// Rewrite a Teams join URL to ask for the anonymous web client.
+///
+/// **Query-only.** Scheme, host, port and path are preserved: `join_urls_match`
+/// normalises to host+path and drops the query, so a path change would break
+/// Graph subject lookup. Every original parameter is carried through, including
+/// the `p` passcode, without which the link does not join at all.
+///
+/// Returns `None` for anything not recognised, so the caller navigates the
+/// operator's URL unchanged. Never call this from [`parse`]: the raw URL is what
+/// the meeting store, Graph, the watcher and the join summary all use.
+pub fn teams_web_join_url(u: &MeetingUrl) -> Option<String> {
+    if u.platform != MeetingPlatform::Teams || u.kind != MeetingKind::Meeting {
+        return None;
+    }
+    let parsed = url::Url::parse(&u.raw).ok()?;
+    // A hash-routed link (`/_#/l/meetup-join/...`) keeps the meeting id in the
+    // fragment, which the server never sees, so a query parameter cannot steer
+    // it. Leave it alone rather than pretend.
+    if parsed.fragment().is_some() {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let path = parsed.path();
+    let recognised = if host_is(&host, "teams.microsoft.com") || host_is(&host, "teams.office.com") {
+        path.starts_with("/l/meetup-join/") || is_short_meet_path(path)
+    } else if host_is(&host, "teams.live.com") {
+        // Consumer Teams, in its own arm so it can be disabled separately.
+        is_short_meet_path(path)
+    } else {
+        false
+    };
+    if !recognised {
+        return None;
+    }
+
+    let carried: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| {
+            !WEB_JOIN_PARAMS
+                .iter()
+                .any(|(name, _)| k.eq_ignore_ascii_case(name))
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    let mut out = parsed.clone();
+    out.set_query(None);
+    {
+        let mut pairs = out.query_pairs_mut();
+        // Operator parameters first, so the `p` passcode can never be crowded
+        // out by a rewrite that grows later.
+        for (k, v) in &carried {
+            pairs.append_pair(k, v);
+        }
+        for (k, v) in WEB_JOIN_PARAMS {
+            pairs.append_pair(k, v);
+        }
+    }
+    Some(out.to_string())
+}
+
+/// `/meet/<id>` - the short join link Teams hands out today.
+fn is_short_meet_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/meet/") else {
+        return false;
+    };
+    let id = rest.trim_end_matches('/');
+    !id.is_empty() && !id.contains('/')
 }
 
 fn has_join_intent(text: &str) -> bool {
@@ -343,6 +457,35 @@ mod tests {
         assert_eq!(u.kind, MeetingKind::Meeting);
     }
 
+    /// `first_https_url` walks byte indices. Slicing on one that lands inside a
+    /// multi-byte character panics, and `panic = "abort"` in `[profile.dev]` and
+    /// `[profile.release]` makes that a hard process death. This runs on every
+    /// prompt submit via `detect_join_request`, so one smart quote is enough.
+    #[test]
+    fn non_ascii_text_does_not_panic_the_scanner() {
+        // No URL anywhere; the crash needs only a multi-byte char past byte 8.
+        assert_eq!(first_https_url("the operator said \u{201c}it broke\u{201d} again"), None);
+        assert_eq!(first_https_url("\u{1f600}\u{1f600}\u{1f600}\u{1f600}"), None);
+        assert_eq!(first_https_url("caf\u{e9} \u{2014} a long enough line"), None);
+        // A real URL is still found when it follows multi-byte text.
+        assert_eq!(
+            first_https_url("notes \u{2014} https://teams.microsoft.com/meet/1?p=x here"),
+            Some("https://teams.microsoft.com/meet/1?p=x")
+        );
+        // A multi-byte char is not a token terminator, so it stays in the match;
+        // what matters here is that the token is not split mid-character.
+        assert_eq!(
+            first_https_url("\u{201c}https://example.com/a\u{201d}"),
+            Some("https://example.com/a\u{201d}")
+        );
+    }
+
+    #[test]
+    fn detect_join_request_survives_a_non_ascii_paste() {
+        // The pager calls this on every ordinary prompt submit.
+        assert!(detect_join_request("here\u{2019}s the plan \u{2014} ship it").is_none());
+    }
+
     #[test]
     fn detect_join_bare_teams_url() {
         let (url, title) =
@@ -388,6 +531,131 @@ mod tests {
             .is_none(),
             "substring 'on meeting' in ticket text must not start capture"
         );
+    }
+
+    /// The rewrite must never leak into `parse`. `parse`'s output feeds the
+    /// meeting store, Graph lookup, the watcher, the pager's injected
+    /// instruction and the operator-facing join summary; only the notetaker's
+    /// `Page.navigate` may ever see a rewritten URL.
+    ///
+    /// Fixture-specific by design: `parse` returns `Url::to_string()`, which
+    /// normalises. Asserting equality on two known-normalised fixtures catches a
+    /// rewrite creeping into `parse` without inviting a maintainer to relax a
+    /// general invariant that was never true.
+    #[test]
+    fn parse_does_not_rewrite_teams_urls() {
+        for raw in [
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc",
+            "https://teams.microsoft.com/meet/2907709513066?p=abc",
+        ] {
+            assert_eq!(parse(raw).unwrap().raw, raw, "parse must not rewrite {raw}");
+        }
+    }
+
+    #[test]
+    fn teams_web_rewrite_preserves_scheme_host_port_path_and_passcode() {
+        let u = parse("https://teams.microsoft.com/meet/2907709513066?p=s3cret").unwrap();
+        let out = teams_web_join_url(&u).expect("short meet link is rewritable");
+        let before = url::Url::parse(&u.raw).unwrap();
+        let after = url::Url::parse(&out).unwrap();
+        assert_eq!(after.scheme(), before.scheme());
+        assert_eq!(after.host_str(), before.host_str());
+        assert_eq!(after.port(), before.port());
+        assert_eq!(after.path(), before.path(), "path is load-bearing for Graph");
+        // The passcode survives, or the link does not join at all.
+        assert_eq!(
+            after
+                .query_pairs()
+                .find(|(k, _)| k == "p")
+                .map(|(_, v)| v.into_owned()),
+            Some("s3cret".to_string())
+        );
+        for (k, v) in WEB_JOIN_PARAMS {
+            assert!(
+                after.query_pairs().any(|(ak, av)| ak == *k && av == *v),
+                "missing {k}={v} in {out}"
+            );
+        }
+        // meetup-join links rewrite too, keeping their escaped path intact.
+        let m = parse("https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc?p=x").unwrap();
+        let mo = teams_web_join_url(&m).expect("meetup-join is rewritable");
+        assert!(mo.contains("/l/meetup-join/19%3ameeting_abc"), "{mo}");
+        assert!(mo.contains("p=x"), "{mo}");
+    }
+
+    /// An operator-supplied `msLaunch=true` is exactly the bug, so it loses.
+    /// Everything else the operator wrote is carried through untouched.
+    #[test]
+    fn teams_web_rewrite_overrides_launcher_params_and_keeps_the_rest() {
+        let u =
+            parse("https://teams.microsoft.com/meet/123?p=pw&msLaunch=true&directDl=true&keep=me")
+                .unwrap();
+        let out = teams_web_join_url(&u).unwrap();
+        let after = url::Url::parse(&out).unwrap();
+        let pairs: Vec<(String, String)> = after
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert!(pairs.contains(&("keep".into(), "me".into())), "{out}");
+        assert!(pairs.contains(&("p".into(), "pw".into())), "{out}");
+        assert_eq!(
+            pairs.iter().filter(|(k, _)| k == "msLaunch").count(),
+            1,
+            "no duplicate msLaunch: {out}"
+        );
+        assert!(pairs.contains(&("msLaunch".into(), "false".into())), "{out}");
+        assert!(pairs.contains(&("directDl".into(), "false".into())), "{out}");
+    }
+
+    #[test]
+    fn teams_web_rewrite_returns_none_for_non_teams_and_unknown_shapes() {
+        for raw in [
+            "https://us02web.zoom.us/j/123456789?pwd=x",
+            "https://meet.google.com/abc-defg-hij",
+            "https://webex.com/meet/x",
+            // Hash-routed: the meeting id lives in the fragment, which the
+            // server never sees, so a query parameter cannot steer it.
+            "https://teams.microsoft.com/_#/l/meetup-join/19%3ameeting_abc",
+            // Webinars and town halls are a different join flow.
+            "https://teams.microsoft.com/l/webinar/19%3ameeting_abc",
+            // Shapes we do not recognise.
+            "https://teams.microsoft.com/some/other/path",
+            "https://teams.microsoft.com/meet/",
+        ] {
+            let u = parse(raw).unwrap();
+            assert_eq!(teams_web_join_url(&u), None, "must not rewrite {raw}");
+        }
+    }
+
+    /// `parse` is the security boundary and the rewrite sits behind it: a
+    /// `MeetingUrl` cannot be built for a hostile authority, so the rewrite can
+    /// never be reached with one.
+    #[test]
+    fn teams_web_rewrite_still_rejects_hostile_authorities() {
+        for hostile in [
+            "http://teams.microsoft.com/meet/1",
+            "https://teams.microsoft.com&calc.exe/meet/1",
+            "https://user:pw@teams.microsoft.com/meet/1",
+            "msteams:join",
+        ] {
+            assert!(parse(hostile).is_err(), "parse must reject {hostile}");
+        }
+        // A lookalike host parses, but is not Teams, so it is never rewritten.
+        let evil = parse("https://evil.example/teams.microsoft.com/meet/1").unwrap();
+        assert_eq!(evil.platform, MeetingPlatform::Other);
+        assert_eq!(teams_web_join_url(&evil), None);
+    }
+
+    #[test]
+    fn teams_web_rewrite_is_kill_switchable() {
+        assert_eq!(TEAMS_WEB_ENV, "GROK_MEETING_TEAMS_WEB");
+        // The env var is process-global, so assert the parser, not the process.
+        for off in ["0", "false", "OFF", "no", " 0 "] {
+            assert!(teams_web_env_disables(off), "{off} must read as disabled");
+        }
+        for on in ["1", "true", "", "yes"] {
+            assert!(!teams_web_env_disables(on), "{on} must leave it enabled");
+        }
     }
 
     #[test]

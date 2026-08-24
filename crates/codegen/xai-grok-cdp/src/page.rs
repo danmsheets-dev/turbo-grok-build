@@ -25,6 +25,7 @@ impl Browser {
     pub async fn launch(opts: &LaunchOptions) -> Result<Self> {
         let process = launch(opts).await?;
         let conn = Connection::connect(&process.ws_url).await?;
+        deny_downloads(&conn).await;
         Ok(Self {
             conn,
             _process: process,
@@ -82,6 +83,43 @@ impl Browser {
         self.conn.close().await;
     }
 }
+
+/// Refuse downloads for the whole browser.
+///
+/// A meeting page has no business downloading anything, and Teams' desktop-app
+/// launcher tries: `directDl=true` pulls an installer, which on Windows can
+/// surface as a file-manager window the operator never asked for.
+///
+/// Best-effort by design. This crate pins no DevTools protocol version, so a
+/// future rename must degrade to "downloads are allowed", never to "the
+/// notetaker cannot start".
+async fn deny_downloads(conn: &Connection) {
+    let params = json!({ "behavior": "deny", "eventsEnabled": true });
+    if let Err(e) = conn.send("Browser.setDownloadBehavior", params, None).await {
+        tracing::debug!(error = %e, "browser download policy not applied");
+    }
+}
+
+/// A navigation the page performed or attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Navigation {
+    /// CDP method that reported it, e.g. `Page.frameNavigated`.
+    pub method: String,
+    /// Target URL, when the event carried one.
+    pub url: String,
+}
+
+/// CDP events that describe a navigation.
+///
+/// `frameRequestedNavigation` is marked experimental upstream and
+/// `downloadWillBegin` only fires once a download policy sets `eventsEnabled`,
+/// so both are observed opportunistically and neither may carry control flow.
+const NAVIGATION_METHODS: &[&str] = &[
+    "Page.frameNavigated",
+    "Page.navigatedWithinDocument",
+    "Page.frameRequestedNavigation",
+    "Page.downloadWillBegin",
+];
 
 /// One tab.
 #[derive(Debug, Clone)]
@@ -165,6 +203,19 @@ impl Page {
     /// Subscribe to every event for this page's session.
     pub fn events(&self) -> broadcast::Receiver<CdpEvent> {
         self.conn.subscribe()
+    }
+
+    /// Subscribe to this page's navigations.
+    ///
+    /// `Page.enable` is already sent in [`Browser::new_page`], so the redirect
+    /// chain is *already* flowing through the connection and being discarded.
+    /// This just stops throwing it away: reconstructing a failed join from the
+    /// browser profile's History file afterwards is not a diagnostic story.
+    pub fn navigation_stream(&self) -> NavigationStream {
+        NavigationStream {
+            rx: self.conn.subscribe(),
+            session_id: self.session_id.clone(),
+        }
     }
 
     /// Subscribe to payloads pushed through one exposed binding.
@@ -255,6 +306,53 @@ impl BindingStream {
     }
 }
 
+/// Navigations reported for one page's session.
+#[derive(Debug)]
+pub struct NavigationStream {
+    rx: broadcast::Receiver<CdpEvent>,
+    session_id: String,
+}
+
+impl NavigationStream {
+    /// Await the next navigation. `None` once the connection closes.
+    ///
+    /// Lag is skipped rather than fatal, exactly as [`BindingStream`] does: a
+    /// second subscriber must never be able to starve the audio-critical
+    /// binding stream, and a missed log line is not worth ending the stream.
+    pub async fn next(&mut self) -> Option<Navigation> {
+        loop {
+            match self.rx.recv().await {
+                Ok(ev) => {
+                    if !NAVIGATION_METHODS.contains(&ev.method.as_str()) {
+                        continue;
+                    }
+                    if ev.session_id.as_deref() != Some(self.session_id.as_str()) {
+                        continue;
+                    }
+                    return Some(Navigation {
+                        method: ev.method,
+                        url: navigation_url(&ev.params),
+                    });
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!(skipped = n, "cdp navigation stream lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
+/// Pull the URL out of whichever navigation event shape this is.
+fn navigation_url(params: &Value) -> String {
+    for pointer in ["/frame/url", "/url"] {
+        if let Some(u) = params.pointer(pointer).and_then(Value::as_str) {
+            return u.to_string();
+        }
+    }
+    String::new()
+}
+
 /// Render a `Runtime.exceptionDetails` object as one line.
 fn describe_exception(details: &Value) -> String {
     let desc = details
@@ -328,6 +426,58 @@ mod tests {
             session_id: Some("S1".into()),
         });
         assert_eq!(stream.next().await.as_deref(), Some("{\"text\":\"hi\"}"));
+    }
+
+    #[tokio::test]
+    async fn navigation_stream_filters_to_page_events_for_this_session() {
+        let (tx, rx) = broadcast::channel(8);
+        let mut nav = NavigationStream {
+            rx,
+            session_id: "S1".into(),
+        };
+        // Not a navigation.
+        let _ = tx.send(CdpEvent {
+            method: "Runtime.bindingCalled".into(),
+            params: json!({ "name": "x" }),
+            session_id: Some("S1".into()),
+        });
+        // Right method, wrong session.
+        let _ = tx.send(CdpEvent {
+            method: "Page.frameNavigated".into(),
+            params: json!({ "frame": { "url": "https://other/" } }),
+            session_id: Some("S2".into()),
+        });
+        // The real one, in the nested `frame` shape.
+        let _ = tx.send(CdpEvent {
+            method: "Page.frameNavigated".into(),
+            params: json!({ "frame": { "url": "https://teams.microsoft.com/dl/launcher/launcher.html" } }),
+            session_id: Some("S1".into()),
+        });
+        assert_eq!(
+            nav.next().await,
+            Some(Navigation {
+                method: "Page.frameNavigated".into(),
+                url: "https://teams.microsoft.com/dl/launcher/launcher.html".into(),
+            })
+        );
+    }
+
+    /// The four navigation events do not agree on where the URL lives.
+    #[test]
+    fn navigation_url_reads_both_event_shapes() {
+        assert_eq!(
+            navigation_url(&json!({ "frame": { "url": "https://a/" } })),
+            "https://a/"
+        );
+        assert_eq!(navigation_url(&json!({ "url": "https://b/" })), "https://b/");
+        assert_eq!(navigation_url(&json!({})), "");
+    }
+
+    /// A download is the `directDl=true` half of the Teams launcher hop.
+    #[test]
+    fn download_events_count_as_navigations() {
+        assert!(NAVIGATION_METHODS.contains(&"Page.downloadWillBegin"));
+        assert!(NAVIGATION_METHODS.contains(&"Page.frameNavigated"));
     }
 
     #[tokio::test]

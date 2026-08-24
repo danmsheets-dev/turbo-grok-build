@@ -271,6 +271,120 @@
     globalThis.webkitRTCPeerConnection = Wrapped;
   }
 
+  // ------------------------------------------------------- protocol handoff
+
+  // The launcher page hands the meeting to the desktop Teams app over a custom
+  // scheme. For a throwaway notetaker profile that is never what we want: it
+  // either does nothing, or wakes the operator's signed-in desktop client --
+  // a different identity than the guest we are trying to seat -- and on
+  // Windows a failed hop can surface as a stray Explorer window.
+  //
+  // Swallow exactly those three schemes and report them. Everything else,
+  // including all same-origin navigation, is untouched: a loose check would
+  // break a page as complex as Teams.
+  //
+  // What actually holds, honestly: `window.open` is replaceable, and the
+  // capture-phase anchor click below runs before Teams' own handlers. The
+  // `Location` patches are attempted but the HTML spec marks that interface
+  // [Unforgeable], so on current Chromium they are expected to fail -- they are
+  // here in case that changes, not because they are load-bearing. A navigation
+  // the browser starts with no JS involved bypasses all of this, which is why
+  // this is one layer of several and not the fix.
+  const HANDOFF_SCHEMES = ['ms-teams:', 'msteams:', 'teams:'];
+
+  function isHandoff(url) {
+    if (typeof url !== 'string') return false;
+    const s = url.trim().toLowerCase();
+    return HANDOFF_SCHEMES.some((p) => s.startsWith(p));
+  }
+
+  function reportBlocked(url, how) {
+    const scheme = String(url).split(':')[0];
+    report({ type: 'protocol-blocked', scheme, how });
+  }
+
+  (() => {
+    try {
+      const nativeOpen = globalThis.open;
+      if (typeof nativeOpen === 'function') {
+        globalThis.open = function (url, ...rest) {
+          if (isHandoff(url)) {
+            reportBlocked(url, 'window.open');
+            return null;
+          }
+          return nativeOpen.call(this, url, ...rest);
+        };
+      }
+    } catch (e) {
+      reportError('guard-open', e);
+    }
+
+    for (const method of ['assign', 'replace']) {
+      try {
+        const native = location[method];
+        if (typeof native !== 'function') continue;
+        location[method] = function (url) {
+          if (isHandoff(url)) {
+            reportBlocked(url, 'location.' + method);
+            return undefined;
+          }
+          return native.call(location, url);
+        };
+      } catch {
+        // Expected: [Unforgeable] under 'use strict'. Silent, or every document
+        // load would warn twice about a layer that was never load-bearing.
+      }
+    }
+
+    // `location.href` is [Unforgeable] in the HTML spec, so redefining it
+    // throws in Chromium. Try anyway -- if it ever becomes configurable we get
+    // one more layer -- but never let the failure escape.
+    try {
+      const desc = Object.getOwnPropertyDescriptor(location, 'href');
+      if (desc && desc.configurable && desc.set) {
+        const nativeSet = desc.set;
+        Object.defineProperty(location, 'href', {
+          configurable: true,
+          get: desc.get,
+          set(url) {
+            if (isHandoff(url)) {
+              reportBlocked(url, 'location.href');
+              return;
+            }
+            nativeSet.call(location, url);
+          },
+        });
+      }
+    } catch {
+      /* expected on current Chromium; the anchor guard below still applies */
+    }
+
+    // Capture phase, so this runs before Teams' own handlers.
+    try {
+      document.addEventListener(
+        'click',
+        (ev) => {
+          try {
+            const target = ev.target;
+            const anchor =
+              target && typeof target.closest === 'function' ? target.closest('a[href]') : null;
+            if (!anchor) return;
+            const href = anchor.getAttribute('href');
+            if (!isHandoff(href)) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            reportBlocked(href, 'anchor');
+          } catch {
+            /* never throw into Teams' event dispatch */
+          }
+        },
+        /* useCapture */ true,
+      );
+    } catch (e) {
+      reportError('guard-click', e);
+    }
+  })();
+
   // ------------------------------------------------------------------ DOM side
 
   function q(list) {
@@ -315,7 +429,19 @@
     if (pageHasText(SEL.captchaText)) return 'captcha';
     if (pageHasText(SEL.signInRequiredText)) return 'sign-in-required';
     if (q(SEL.nameInput) || q(SEL.joinButton)) return 'prejoin';
+    // Teams' desktop-app launcher. A path check, not a copy check: this is the
+    // hop that fires ms-teams: and never renders a web join screen, and it is
+    // also how we tell whether the web-join URL rewrite actually took effect.
+    if (isLauncherPage()) return 'launcher';
     return 'loading';
+  }
+
+  function isLauncherPage() {
+    try {
+      return location.pathname.indexOf('/dl/launcher/') !== -1;
+    } catch {
+      return false;
+    }
   }
 
   const seenChat = new Set();
@@ -376,12 +502,37 @@
   }
 
   let lastState = '';
+  // The launcher redirects twice inside about a second. Rust polls at 500 ms
+  // and fires the continue-on-web click exactly once, which loses that race
+  // against a DOM that is replaced underneath it. The page is already awake
+  // every pollMs, so retry from here -- bounded, because a page that never
+  // offers the button must not be clicked at forever.
+  const CONTINUE_MAX_ATTEMPTS = 10;
+  let continueAttempts = 0;
+
+  function retryContinueInBrowser() {
+    if (continueAttempts >= CONTINUE_MAX_ATTEMPTS) return;
+    continueAttempts += 1;
+    try {
+      if (globalThis.__turbo.continueInBrowser()) {
+        report({ type: 'notice', message: 'clicked continue-on-web' });
+        // Force the next poll to re-report, so Rust sees the screen change.
+        lastState = '';
+      }
+    } catch (e) {
+      reportError('continue-retry', e);
+    }
+  }
+
   function poll() {
     try {
       const state = detectState();
       if (state !== lastState) {
         lastState = state;
         report({ type: 'state', state });
+      }
+      if (state === 'loading' || state === 'launcher') {
+        retryContinueInBrowser();
       }
       if (state === 'admitted') {
         scrapeChat();

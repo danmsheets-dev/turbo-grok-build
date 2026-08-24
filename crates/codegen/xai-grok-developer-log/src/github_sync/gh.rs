@@ -46,7 +46,8 @@ impl GithubTransport for GhCli {
             "repo".into(),
             "view".into(),
             "--json".into(),
-            "isPrivate,nameWithOwner,url".into(),
+            "isPrivate,nameWithOwner,url,hasIssuesEnabled,viewerPermission,isFork,isArchived"
+                .into(),
             "--".into(),
             repo.to_string(),
         ];
@@ -60,12 +61,30 @@ impl GithubTransport for GhCli {
             is_private: bool,
             name_with_owner: String,
             url: String,
+            // `#[serde(default)]` on each capability field: an older `gh` that
+            // does not know one of these must not turn a working sync into a
+            // parse error. Absent reads as "no reason to refuse".
+            #[serde(default = "yes")]
+            has_issues_enabled: bool,
+            #[serde(default)]
+            viewer_permission: Option<String>,
+            #[serde(default)]
+            is_fork: bool,
+            #[serde(default)]
+            is_archived: bool,
+        }
+        fn yes() -> bool {
+            true
         }
         let raw: Raw = serde_json::from_slice(&out.stdout)?;
         Ok(RepoMeta {
             name_with_owner: raw.name_with_owner,
             is_private: raw.is_private,
             url: raw.url,
+            has_issues_enabled: raw.has_issues_enabled,
+            viewer_permission: raw.viewer_permission.filter(|p| !p.trim().is_empty()),
+            is_fork: raw.is_fork,
+            is_archived: raw.is_archived,
         })
     }
 

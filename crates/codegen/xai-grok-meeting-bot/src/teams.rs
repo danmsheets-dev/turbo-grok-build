@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use xai_grok_cdp::{Browser, LaunchOptions, Page};
+use xai_grok_cdp::{Browser, LaunchOptions, NavigationStream, Page};
 
 use crate::audio::{self, AudioServer};
 use crate::error::{BotError, Result};
@@ -33,6 +33,13 @@ const JOIN_SETTLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Poll interval for Rust-side waits.
 const POLL: Duration = Duration::from_millis(500);
+
+/// How long Teams' desktop-app launcher page may persist before we call it.
+///
+/// On a healthy join it flashes past in about a second on the way to pre-join.
+/// Parked there, it means this URL is routing the notetaker at the installed
+/// desktop client, and no amount of further waiting produces a join screen.
+const LAUNCHER_GRACE: Duration = Duration::from_secs(20);
 
 /// How the bot should join.
 #[derive(Debug, Clone)]
@@ -120,6 +127,7 @@ pub struct TeamsBot {
     _browser: Browser,
     _pump: JoinHandle<()>,
     _watchdog: JoinHandle<()>,
+    _navlog: JoinHandle<()>,
 }
 
 impl std::fmt::Debug for TeamsBot {
@@ -166,6 +174,9 @@ impl TeamsBot {
         page.add_init_script(&build_init_script(&cfg, audio.url()))
             .await?;
 
+        // Subscribe before navigating, or the first hops are already gone.
+        let navlog = log_navigations(page.navigation_stream());
+
         let mut binding = page.binding_stream(BINDING);
         let pump_state = state_tx.clone();
         let pump = tokio::spawn(async move {
@@ -198,6 +209,19 @@ impl TeamsBot {
                     TapEvent::Audio { state } => {
                         tracing::debug!(state = %state, "meeting audio tap");
                     }
+                    TapEvent::Blocked { scheme, how } => {
+                        // Worth a warning, not a failure: the guard working is
+                        // the good outcome. It is also the single clearest
+                        // signal that Teams tried the desktop handoff.
+                        tracing::warn!(
+                            scheme = %scheme,
+                            how = %how,
+                            "notetaker refused a Teams desktop-app protocol handoff"
+                        );
+                    }
+                    TapEvent::Notice { message } => {
+                        tracing::debug!(message = %message, "meeting tap");
+                    }
                     TapEvent::Error { step, message } => {
                         tracing::warn!(step = %step, error = %message, "meeting tap error");
                     }
@@ -209,6 +233,7 @@ impl TeamsBot {
 
         let bot_result = drive_join(&page, &cfg, &state_tx).await;
         if let Err(e) = bot_result {
+            navlog.abort();
             pump.abort();
             audio.shutdown();
             browser.close().await;
@@ -247,6 +272,7 @@ impl TeamsBot {
             _browser: browser,
             _pump: pump,
             _watchdog: watchdog,
+            _navlog: navlog,
         })
     }
 
@@ -337,8 +363,28 @@ impl TeamsBot {
         self.audio.shutdown();
         self._pump.abort();
         self._watchdog.abort();
+        self._navlog.abort();
         self._browser.close().await;
     }
+}
+
+/// Log every hop the notetaker's page takes.
+///
+/// The field diagnosis of a failed join was reconstructed by hand from the
+/// browser profile's History file. These hops are already flowing through the
+/// CDP connection, so the same picture costs one log line each.
+///
+/// Query strings are dropped wholesale: a Teams join URL carries the meeting
+/// passcode in `p`, and a log line is the wrong place for it.
+fn log_navigations(mut nav: NavigationStream) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut hop: u32 = 0;
+        while let Some(n) = nav.next().await {
+            hop += 1;
+            let path = n.url.split(['?', '#']).next().unwrap_or("");
+            tracing::info!(hop, method = %n.method, url = %path, "notetaker navigation");
+        }
+    })
 }
 
 /// Walk the pre-join screens and click Join.
@@ -363,23 +409,12 @@ async fn drive_join(
     let _ = page.evaluate("window.__turbo.continueInBrowser()").await;
 
     // Reaching a *known* screen. Terminal refusals short-circuit here so the
-    // caller falls back instead of waiting out the timeout.
-    let reached = page
-        .wait_for_expression(
-            "['prejoin','lobby','admitted','denied','captcha','sign-in-required']\
-             .includes(window.__turbo.state())",
-            PREJOIN_TIMEOUT,
-            POLL,
-        )
-        .await?;
-    if !reached {
-        return Err(BotError::JoinTimeout {
-            secs: PREJOIN_TIMEOUT.as_secs(),
-        });
-    }
+    // caller falls back instead of waiting out the timeout, and a page parked
+    // on the desktop-app launcher is named rather than reported as a generic
+    // timeout a minute later.
+    let state = wait_for_known_screen(page).await?;
     check_terminal(page, state_tx).await?;
 
-    let state = read_state(page).await;
     if state == BotState::Prejoin {
         let name = serde_json::to_string(&cfg.display_name)
             .unwrap_or_else(|_| "\"Turbo (Notetaker)\"".to_string());
@@ -421,6 +456,49 @@ async fn drive_join(
     let final_state = read_state(page).await;
     let _ = state_tx.send(final_state);
     Ok(())
+}
+
+/// Wait for a screen we recognize, naming the desktop-app launcher hop.
+///
+/// A JS state-list expression cannot say "this state is conclusive once it has
+/// persisted", and the launcher page is exactly that: transient on a healthy
+/// join, decisive when it sticks. Polling from Rust keeps the distinction, so
+/// the operator gets "Teams app launcher" in twenty seconds instead of "join
+/// timed out" in sixty.
+async fn wait_for_known_screen(page: &Page) -> Result<BotState> {
+    let deadline = tokio::time::Instant::now() + PREJOIN_TIMEOUT;
+    let mut launcher_since: Option<tokio::time::Instant> = None;
+    loop {
+        let state = read_state(page).await;
+        match state {
+            BotState::Prejoin
+            | BotState::Lobby
+            | BotState::Admitted
+            | BotState::Denied
+            | BotState::Captcha
+            | BotState::SignInRequired => return Ok(state),
+            BotState::Launcher => {
+                let since = *launcher_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= LAUNCHER_GRACE {
+                    return Err(BotError::LauncherHandoff);
+                }
+            }
+            // Exhaustive on purpose: a new `BotState` must be classified here
+            // rather than silently falling into "keep waiting".
+            BotState::Launching | BotState::Loading | BotState::Failed(_) | BotState::Ended => {
+                launcher_since = None;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(match launcher_since {
+                Some(_) => BotError::LauncherHandoff,
+                None => BotError::JoinTimeout {
+                    secs: PREJOIN_TIMEOUT.as_secs(),
+                },
+            });
+        }
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 /// Read the page's own view of the join state.
@@ -514,6 +592,81 @@ mod tests {
             "quote must be escaped, not emitted raw"
         );
         assert!(script.contains(r#"a\"]}; evil(); //"#));
+    }
+
+    /// Source-shape assertions, not behaviour: whether Teams actually stops
+    /// firing the protocol handoff can only be settled against a live meeting.
+    /// What these pin is that the guard is still *wired*, so a refactor cannot
+    /// quietly drop it.
+    #[test]
+    fn tap_guards_the_desktop_protocol_schemes() {
+        let tap = include_str!("tap.js");
+        for scheme in ["ms-teams:", "msteams:", "teams:"] {
+            assert!(tap.contains(scheme), "protocol guard lost `{scheme}`");
+        }
+        assert!(
+            tap.contains("'protocol-blocked'") || tap.contains("protocol-blocked"),
+            "a blocked handoff must be reported, not swallowed silently"
+        );
+        // Capture phase, or Teams' own handler runs first. Asserted on the
+        // marker rather than on whitespace, which a formatter may reflow.
+        assert!(tap.contains("'click',"), "{tap}");
+        assert!(
+            tap.contains("/* useCapture */ true"),
+            "click listener must stay capture-phase"
+        );
+    }
+
+    /// The launcher redirects twice in about a second while Rust polls at
+    /// 500 ms, so a single Rust-side click cannot win. The page must keep
+    /// trying from its own loop.
+    #[test]
+    fn tap_retries_continue_in_browser_from_its_poll_loop() {
+        let tap = include_str!("tap.js");
+        assert!(tap.contains("retryContinueInBrowser"), "{tap}");
+        assert!(
+            tap.contains("CONTINUE_MAX_ATTEMPTS"),
+            "the retry must be bounded"
+        );
+        // Wired into poll(), not merely defined.
+        let poll_body = tap
+            .split("function poll()")
+            .nth(1)
+            .expect("poll() must exist");
+        assert!(
+            poll_body.contains("retryContinueInBrowser"),
+            "retry is defined but never called from poll()"
+        );
+    }
+
+    #[test]
+    fn tap_detects_the_launcher_page_by_path() {
+        let tap = include_str!("tap.js");
+        assert!(tap.contains("/dl/launcher/"), "{tap}");
+        assert!(tap.contains("'launcher'"), "{tap}");
+        // A path check survives Teams changing its copy; a text probe would not.
+        assert!(tap.contains("location.pathname"), "{tap}");
+    }
+
+    /// The state the page can report and the state Rust can classify must stay
+    /// in step: `BotState::from_page` returns `None` for anything unknown, and
+    /// the pump drops it, so a page-side rename would fail silently.
+    #[test]
+    fn every_page_state_string_in_the_tap_is_one_rust_understands() {
+        let tap = include_str!("tap.js");
+        for raw in [
+            "loading", "launcher", "prejoin", "lobby", "admitted", "denied", "captcha",
+            "sign-in-required",
+        ] {
+            assert!(
+                tap.contains(&format!("'{raw}'")),
+                "tap no longer reports `{raw}`"
+            );
+            assert!(
+                BotState::from_page(raw).is_some(),
+                "tap reports `{raw}` but Rust cannot parse it"
+            );
+        }
     }
 
     #[test]

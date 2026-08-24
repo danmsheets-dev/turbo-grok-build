@@ -33,12 +33,25 @@ pub struct SyncReport {
     pub created: u32,
     pub updated: u32,
     pub skipped: u32,
+    /// Of `skipped`, how many stayed local **by design** because redaction
+    /// could not resolve a secret shape.
+    ///
+    /// Separated because those are permanent and correct: a caller that exits
+    /// nonzero on any skip would fail forever over an incident that is never
+    /// meant to leave the machine.
+    pub skipped_redaction: u32,
     pub skipped_reasons: Vec<String>,
     pub pulled: u32,
     pub comments: u32,
 }
 
 impl SyncReport {
+    /// Skips worth failing a scripted run over: everything except the
+    /// deliberate, permanent "this incident stays on this machine" ones.
+    pub fn actionable_skips(&self) -> u32 {
+        self.skipped.saturating_sub(self.skipped_redaction)
+    }
+
     pub fn human_summary(&self, kind: &str) -> String {
         let vis = if self.is_private { "private" } else { "public" };
         let mut s = format!(
@@ -164,6 +177,13 @@ pub fn sync_incidents(
 ) -> Result<SyncReport, SyncError> {
     gh.ensure_gh_and_auth()?;
     let meta = gh.repo_meta(&opts.repo)?;
+    // Before listing, not after. `gh issue list` fails outright on a repo with
+    // Issues disabled, so the raw API string used to be the whole diagnosis and
+    // the push loop never ran.
+    meta.check_can_receive(matches!(
+        opts.direction,
+        SyncDirection::Push | SyncDirection::Both
+    ))?;
     let mut report = SyncReport {
         repo: meta.name_with_owner.clone(),
         is_private: meta.is_private,
@@ -174,13 +194,9 @@ pub fn sync_incidents(
         report.private_warning = true;
         idx.private_warned = true;
     }
-    let listed = if matches!(opts.direction, SyncDirection::Push | SyncDirection::Both)
-        || matches!(opts.direction, SyncDirection::Pull | SyncDirection::Both)
-    {
-        remote_map(gh.list_issues(&opts.repo, LogKind::Incident)?)
-    } else {
-        HashMap::new()
-    };
+    // Unconditional: every direction needs the remote map, and the old guard
+    // was a tautology over a three-variant enum.
+    let listed = remote_map(gh.list_issues(&opts.repo, LogKind::Incident)?);
 
     if matches!(opts.direction, SyncDirection::Push | SyncDirection::Both) {
         let entries = store
@@ -202,6 +218,7 @@ pub fn sync_incidents(
                 Ok(()) => {}
                 Err(SyncError::RedactUnresolved(fp)) => {
                     report.skipped += 1;
+                    report.skipped_redaction += 1;
                     report
                         .skipped_reasons
                         .push(format!("{fp}: unresolved secret shape after redaction"));
@@ -233,6 +250,13 @@ pub fn sync_features(
 ) -> Result<SyncReport, SyncError> {
     gh.ensure_gh_and_auth()?;
     let meta = gh.repo_meta(&opts.repo)?;
+    // Before listing, not after. `gh issue list` fails outright on a repo with
+    // Issues disabled, so the raw API string used to be the whole diagnosis and
+    // the push loop never ran.
+    meta.check_can_receive(matches!(
+        opts.direction,
+        SyncDirection::Push | SyncDirection::Both
+    ))?;
     let mut report = SyncReport {
         repo: meta.name_with_owner.clone(),
         is_private: meta.is_private,
@@ -265,6 +289,7 @@ pub fn sync_features(
                 Ok(()) => {}
                 Err(SyncError::RedactUnresolved(fp)) => {
                     report.skipped += 1;
+                    report.skipped_redaction += 1;
                     report
                         .skipped_reasons
                         .push(format!("{fp}: unresolved secret shape after redaction"));
@@ -546,7 +571,7 @@ fn pull_features(
 mod tests {
     use super::*;
     use crate::feature_request::schema::{FeatureRequestReport, RequestClass};
-    use crate::github_sync::{IssueDraft, RepoMeta};
+    use crate::github_sync::{IssueDraft, RemoteState, RepoMeta};
     use crate::schema::{ErrorClass, ReportRequest};
     use std::sync::Mutex;
 
@@ -560,6 +585,12 @@ mod tests {
         authed: bool,
         missing: bool,
         private: bool,
+        /// `false` = healthy, so `MemInner::default()` stays permissive.
+        issues_disabled: bool,
+        fork: bool,
+        archived: bool,
+        /// `None` = GitHub did not say, which `can_push` treats as permissive.
+        viewer_permission: Option<String>,
         issues: Vec<RemoteIssue>,
         comments: Vec<(u64, String)>,
         next_number: u64,
@@ -572,11 +603,33 @@ mod tests {
                     authed: true,
                     missing: false,
                     private,
+                    issues_disabled: false,
+                    fork: false,
+                    archived: false,
+                    viewer_permission: Some("WRITE".into()),
                     issues: Vec::new(),
                     comments: Vec::new(),
                     next_number: 1,
                 }),
             }
+        }
+
+        /// A fork with Issues turned off -- the shape GitHub creates by
+        /// default, and the shape that stranded the field incident log.
+        fn fork_with_issues_disabled(repo: &str) -> Self {
+            let m = Self::new(repo, false);
+            {
+                let mut g = m.inner.lock().unwrap();
+                g.issues_disabled = true;
+                g.fork = true;
+            }
+            m
+        }
+
+        fn with_permission(repo: &str, permission: Option<&str>) -> Self {
+            let m = Self::new(repo, false);
+            m.inner.lock().unwrap().viewer_permission = permission.map(str::to_string);
+            m
         }
 
         fn issue_count(&self) -> usize {
@@ -616,6 +669,10 @@ mod tests {
                 name_with_owner: repo.to_string(),
                 is_private: g.private,
                 url: format!("https://github.com/{repo}"),
+                has_issues_enabled: !g.issues_disabled,
+                viewer_permission: g.viewer_permission.clone(),
+                is_fork: g.fork,
+                is_archived: g.archived,
             })
         }
 
@@ -710,6 +767,21 @@ mod tests {
     fn tmp_incident_store() -> (tempfile::TempDir, DeveloperLogStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = DeveloperLogStore::new(dir.path().to_path_buf());
+        (dir, store)
+    }
+
+    /// One filed incident, so a push has something real to attempt.
+    fn store_with_one_incident() -> (tempfile::TempDir, DeveloperLogStore) {
+        let (dir, store) = tmp_incident_store();
+        store
+            .report(ReportRequest {
+                title: "Teams notetaker opened File Explorer".into(),
+                summary: "meeting_join shell-opened the link on the bot path".into(),
+                error_class: ErrorClass::Unknown,
+                component: vec!["meeting".into()],
+                ..Default::default()
+            })
+            .unwrap();
         (dir, store)
     }
 
@@ -863,6 +935,102 @@ mod tests {
             crate::github_sync::resolve_repo(None, &cfg),
             Err(SyncError::RepoUnset)
         ));
+    }
+
+    /// The field failure, end to end: a configured sync that pushes nothing.
+    /// The refusal must arrive *before* any listing, so the operator gets a
+    /// remedy instead of `the '...' repository has disabled issues`.
+    #[test]
+    fn issues_disabled_repo_fails_preflight_before_listing() {
+        let (_tmp, store) = store_with_one_incident();
+        let gh = MemoryGithub::fork_with_issues_disabled("danmsheets-dev/turbo-grok-build");
+        let err = sync_incidents(
+            &store,
+            &gh,
+            &SyncOptions {
+                repo: "danmsheets-dev/turbo-grok-build".into(),
+                direction: SyncDirection::Push,
+            },
+        )
+        .expect_err("a repo with Issues off must not report success");
+        assert!(
+            matches!(err, SyncError::IssuesDisabled { .. }),
+            "got {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("forks"), "{text}");
+        assert!(text.contains("still in the local log"), "{text}");
+        assert_eq!(gh.issue_count(), 0, "nothing may be filed");
+    }
+
+    #[test]
+    fn read_only_permission_blocks_push_but_allows_pull() {
+        let (_tmp, store) = store_with_one_incident();
+        let gh = MemoryGithub::with_permission("o/r", Some("READ"));
+        let err = sync_incidents(
+            &store,
+            &gh,
+            &SyncOptions {
+                repo: "o/r".into(),
+                direction: SyncDirection::Push,
+            },
+        )
+        .expect_err("read access cannot file issues");
+        assert!(matches!(err, SyncError::NoPushAccess { .. }), "got {err:?}");
+        assert_eq!(gh.issue_count(), 0);
+
+        // Pulling remote closes back is still legitimate.
+        assert!(
+            sync_incidents(
+                &store,
+                &gh,
+                &SyncOptions {
+                    repo: "o/r".into(),
+                    direction: SyncDirection::Pull,
+                },
+            )
+            .is_ok(),
+            "read access is enough to pull"
+        );
+    }
+
+    /// GitHub reports a null permission for several legitimate auth shapes.
+    /// Blocking those would break syncs that work today.
+    #[test]
+    fn unknown_viewer_permission_still_pushes() {
+        let (_tmp, store) = store_with_one_incident();
+        let gh = MemoryGithub::with_permission("o/r", None);
+        let report = sync_incidents(
+            &store,
+            &gh,
+            &SyncOptions {
+                repo: "o/r".into(),
+                direction: SyncDirection::Push,
+            },
+        )
+        .expect("an unknown permission must not block a push");
+        assert_eq!(report.created, 1);
+        assert_eq!(gh.issue_count(), 1);
+    }
+
+    /// A skip that is *by design* must stay distinguishable from a skip that
+    /// means "this did not reach GitHub and you should care", or the CLI's
+    /// nonzero exit fires forever over an incident meant to stay local.
+    #[test]
+    fn redaction_skips_are_counted_separately() {
+        let report = SyncReport {
+            skipped: 3,
+            skipped_redaction: 3,
+            ..Default::default()
+        };
+        assert_eq!(report.actionable_skips(), 0);
+
+        let mixed = SyncReport {
+            skipped: 3,
+            skipped_redaction: 1,
+            ..Default::default()
+        };
+        assert_eq!(mixed.actionable_skips(), 2);
     }
 
     #[test]

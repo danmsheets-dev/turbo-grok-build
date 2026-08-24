@@ -50,6 +50,17 @@ pub enum BotError {
     #[error("this meeting only admits signed-in users, so a guest notetaker cannot join")]
     SignInRequired,
 
+    /// Teams served the desktop-app launcher instead of a web join screen.
+    ///
+    /// Distinct from [`Self::JoinTimeout`] because the remedy is different: the
+    /// selectors are fine and the meeting is fine, but this URL is routing the
+    /// notetaker at the installed desktop client instead of the web guest flow.
+    #[error(
+        "Teams served the desktop-app launcher page and never rendered a web join screen, \
+         so the guest notetaker had nothing to drive"
+    )]
+    LauncherHandoff,
+
     /// The page never reached a state we recognize.
     #[error("the Teams page never reached a known state within {secs}s")]
     JoinTimeout {
@@ -73,6 +84,7 @@ impl BotError {
             Self::Denied => "denied".into(),
             Self::VerificationRequired => "verification required".into(),
             Self::SignInRequired => "sign-in required".into(),
+            Self::LauncherHandoff => "Teams app launcher".into(),
             Self::JoinTimeout { .. } => "join timed out".into(),
         }
     }
@@ -93,6 +105,17 @@ mod tests {
         assert!(text.contains("GROK_MEETING_SELECTORS"), "{text}");
     }
 
+    /// The launcher hop is a *routing* failure, not a stale-selector failure.
+    /// Reporting it as a generic timeout is what made the field incident take
+    /// four attempts to diagnose.
+    #[test]
+    fn launcher_handoff_is_distinguishable_from_a_plain_timeout() {
+        let launcher = BotError::LauncherHandoff;
+        assert_ne!(launcher.short(), BotError::JoinTimeout { secs: 60 }.short());
+        assert!(launcher.to_string().contains("launcher"), "{launcher}");
+        assert!(launcher.short().len() < 40, "{}", launcher.short());
+    }
+
     #[test]
     fn verification_never_reads_as_retryable() {
         let text = BotError::VerificationRequired.to_string();
@@ -104,6 +127,7 @@ mod tests {
     fn every_variant_has_a_short_reason() {
         let all = [
             BotError::NoBrowser("x".into()),
+            BotError::LauncherHandoff,
             BotError::Audio("x".into()),
             BotError::Selector { step: "s", env: "E" },
             BotError::LobbyTimeout { secs: 1 },

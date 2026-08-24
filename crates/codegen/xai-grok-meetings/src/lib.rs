@@ -23,8 +23,9 @@ pub use slash::{
     status_instruction, stop_instruction, transcript_instruction, usage_message,
 };
 pub use store::{
-    CaptureSource, MeetingMeta, MeetingStatus, MeetingStore, TranscriptSegment, clear_current,
-    is_safe_meeting_id, meeting_dir, new_meeting_id, read_current_id, write_current,
+    CaptureSource, JoinFailureStage, MeetingMeta, MeetingStatus, MeetingStore, NotetakerOutcome,
+    TranscriptSegment, clear_current, is_safe_meeting_id, meeting_dir, new_meeting_id,
+    read_current_id, write_current,
 };
 pub use summary::{
     WORKSPACE_MEETINGS_DIR, compose_summary_markdown, default_meeting_title,
@@ -33,6 +34,7 @@ pub use summary::{
 };
 pub use trigger::extract_turbo_question;
 pub use url::{
-    MeetingKind, MeetingPlatform, MeetingUrl, ParseError, detect_join_request, first_https_url,
-    is_joinable_platform, parse as parse_meeting_url, redact_join_secrets,
+    MeetingKind, MeetingPlatform, MeetingUrl, ParseError, TEAMS_WEB_ENV, detect_join_request,
+    first_https_url, is_joinable_platform, parse as parse_meeting_url, redact_join_secrets,
+    teams_web_join_url, teams_web_rewrite_enabled,
 };

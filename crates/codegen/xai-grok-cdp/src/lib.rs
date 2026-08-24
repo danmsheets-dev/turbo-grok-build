@@ -32,4 +32,4 @@ pub use launch::{
     BROWSER_ENV, Headless, LaunchOptions, LaunchedBrowser, find_browser, launch,
     parse_endpoint_line,
 };
-pub use page::{BindingStream, Browser, Page};
+pub use page::{BindingStream, Browser, Navigation, NavigationStream, Page};

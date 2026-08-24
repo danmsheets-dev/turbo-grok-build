@@ -193,10 +193,13 @@ fn base_args(opts: &LaunchOptions) -> Vec<String> {
         // Let the meeting page start audio without a user gesture.
         "--autoplay-policy=no-user-gesture-required".to_string(),
     ];
+    // Both modes need a plausible window size: headless for responsive
+    // layouts, windowed because Chromium's default geometry is small enough
+    // that Teams collapses to a narrow layout with different controls -- and
+    // a windowed launch exists precisely to diagnose a failing join.
+    args.push("--window-size=1280,900".to_string());
     if opts.headless == Headless::New {
         args.push("--headless=new".to_string());
-        // Headless still needs a plausible window size for responsive layouts.
-        args.push("--window-size=1280,900".to_string());
     }
     args.extend(opts.extra_args.iter().cloned());
     args
@@ -329,6 +332,22 @@ mod tests {
         let opts = LaunchOptions::new("/tmp/profile-y").windowed();
         let args = base_args(&opts);
         assert!(!args.iter().any(|a| a == "--headless=new"), "{args:?}");
+    }
+
+    /// The windowed mode exists to diagnose a failing join, so it must render
+    /// the same layout the headless run saw.
+    #[test]
+    fn window_size_is_set_in_both_modes() {
+        for opts in [
+            LaunchOptions::new("/tmp/p"),
+            LaunchOptions::new("/tmp/p").windowed(),
+        ] {
+            assert!(
+                base_args(&opts).iter().any(|a| a == "--window-size=1280,900"),
+                "{:?} lost its window size",
+                opts.headless
+            );
+        }
     }
 
     #[test]

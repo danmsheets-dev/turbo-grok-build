@@ -3,7 +3,66 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-24 (1.0.0-rc.9 Meeting Tool v3 — joined Teams notetaker).
+Last reviewed: 2026-08-24 (1.0.0-rc.10 Teams join hardening and incident log).
+
+## 1.0.0-rc.10 — Teams join hardening and incident log
+
+Shipped on wire `1.0.0-rc.10`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+### Unvalidated against a live meeting
+
+rc.10 defends the guest join in four layers because two of them rest on
+third-party behaviour this repo cannot verify. **Do not read a green test suite
+as a validated fix** — the unit tests assert the wiring, not the effect.
+
+| Layer | Depends on a guess? |
+|-------|--------|
+| Navigation logging (`Page::navigation_stream`) | No. The events already flowed through the CDP connection and were discarded. |
+| Page-side protocol guard + continue-on-web retry | No. The init script provably runs before any Teams script in every document. |
+| Teams web-join URL rewrite | **Yes.** `msLaunch` / `directDl` / `suppressPrompt` / `anon` semantics come from one observed redirect chain, not documentation. Kill switch: `GROK_MEETING_TEAMS_WEB=0`. |
+| `Browser.setDownloadBehavior` | **Yes.** The crate pins no DevTools protocol version. Failure warns; it never fails a join. |
+
+To validate on a machine that reproduces the failure: run with
+`GROK_MEETING_BOT_WINDOW=1` and read the `notetaker navigation` log lines. If
+`/dl/launcher/` still appears in the chain, the rewrite is not doing what the
+field report suggested and the remaining three layers are what is holding.
+
+### Intentional limits
+
+- **A launcher-opened tab is invisible to the bot.** There is no CDP target
+  auto-attach (`Target.setAutoAttach` is never sent), so if Teams opens the
+  meeting in a *new tab or window*, that tab gets no injected tap and
+  `drive_join` keeps polling the abandoned page until it times out. Every rc.10
+  remedy is scoped to the original page. Tracked for rc.11.
+- **Background GitHub sync is not preflighted.** `github_sync = "on-file"`
+  spawns a fail-open thread per local write, and each one still runs `gh` against
+  a repo that may be permanently refusing issues. Only the CLI
+  (`turbo issues sync`) preflights. Adding a `gh repo view` per background write
+  would turn a deliberately network-free path into a chatty one.
+- **Switching `--repo` discards the fingerprint→issue map.** `load_index` is
+  keyed per store, not per repo, so re-targeting a sync loses the mapping and the
+  first sync back also drops occurrence-bump comments.
+- **A failed Teams guest join delays the fallback link-open.** `meeting_join`
+  now waits to see which transport wins before handing the link to your OS, so
+  on a Teams meeting where the bot tries and fails, your browser opens after the
+  attempt rather than immediately. That is deliberate: opening it eagerly meant
+  that a *successful* guest join also launched your signed-in desktop Teams, and
+  two participants arriving from one command is worse than a pause. Zoom, Meet,
+  Webex and `GROK_MEETING_BOT=0` are refused instantly and see no delay.
+- **Q&A still needs a guest or a Graph token.** With the guest join failing and
+  `GROK_GRAPH_TOKEN` unset, nothing can post to meeting chat. rc.10 makes that
+  state loud instead of silent; it does not remove the requirement.
+
+### Fixed here
+
+- **Prompts containing a smart quote, em dash or emoji could abort the process**
+  (`first_https_url` sliced on byte offsets). This ran on every prompt submit,
+  which is why it presented as a large-paste crash — a long paste almost always
+  contains one non-ASCII character. Supersedes the event-coalescing hypothesis
+  recorded for `inc_01a034f9328c7762bcb52b0f87ca464b`.
+- **`xai-grok-developer-log` tests did not compile on `dev`** (missing
+  `RemoteState` import in `github_sync/sync.rs`), so its `keep-features.yml` gate
+  had been red since `316cbd2af`.
 
 ## 1.0.0-rc.9 — joined Teams notetaker
 

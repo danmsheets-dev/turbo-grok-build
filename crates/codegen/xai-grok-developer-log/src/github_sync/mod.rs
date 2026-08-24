@@ -42,6 +42,40 @@ pub enum SyncError {
     Timeout(u64),
     #[error("GitHub API rate limited: {0}")]
     RateLimited(String),
+    #[error(
+        "GitHub Issues are disabled on `{repo}`.{fork_note} Enable them at \
+         https://github.com/{repo}/settings -> General -> Features -> tick \"Issues\", then \
+         re-run. Or target a repo you own with `--repo owner/name`. Nothing was lost: your \
+         incidents are still in the local log."
+    )]
+    IssuesDisabled {
+        /// `owner/name`.
+        repo: String,
+        /// Extra sentence when the repo is a fork, where this is the default.
+        fork_note: String,
+    },
+    #[error(
+        "Your GitHub login has {permission} access to `{repo}`; filing Issues needs WRITE or \
+         higher. Ask a repo admin for write access, run \
+         `gh auth refresh -h github.com -s repo` if your token is missing the `repo` scope, or \
+         push to a repo you own with `--repo owner/name`. Nothing was lost: your incidents are \
+         still in the local log."
+    )]
+    NoPushAccess {
+        /// `owner/name`.
+        repo: String,
+        /// Permission GitHub reported, e.g. `READ`.
+        permission: String,
+    },
+    #[error(
+        "`{repo}` is archived, and GitHub rejects new Issues on archived repositories. \
+         Unarchive it at https://github.com/{repo}/settings, or target another repo with \
+         `--repo owner/name`. Nothing was lost: your incidents are still in the local log."
+    )]
+    RepoArchived {
+        /// `owner/name`.
+        repo: String,
+    },
     #[error("`gh` failed: {0}")]
     Gh(String),
     #[error("io error: {0}")]
@@ -66,6 +100,148 @@ pub struct RepoMeta {
     pub name_with_owner: String,
     pub is_private: bool,
     pub url: String,
+    /// GitHub turns Issues **off** on new forks, which is how a configured
+    /// sync can look healthy and still land nothing.
+    pub has_issues_enabled: bool,
+    /// `ADMIN` / `MAINTAIN` / `WRITE` / `TRIAGE` / `READ`, or `None` when
+    /// GitHub does not report one (some fine-grained tokens and app auth).
+    pub viewer_permission: Option<String>,
+    pub is_fork: bool,
+    pub is_archived: bool,
+}
+
+impl RepoMeta {
+    /// Whether this login can file issues here.
+    ///
+    /// An unknown permission counts as permissive: GitHub returns null for
+    /// several legitimate auth shapes, and refusing a push that would have
+    /// worked is worse than letting the API refuse it with its own message.
+    pub fn can_push(&self) -> bool {
+        match self.viewer_permission.as_deref() {
+            None => true,
+            Some(p) => matches!(
+                p.to_ascii_uppercase().as_str(),
+                "ADMIN" | "MAINTAIN" | "WRITE"
+            ),
+        }
+    }
+
+    /// Refuse early, with a remediation, when the remote cannot accept issues.
+    ///
+    /// Called before listing rather than after: `gh issue list` fails outright
+    /// on a repo with Issues disabled, so without this the push loop never runs
+    /// and the operator sees a raw API string instead of what to do about it.
+    pub fn check_can_receive(&self, pushing: bool) -> Result<(), SyncError> {
+        let repo = self.name_with_owner.clone();
+        if self.is_archived {
+            return Err(SyncError::RepoArchived { repo });
+        }
+        if !self.has_issues_enabled {
+            return Err(SyncError::IssuesDisabled {
+                fork_note: if self.is_fork {
+                    " GitHub disables Issues on new forks by default.".to_string()
+                } else {
+                    String::new()
+                },
+                repo,
+            });
+        }
+        if pushing && !self.can_push() {
+            return Err(SyncError::NoPushAccess {
+                permission: self
+                    .viewer_permission
+                    .clone()
+                    .unwrap_or_else(|| "unknown".into()),
+                repo,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod repo_meta_tests {
+    use super::*;
+
+    fn meta() -> RepoMeta {
+        RepoMeta {
+            name_with_owner: "danmsheets-dev/turbo-grok-build".into(),
+            is_private: false,
+            url: "https://github.com/danmsheets-dev/turbo-grok-build".into(),
+            has_issues_enabled: true,
+            viewer_permission: Some("WRITE".into()),
+            is_fork: true,
+            is_archived: false,
+        }
+    }
+
+    /// The field failure: a fork with Issues off. The old code found out from
+    /// `gh issue list` and surfaced the raw API string.
+    #[test]
+    fn a_fork_with_issues_disabled_is_refused_with_a_remedy() {
+        let mut m = meta();
+        m.has_issues_enabled = false;
+        let err = m.check_can_receive(true).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("/settings"), "must link the exact page: {text}");
+        assert!(text.contains("Features"), "{text}");
+        assert!(
+            text.contains("forks"),
+            "a fork must be told why it is off by default: {text}"
+        );
+        assert!(
+            text.contains("still in the local log"),
+            "the operator must know nothing was lost: {text}"
+        );
+        // Pull is refused too: `gh issue list` fails either way.
+        assert!(m.check_can_receive(false).is_err());
+    }
+
+    #[test]
+    fn read_only_permission_blocks_push_but_not_pull() {
+        let mut m = meta();
+        m.viewer_permission = Some("READ".into());
+        assert!(!m.can_push());
+        let err = m.check_can_receive(true).unwrap_err();
+        assert!(err.to_string().contains("READ"), "{err}");
+        assert!(m.check_can_receive(false).is_ok(), "reading is still fine");
+    }
+
+    /// GitHub reports null for several legitimate auth shapes. Refusing a push
+    /// that would have worked is worse than letting the API refuse it.
+    #[test]
+    fn unknown_viewer_permission_is_permissive() {
+        let mut m = meta();
+        m.viewer_permission = None;
+        assert!(m.can_push());
+        assert!(m.check_can_receive(true).is_ok());
+    }
+
+    #[test]
+    fn write_maintain_and_admin_can_push_case_insensitively() {
+        for p in ["WRITE", "maintain", "Admin"] {
+            let mut m = meta();
+            m.viewer_permission = Some(p.into());
+            assert!(m.can_push(), "{p} must be allowed to file issues");
+        }
+        for p in ["READ", "TRIAGE", "NONE"] {
+            let mut m = meta();
+            m.viewer_permission = Some(p.into());
+            assert!(!m.can_push(), "{p} must not be treated as write access");
+        }
+    }
+
+    #[test]
+    fn an_archived_repo_is_refused_first() {
+        let mut m = meta();
+        m.is_archived = true;
+        m.has_issues_enabled = false;
+        let err = m.check_can_receive(true).unwrap_err();
+        assert!(
+            matches!(err, SyncError::RepoArchived { .. }),
+            "archived is the more actionable diagnosis: {err}"
+        );
+    }
 }
 
 /// Draft used for create/update.

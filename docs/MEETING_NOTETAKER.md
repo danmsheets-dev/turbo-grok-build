@@ -123,10 +123,57 @@ what is actually being recorded:
 | Meeting requires signed-in users | local capture |
 | Verification challenge shown | local capture (never solved) |
 | Teams UI changed, a step not found | local capture, naming the step |
+| Teams served the desktop-app launcher | local capture, named `Teams app launcher` |
 
 Sitting in the lobby past the timeout marks the notetaker `Failed` and reports
 it. Turbo does **not** silently switch to recording your speakers instead —
 starting a different kind of capture without saying so would be a surprise.
+
+A failed guest join **leads** with what did not happen:
+
+```
+NO GUEST IN THE MEETING - the notetaker could not join (Teams app launcher).
+Nobody is in the lobby and chat Q&A through the notetaker is unavailable.
+Local recording started (Teams)
+```
+
+The outcome is durable in the meeting's `meta.json`, so `meeting_status` and
+`meeting_stop` report the same thing after a restart. A transcript from local
+capture looks healthy either way, which is exactly why the difference has to be
+stated rather than inferred.
+
+## The desktop-app launcher hop
+
+A Teams `/meet/<id>` link redirects to
+`/dl/launcher/launcher.html?…&msLaunch=true&directDl=true&suppressPrompt=true`,
+which fires the `ms-teams:` protocol immediately and never renders
+"Continue on this browser" — so the guest notetaker has no join screen to drive,
+and any handoff would reach your *signed-in desktop client*, not an anonymous
+guest.
+
+Turbo defends this in four layers, deliberately, because two of them rest on
+Teams behaviour that is observed rather than documented:
+
+1. **Navigation logging.** Every hop is logged (`notetaker navigation`), query
+   strings stripped. This is how you tell whether the rest is working.
+2. **Page-side guard.** The injected tap refuses `ms-teams:` / `msteams:` /
+   `teams:` navigations and retries the continue-on-web click from its own poll
+   loop, because the launcher redirects twice inside a second while the Rust
+   side polls at 500 ms.
+3. **URL rewrite.** The bot navigates a query-only rewrite asking for the
+   anonymous web client. Host, path and the `p` passcode are untouched;
+   unrecognised link shapes are navigated exactly as pasted. Disable with
+   `GROK_MEETING_TEAMS_WEB=0`.
+4. **Downloads denied browser-wide,** so `directDl=true` cannot pull an
+   installer.
+
+Layers 3 and 4 are the unverified ones. If a join still fails, run with
+`GROK_MEETING_BOT_WINDOW=1` and check whether `/dl/launcher/` still appears in
+the navigation log.
+
+Note that `meeting_join` does **not** hand the link to your OS when a guest bot
+is dispatched — the notetaker opens it itself, in an isolated profile. Only the
+local-capture paths open it for you, because only those need you in the meeting.
 
 ## Environment
 
@@ -137,6 +184,7 @@ starting a different kind of capture without saying so would be a surprise.
 | `GROK_MEETING_LOBBY_TIMEOUT` | `300` | Seconds to wait for an admit |
 | `GROK_MEETING_SELECTORS` | unset | Path to a selector-override JSON file |
 | `GROK_CDP_BROWSER` | unset | Absolute path to a Chromium binary |
+| `GROK_MEETING_TEAMS_WEB` | on | `0` navigates the pasted URL as-is instead of asking Teams for the web client |
 | `GROK_MEETING_NO_CAPTURE` | off | Disable audio entirely (tests) |
 | `GROK_MEETING_CAPTURE` | auto | `mic` / `loopback` for the fallback path |
 | `GROK_MEETING_AUTO_ASK` | on | `0` queues `Turbo:` questions instead of answering; drain them with `/meeting ask` |

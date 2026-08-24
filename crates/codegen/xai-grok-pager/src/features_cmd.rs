@@ -394,15 +394,23 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
             let repo = resolve_repo(repo.as_deref(), &cfg)?;
             let direction = sync_direction(push, pull, both);
             let gh = GhCli::new();
-            let report = sync_features(
-                &store,
-                &gh,
-                &SyncOptions {
-                    repo,
-                    direction,
-                },
-            )?;
+            let report = match sync_features(&store, &gh, &SyncOptions { repo, direction }) {
+                Ok(r) => r,
+                Err(e) if crate::issues_cmd::is_repo_capability_error(&e) => {
+                    // Feature requests have no export pack of their own; the
+                    // remediation in the error is the whole story here.
+                    eprintln!("{e}");
+                    bail!("GitHub sync refused; feature requests stay in the local log");
+                }
+                Err(e) => return Err(e.into()),
+            };
             println!("{}", report.human_summary("features"));
+            if report.actionable_skips() > 0 {
+                bail!(
+                    "{} feature request(s) could not be pushed; see the skip list above",
+                    report.actionable_skips()
+                );
+            }
             Ok(())
         }
     }

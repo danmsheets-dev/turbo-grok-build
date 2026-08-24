@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local, Utc};
 
+use crate::store::CaptureSource;
 use crate::url::MeetingPlatform;
 
 /// Subfolder of the launch workspace where dated summaries are written.
@@ -106,9 +107,22 @@ fn strip_leading_heading(md: &str) -> &str {
 }
 
 /// Canonical work summary: title + date at the top, then the recap body.
-pub fn compose_summary_markdown(title: &str, date: &str, platform: &str, body: &str) -> String {
+///
+/// `capture` is recorded because this file outlives the session. A recap
+/// transcribed from one PC's speakers reads exactly like one transcribed from
+/// inside the meeting, and months later nobody can tell which they are holding.
+pub fn compose_summary_markdown(
+    title: &str,
+    date: &str,
+    platform: &str,
+    capture: CaptureSource,
+    body: &str,
+) -> String {
     let body = strip_leading_heading(body).trim();
-    let mut out = format!("# {title}\n\n- Date: {date}\n- Meeting: {title}\n- Platform: {platform}\n");
+    let mut out = format!(
+        "# {title}\n\n- Date: {date}\n- Meeting: {title}\n- Platform: {platform}\n- Source: {}\n",
+        capture.describe()
+    );
     if !body.is_empty() {
         out.push('\n');
         out.push_str(body);
@@ -163,6 +177,21 @@ mod tests {
     use super::*;
     use std::env;
 
+    /// The recap outlives the session, so it has to say where the audio came
+    /// from. A loopback transcript and a real meeting transcript are otherwise
+    /// indistinguishable once the meeting folder is gone.
+    #[test]
+    fn recap_records_where_the_audio_came_from() {
+        let bot = compose_summary_markdown("M", "2026-08-21", "Teams", CaptureSource::MeetingBot, "");
+        assert!(
+            bot.contains(CaptureSource::MeetingBot.describe()),
+            "{bot}"
+        );
+        let local = compose_summary_markdown("M", "2026-08-21", "Teams", CaptureSource::Loopback, "");
+        assert!(local.contains(CaptureSource::Loopback.describe()), "{local}");
+        assert_ne!(bot, local, "the two must not render identically");
+    }
+
     #[test]
     fn sanitizes_and_names_file() {
         assert_eq!(
@@ -179,6 +208,7 @@ mod tests {
             "Website standup",
             "2026-08-21",
             "Teams",
+            CaptureSource::MeetingBot,
             "# Website standup\n\n## Summary\n- Ship the nav\n",
         );
         assert!(md.starts_with("# Website standup\n"));

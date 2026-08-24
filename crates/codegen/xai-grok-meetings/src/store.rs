@@ -91,6 +91,188 @@ mod capture_source_tests {
     }
 }
 
+/// Which step of the guest join failed.
+///
+/// Durable in `meta.json`, so the wire names are frozen: renaming a variant
+/// orphans meetings recorded by an older build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinFailureStage {
+    /// No Chromium-family browser to run the notetaker in.
+    NoBrowser,
+    /// Teams served the desktop-app launcher page instead of a web join screen.
+    LauncherHandoff,
+    /// A pre-join element could not be found; the Teams DOM moved.
+    Selector,
+    /// The page never reached any screen we recognise.
+    JoinTimeout,
+    /// We sat in the lobby and nobody admitted the notetaker.
+    LobbyTimeout,
+    /// The organizer refused or removed the notetaker.
+    Denied,
+    /// A human-verification challenge, which Turbo never answers.
+    Verification,
+    /// The meeting admits only signed-in participants.
+    SignInRequired,
+    /// The loopback audio sink for the notetaker could not be set up.
+    Audio,
+    /// Driving the browser failed.
+    Browser,
+}
+
+impl JoinFailureStage {
+    /// Short operator-facing label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoBrowser => "no browser",
+            Self::LauncherHandoff => "Teams app launcher",
+            Self::Selector => "Teams UI changed",
+            Self::JoinTimeout => "join timed out",
+            Self::LobbyTimeout => "not admitted",
+            Self::Denied => "denied",
+            Self::Verification => "verification required",
+            Self::SignInRequired => "sign-in required",
+            Self::Audio => "audio setup failed",
+            Self::Browser => "browser error",
+        }
+    }
+
+    /// Every stage, for exhaustiveness tests.
+    pub const ALL: &'static [Self] = &[
+        Self::NoBrowser,
+        Self::LauncherHandoff,
+        Self::Selector,
+        Self::JoinTimeout,
+        Self::LobbyTimeout,
+        Self::Denied,
+        Self::Verification,
+        Self::SignInRequired,
+        Self::Audio,
+        Self::Browser,
+    ];
+}
+
+/// What became of the guest notetaker for this meeting.
+///
+/// The operator asked for a participant in the lobby that can answer questions
+/// in meeting chat. Local capture is a *different* feature that happens to
+/// produce a transcript, so a meeting that fell back must never read as one
+/// that succeeded. This is the single value `meeting_join`, `meeting_status`
+/// and `meeting_stop` all render, so the three cannot disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum NotetakerOutcome {
+    /// No guest was dispatched at all.
+    NotAttempted {
+        /// Why not, in operator language.
+        why: String,
+    },
+    /// A guest reached the meeting: lobby or admitted.
+    Joined,
+    /// A guest was dispatched and could not get in.
+    Failed {
+        /// Typed classification, for anything that reasons about the failure.
+        stage: JoinFailureStage,
+        /// Short reason, already operator-facing.
+        detail: String,
+    },
+}
+
+impl NotetakerOutcome {
+    /// True only when a participant named "Turbo (Notetaker)" is in the meeting.
+    ///
+    /// Anything else means the lobby is empty and notetaker chat Q&A is not
+    /// running, however healthy the transcript looks.
+    pub fn guest_present(&self) -> bool {
+        matches!(self, Self::Joined)
+    }
+
+    /// The one line every meeting tool leads with.
+    pub fn headline(&self) -> String {
+        match self {
+            Self::Joined => {
+                "guest notetaker \"Turbo (Notetaker)\" is in the meeting".to_string()
+            }
+            Self::NotAttempted { why } => format!(
+                "NO GUEST IN THE MEETING - no notetaker was dispatched ({why}). Nobody is in \
+                 the lobby and chat Q&A through the notetaker is unavailable."
+            ),
+            Self::Failed { detail, .. } => format!(
+                "NO GUEST IN THE MEETING - the notetaker could not join ({detail}). Nobody is \
+                 in the lobby and chat Q&A through the notetaker is unavailable."
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod notetaker_outcome_tests {
+    use super::{JoinFailureStage, NotetakerOutcome};
+
+    /// `meta.json` is durable; renaming a variant would orphan old meetings.
+    #[test]
+    fn notetaker_outcome_wire_names_are_stable() {
+        let joined = serde_json::to_string(&NotetakerOutcome::Joined).unwrap();
+        assert_eq!(joined, "{\"state\":\"joined\"}");
+        let failed = serde_json::to_string(&NotetakerOutcome::Failed {
+            stage: JoinFailureStage::LauncherHandoff,
+            detail: "Teams app launcher".into(),
+        })
+        .unwrap();
+        assert!(failed.contains("\"state\":\"failed\""), "{failed}");
+        assert!(failed.contains("\"stage\":\"launcher_handoff\""), "{failed}");
+        let back: NotetakerOutcome =
+            serde_json::from_str("{\"state\":\"not_attempted\",\"why\":\"disabled\"}").unwrap();
+        assert_eq!(back, NotetakerOutcome::NotAttempted { why: "disabled".into() });
+    }
+
+    #[test]
+    fn only_a_joined_guest_counts_as_present() {
+        assert!(NotetakerOutcome::Joined.guest_present());
+        assert!(!NotetakerOutcome::NotAttempted { why: "x".into() }.guest_present());
+        for stage in JoinFailureStage::ALL {
+            let o = NotetakerOutcome::Failed {
+                stage: *stage,
+                detail: stage.label().to_string(),
+            };
+            assert!(!o.guest_present(), "{stage:?} is not a guest in the meeting");
+        }
+    }
+
+    /// The honesty contract: anything short of a joined guest must say so in
+    /// words the operator cannot mistake for success.
+    #[test]
+    fn every_non_joined_outcome_headline_says_no_guest() {
+        let mut outcomes = vec![NotetakerOutcome::NotAttempted { why: "GROK_MEETING_BOT=0".into() }];
+        for stage in JoinFailureStage::ALL {
+            outcomes.push(NotetakerOutcome::Failed {
+                stage: *stage,
+                detail: stage.label().to_string(),
+            });
+        }
+        for o in &outcomes {
+            let line = o.headline();
+            assert!(line.contains("NO GUEST IN THE MEETING"), "{line}");
+            assert!(line.contains("lobby"), "{line}");
+            assert!(
+                line.to_lowercase().contains("q&a"),
+                "must name the feature that is not running: {line}"
+            );
+        }
+        let ok = NotetakerOutcome::Joined.headline();
+        assert!(!ok.contains("NO GUEST"), "{ok}");
+        assert!(ok.contains("Notetaker"), "{ok}");
+    }
+
+    #[test]
+    fn every_stage_has_a_short_label() {
+        for stage in JoinFailureStage::ALL {
+            let l = stage.label();
+            assert!(!l.is_empty() && l.len() < 40, "{stage:?} -> {l:?}");
+        }
+    }
+}
+
 /// Live notetaker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +302,12 @@ pub struct MeetingMeta {
     /// Dated summary written into the launch workspace (`Meetings/…`).
     #[serde(default)]
     pub workspace_summary_path: Option<String>,
+    /// What became of the guest notetaker.
+    ///
+    /// `None` for meetings recorded before this field existed, and for the
+    /// brief window between `create` and the join deciding an outcome.
+    #[serde(default)]
+    pub notetaker: Option<NotetakerOutcome>,
 }
 
 /// One STT segment (JSONL in `transcript.jsonl`).
@@ -179,6 +367,7 @@ impl MeetingStore {
             knowledge_dir: None,
             title: None,
             workspace_summary_path: None,
+            notetaker: None,
         };
         store.write_meta(&meta)?;
         Ok(store)
@@ -317,6 +506,21 @@ impl MeetingStore {
     pub fn set_capture_source(&self, source: CaptureSource) -> std::io::Result<MeetingMeta> {
         let mut meta = self.read_meta()?;
         meta.capture_source = source;
+        self.write_meta(&meta)?;
+        Ok(meta)
+    }
+
+    /// Record what became of the guest notetaker.
+    ///
+    /// Written to `meta.json` rather than held in memory because
+    /// `meeting_status` and `meeting_reply` both re-read the store from disk,
+    /// and must still tell the truth after a restart.
+    pub fn set_notetaker_outcome(
+        &self,
+        outcome: NotetakerOutcome,
+    ) -> std::io::Result<MeetingMeta> {
+        let mut meta = self.read_meta()?;
+        meta.notetaker = Some(outcome);
         self.write_meta(&meta)?;
         Ok(meta)
     }

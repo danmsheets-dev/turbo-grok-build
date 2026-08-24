@@ -14,6 +14,10 @@ pub enum BotState {
     Launching,
     /// Page loading; no recognizable Teams screen yet.
     Loading,
+    /// Teams served `/dl/launcher/` -- the desktop-app handoff page, which
+    /// never renders a web join screen. Transient on a healthy join; if it
+    /// persists, the guest is not getting in through this URL.
+    Launcher,
     /// Pre-join screen: name box and Join button.
     Prejoin,
     /// Waiting for an organizer to admit the notetaker.
@@ -37,6 +41,7 @@ impl BotState {
     pub fn from_page(s: &str) -> Option<Self> {
         Some(match s {
             "loading" => Self::Loading,
+            "launcher" => Self::Launcher,
             "prejoin" => Self::Prejoin,
             "lobby" => Self::Lobby,
             "admitted" => Self::Admitted,
@@ -64,6 +69,7 @@ impl BotState {
         match self {
             Self::Launching => "starting the notetaker browser".into(),
             Self::Loading => "loading the meeting page".into(),
+            Self::Launcher => "stuck on the Teams desktop-app launcher page".into(),
             Self::Prejoin => "at the Teams pre-join screen".into(),
             Self::Lobby => "waiting in the lobby — admit \"Turbo\" to start notes".into(),
             Self::Admitted => "in the meeting".into(),
@@ -114,6 +120,19 @@ pub enum TapEvent {
         /// Sub-state, e.g. `streaming`.
         state: String,
     },
+    /// The page refused a desktop-app protocol handoff.
+    #[serde(rename = "protocol-blocked")]
+    Blocked {
+        /// Scheme that was refused, e.g. `msteams`.
+        scheme: String,
+        /// Which interception fired (`anchor`, `window.open`, ...).
+        how: String,
+    },
+    /// A page-side step worth one log line.
+    Notice {
+        /// What the tap did.
+        message: String,
+    },
     /// The tap caught an exception.
     Error {
         /// Which part of the tap failed.
@@ -138,6 +157,7 @@ mod tests {
     fn parses_every_page_state() {
         for (raw, want) in [
             ("loading", BotState::Loading),
+            ("launcher", BotState::Launcher),
             ("prejoin", BotState::Prejoin),
             ("lobby", BotState::Lobby),
             ("admitted", BotState::Admitted),
@@ -158,6 +178,10 @@ mod tests {
         assert!(BotState::Ended.is_terminal());
         assert!(BotState::Failed("x".into()).is_terminal());
         assert!(!BotState::Lobby.is_terminal(), "lobby is where we wait");
+        // The launcher page is transient on a healthy join. Treating it as
+        // terminal would fail a join that was about to redirect to pre-join;
+        // `drive_join` bounds it with a grace window instead.
+        assert!(!BotState::Launcher.is_terminal(), "launcher is transient");
         assert!(!BotState::Admitted.is_terminal());
     }
 
@@ -184,6 +208,23 @@ mod tests {
         assert_eq!(
             TapEvent::parse(r#"{"type":"audio","state":"streaming"}"#),
             Some(TapEvent::Audio { state: "streaming".into() })
+        );
+    }
+
+    #[test]
+    fn parses_the_protocol_guard_events() {
+        assert_eq!(
+            TapEvent::parse(r#"{"type":"protocol-blocked","scheme":"msteams","how":"anchor"}"#),
+            Some(TapEvent::Blocked {
+                scheme: "msteams".into(),
+                how: "anchor".into()
+            })
+        );
+        assert_eq!(
+            TapEvent::parse(r#"{"type":"notice","message":"clicked continue-on-web"}"#),
+            Some(TapEvent::Notice {
+                message: "clicked continue-on-web".into()
+            })
         );
     }
 
