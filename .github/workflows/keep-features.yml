@@ -29,6 +29,15 @@ jobs:
         with:
           shared-key: keep-features
 
+      # Every cargo invocation below builds xai-grok-tools-api, whose build.rs
+      # compiles protos. `find_protoc` resolves $PROTOC, else the repo's
+      # `bin/protoc` dotslash wrapper -- which cannot run without dotslash, so
+      # this job died in the first build script and every step after it was
+      # skipped. release.yml already installs this; keep-features never did,
+      # which is why the gate was red rather than useful.
+      - name: Install dotslash (protoc launcher)
+        run: cargo install dotslash --locked
+
       - name: Isolation / subagents
         run: |
           cargo test -p xai-grok-tools --lib spawn_queues -- --test-threads=2
