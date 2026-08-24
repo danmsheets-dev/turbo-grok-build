@@ -317,6 +317,7 @@ async fn workflow_restore_rejects_symlinks_and_caps_run_count() {
             version: WORKFLOW_RUN_MANIFEST_VERSION,
             state,
             script_revision: 0,
+            task_queue: Default::default(),
         };
         std::fs::write(
                 run_dir.join("state.json"),
