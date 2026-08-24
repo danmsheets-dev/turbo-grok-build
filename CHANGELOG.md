@@ -42,6 +42,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc7** | **`1.0.0-rc.7`** | Phase 5 control plane + Meeting Join Hardening |
 | **1.0 rc8** | **`1.0.0-rc.8`** | Scheduled tasks, Meeting R2, Browser R3, GitHub log sync |
 | **1.0 rc9** | **`1.0.0-rc.9`** | Meeting Tool v3: joined Teams notetaker bot |
+| **1.0 rc10** | **`1.0.0-rc.10`** | Teams join hardening and incident log |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -49,6 +50,88 @@ Older release notes (r1–r13 detail) are archived under
 ---
 
 ## Unreleased
+
+---
+
+## [1.0.0-rc.10] - 2026-08-24
+
+**Teams Join Hardening and Incident Log.** rc.9 sent a guest notetaker into the
+meeting. On one machine it worked; on another the operator got a File Explorer
+window, a join that timed out, and a transcript of their own speakers that
+looked healthy. Two independent defects, plus a crash found on the way.
+
+### Fixed
+
+- **`meeting_join` no longer opens the join link when a guest bot is
+  dispatched.** The link was handed to the OS unconditionally, before the
+  transport was even chosen, via `explorer.exe <url>` — which opens the default
+  browser when the `https` association resolves and *reveals a folder* when it
+  does not. That single line produced both the working Chrome window on one
+  machine and the stray File Explorer windows on the other. Local-capture paths
+  still open the link, because there the operator does have to be in the
+  meeting themselves.
+- **Windows now opens join links with `ShellExecuteW(open)`,** matching the
+  contract the pager already documents, instead of `explorer.exe` — which
+  spawns a new Explorer window per call. A link with no handler is *reported*,
+  never turned into a file-manager window.
+- **A prompt containing any multi-byte character could abort the process.**
+  `first_https_url` walked byte offsets and sliced on them, so a smart quote, em
+  dash or emoji anywhere past byte 8 panicked — and `panic = "abort"` made that
+  a hard process death. It ran on every prompt submit through
+  `detect_join_request`, which is why it looked like a large-paste crash: a long
+  paste almost always contains one. Now walks character starts.
+- **`turbo issues sync --push` exited 0 after pushing nothing.** A run where
+  every incident was skipped printed a cheerful summary and reported success.
+  It now exits nonzero. Same for `turbo features sync`.
+
+### Added
+
+- **Teams web-join rewrite.** Teams redirects a `/meet/<id>` link to
+  `/dl/launcher/launcher.html?…&msLaunch=true&suppressPrompt=true`, which fires
+  the `ms-teams:` protocol immediately and never renders "Continue on this
+  browser" — leaving the notetaker with no DOM to drive. The bot now navigates a
+  query-only rewrite asking for the anonymous web client. Path, host and the `p`
+  passcode are preserved untouched; unrecognised shapes fall back to the URL as
+  pasted. Kill switch: `GROK_MEETING_TEAMS_WEB=0`.
+- **Page-side protocol guard.** The injected tap refuses `ms-teams:`,
+  `msteams:` and `teams:` navigations through `window.open`, `location.assign`,
+  `location.replace` and a capture-phase anchor click, and reports each one.
+- **The continue-on-web click is retried from the page's own poll loop.** The
+  launcher redirects twice inside a second while the Rust side polls at 500 ms,
+  so a single click could never win that race.
+- **`BotState::Launcher` and `BotError::LauncherHandoff`.** A page parked on the
+  launcher is now named in 20 seconds instead of being reported as a generic
+  "join timed out" after 60. Every bot failure maps to a typed
+  `JoinFailureStage` recorded in `meta.json`.
+- **Navigation logging.** `Page::navigation_stream()` surfaces the redirect
+  chain that was already flowing through the CDP connection and being discarded.
+  Diagnosing this incident previously meant reading the browser profile's
+  History file by hand.
+- **Downloads are denied browser-wide** (`Browser.setDownloadBehavior`), so the
+  launcher's `directDl=true` cannot pull an installer. Best-effort: a protocol
+  mismatch warns, it never fails a join.
+- **`gh repo view` preflight.** Sync now asks for `hasIssuesEnabled`,
+  `viewerPermission`, `isFork` and `isArchived` *before* listing, and refuses
+  with a remediation naming the exact GitHub settings page. GitHub disables
+  Issues on new forks by default, which is how a configured sync landed nothing
+  and reported an opaque API string. On refusal the maintainer bundle is
+  exported locally and its path printed, so the log is never stranded.
+
+### Changed
+
+- **A failed guest join no longer reads as success.** The outcome is durable in
+  `meta.json` as `NotetakerOutcome`, and `meeting_join`, `meeting_status` and
+  `meeting_stop` all render it, so they cannot disagree. A failed join now leads
+  with `NO GUEST IN THE MEETING …` naming the reason, instead of burying one
+  honest sentence seventh of eight lines under "Notetaker started".
+- **Work-folder recaps record the capture source.** A recap transcribed from one
+  PC's speakers used to be indistinguishable from one taken inside the meeting.
+- **A visible (`GROK_MEETING_BOT_WINDOW=1`) launch gets `--window-size`,** which
+  only headless mode set, so the diagnostic window now renders the layout the
+  headless run saw.
+- CI covers `xai-grok-meetings`, `xai-grok-meeting-bot` and `xai-grok-cdp`,
+  which had no gate. `xai-grok-developer-log`'s test target did not compile on
+  `dev` (a missing `RemoteState` import), so its existing gate was red.
 
 ---
 
