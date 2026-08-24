@@ -95,6 +95,10 @@ libc = { workspace = true }
 # EnumDisplaySettingsW for primary-display refresh probe (host/display_refresh).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Graphics_Gdi"] }
+# ShellExecuteW for `open_path`: launches a file in its default application
+# without a shell, so percent-encoded session paths survive intact and no
+# Explorer window is spawned. See `link_opener::shell_open_detached`.
+windows = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

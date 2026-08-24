@@ -105,8 +105,11 @@ fn consider(
     }
 }
 
-/// Append a line to inbox.jsonl (tests / manual paste).
-#[allow(dead_code)]
+/// Append a line to `inbox.jsonl`.
+///
+/// This is the ingress seam every chat source shares: the joined notetaker
+/// writes scraped Teams chat here, and `drain_inbox` turns it into `Turbo:`
+/// questions. Also used for tests and manual paste.
 pub fn append_inbox(store: &MeetingStore, from: &str, text: &str) -> std::io::Result<()> {
     let rec = serde_json::json!({ "from": from, "text": text });
     let mut f = OpenOptions::new()

@@ -787,7 +787,8 @@ impl SessionActor {
                         super::super::PromptOrigin::GoalClassifierNudge => {
                             ConversationItem::goal_classifier_nudge(user_message)
                         }
-                        super::super::PromptOrigin::SchedulerFired => {
+                        super::super::PromptOrigin::SchedulerFired
+                        | super::super::PromptOrigin::MeetingQuestion => {
                             ConversationItem::scheduler_fired(user_message)
                         }
                         super::super::PromptOrigin::PlanResume => {

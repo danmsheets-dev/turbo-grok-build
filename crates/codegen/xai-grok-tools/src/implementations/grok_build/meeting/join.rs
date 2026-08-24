@@ -10,7 +10,7 @@ pub const MEETING_JOIN_TOOL_NAME: &str = "meeting_join";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct MeetingJoinInput {
     #[schemars(
-        description = "Zoom, Teams, Meet, or Webex join URL (https). Opens the link and starts recording/transcription."
+        description = "Zoom, Teams, Meet, or Webex join URL (https). Teams sends a notetaker bot into the meeting lobby; other platforms record this machine's audio."
     )]
     pub url: String,
     #[serde(default, alias = "name")]
@@ -33,7 +33,7 @@ impl crate::types::tool_metadata::ToolMetadata for MeetingJoinTool {
     }
 
     fn description_template(&self) -> &str {
-        "Start Turbo's Fathom-style meeting notetaker. Pass a Zoom/Teams/Meet/Webex https join URL and optional title. Opens the link. On Windows, captures system playback (all participants) mixed with the microphone, transcribed with Grok STT. When the meeting stops, a work-only summary is saved as Meetings/YYYY-MM-DD - <name>.md in the launch work folder."
+        "Start Turbo's Fathom-style meeting notetaker. Pass a Zoom/Teams/Meet/Webex https join URL and optional title. For Teams, a guest participant named \"Turbo (Notetaker)\" joins the meeting and waits in the lobby until an organizer admits it, then hears the meeting itself. For other platforms (or if the bot cannot join) Turbo falls back to capturing this machine's audio, and the result says so. Transcribed with Grok STT. When the meeting stops, a work-only summary is saved as Meetings/YYYY-MM-DD - <name>.md in the launch work folder."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {

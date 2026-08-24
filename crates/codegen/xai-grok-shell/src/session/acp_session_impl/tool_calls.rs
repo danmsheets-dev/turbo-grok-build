@@ -332,7 +332,46 @@ fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> 
         PlanApprovalOutcome::Abandoned => ResumeAction::LeaveOnly,
     }
 }
+/// Strip any namespace qualifier (`GrokBuild:meeting_ask` → `meeting_ask`).
+///
+/// Matching on a suffix instead would also match an unrelated tool that merely
+/// *ends* with the name.
+fn short_tool_name(id: &str) -> &str {
+    id.rsplit([':', '/']).next().unwrap_or(id)
+}
+
+/// True when a `meeting_ask` call would drain the pending-question queue
+/// rather than asking a caller-supplied question.
+///
+/// Mirrors `MeetingHandle::ask`, which treats an absent, non-string, or
+/// whitespace-only `question` as "take the next queued item". Anything we
+/// cannot parse is treated as a drain, so the guard fails closed.
+fn meeting_ask_drains_queue(raw_input: &serde_json::Value) -> bool {
+    match raw_input.get("question") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+        Some(_) => true,
+    }
+}
+
 impl SessionActor {
+    /// Whether the running turn was driven by text from someone other than the
+    /// operator — today, a `Turbo:` question from meeting chat or audio.
+    ///
+    /// Derived from the running prompt id, which the pager tags with
+    /// [`xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX`].
+    /// A poisoned mutex fails **closed**: an unreadable origin is treated as
+    /// untrusted rather than waved through.
+    pub(super) fn turn_is_untrusted_third_party(&self) -> bool {
+        match self.current_prompt_id.lock() {
+            Ok(guard) => guard
+                .as_deref()
+                .map(crate::session::PromptOrigin::from_prompt_id)
+                .is_some_and(|o| o.is_untrusted_third_party()),
+            Err(_) => true,
+        }
+    }
+
     /// Merge the canonical `x.ai/tool` identity envelope into a tool-call
     /// event's `_meta`, resolving the tool from the live toolset by wire name.
     pub(super) fn stamp_tool_meta(
@@ -790,6 +829,9 @@ impl SessionActor {
                 ToolLoop::Cancelled => crate::session::events::ToolOutcome::PermissionCancelled,
                 ToolLoop::FollowupMessage(_) => crate::session::events::ToolOutcome::Followup,
                 ToolLoop::HookDenied { .. } => crate::session::events::ToolOutcome::HookDenied,
+                ToolLoop::PolicyDenied { .. } => {
+                    crate::session::events::ToolOutcome::PermissionRejected
+                }
                 ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => {
                     crate::session::events::ToolOutcome::InvalidTool
                 }
@@ -1566,6 +1608,67 @@ impl SessionActor {
                 )
             })
             .unwrap_or(false);
+
+        // A turn driven by meeting chat or speech is confined to the read-only
+        // set above. The question came from participants who may be outside the
+        // organization, so "do not run shell commands" is enforced here rather
+        // than merely asked for in the prompt.
+        //
+        // The notetaker's own Q&A tools are exempt: every meeting tool is
+        // `ToolKind::Meeting`, which is not read-only as a class, but reading
+        // this meeting and answering into its chat is the whole point of the
+        // turn. `is_meeting_qa_tool_name` is deliberately narrower than the
+        // full notetaker set — join/stop/notes/knowledge stay blocked.
+        let meeting_qa_tool =
+            xai_grok_meetings::is_meeting_qa_tool_name(&call.function.name);
+
+        // Defence in depth: `meeting_ask` with no question drains a queued
+        // question written by a meeting participant. Confinement must follow
+        // the *data*, not the entry point, so that drain is only allowed in a
+        // turn that is already confined. Otherwise an ordinary turn could pull
+        // untrusted text into a full-toolset context.
+        if !self.turn_is_untrusted_third_party()
+            && short_tool_name(&call.function.name) == xai_grok_meetings::MEETING_ASK_TOOL_NAME
+            && meeting_ask_drains_queue(&raw_input)
+        {
+            let message = format!(
+                "`{}` with no `question` drains a question written by a meeting participant. \
+                 That is untrusted text, so it may only be answered in a confined turn — it \
+                 runs automatically when a coworker asks, or via `/meeting ask` with no \
+                 arguments. Pass `question=` explicitly to ask something yourself.",
+                call.function.name
+            );
+            tracing::warn!("blocked an untrusted meeting-question drain in an unconfined turn");
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::PolicyDenied {
+                policy: "meeting_untrusted_drain",
+            }));
+        }
+
+        if !is_read_only && !meeting_qa_tool && self.turn_is_untrusted_third_party() {
+            let message = format!(
+                "`{}` is not available while answering a meeting question. Meeting text is \
+                 untrusted, so this turn may only use read-only tools (read, search, list, \
+                 LSP, memory lookup, web) plus meeting_ask/meeting_reply/meeting_transcript/\
+                 meeting_status. Answer from what you can read, or tell the meeting that the \
+                 operator has to make that change themselves.",
+                call.function.name
+            );
+            tracing::warn!(
+                tool = %call.function.name,
+                "blocked a write/exec tool in a meeting-question turn"
+            );
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            // Non-terminal: the model still has to post an answer with
+            // meeting_reply. Cancelling here would leave the coworker with
+            // silence and contradict the refusal text.
+            return Ok(Err(ToolLoop::PolicyDenied {
+                policy: "meeting_read_only",
+            }));
+        }
+
         let prepared = PreparedToolCall {
             call_id: call.id.clone(),
             tool_call_id,
@@ -3516,5 +3619,58 @@ mod wait_interrupt_tests {
         );
         drop(new);
         assert_eq!(depth.depth(), 0);
+    }
+}
+
+#[cfg(test)]
+mod meeting_confinement_tests {
+    use super::{meeting_ask_drains_queue, short_tool_name};
+    use serde_json::json;
+
+    #[test]
+    fn short_tool_name_strips_the_namespace_without_suffix_matching() {
+        assert_eq!(short_tool_name("GrokBuild:meeting_ask"), "meeting_ask");
+        assert_eq!(short_tool_name("meeting_ask"), "meeting_ask");
+        assert_eq!(short_tool_name("mcp/server/meeting_ask"), "meeting_ask");
+        // A tool merely ending in the name is a different tool.
+        assert_ne!(short_tool_name("evil_meeting_ask"), "meeting_ask");
+    }
+
+    /// The drain form pulls text a meeting participant wrote. Anything we
+    /// cannot read as an explicit question must be treated as a drain, so the
+    /// guard fails closed rather than waving untrusted text through.
+    #[test]
+    fn absent_null_or_blank_question_is_a_drain() {
+        assert!(meeting_ask_drains_queue(&json!({})));
+        assert!(meeting_ask_drains_queue(&json!({ "question": null })));
+        assert!(meeting_ask_drains_queue(&json!({ "question": "" })));
+        assert!(meeting_ask_drains_queue(&json!({ "question": "   " })));
+        assert!(meeting_ask_drains_queue(&json!({ "question": "\t\n" })));
+    }
+
+    #[test]
+    fn a_non_string_question_fails_closed() {
+        assert!(meeting_ask_drains_queue(&json!({ "question": 42 })));
+        assert!(meeting_ask_drains_queue(&json!({ "question": ["a"] })));
+        assert!(meeting_ask_drains_queue(&json!({ "question": { "a": 1 } })));
+        assert!(meeting_ask_drains_queue(&json!(null)));
+    }
+
+    #[test]
+    fn an_explicit_question_is_not_a_drain() {
+        assert!(!meeting_ask_drains_queue(
+            &json!({ "question": "how is the website going" })
+        ));
+        assert!(!meeting_ask_drains_queue(&json!({ "question": "?" })));
+    }
+
+    /// Only the notetaker Q&A subset is exempt from the read-only gate; the
+    /// state-changing notetaker tools must stay blocked.
+    #[test]
+    fn qa_exemption_does_not_cover_join_or_stop() {
+        assert!(xai_grok_meetings::is_meeting_qa_tool_name("meeting_reply"));
+        assert!(xai_grok_meetings::is_meeting_qa_tool_name("meeting_ask"));
+        assert!(!xai_grok_meetings::is_meeting_qa_tool_name("meeting_join"));
+        assert!(!xai_grok_meetings::is_meeting_qa_tool_name("meeting_stop"));
     }
 }

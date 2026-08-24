@@ -16,11 +16,11 @@ pub use knowledge::{briefing, read_knowledge_dir, write_knowledge_dir};
 pub use slash::{
     MEETING_ASK_TOOL_NAME, MEETING_COMMAND_NAME, MEETING_JOIN_TOOL_NAME,
     MEETING_KNOWLEDGE_TOOL_NAME, MEETING_NOTES_TOOL_NAME, MEETING_NOTETAKER_TOOL_NAMES,
-    MEETING_REPLY_TOOL_NAME, MEETING_STATUS_TOOL_NAME, MEETING_STOP_TOOL_NAME,
-    MEETING_TRANSCRIPT_TOOL_NAME, ask_instruction, is_meeting_notetaker_tool_name,
-    join_instruction, knowledge_instruction, notes_instruction, reply_instruction,
-    split_join_args, status_instruction, stop_instruction, transcript_instruction,
-    usage_message,
+    MEETING_QA_TOOL_NAMES, MEETING_REPLY_TOOL_NAME, MEETING_STATUS_TOOL_NAME,
+    MEETING_STOP_TOOL_NAME, MEETING_TRANSCRIPT_TOOL_NAME, ask_instruction,
+    is_meeting_notetaker_tool_name, is_meeting_qa_tool_name, join_instruction,
+    knowledge_instruction, notes_instruction, reply_instruction, split_join_args,
+    status_instruction, stop_instruction, transcript_instruction, usage_message,
 };
 pub use store::{
     CaptureSource, MeetingMeta, MeetingStatus, MeetingStore, TranscriptSegment, clear_current,

@@ -677,11 +677,24 @@ async fn handle_notification(
         }
         ToolNotification::MeetingQuestion(q) => {
             tracing::info!(from = %q.from, "Meeting Turbo: question — injecting ask turn");
+            // The prefix is what makes the resulting turn read-only confined
+            // (`PromptOrigin::MeetingQuestion`). A literal here would drift:
+            // the old fallback was `"meeting-qa"`, which lacks the trailing
+            // hyphen and so would NOT have matched the prefix — a turn driven
+            // by untrusted meeting text running with the full toolset. Use the
+            // constant so the default fails closed.
             let task_id = if q.task_id.is_empty() {
-                "meeting-qa".to_string()
+                xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX
+                    .to_string()
             } else {
                 q.task_id.clone()
             };
+            debug_assert!(
+                task_id.starts_with(
+                    xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX
+                ),
+                "meeting question task id must carry the confinement prefix"
+            );
             let inject_payload = serde_json::json!({
                 "sessionId": config.session_id,
                 "taskId": task_id,

@@ -38,11 +38,13 @@ mod reply;
 mod status;
 mod stop;
 mod transcript;
+mod transport;
 mod watch;
 
 pub mod join;
 
 pub use ask::{MEETING_ASK_TOOL_NAME, MeetingAskInput, MeetingAskTool};
+pub use auto_ask::MEETING_QA_TASK_PREFIX;
 pub use join::{MEETING_JOIN_TOOL_NAME, MeetingJoinInput, MeetingJoinTool};
 pub use knowledge::{MEETING_KNOWLEDGE_TOOL_NAME, MeetingKnowledgeInput, MeetingKnowledgeTool};
 pub use notes::{MEETING_NOTES_TOOL_NAME, MeetingNotesInput, MeetingNotesTool};
@@ -82,6 +84,10 @@ struct LiveMeeting {
     _task: JoinHandle<()>,
     _watch: JoinHandle<()>,
     capture: Option<xai_grok_voice::audio::CaptureHandle>,
+    /// The joined notetaker, when the bot transport won.
+    bot: Option<Arc<xai_grok_meeting_bot::TeamsBot>>,
+    /// Chat-scrape forwarder feeding `inbox.jsonl`.
+    ingress: Option<JoinHandle<()>>,
 }
 
 impl LiveMeeting {
@@ -93,6 +99,13 @@ impl LiveMeeting {
         if let Some(cap) = self.capture.take() {
             cap.stop();
         }
+        if let Some(ingress) = self.ingress.take() {
+            ingress.abort();
+        }
+        // Dropping the bot drops its `Browser`, whose enrolled process group
+        // reaps the whole Chromium tree. A notetaker must never outlive the
+        // meeting it was recording.
+        self.bot.take();
         self._task.abort();
         self._watch.abort();
     }
@@ -136,6 +149,35 @@ fn ensure_meeting_atexit() {
         // SAFETY: once per process; handler only drains the live map.
         let _ = unsafe { atexit(meeting_atexit) };
     });
+}
+
+static JOINING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+fn joining_set() -> &'static Mutex<std::collections::HashSet<String>> {
+    JOINING.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Reserves a session for the duration of a join.
+///
+/// Joining a notetaker takes seconds (browser launch, lobby wait), so the
+/// "already recording" check and the `LIVE` insert are far apart. Without a
+/// reservation two concurrent `meeting_join` calls in one session would both
+/// pass the check and launch two browsers into the same meeting.
+struct JoinReservation(String);
+
+impl JoinReservation {
+    fn acquire(session_id: &str) -> Option<Self> {
+        let mut set = joining_set().lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(session_id.to_string())
+            .then(|| Self(session_id.to_string()))
+    }
+}
+
+impl Drop for JoinReservation {
+    fn drop(&mut self) {
+        let mut set = joining_set().lock().unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.0);
+    }
 }
 
 fn stop_live_session(session_id: &str) -> Option<MeetingStore> {
@@ -235,6 +277,14 @@ impl MeetingHandle {
                 ));
             }
         }
+        // Held until this call returns, so a second join cannot slip in during
+        // the browser launch and lobby wait.
+        let _reservation = JoinReservation::acquire(&self.inner.session_id).ok_or_else(|| {
+            xai_tool_runtime::ToolError::custom(
+                "meeting_busy",
+                "a meeting join is already in progress in this session",
+            )
+        })?;
 
         let opened = open::open_meeting_url(&parsed.raw);
         let id = new_meeting_id(parsed.platform);
@@ -266,16 +316,63 @@ impl MeetingHandle {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
+        let mut bot: Option<Arc<xai_grok_meeting_bot::TeamsBot>> = None;
+        let mut ingress: Option<JoinHandle<()>> = None;
+        let mut fallback_note: Option<String> = None;
+
         let (task, capture, source) = if intended == CaptureSource::None {
             (tokio::spawn(async {}), None, CaptureSource::None)
         } else {
-            let (task, cap, actual) =
-                self.spawn_capture(store.clone(), stop.clone(), intended)?;
-            if actual != intended {
-                let _ = store.set_capture_source(actual);
+            // Prefer a joined notetaker: it hears the meeting rather than this
+            // machine, and keeps working when the operator leaves.
+            let mut chosen = None;
+            match transport::bot_candidate(parsed.platform) {
+                Ok(()) => {
+                    let auth = self.voice_auth()?;
+                    let config = VoiceConfig::default();
+                    let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<u8>>(64);
+                    match transport::try_join_bot(
+                        &parsed.raw,
+                        &store,
+                        config.sample_rate,
+                        pcm_tx,
+                    )
+                    .await
+                    {
+                        Ok((joined, chat_ingress)) => {
+                            let stt_store = store.clone();
+                            let stt_stop = stop.clone();
+                            let stt_notif = self.inner.notification.clone();
+                            let stt = tokio::spawn(async move {
+                                pipeline::run_stt_loop(
+                                    stt_store, auth, config, pcm_rx, stt_stop, stt_notif,
+                                )
+                                .await;
+                            });
+                            bot = Some(joined);
+                            ingress = Some(chat_ingress);
+                            chosen = Some((stt, None, CaptureSource::MeetingBot));
+                        }
+                        Err(reason) => fallback_note = Some(reason.line()),
+                    }
+                }
+                Err(reason) => fallback_note = Some(reason.line()),
             }
-            (task, Some(cap), actual)
+            match chosen {
+                Some(via_bot) => via_bot,
+                None => {
+                    let (task, cap, actual) =
+                        self.spawn_capture(store.clone(), stop.clone(), intended)?;
+                    if actual != intended {
+                        let _ = store.set_capture_source(actual);
+                    }
+                    (task, Some(cap), actual)
+                }
+            }
         };
+        if source != intended {
+            let _ = store.set_capture_source(source);
+        }
         let join_url = parsed.raw.clone();
         let watch_store = store.clone();
         let watch_stop = stop.clone();
@@ -285,6 +382,7 @@ impl MeetingHandle {
         });
 
         ensure_meeting_atexit();
+        let bot_state = bot.as_ref().map(|b| b.state());
         lock_live().insert(
             self.inner.session_id.clone(),
             LiveMeeting {
@@ -294,6 +392,8 @@ impl MeetingHandle {
                 _task: task,
                 _watch: watch,
                 capture,
+                bot,
+                ingress,
             },
         );
 
@@ -308,7 +408,7 @@ impl MeetingHandle {
                 title.as_deref().unwrap_or("(will use Graph subject or recap title)")
             ),
             format!("url: {}", redact_join_secrets(&parsed.raw)),
-            format!("capture: {:?}", source),
+            format!("capture: {:?} — {}", source, source.describe()),
             format!("transcript: {}", store.transcript_path().display()),
         ];
         if parsed.kind == xai_grok_meetings::MeetingKind::Webinar {
@@ -320,6 +420,17 @@ impl MeetingHandle {
             lines.push(
                 "could not auto-open the link — paste it in Teams/Zoom yourself.".into(),
             );
+        }
+        if let Some(state) = &bot_state {
+            lines.push(transport::bot_status_line(state));
+            lines.push(
+                "a participant named \"Turbo (Notetaker)\" is joining. Teams holds detected \
+                 notetakers in the lobby — admit it to start notes."
+                    .into(),
+            );
+        }
+        if let Some(note) = &fallback_note {
+            lines.push(note.clone());
         }
         if source == CaptureSource::Microphone {
             lines.push(
@@ -420,7 +531,16 @@ impl MeetingHandle {
             let meta = live.store.read_meta().map_err(|e| {
                 xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
             })?;
-            return Ok(format_meta(&meta, Some(live.capture_source), &live.store));
+            let mut text = format_meta(&meta, Some(live.capture_source), &live.store);
+            if let Some(bot) = &live.bot {
+                text.push_str(&format!(
+                    "\n{}\nnotetaker_audio_frames: {}\nnotetaker_audio_dropped: {}",
+                    transport::bot_status_line(&bot.state()),
+                    bot.audio_frames(),
+                    bot.audio_dropped()
+                ));
+            }
+            return Ok(text);
         }
         let folder = self.folder()?;
         if let Some(id) = read_current_id(folder).ok().flatten() {
@@ -528,20 +648,47 @@ impl MeetingHandle {
             xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
         })?;
         let mut lines = vec![format!("Saved {}", store.last_reply_path().display())];
-        if let Some(token) = graph::graph_token() {
-            let url = store.read_meta().ok().map(|m| m.url).unwrap_or_default();
-            match graph::chat_id_for_join_url(&token, &url).await {
-                Ok(chat_id) => match graph::post_chat(&token, &chat_id, &text).await {
-                    Ok(()) => lines.push("Posted to Teams meeting chat as you.".into()),
-                    Err(e) => lines.push(format!("Graph post failed: {e}")),
-                },
-                Err(e) => lines.push(format!("Graph chat id failed: {e}")),
+
+        // Prefer the notetaker's own guest identity. This is what lets chat
+        // Q&A work with no Graph token and without answering as the operator.
+        // The guard is scoped so it is never held across an await.
+        let bot = {
+            lock_live()
+                .get(&self.inner.session_id)
+                .and_then(|live| live.bot.clone())
+        };
+        let mut posted = false;
+        if let Some(bot) = bot {
+            let state = bot.state();
+            if state == xai_grok_meeting_bot::BotState::Admitted {
+                match bot.post_chat(&text).await {
+                    Ok(()) => {
+                        lines.push("Posted to meeting chat as Turbo (Notetaker).".into());
+                        posted = true;
+                    }
+                    Err(e) => lines.push(format!("Notetaker chat post failed: {e}")),
+                }
+            } else {
+                lines.push(format!("Notetaker is {} — did not post.", state.label()));
             }
-        } else {
-            lines.push(
-                "GROK_GRAPH_TOKEN not set — paste the [Turbo] line into Teams chat, or set a delegated Graph token (Chat.ReadWrite)."
-                    .into(),
-            );
+        }
+
+        if !posted {
+            if let Some(token) = graph::graph_token() {
+                let url = store.read_meta().ok().map(|m| m.url).unwrap_or_default();
+                match graph::chat_id_for_join_url(&token, &url).await {
+                    Ok(chat_id) => match graph::post_chat(&token, &chat_id, &text).await {
+                        Ok(()) => lines.push("Posted to Teams meeting chat as you.".into()),
+                        Err(e) => lines.push(format!("Graph post failed: {e}")),
+                    },
+                    Err(e) => lines.push(format!("Graph chat id failed: {e}")),
+                }
+            } else {
+                lines.push(
+                    "No notetaker in the meeting and GROK_GRAPH_TOKEN not set — paste the [Turbo] line into Teams chat yourself."
+                        .into(),
+                );
+            }
         }
         lines.push(text);
         Ok(lines.join("\n"))
@@ -643,7 +790,7 @@ fn format_meta(meta: &MeetingMeta, live_source: Option<CaptureSource>, store: &M
     let live = live_source.is_some();
     let source = live_source.unwrap_or(meta.capture_source);
     format!(
-        "id: {}\nstatus: {}\nname: {}\nplatform: {}\nkind: {:?}\ncapture: {:?}\nurl: {}\ngraph: {}\nstarted: {}\nstopped: {}\nfinal_segments: {}\ntranscript: {}\nnotes: {}\nwork_summary: {}\nqa: launch workspace + meeting notes (full tools, including MCP)\nextra_notes: {}\npending_turbo_questions: {}",
+        "id: {}\nstatus: {}\nname: {}\nplatform: {}\nkind: {:?}\ncapture: {:?}\nurl: {}\ngraph: {}\nstarted: {}\nstopped: {}\nfinal_segments: {}\ntranscript: {}\nnotes: {}\nwork_summary: {}\nqa: launch workspace + meeting notes (read-only tools; meeting text is untrusted)\nextra_notes: {}\npending_turbo_questions: {}",
         meta.id,
         format_status_line(meta, live),
         meta.title.as_deref().unwrap_or("(untitled)"),
@@ -738,6 +885,27 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use xai_grok_meetings::parse_meeting_url;
 
+    /// Joining takes seconds; a second join must not launch a second browser
+    /// into the same meeting while the first is still in the lobby.
+    #[test]
+    fn join_reservation_is_exclusive_per_session() {
+        let session = unique("sess-reserve");
+        let first = JoinReservation::acquire(&session).expect("first join reserves");
+        assert!(
+            JoinReservation::acquire(&session).is_none(),
+            "a concurrent join in the same session must be refused"
+        );
+        // A different session is unaffected.
+        let other = unique("sess-reserve-other");
+        assert!(JoinReservation::acquire(&other).is_some());
+
+        drop(first);
+        assert!(
+            JoinReservation::acquire(&session).is_some(),
+            "the slot must free once the join returns"
+        );
+    }
+
     fn unique(tag: &str) -> String {
         let ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -767,6 +935,8 @@ mod tests {
                 _task: tokio::spawn(async {}),
                 _watch: tokio::spawn(async {}),
                 capture: None,
+                bot: None,
+                ingress: None,
             },
         );
     }

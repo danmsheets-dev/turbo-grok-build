@@ -41,6 +41,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc6** | **`1.0.0-rc.6`** | Providers ACP, isolation, Poolside hosted Chat API |
 | **1.0 rc7** | **`1.0.0-rc.7`** | Phase 5 control plane + Meeting Join Hardening |
 | **1.0 rc8** | **`1.0.0-rc.8`** | Scheduled tasks, Meeting R2, Browser R3, GitHub log sync |
+| **1.0 rc9** | **`1.0.0-rc.9`** | Meeting Tool v3: joined Teams notetaker bot |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -48,6 +49,112 @@ Older release notes (r1–r13 detail) are archived under
 ---
 
 ## Unreleased
+
+---
+
+## [1.0.0-rc.9] - 2026-08-23
+
+**Meeting Tool v3 — the notetaker joins the meeting.** rc.4 recorded the
+operator's speakers and put nobody in the room. rc.9 sends a real guest
+participant: "Turbo (Notetaker)" waits in the Teams lobby, is admitted like any
+other attendee, hears the meeting instead of the machine, and answers `Turbo:`
+questions in chat under its own name. Closes
+`fr_01a030379de47ce1bf74fed2c32cb44b` and `fr_01a030361d877ce39a41ff8b933df228`.
+
+### Added
+- **Joined Teams notetaker.** `meeting_join` launches the Edge already installed
+  on the machine (headless, throwaway profile), joins as an anonymous guest named
+  **Turbo (Notetaker)**, camera and mic off, and reports lobby → admitted state.
+  Teams' default `ExternalBotAccessMode=RequireApprovalWhenDetected` holds
+  detected notetakers in the lobby for an explicit admit; Turbo surfaces that
+  rather than working around it.
+- **In-page audio tap.** A document-start script wraps `RTCPeerConnection`,
+  mixes inbound tracks through Web Audio running natively at 16 kHz, and streams
+  20 ms frames of mono 16-bit LE PCM over a loopback WebSocket (bound to
+  `127.0.0.1`, random per-meeting token) into the existing Grok STT pipeline.
+  No WASAPI, no virtual audio cable, no third-party service — **meeting audio
+  never leaves the machine**. Works with the operator's speakers muted, their
+  headset unplugged, or the operator gone entirely.
+- **Chat Q&A as the bot.** Scraped meeting chat feeds `inbox.jsonl`; answers
+  post to meeting chat as **Turbo (Notetaker)**. `GROK_GRAPH_TOKEN` is no longer
+  required for coworker Q&A — Graph is now the fallback, not the primary path.
+- **`xai-grok-cdp`** — minimal Chrome DevTools Protocol client (Target / Page /
+  Runtime) over a local WebSocket. Launches through `ProcessScope::enroll`, so
+  the whole Chromium tree is reaped with the session.
+- **`xai-grok-meeting-bot`** — join choreography, selector table, injected tap,
+  loopback audio server.
+- **Selector overrides.** `GROK_MEETING_SELECTORS` (or
+  `$GROK_HOME/teams-selectors.json`) replaces the Teams DOM selector table from
+  disk, so a Teams UI change is repairable without a Turbo release. Join
+  failures name the step that broke (`name_input`, `join_button`, …).
+- Docs: [`docs/MEETING_NOTETAKER.md`](./docs/MEETING_NOTETAKER.md).
+
+### Security
+- **Meeting Q&A is confined to read-only tools, enforced at dispatch.** A
+  `Turbo:` question is untrusted text from participants who may be outside the
+  organization, with spoofable display names. The pager tags the prompt id with
+  `meeting-qa-`, the shell parses it into `PromptOrigin::MeetingQuestion`, and
+  anything outside the allowed set is refused **before it runs** — no write,
+  edit, shell, or subagent spawn, and no MCP, `workspace_tree` or `resolve_path`
+  (MCP reaches off-box and its read-only hints are server-self-reported).
+  Unreadable classification **fails closed**. Previously this was only requested
+  in the prompt text.
+- **Confinement follows the data, not the entry point.** `/meeting ask` with no
+  arguments drains a participant-authored question, so it is tagged and confined
+  exactly like the automatic path; calling `meeting_ask` with no question from an
+  ordinary turn is refused. Only the notetaker's read/answer tools
+  (`meeting_ask`, `meeting_reply`, `meeting_transcript`, `meeting_status`) are
+  exempt from the gate — `meeting_join`, `meeting_stop`, `meeting_notes` and
+  `meeting_knowledge` stay blocked, so a coworker cannot start another
+  recording, end this one, or rewrite the recap.
+- A refused tool is **non-terminal** (`ToolLoop::PolicyDenied`): the refusal is
+  fed back as a tool result so Turbo still answers with what it may use, instead
+  of the turn dying and the coworker getting silence.
+- The bot's outbound audio track is silent by construction (zero-gain Web Audio
+  node), not Chromium's fake-device beep, and `getUserMedia` never reaches the
+  operator's real microphone.
+- Verification challenges are **never answered**. A challenge, a signed-in-only
+  meeting, or a denial ends the bot join and falls back to local capture.
+
+### Changed
+- `CaptureSource` gains `MeetingBot`. `meeting_status` reports notetaker state
+  and PCM frame count, and no longer claims Q&A has "full tools".
+- Every fallback to local capture states what is actually being recorded and
+  that **no participant joins the meeting**, so nobody waits to admit a bot that
+  was never dispatched (`fr_01a03036`).
+- Sitting in the lobby past `GROK_MEETING_LOBBY_TIMEOUT` (default 300s) marks
+  the notetaker failed and says so. Turbo does not silently switch to recording
+  the operator's speakers instead.
+
+### Fixed
+- **Windows: clicking a file link no longer opens an Explorer window.**
+  `open_path` ran `explorer.exe /select,<path>` on every activation — a file
+  link, a `file://` URL, or the media `[Open]` button — and `/select` spawns a
+  *new* Explorer window each time, so they accumulated across a working
+  session. The file was never actually opened, despite the toast saying
+  "Opening in default app…" (macOS and Linux did open it). Now `ShellExecuteW`
+  launches the file in its default application: no shell, so percent-encoded
+  session paths still survive intact, and no Explorer window. A file with no
+  registered association falls back to revealing it rather than raising the
+  "How do you want to open this file?" chooser, and a missing file still opens
+  its parent folder. `reveal_in_file_manager` stays public for an explicit
+  "show in folder" action.
+- Live meeting audio is **shed, not queued**, when STT stalls — in the page (a
+  WebSocket backlog ceiling) and in Turbo (`try_send`), matching local capture.
+  Previously an STT reconnect applied backpressure all the way into the browser
+  and buffered stale audio. `meeting_status` reports `notetaker_audio_dropped`.
+- The in-page audio graph is built behind a memoized promise. A boolean latched
+  before `audioWorklet.addModule` resolved let every track that arrived during
+  startup — i.e. everyone who joined at the same moment — past a still-undefined
+  mixer, silently dropping them for the rest of the meeting.
+- Pre-existing `clippy::approx_constant` error in Game Mode's `RACK_ANCHOR`
+  blocked `cargo clippy` on the whole pager crate.
+- `schema/tool_meta.schema.json` was stale since rc.8 added `ToolKind::Meeting`,
+  failing `tool_meta_schema_is_up_to_date`. Regenerated.
+- Flaky `disk_cmd` tests: `plugin_worktrees_skips_live_and_reclaims_old` set
+  `GROK_BUILD_WORKTREE_ROOT` with a raw `set_var`, racing
+  `plugin_worktree_roots_are_config_only`, which asserts it is unset. Both (and
+  the semicolon-split test) now share a `serial_test` key and use `EnvVarGuard`.
 
 ---
 

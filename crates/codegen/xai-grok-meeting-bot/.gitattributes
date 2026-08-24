@@ -1,0 +1,3 @@
+# include_str! meeting tap must be host-independent (same policy as the root
+# `.gitattributes` embedded-asset pins). Path-only: this crate's only shipped JS.
+src/tap.js text eol=lf

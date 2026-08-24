@@ -52,6 +52,7 @@ impl SlashCommand for ImagineVideoCommand {
             ))],
             display_as_skill: false,
             scheduled_task_preview: None,
+            task_id: None,
         }
     }
 }

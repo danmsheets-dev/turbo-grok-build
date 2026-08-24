@@ -81,6 +81,7 @@ impl SlashCommand for ScheduleCommand {
             ))],
             display_as_skill: false,
             scheduled_task_preview: preview,
+            task_id: None,
         }
     }
 }

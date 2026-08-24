@@ -26,7 +26,7 @@ impl crate::types::tool_metadata::ToolMetadata for MeetingReplyTool {
     }
 
     fn description_template(&self) -> &str {
-        "Send a Turbo answer to the meeting. Posts to Teams chat as the signed-in user when GROK_GRAPH_TOKEN is set; always saves last_reply.md. Prefix [Turbo]. Do not impersonate without the operator opting in (they have)."
+        "Send a Turbo answer to the meeting. Posts to meeting chat as \"Turbo (Notetaker)\" when the notetaker bot is in the meeting; otherwise falls back to Teams chat as the signed-in user when GROK_GRAPH_TOKEN is set. Always saves last_reply.md. Prefix [Turbo]."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {

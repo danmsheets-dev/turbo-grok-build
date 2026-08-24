@@ -732,6 +732,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 prompt_blocks,
                 display_as_skill,
                 scheduled_task_preview,
+                task_id,
             } => {
                 // Enqueue with display text for scrollback but wire_blocks
                 // for the actual prompt sent to the model. Leading skill
@@ -744,6 +745,10 @@ pub(super) fn dispatch_send_prompt_inner(
                     .push_back(crate::app::agent::QueuedPrompt {
                         wire_blocks: Some(prompt_blocks),
                         display_as_skill,
+                        // Carries the `meeting-qa-` tag when the prompt will
+                        // pull participant-authored text; `queue.rs` turns
+                        // that into a confined prompt id.
+                        task_id,
                         ..crate::app::agent::QueuedPrompt::plain(
                             id,
                             display_text,

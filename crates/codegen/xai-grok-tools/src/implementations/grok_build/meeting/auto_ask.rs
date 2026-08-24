@@ -5,6 +5,15 @@ use xai_grok_meetings::ask_instruction;
 
 pub const AUTO_ASK_ENV: &str = "GROK_MEETING_AUTO_ASK";
 
+/// Prefix on both the injected task id and the resulting prompt id.
+///
+/// This is the tag that marks a turn as driven by untrusted meeting text.
+/// The pager copies it onto the prompt id and the shell parses it back into
+/// `PromptOrigin::MeetingQuestion`, which confines the turn to read-only
+/// tools. Changing it in one place without the others silently removes that
+/// confinement, so all three read this constant.
+pub const MEETING_QA_TASK_PREFIX: &str = "meeting-qa-";
+
 pub fn auto_ask_enabled() -> bool {
     match std::env::var(AUTO_ASK_ENV) {
         Ok(s) => !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
@@ -17,7 +26,7 @@ pub fn meeting_qa_task_id(from: &str, question: &str) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     from.hash(&mut h);
     question.hash(&mut h);
-    format!("meeting-qa-{:x}", h.finish())
+    format!("{MEETING_QA_TASK_PREFIX}{:x}", h.finish())
 }
 
 /// Queue a research+reply turn. No-op if auto-ask is off or there is no sink.

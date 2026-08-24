@@ -77,6 +77,14 @@ pub enum CommandResult {
         /// pane (replaced when the real `ScheduledTaskCreated` notification
         /// arrives from the shell).
         scheduled_task_preview: Option<ScheduledTaskPreview>,
+        /// Optional task id carried onto the queued prompt.
+        ///
+        /// A `meeting-qa-` prefix here makes the resulting turn run under
+        /// `PromptOrigin::MeetingQuestion`, i.e. confined to read-only tools.
+        /// Set it whenever the prompt will pull text authored by someone other
+        /// than the operator — `/meeting ask` with no arguments drains a
+        /// participant's queued question, so it must be tagged.
+        task_id: Option<String>,
     },
     /// Command text should be sent as a regular prompt. The shell resolves it.
     ///

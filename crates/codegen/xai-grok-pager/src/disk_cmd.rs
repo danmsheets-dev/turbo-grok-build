@@ -2693,6 +2693,7 @@ mod tests {
     /// `H:\gb-work` and delete every child. Roots now come from configuration
     /// only, and only product-named children are candidates.
     #[test]
+    #[serial_test::serial(plugin_worktree_root_env)]
     fn plugin_worktree_roots_are_config_only() {
         for key in ["GROK_BUILD_WORKTREE_ROOT", "GROK_PLUGIN_WORKTREE_ROOT"] {
             assert!(
@@ -2753,6 +2754,7 @@ mod tests {
     /// A comma is legal in a Windows path; splitting on it would promote an
     /// ancestor of the nominated directory into a deletion root.
     #[test]
+    #[serial_test::serial(plugin_worktree_root_env)]
     fn plugin_worktree_roots_split_on_semicolon_only() {
         let tmp = tempfile::tempdir().unwrap();
         let comma_dir = tmp.path().join("my,dir");
@@ -3127,6 +3129,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(plugin_worktree_root_env)]
     fn plugin_worktrees_skips_live_and_reclaims_old() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("gb");
@@ -3137,10 +3140,10 @@ mod tests {
         fs::write(live.join(".grok-subagent-live"), b"1").unwrap();
         fs::write(live.join("x"), b"live").unwrap();
         fs::write(dead.join("x"), b"dead").unwrap();
-        let prev = std::env::var_os("GROK_BUILD_WORKTREE_ROOT");
-        unsafe {
-            std::env::set_var("GROK_BUILD_WORKTREE_ROOT", &root);
-        }
+        // Guarded + serial: this is process-global state, and
+        // `plugin_worktree_roots_are_config_only` asserts the same variable is
+        // unset. A raw `set_var` here raced that test into a flaky failure.
+        let _guard = crate::test_util::EnvVarGuard::set("GROK_BUILD_WORKTREE_ROOT", &root);
         let cats = resolve_categories(&[CleanCategory::PluginWorktrees], false).unwrap();
         clean(CleanOpts {
             root: Some(tmp.path().to_path_buf()),
@@ -3156,12 +3159,6 @@ mod tests {
         .unwrap();
         assert!(live.exists(), "live plugin worktree must remain");
         assert!(!dead.exists(), "old plugin worktree should be removed");
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("GROK_BUILD_WORKTREE_ROOT", v),
-                None => std::env::remove_var("GROK_BUILD_WORKTREE_ROOT"),
-            }
-        }
     }
 
     #[test]

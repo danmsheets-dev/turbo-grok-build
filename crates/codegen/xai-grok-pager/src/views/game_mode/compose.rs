@@ -84,6 +84,9 @@ const COFFEE_ANCHOR: (f32, f32) = (0.88, 0.48);
 /// would have to displace a desk card. So the rack tooltip must be gated on
 /// `render::render_game_mode`'s `pixel_painted`, exactly like the supervisor
 /// hit rect: a default `Rect` never hit-tests.
+// The `0.318` is a canvas fraction measured off the baked art, not an
+// approximation of `FRAC_1_PI`; clippy cannot tell the two apart.
+#[allow(clippy::approx_constant)]
 const RACK_ANCHOR: (f32, f32) = (0.947, 0.318);
 
 /// Footprint of the baked rack, as fractions of the canvas.

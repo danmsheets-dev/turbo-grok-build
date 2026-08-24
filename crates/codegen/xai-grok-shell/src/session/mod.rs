@@ -87,6 +87,13 @@ pub enum PromptOrigin {
     GoalClassifierNudge,
     /// Scheduled task (`/loop`) prompt fired by the scheduler via the pager.
     SchedulerFired,
+    /// Q&A turn driven by a `Turbo:` question from meeting chat or audio.
+    ///
+    /// The text comes from meeting participants, who may be outside the
+    /// organization and whose display names are spoofable in an anonymous-join
+    /// meeting. Turns with this origin are confined to read-only tools — see
+    /// [`PromptOrigin::is_untrusted_third_party`].
+    MeetingQuestion,
     /// Turn injected after a resumed plan-approval decision: the
     /// shell re-parked `exit_plan_mode` on resume, the user approved/revised,
     /// and the shell injects the follow-up turn. Synthetic so the user never
@@ -116,6 +123,8 @@ impl PromptOrigin {
             Self::GoalClassifierNudge
         } else if prompt_id.starts_with("scheduler-fired-") {
             Self::SchedulerFired
+        } else if prompt_id.starts_with("meeting-qa-") {
+            Self::MeetingQuestion
         } else if prompt_id.starts_with("plan-resume-") {
             Self::PlanResume
         } else {
@@ -126,6 +135,16 @@ impl PromptOrigin {
     pub fn is_synthetic(&self) -> bool {
         !matches!(self, Self::User)
     }
+    /// Whether this turn was driven by text Turbo received from someone other
+    /// than the operator.
+    ///
+    /// Such a turn is restricted to read-only tools at dispatch, so a coworker
+    /// (or anyone who talked their way into the meeting) cannot make Turbo
+    /// write files, run shell commands, or spawn subagents. This is enforced
+    /// in `tool_calls::prepare`, not merely requested in the prompt.
+    pub fn is_untrusted_third_party(&self) -> bool {
+        matches!(self, Self::MeetingQuestion)
+    }
     /// Whether a `UserMessageChunk` echo for this origin must stay out of
     /// client scrollback (live and on resume). Model-only / side-channel
     /// content — UI already surfaces it via task pane, monitor gutter, etc.
@@ -134,7 +153,9 @@ impl PromptOrigin {
     /// real user turns always render.
     pub fn hide_user_echo_from_scrollback(&self) -> bool {
         match self {
-            Self::User | Self::SchedulerFired | Self::PlanResume => false,
+            // A meeting question renders like cron: the operator should be
+            // able to see what a coworker asked and what Turbo answered.
+            Self::User | Self::SchedulerFired | Self::PlanResume | Self::MeetingQuestion => false,
             Self::TaskCompleted { .. }
             | Self::SubagentCompleted { .. }
             | Self::WorkflowCompleted { .. }
@@ -153,6 +174,7 @@ impl PromptOrigin {
             | Self::GoalSummary
             | Self::GoalClassifierNudge
             | Self::SchedulerFired
+            | Self::MeetingQuestion
             | Self::PlanResume => None,
         }
     }
@@ -160,6 +182,71 @@ impl PromptOrigin {
 #[cfg(test)]
 mod tests {
     use super::PromptOrigin;
+
+    #[test]
+    fn meeting_qa_prompt_id_is_untrusted_third_party() {
+        let origin = PromptOrigin::from_prompt_id("meeting-qa-3f2a1b");
+        assert_eq!(origin, PromptOrigin::MeetingQuestion);
+        assert!(
+            origin.is_untrusted_third_party(),
+            "a meeting question must confine the turn to read-only tools"
+        );
+        assert!(origin.is_synthetic(), "the operator did not type it");
+        assert!(
+            !origin.hide_user_echo_from_scrollback(),
+            "the operator should see what a coworker asked"
+        );
+    }
+
+    /// The confinement must not leak onto operator-authored turns: a `/loop`
+    /// task is the operator's own instruction and keeps full tools.
+    #[test]
+    fn only_meeting_questions_are_untrusted() {
+        for id in [
+            "my-prompt",
+            "scheduler-fired-abc",
+            "task-completed-1",
+            "subagent-completed-2",
+            "workflow-completed-3",
+            "notifications-4",
+            "goal-summary-5",
+            "goal-classifier-nudge-6",
+            "plan-resume-7",
+        ] {
+            assert!(
+                !PromptOrigin::from_prompt_id(id).is_untrusted_third_party(),
+                "`{id}` must keep the operator's full toolset"
+            );
+        }
+    }
+
+    /// A prompt id merely *containing* the tag is not a meeting turn; only the
+    /// prefix the pager writes counts.
+    #[test]
+    fn meeting_tag_must_be_a_prefix() {
+        assert_eq!(
+            PromptOrigin::from_prompt_id("scheduler-fired-meeting-qa-1"),
+            PromptOrigin::SchedulerFired
+        );
+        assert_eq!(
+            PromptOrigin::from_prompt_id("x-meeting-qa-1"),
+            PromptOrigin::User
+        );
+    }
+
+    #[test]
+    fn meeting_prefix_matches_the_tools_constant() {
+        // One constant drives the pager tag, the task id, and this parser.
+        // If they drift, the read-only confinement silently stops applying.
+        let prefix =
+            xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX;
+        assert_eq!(prefix, "meeting-qa-");
+        assert_eq!(
+            PromptOrigin::from_prompt_id(&format!("{prefix}deadbeef")),
+            PromptOrigin::MeetingQuestion
+        );
+    }
+
     #[test]
     fn from_prompt_id_user() {
         assert_eq!(

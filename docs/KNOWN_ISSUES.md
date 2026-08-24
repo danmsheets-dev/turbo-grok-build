@@ -3,7 +3,28 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-23 (1.0.0-rc.8 scheduled tasks, Meeting R2, Browser R3).
+Last reviewed: 2026-08-24 (1.0.0-rc.9 Meeting Tool v3 — joined Teams notetaker).
+
+## 1.0.0-rc.9 — joined Teams notetaker
+
+Shipped on wire `1.0.0-rc.9`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+### Intentional limits
+
+- **Turbo cannot speak in a meeting.** `xai-grok-voice` has STT and a live
+  WebRTC session with speaker playback, but no TTS, so there is no audio source
+  to feed the meeting. Answers post to meeting chat. Tracked as
+  `fr_01a0311b05b37e50bd30be250814ad61`.
+- **Teams DOM selectors are unvalidated against a live meeting.** They are
+  candidate lists overridable from disk (`GROK_MEETING_SELECTORS` or
+  `$GROK_HOME/teams-selectors.json`), and a failed join names the step that
+  could not be found. Expect to need an override when Teams ships UI changes.
+- **Only Teams gets a bot.** Zoom / Meet / Webex fall back to local capture and
+  say so; no participant joins those meetings.
+- **A tenant that blocks external bots wins.** Teams' default is lobby +
+  label + explicit admit, which is the intended flow; Turbo reports refusal and
+  falls back rather than evading detection, and never answers a verification
+  challenge.
 
 ## 1.0.0-rc.8 — standing jobs, Meeting R2, Browser R3
 

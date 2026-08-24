@@ -17,8 +17,78 @@ pub enum CaptureSource {
     Loopback,
     /// Default microphone (fallback when loopback is unavailable).
     Microphone,
+    /// A joined guest notetaker, tapped inside the meeting page.
+    ///
+    /// Unlike the loopback paths this does not depend on the operator being in
+    /// the meeting, or even at the machine.
+    MeetingBot,
     /// Tests / `GROK_MEETING_NO_CAPTURE=1`.
     None,
+}
+
+impl CaptureSource {
+    /// One-line description for join output and `meeting_status`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Loopback => "system playback (all participants)",
+            Self::Microphone => "default microphone",
+            Self::MeetingBot => "joined notetaker (meeting audio, no local devices)",
+            Self::None => "disabled",
+        }
+    }
+
+    /// True when audio comes from a participant Turbo joined, not this machine.
+    ///
+    /// The distinction matters for anything that reasons about the operator's
+    /// devices: a bot capture is unaffected by muted speakers, an unplugged
+    /// headset, or the operator leaving the meeting.
+    pub fn is_bot(self) -> bool {
+        matches!(self, Self::MeetingBot)
+    }
+}
+
+#[cfg(test)]
+mod capture_source_tests {
+    use super::CaptureSource;
+
+    #[test]
+    fn only_the_bot_source_is_independent_of_local_devices() {
+        assert!(CaptureSource::MeetingBot.is_bot());
+        for local in [
+            CaptureSource::Loopback,
+            CaptureSource::Microphone,
+            CaptureSource::None,
+        ] {
+            assert!(!local.is_bot(), "{local:?} records this machine");
+        }
+    }
+
+    #[test]
+    fn every_source_describes_itself_for_join_output() {
+        for s in [
+            CaptureSource::Loopback,
+            CaptureSource::Microphone,
+            CaptureSource::MeetingBot,
+            CaptureSource::None,
+        ] {
+            assert!(!s.describe().is_empty(), "{s:?} needs a description");
+        }
+        assert!(
+            CaptureSource::MeetingBot.describe().contains("no local devices"),
+            "the bot line must say local devices are not involved"
+        );
+    }
+
+    /// `meta.json` is durable; renaming a variant would orphan old meetings.
+    #[test]
+    fn capture_source_wire_names_are_stable() {
+        let json = serde_json::to_string(&CaptureSource::MeetingBot).unwrap();
+        assert_eq!(json, "\"meeting_bot\"");
+        assert_eq!(
+            serde_json::from_str::<CaptureSource>("\"loopback\"").unwrap(),
+            CaptureSource::Loopback
+        );
+    }
 }
 
 /// Live notetaker state.

@@ -161,16 +161,44 @@ fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
     command
 }
 
-/// Reveal/open a local file in the OS file manager or default application.
+/// What [`open_path`] should hand to the OS for `path`.
 ///
-/// Returns `true` on success. Takes a trusted filesystem path (no scheme
-/// validation, unlike [`open_url`]).
+/// A missing file falls back to its parent directory so the user lands near
+/// the media instead of in Home. `None` means there is nothing openable and
+/// the caller should report failure rather than spawn a stray window.
 ///
-/// - **Windows**: `explorer.exe /select,<path>` reveals + highlights the file
-///   in Explorer. We deliberately avoid `cmd /c start`, whose `%VAR%`
-///   expansion corrupts the percent-encoded session-directory segment in
-///   imagine media paths (e.g. `…\C%3A%5CUsers…`).
+/// Windows-only: `open`/`xdg-open` already fail cleanly on a missing path, so
+/// the other platforms keep their existing behaviour.
+#[cfg(any(test, target_os = "windows"))]
+fn resolve_open_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    if path.is_file() || path.is_dir() {
+        return Some(path.to_path_buf());
+    }
+    path.parent()
+        .filter(|p| p.is_dir())
+        .map(std::path::Path::to_path_buf)
+}
+
+/// Open a local file in its default application.
+///
+/// Returns `true` when the open was dispatched. Takes a trusted filesystem
+/// path (no scheme validation, unlike [`open_url`]).
+///
+/// - **Windows**: `ShellExecuteW` with the `open` verb. This is *not*
+///   `cmd /c start`, whose `%VAR%` expansion corrupts the percent-encoded
+///   session-directory segment in imagine media paths (e.g.
+///   `…\C%3A%5CUsers…`), and *not* `explorer.exe`, which spawns a new
+///   Explorer window per call — those accumulate across a working session.
+///   A file with no registered association falls back to
+///   [`reveal_in_file_manager`] rather than raising Windows' "How do you want
+///   to open this file?" chooser.
 /// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app.
+///
+/// Use [`reveal_in_file_manager`] when the intent is to *show* the file in the
+/// file manager rather than open it.
 #[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 pub fn open_path(path: &std::path::Path) -> bool {
     // Never launch a real GUI app in tests.
@@ -180,7 +208,16 @@ pub fn open_path(path: &std::path::Path) -> bool {
     }
     #[cfg(all(not(test), target_os = "windows"))]
     {
-        reveal_in_explorer(path)
+        match resolve_open_target(path) {
+            Some(target) => {
+                shell_open_detached(target);
+                true
+            }
+            None => {
+                tracing::warn!(path = %path.display(), "nothing to open: path and parent are both missing");
+                false
+            }
+        }
     }
     #[cfg(all(not(test), not(target_os = "windows")))]
     {
@@ -194,7 +231,73 @@ pub fn open_path(path: &std::path::Path) -> bool {
     }
 }
 
+/// `ShellExecuteW(open)` on a short-lived thread.
+///
+/// Off-thread for two reasons: `ShellExecuteW` may delegate to a Shell
+/// extension that expects an initialized apartment (so the thread calls
+/// `CoInitializeEx` itself, without disturbing the TUI's thread), and a
+/// handler that blocks must not stall rendering.
+#[cfg(all(not(test), target_os = "windows"))]
+fn shell_open_detached(target: std::path::PathBuf) {
+    use std::os::windows::ffi::OsStrExt;
+
+    std::thread::spawn(move || {
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+        use windows::Win32::UI::Shell::{SE_ERR_NOASSOC, ShellExecuteW};
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::PCWSTR;
+
+        let wide: Vec<u16> = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+
+        // SAFETY: both buffers are NUL-terminated and outlive the call; the
+        // remaining pointers are null, which ShellExecuteW documents as
+        // "no parameters / use the working directory".
+        let code = unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let result = ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+            if hr.is_ok() {
+                CoUninitialize();
+            }
+            result.0 as usize
+        };
+
+        // ShellExecuteW returns a pseudo-HINSTANCE: >32 is success, and any
+        // smaller value is an SE_ERR_* code.
+        if code > 32 {
+            return;
+        }
+        if code == SE_ERR_NOASSOC as usize {
+            // No default app for this extension (common for source files).
+            // Showing it in Explorer beats the "How do you want to open this
+            // file?" chooser, and matches what this used to do for everything.
+            tracing::debug!(path = %target.display(), "no file association; revealing instead");
+            reveal_in_file_manager(&target);
+            return;
+        }
+        tracing::warn!(path = %target.display(), code, "ShellExecuteW failed to open path");
+    });
+}
+
 /// Reveal `path` in a new Explorer window with the file selected.
+///
+/// **Every call opens another Explorer window** — Windows offers no way to
+/// reuse one — so this is for an explicit "show me where this is" action, not
+/// for opening a file. [`open_path`] is the opener; it only lands here when a
+/// file has no registered application.
 ///
 /// Uses `raw_arg` so Explorer's required `/select,"<path>"` quoting is passed
 /// verbatim — the default arg quoting wraps the whole token and breaks the
@@ -206,7 +309,7 @@ pub fn open_path(path: &std::path::Path) -> bool {
 /// folder (no `/select`) so the user lands near the media instead of Home.
 #[cfg(all(not(test), target_os = "windows"))]
 #[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
-fn reveal_in_explorer(path: &std::path::Path) -> bool {
+pub fn reveal_in_file_manager(path: &std::path::Path) -> bool {
     use std::os::windows::process::CommandExt;
 
     // Prefer the real on-disk location (absolute). Fall back to parent when
@@ -326,6 +429,44 @@ pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_target_is_the_file_itself_when_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("shot.png");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(resolve_open_target(&file).as_deref(), Some(file.as_path()));
+    }
+
+    #[test]
+    fn open_target_is_the_directory_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_open_target(dir.path()).as_deref(),
+            Some(dir.path())
+        );
+    }
+
+    /// A deleted or moved file lands the user in its folder rather than Home.
+    /// This is the case that produced the stray `…/research` window.
+    #[test]
+    fn missing_file_falls_back_to_its_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("deleted.png");
+        assert_eq!(
+            resolve_open_target(&gone).as_deref(),
+            Some(dir.path()),
+            "a missing file should open its folder"
+        );
+    }
+
+    /// Nothing openable must report failure, not spawn a window at Home.
+    #[test]
+    fn unopenable_paths_resolve_to_nothing() {
+        assert_eq!(resolve_open_target(std::path::Path::new("")), None);
+        let nowhere = std::path::Path::new("/no/such/dir/anywhere/at/all/x.png");
+        assert_eq!(resolve_open_target(nowhere), None);
+    }
 
     #[test]
     #[cfg(not(target_os = "windows"))]

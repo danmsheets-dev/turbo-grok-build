@@ -115,6 +115,18 @@ pub(crate) enum ToolLoop {
     HookDenied {
         hook_name: String,
     },
+    /// A built-in policy refused this tool call — today, the read-only
+    /// confinement on a turn driven by untrusted meeting text.
+    ///
+    /// Non-terminal, like [`Self::HookDenied`]: the refusal is fed back as the
+    /// tool result so the model can answer with what it *is* allowed to use,
+    /// rather than the whole turn dying and the coworker getting no reply.
+    /// Distinct from `HookDenied` so telemetry does not invent a hook that the
+    /// user never configured.
+    PolicyDenied {
+        /// Stable identifier for the policy, e.g. `meeting_read_only`.
+        policy: &'static str,
+    },
 }
 
 /// Why the TodoGate fired. Single variant today; kept as an enum so

@@ -22,6 +22,7 @@ members = [
     "crates/codegen/xai-grok-announcements",
     "crates/codegen/xai-grok-auth",
     "crates/codegen/xai-grok-browser",
+    "crates/codegen/xai-grok-cdp",
     "crates/codegen/xai-grok-config",
     "crates/codegen/xai-grok-config-types",
     "crates/codegen/xai-grok-dashboard",
@@ -37,6 +38,7 @@ members = [
     "crates/codegen/xai-grok-markdown",
     "crates/codegen/xai-grok-markdown-core",
     "crates/codegen/xai-grok-mcp",
+    "crates/codegen/xai-grok-meeting-bot",
     "crates/codegen/xai-grok-meetings",
     "crates/codegen/xai-grok-memory",
     "crates/codegen/xai-grok-mermaid",
@@ -307,7 +309,7 @@ webrtc = "0.17.2"
 which = "8"
 whoami = "1.4"
 wildmatch = "2"
-windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_Storage_FileSystem"] }
+windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"
 xai-acp-lib = { path = "crates/codegen/xai-acp-lib" }
@@ -320,6 +322,7 @@ xai-grok-agent = { path = "crates/codegen/xai-grok-agent" }
 xai-grok-announcements = { path = "crates/codegen/xai-grok-announcements" }
 xai-grok-auth = { path = "crates/codegen/xai-grok-auth" }
 xai-grok-browser = { path = "crates/codegen/xai-grok-browser" }
+xai-grok-cdp = { path = "crates/codegen/xai-grok-cdp" }
 xai-grok-config = { path = "crates/codegen/xai-grok-config" }
 xai-grok-config-types = { path = "crates/codegen/xai-grok-config-types" }
 xai-grok-developer-log = { path = "crates/codegen/xai-grok-developer-log" }
@@ -333,6 +336,7 @@ xai-grok-http = { path = "crates/codegen/xai-grok-http" }
 xai-grok-markdown = { path = "crates/codegen/xai-grok-markdown" }
 xai-grok-markdown-core = { path = "crates/codegen/xai-grok-markdown-core" }
 xai-grok-mcp = { path = "crates/codegen/xai-grok-mcp" }
+xai-grok-meeting-bot = { path = "crates/codegen/xai-grok-meeting-bot" }
 xai-grok-meetings = { path = "crates/codegen/xai-grok-meetings" }
 xai-grok-memory = { path = "crates/codegen/xai-grok-memory" }
 xai-grok-mermaid = { path = "crates/codegen/xai-grok-mermaid" }

@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-1.0.0--rc.8-blue" alt="1.0.0-rc.8">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.9-blue" alt="1.0.0-rc.9">
   <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.8`** — GitHub
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.9`** — GitHub
 **Latest** with `SHA256SUMS` so managed `~/.turbo` installs auto-update.
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
@@ -73,9 +73,9 @@ community updater and `install.ps1` / `install.sh` require:
 
 | Wire | Release | Windows asset |
 | --- | --- | --- |
+| `1.0.0-rc.9` | [v1.0.0-rc.9](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.9) | `turbo-1.0.0-rc.9-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.8` | [v1.0.0-rc.8](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.8) | `turbo-1.0.0-rc.8-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.7` | [v1.0.0-rc.7](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.7) | `turbo-1.0.0-rc.7-x86_64-pc-windows-msvc.zip` |
-| `1.0.0-rc.6` | [v1.0.0-rc.6](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.6) | `turbo-1.0.0-rc.6-x86_64-pc-windows-msvc.zip` |
 
 ```powershell
 # Managed install (enables `turbo update` / launch auto-update)
@@ -119,6 +119,14 @@ popups, session-scoped profiles). See [`CHANGELOG.md`](./CHANGELOG.md).
 (WASAPI loopback + mic → Grok STT), auto-answers coworker `Turbo:` questions
 from the launch workspace (MCP ok), and writes a work-only recap to
 `Meetings/YYYY-MM-DD - <name>.md` with **For you** and **Projects** sections.
+
+**1.0.0-rc.9** is **Meeting Tool v3**: the notetaker stops recording your PC and
+**joins the meeting**. `/meeting join <teams-url>` sends a guest participant
+named **Turbo (Notetaker)** that waits in the Teams lobby, is admitted like any
+other attendee, and taps audio inside the meeting page — so it works with your
+speakers muted, your headset unplugged, or you gone. Coworker `Turbo:` questions
+are answered in chat under the bot's own name, on a **read-only toolset enforced
+at dispatch**. See [`docs/MEETING_NOTETAKER.md`](./docs/MEETING_NOTETAKER.md).
 
 **1.0.0-rc.8** productizes **scheduled tasks** (`/schedule` + `turbo schedule`),
 hardens **Meeting R2** (live tool pin, honest stop after crash, passcode redact,
@@ -198,7 +206,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Game Mode** | `Ctrl+G` pixel office of supervisor + subagent desks; hover tooltips (Supervisor / MCP rack), 11 animations, parks when idle | RC11 / RC2 |
 | **Multi-provider** | Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, … | r2+ |
 | **Headless honesty** | Streaming-json tool/subagent events, confine, trust gates | RC6 |
-| **`/meeting` notetaker** | Join Zoom/Teams/Meet/Webex; Windows loopback STT; coworker `Turbo:` Q&A; work-only recap in `Meetings/` | **1.0-rc.4** / R2 **1.0-rc.8** |
+| **`/meeting` notetaker** | **Joins Teams as a guest bot** ("Turbo (Notetaker)" in the lobby); in-page audio tap; coworker `Turbo:` Q&A on read-only tools; work-only recap in `Meetings/` | **1.0-rc.4** / v3 **1.0-rc.9** |
 | **`/schedule`** | Standing jobs (search / stat / meeting join); no 7-day expiry; `turbo schedule list` | **1.0-rc.8** |
 | **GitHub log sync** | Opt-in `turbo issues sync` / `turbo features sync` to a private Issues repo | **1.0-rc.8** |
 
@@ -229,6 +237,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **1.0-rc.6** | **`1.0.0-rc.6`** | **Providers:** `/providers` ACP, isolation keep-N/land, **Poolside** hosted Chat API |
 | **1.0-rc.7** | **`1.0.0-rc.7`** | Phase 5 control plane, spawn identity, Meeting Join Hardening, Windows credential jail |
 | **1.0-rc.8** | **`1.0.0-rc.8`** | **`/schedule`**, Meeting R2, Browser R3, GitHub Issues log sync, stock workflows |
+| **1.0-rc.9** | **`1.0.0-rc.9`** | **Meeting Tool v3:** joined Teams notetaker bot, in-page audio tap, read-only meeting Q&A |
 
 > RC numbering follows the **wire version**, which restarted at `r1` when RC15
 > synced upstream `0.2.119`. The 1.0 line starts at **`1.0.0-rc.1`**.
@@ -253,7 +262,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **1.0.0-rc.8** |
+| Release line | upstream cadence | **1.0.0-rc.9** |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -284,12 +293,12 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v1.0.0-rc.8
+curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v1.0.0-rc.9
 ```
 
 ```powershell
 # Windows — pin this release
-.\install.ps1 -Version v1.0.0-rc.8
+.\install.ps1 -Version v1.0.0-rc.9
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
@@ -545,7 +554,7 @@ Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
 
 ## Changelog & known issues
 
-- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **1.0.0-rc.8** is current
+- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **1.0.0-rc.9** is current
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
 - [`docs/workspace-tree.md`](docs/workspace-tree.md) — Workspace Tree (RC12–RC13)
 - [`docs/archive/RC11_RELEASE_NOTES.md`](docs/archive/RC11_RELEASE_NOTES.md) — Game Mode (historical)

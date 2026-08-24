@@ -15,6 +15,7 @@ use crate::scrollback::block::RenderBlock;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use std::time::Instant;
+use xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX;
 
 fn page_flip_on_send() -> bool {
     crate::appearance::cache::load_page_flip_on_send()
@@ -344,7 +345,21 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     // threaded through PromptRequest._meta to the agent and echoed on every
     // SessionNotification + the PromptResponse, letting us correlate
     // notifications back to the originating prompt for cancel/rewind.
-    let prompt_id = uuid::Uuid::new_v4().to_string();
+    let mut prompt_id = uuid::Uuid::new_v4().to_string();
+
+    // A queued prompt that will pull participant-authored meeting text carries
+    // the `meeting-qa-` task id (`/meeting ask` with no argument). Tag the
+    // prompt id so the shell resolves `PromptOrigin::MeetingQuestion` and
+    // confines the turn — the same treatment the auto-ask path gets via Cron.
+    // Without this, the manual drain would run with the full toolset.
+    let tagged_meeting_qa = queued
+        .task_id
+        .as_deref()
+        .is_some_and(|t| t.starts_with(MEETING_QA_TASK_PREFIX));
+    if tagged_meeting_qa && queued.kind == QueueEntryKind::Prompt {
+        prompt_id = format!("{MEETING_QA_TASK_PREFIX}{prompt_id}");
+    }
+    let prompt_id = prompt_id;
 
     // Record it as self-originated so the ACP gate treats this turn's deltas as
     // ours (drive it; drop a stale post-rewind chunk on a mismatch) rather than
@@ -516,7 +531,15 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             }
         }
         QueueEntryKind::Cron => {
-            let prompt_id = format!("scheduler-fired-{prompt_id}");
+            // A meeting `Turbo:` question rides the same cron injection path,
+            // but it is third-party text, not an operator-authored schedule.
+            // Tagging the prompt id is what lets the shell confine the turn to
+            // read-only tools (`PromptOrigin::MeetingQuestion`).
+            let prompt_id = if tagged_meeting_qa {
+                format!("{MEETING_QA_TASK_PREFIX}{prompt_id}")
+            } else {
+                format!("scheduler-fired-{prompt_id}")
+            };
             agent.note_self_originated_prompt(&prompt_id);
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());

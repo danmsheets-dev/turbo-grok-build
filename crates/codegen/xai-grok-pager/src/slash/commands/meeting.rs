@@ -50,6 +50,19 @@ impl SlashCommand for MeetingCommand {
             .split_once(char::is_whitespace)
             .map(|(v, r)| (v, r.trim()))
             .unwrap_or((args, ""));
+
+        // `/meeting ask` with no argument drains a question a *meeting
+        // participant* wrote, so the resulting turn must be confined exactly
+        // like the auto-ask path. `/meeting ask <text>` is the operator's own
+        // words and stays a normal turn.
+        let drains_participant_question = matches!(verb, "ask" | "q") && rest.is_empty();
+        let task_id = drains_participant_question.then(|| {
+            format!(
+                "{}slash",
+                xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX
+            )
+        });
+
         let instruction = match verb {
             "join" => {
                 if rest.is_empty() {
@@ -85,6 +98,7 @@ impl SlashCommand for MeetingCommand {
             )],
             display_as_skill: false,
             scheduled_task_preview: None,
+            task_id,
         }
     }
 }
