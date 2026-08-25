@@ -8,7 +8,9 @@
 //!   WebRTC audio tracks, over a loopback WebSocket.
 //! - **Chat messages and roster**, scraped from the DOM, over a CDP binding.
 //!
-//! Meeting audio never leaves the machine.
+//! The tap is in-page (not the sound card). PCM is streamed over loopback to
+//! Turbo, then uploaded to xAI hosted STT (`wss://api.x.ai/v1/stt` by default,
+//! overridable via `[voice].api_base`).
 //!
 //! # What this deliberately does not do
 //!

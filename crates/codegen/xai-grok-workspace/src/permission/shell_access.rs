@@ -434,15 +434,25 @@ fn analyse_shell_tree(root: Node<'_>, src: &str) -> ConfineShellAnalysis {
         }
     }
     for invocation in &invocations {
-        let words = InvocationSlice {
-            words: &invocation.words,
+        // Peel env/timeout/nice and command/builtin/exec *before* classifying.
+        // Classifying words[0] left `env python -c …` modelled as a bare `env`.
+        let peeled = unwrap_invocation_checked(invocation);
+        if peeled.has_split_string
+            || peeled.env_options_uncertain
+            || peeled.exhausted
+            || peeled.transparent_ambiguous
+        {
+            return ConfineShellAnalysis::Unmodelled {
+                program: "wrapper-uncertain".to_owned(),
+            };
         }
-        .literal_words();
+        let words = peeled.words.literal_words();
         let Some(raw) = words.first() else {
             continue;
         };
         let program = normalize_program_name(raw);
-        if invocation
+        if peeled
+            .words
             .words
             .iter()
             .any(|word| matches!(word, InvocationWord::Untrusted))
@@ -1017,8 +1027,6 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
             | "type"
             | "which"
             | "where.exe"
-            | "command"
-            | "builtin"
             | "enable"
             | "bind"
             | "complete"
@@ -1048,7 +1056,6 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
             | "nproc"
             | "arch"
             | "printenv"
-            | "env" // env alone is ok; `env -u GROK_CONFINE` is pinned at spawn
             | "times"
             // PowerShell pure readers / formatters (no arbitrary write path).
             | "get-psdrive"
@@ -1158,9 +1165,20 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
         return true;
     }
     // Common no-side-effect wrappers that peel in the access gate.
+    // `env` / `command` / `builtin` used to sit on the pure-builtin allowlist,
+    // so `env python -c …` classified as modelled `env` with empty operands.
     if matches!(
         program,
-        "timeout" | "time" | "nice" | "nohup" | "stdbuf" | "ionice" | "chrt"
+        "timeout"
+            | "time"
+            | "nice"
+            | "nohup"
+            | "stdbuf"
+            | "ionice"
+            | "chrt"
+            | "env"
+            | "command"
+            | "builtin"
     ) {
         // Wrapper itself is fine; the next program is checked as its own
         // invocation when tree-sitter splits it. If not split, fail closed
@@ -2780,11 +2798,29 @@ mod tests {
             r#"perl -e 'print 1'"#,
             "powershell -Command \"Set-Content C:\\x p\"",
             "pwsh -c \"echo hi\"",
+            // F01/F18: wrapper prefixes must not launder the same interpreters.
+            r#"env python -c "open(r'C:\Users\x\.ssh\authorized_keys','a').write('k')""#,
+            r#"command python -c "print(1)""#,
+            r#"builtin python -c "print(1)""#,
+            r#"env node -e "require('fs').writeFileSync('C:/x','p')""#,
+            r#"/usr/bin/env python3 -c "print(1)""#,
+            r#"command node -e "require('fs').writeFileSync('C:/x','p')""#,
         ] {
             let hit = shell_unmodelled_program_for_confine(cmd);
             assert!(
                 hit.is_some(),
                 "expected unmodelled program for `{cmd}`, got None"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_modelled_allows_bare_env_command_builtin() {
+        for cmd in ["env", "command", "builtin", "printenv"] {
+            let hit = shell_unmodelled_program_for_confine(cmd);
+            assert!(
+                hit.is_none(),
+                "bare `{cmd}` must stay modelled, got {hit:?}"
             );
         }
     }

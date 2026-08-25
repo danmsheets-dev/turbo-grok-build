@@ -21,11 +21,12 @@ WASAPI loopback locally. Consequences:
 | Constraint | Decision |
 |---|---|
 | Tenant access | Personal / guest only. No Azure subscription, no admin consent. |
-| Hosting | Self-hosted. Meeting audio must not transit a third-party SaaS. |
+| Hosting | Self-hosted **bot process** (no Recall.ai / MeetingBaaS). Audio is tapped in-page, then streamed to xAI hosted STT (`wss://api.x.ai/v1/stt`). |
 | Driver | Minimal CDP client written in Rust, driving the already-installed Edge. |
 | Trust boundary | Meeting-originated turns get a read-only, workspace-confined toolset. |
 
-Rejected: Recall.ai / MeetingBaaS (audio leaves the machine, per-hour cost);
+Rejected: Recall.ai / MeetingBaaS (third-party meeting-bot SaaS, per-hour cost);
+STT itself is xAI's hosted API — that hop is in-product, not a meeting vendor.
 ACS + Graph calling bot (needs tenant admin); Node + Playwright (ships a Node
 runtime and a ~150 MB Chromium); extending the WebView2 host (fights that
 crate's allowlist and eval-confirm policy, weak headless story).

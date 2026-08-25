@@ -26,7 +26,7 @@ onward, official Grok Build is the permanent upstream core remote
 | r9 | `0.2.114-r9` | Baselines, Boot Card, Auto Developer Log |
 | r10 | `0.2.114-r10` | Turbo brand / `turbo` CLI |
 | r11 | `0.2.114-r11` | Game Mode, Feature Request Log |
-| r12 | `0.2.114-r12` | Isolation FS jail, densify, MCP harden |
+| r12 | `0.2.114-r12` | Isolation write boundary, densify, MCP harden |
 | r13 | `0.2.114-r13` | Workspace Tree inject, Game Mode perf |
 | r14 | `0.2.114-r14` | **web_fetch**, **workflow routing**, English-only |
 | r15 | `0.2.119-r1` | Upstream 0.2.119 sync, security + Windows correctness |
@@ -155,9 +155,11 @@ questions in chat under its own name. Closes
   mixes inbound tracks through Web Audio running natively at 16 kHz, and streams
   20 ms frames of mono 16-bit LE PCM over a loopback WebSocket (bound to
   `127.0.0.1`, random per-meeting token) into the existing Grok STT pipeline.
-  No WASAPI, no virtual audio cable, no third-party service — **meeting audio
-  never leaves the machine**. Works with the operator's speakers muted, their
-  headset unplugged, or the operator gone entirely.
+  The tap is in-page rather than on the sound card, so it keeps working with
+  the operator's speakers muted, their headset unplugged, or the operator
+  gone. Captured PCM is then **uploaded to xAI hosted STT** (`wss://api.x.ai/v1/stt`
+  by default, overridable via `[voice].api_base`). This is not local-only
+  transcription and not a third-party meeting-bot SaaS.
 - **Chat Q&A as the bot.** Scraped meeting chat feeds `inbox.jsonl`; answers
   post to meeting chat as **Turbo (Notetaker)**. `GROK_GRAPH_TOKEN` is no longer
   required for coworker Q&A — Graph is now the fallback, not the primary path.

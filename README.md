@@ -116,10 +116,12 @@ and session, and the close button hides the window instead of killing the host.
 popups, session-scoped profiles). See [`CHANGELOG.md`](./CHANGELOG.md).
 
 **1.0.0-rc.4** adds the **Fathom-style meeting notetaker**: `/meeting join <url>
-[name]` opens Zoom/Teams/Meet/Webex, transcribes **all participants** on Windows
-(WASAPI loopback + mic → Grok STT), auto-answers coworker `Turbo:` questions
-from the launch workspace (MCP ok), and writes a work-only recap to
-`Meetings/YYYY-MM-DD - <name>.md` with **For you** and **Projects** sections.
+[name]` opens Zoom/Teams/Meet/Webex, taps inbound audio in-page (or WASAPI
+loopback + mic on Windows fallback), and transcribes **all participants** via
+**xAI hosted STT** (`wss://api.x.ai/v1/stt` by default). Auto-answers coworker
+`Turbo:` questions from the launch workspace (MCP ok), and writes a work-only
+recap to `Meetings/YYYY-MM-DD - <name>.md` with **For you** and **Projects**
+sections. Audio leaves the machine for transcription.
 
 **1.0.0-rc.10** is **Teams Join Hardening and Incident Log**: `meeting_join` no
 longer hands the link to the OS when a guest bot is dispatched (which is what put
@@ -186,8 +188,9 @@ was created), Windows and macOS users were shown **Linux** paste instructions, a
 `locales/en.yml` was compiled into the binary without an LF pin.
 
 Still ships from earlier RCs: **`web_fetch`** + workflow routing (RC14), isolation
-FS jail (RC12), Workspace Tree inject (RC13), Game Mode (RC11), baselines + Boot
-Card + ADL (RC9–10), **`/deepaudit`** (RC8).
+write boundary (RC12; policy classifier, not an OS sandbox), Workspace Tree inject
+(RC13), Game Mode (RC11), baselines + Boot Card + ADL (RC9–10), **`/deepaudit`**
+(RC8).
 
 Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 
@@ -204,7 +207,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Free-space gate** | Pre-spawn + `turbo disk check` (`GROK_MIN_FREE_GB`, default 40) | RC12 / RC2 |
 | **`turbo tools list`** | Headless schema assert (`--require spawn_subagent`) without a model turn | RC2 |
 | **`turbo disk`** | Report / check / category clean / recover / prune (multi-path free space) | RC15 / RC2 / **RC3** / **1.0-rc1** |
-| **FS confine (worktree)** | Write path + shell operand jail fail closed | RC12 |
+| **FS confine (worktree)** | Fail-closed **write boundary** (path-prefix + program classifier; not an OS sandbox). See [KNOWN_ISSUES](./docs/KNOWN_ISSUES.md) | RC12 |
 | **`/deepaudit`** | Parallel investigate → independent verify → verified report | RC8 |
 | **`/deep-research`** | Bounded research with claim cross-check | earlier + RC14 routing |
 | **Workflow tool + NL** | Rhai recipes; free-text maps to stock launches | RC14 |
@@ -233,7 +236,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **r9** | `0.2.114-r9` | Baselines, **Boot Card**, **Auto Developer Log**, soft-preserve |
 | **r10** | `0.2.114-r10` | Deep-audit + ADL ship fixes; **Turbo** brand / `turbo` CLI |
 | **r11** | `0.2.114-r11` | **Game Mode** + Feature Request Log |
-| **r12** | `0.2.114-r12` | Isolation **FS jail**, densify lifecycle, MCP harden, Game Mode polish |
+| **r12** | `0.2.114-r12` | Isolation **write boundary**, densify lifecycle, MCP harden, Game Mode polish |
 | **r13** | `0.2.114-r13` | **Workspace Tree** inject, densify engines, Game Mode performance |
 | **r14** | `0.2.114-r14` | **`web_fetch`** + **workflow routing** |
 | **r15** | `0.2.119-r1` | **Upstream 0.2.119 sync**, security + Windows correctness |

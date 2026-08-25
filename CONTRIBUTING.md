@@ -1,11 +1,14 @@
 # Contributing
 
-This repository does **not** accept external pull requests or unsolicited
-patches.
+This repository is an **unofficial community fork** of
+[xAI Grok Build](https://github.com/xai-org/grok-build). It is maintained by
+the repo owner for source transparency and local builds under the Apache
+License, Version 2.0 (see [`LICENSE`](LICENSE)). It is **not** affiliated
+with, supported by, or developed by xAI or SpaceXAI.
 
-SpaceXAI develops this software internally. The public tree is published for
-source transparency and local builds under the terms of the Apache License,
-Version 2.0 (see [`LICENSE`](LICENSE)).
+This repository does **not** accept external pull requests or unsolicited
+patches. Bug reports that are not security issues may be filed as GitHub
+issues.
 
 ## Working in a local checkout
 
@@ -51,7 +54,8 @@ it updates the index but **not** the worktree, so re-checkout afterwards.
 ## Security reports
 
 Please report security issues through the process described in
-[`SECURITY.md`](SECURITY.md). Do not open a public issue for vulnerabilities.
+[`SECURITY.md`](SECURITY.md) (GitHub private vulnerability reporting on this
+fork — not xAI's HackerOne). Do not open a public issue for vulnerabilities.
 
 ## Licensing of this source
 

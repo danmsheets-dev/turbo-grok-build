@@ -49,7 +49,11 @@ Audio is tapped **inside the meeting page**, not from your sound card:
 - Web Audio runs natively at 16 kHz, so no resampling is needed.
 - An `AudioWorklet` emits 20 ms frames of 16 kHz mono 16-bit LE PCM.
 - Frames go over a loopback WebSocket, bound to `127.0.0.1` with a random
-  per-meeting token, into the same Grok STT pipeline v1 used.
+  per-meeting token, then **off the machine** into xAI's hosted Grok STT
+  service (`wss://api.x.ai/v1/stt` by default). Override with `[voice] api_base`
+  or `[endpoints] xai_api_base_url`. There is no local STT path: every captured
+  frame of **every remote participant's** inbound audio is uploaded under the
+  operator's bearer token. The loopback hop is page-to-Turbo transport only.
 
 If STT falls behind (an auth retry or socket reconnect), frames are **dropped
 rather than queued** — both in the page and in Turbo — because audio buffered
@@ -58,9 +62,11 @@ through a stall is stale by the time it is transcribed. `meeting_status` reports
 
 Consequences:
 
-- **Your speakers, headset, and microphone are irrelevant.** Nothing on the
-  machine is recorded.
-- **You can leave the meeting** and the notetaker keeps listening.
+- **Your speakers, headset, and microphone are irrelevant to capture.** The
+  tap is inside the meeting page, not your sound card. That is not the same as
+  "audio stays on this machine."
+- **You can leave the meeting** and the notetaker keeps listening (and
+  uploading).
 - The bot's own outbound audio track is **silent by construction** — it is a
   zero-gain Web Audio node, not Chromium's fake-device beep.
 

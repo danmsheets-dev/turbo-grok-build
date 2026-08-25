@@ -827,6 +827,13 @@ impl JoinSummary<'_> {
             format!("capture: {:?} — {}", self.source, self.source.describe()),
             format!("transcript: {}", self.transcript),
         ]);
+        if self.source != CaptureSource::None {
+            lines.push(
+                "stt: captured audio is uploaded to xAI hosted STT \
+                 (default wss://api.x.ai/v1/stt; override [voice].api_base)"
+                    .into(),
+            );
+        }
         if self.kind == xai_grok_meetings::MeetingKind::Webinar {
             lines.push("note: webinar links often block attendee chat; v1 is notes-only.".into());
         }
@@ -1109,6 +1116,10 @@ mod tests {
         assert!(
             !lines.iter().any(|l| l.contains("NO GUEST")),
             "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("wss://api.x.ai/v1/stt")),
+            "join output must name the remote STT destination: {lines:#?}"
         );
     }
 

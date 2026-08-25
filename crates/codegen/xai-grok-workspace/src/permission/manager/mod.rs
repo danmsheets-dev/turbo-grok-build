@@ -9241,6 +9241,47 @@ mod tests {
         );
     }
 
+    /// F01/F18: `env`/`command`/`builtin` must not launder an unmodelled interpreter.
+    #[test]
+    fn confine_bash_unmodelled_env_python_is_denied_fail_closed() {
+        let _guard = CONFINE_SHELL_MODE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
+        let prev = std::env::var("GROK_CONFINE_SHELL_MODE").ok();
+        unsafe {
+            std::env::remove_var("GROK_CONFINE_SHELL_MODE");
+        }
+        #[cfg(windows)]
+        let python_c = r#"python -c "open(r'C:\Users\x\.ssh\authorized_keys','a').write('k')""#;
+        #[cfg(not(windows))]
+        let python_c = r#"python -c "open('/tmp/pwned','a').write('k')""#;
+        let cmds = [
+            format!("env {python_c}"),
+            format!("command {python_c}"),
+            format!("builtin {python_c}"),
+        ];
+        for cmd in &cmds {
+            let access = AccessKind::Bash(cmd.clone());
+            let hit = confine_access_outside_root(&access, &root_path, root.path(), None);
+            assert!(
+                hit.is_some(),
+                "wrapper-prefixed python under fail-closed must deny, got None for `{cmd}`"
+            );
+            let hit = hit.unwrap();
+            assert_eq!(hit.rule, "shell-unmodelled-program");
+            assert_eq!(
+                hit.path, "python",
+                "denial must name the inner program, not the wrapper: {hit:?} for `{cmd}`"
+            );
+        }
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GROK_CONFINE_SHELL_MODE", v) },
+            None => unsafe { std::env::remove_var("GROK_CONFINE_SHELL_MODE") },
+        }
+    }
+
     /// R7-7b: compound read-only commands whose every path operand is inside
     /// the confine root must not emit a violation.
     #[test]
