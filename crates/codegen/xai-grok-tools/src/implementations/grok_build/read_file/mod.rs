@@ -437,13 +437,15 @@ pub(crate) async fn run_read_file(
         }
         Err(_) => (joined_path, None),
     };
-    if xai_grok_sandbox::write_denied_grok_home_credential(&path) {
+    if xai_grok_sandbox::write_denied_grok_home_credential(&path)
+        || xai_grok_sandbox::is_sensitive_credential_store(&path)
+    {
         return Err(xai_tool_runtime::ToolError::custom(
             "policy_denied",
             crate::implementations::grok_build::policy::denial(
                 "read_file",
                 "grok_home_credentials",
-                &format!("`{}` is a $GROK_HOME credential file", path.display()),
+                &format!("`{}` is a credential-store file", path.display()),
             ),
         ));
     }
@@ -943,6 +945,31 @@ mod tests {
         .await
         .expect_err("$GROK_HOME credentials must be denied");
         assert!(err.to_string().contains("grok_home_credentials"));
+    }
+
+    #[tokio::test]
+    async fn read_file_ssh_private_key_is_policy_denied() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ReadFileTool;
+        let input = ReadFileInput {
+            path: "/home/x/.ssh/id_rsa".into(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+        };
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            input,
+        )
+        .await
+        .expect_err("~/.ssh keys must be denied");
+        assert!(
+            err.to_string().contains("credential"),
+            "{}",
+            err.to_string()
+        );
     }
 
     #[tokio::test]

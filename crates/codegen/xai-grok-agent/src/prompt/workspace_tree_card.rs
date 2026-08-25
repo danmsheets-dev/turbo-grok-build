@@ -85,6 +85,7 @@ pub fn inject_workspace_tree_card(system_prompt: &mut String, ctx: &PromptContex
     let Some(body) = render_workspace_tree_card(ctx) else {
         return;
     };
+    let body = xai_grok_tools::reminders::neutralize_harness_tags(&body);
     system_prompt.push_str("\n\n");
     system_prompt.push_str(CARD_TAG_OPEN);
     system_prompt.push('\n');

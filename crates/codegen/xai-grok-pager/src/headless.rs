@@ -40,6 +40,27 @@ pub enum OutputFormat {
     StreamingJson,
 }
 
+/// Strip C0/C1 controls from headless Plain stdout/stderr, keeping `\n` and `\t`.
+///
+/// Model-influenced text (assistant chunks, error strings) must not be able to
+/// emit OSC 52 clipboard writes or CSI rewind sequences into the user's terminal.
+/// JSON formats are already safe because serde escapes ESC.
+fn sanitize_plain_stdout(text: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| match c {
+        '\n' | '\t' => false,
+        '\u{00}'..='\u{1F}' | '\u{7F}'..='\u{9F}' => true,
+        _ => false,
+    };
+    if !text.chars().any(unsafe_char) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        text.chars()
+            .map(|c| if unsafe_char(c) { '\u{FFFD}' } else { c })
+            .collect(),
+    )
+}
+
 /// How much of each tool call's raw input/output to include on the stream.
 /// Default `truncated` (~2 KB) keeps NDJSON usable for harnesses without
 /// exploding on large bash logs or file bodies.
@@ -652,7 +673,7 @@ impl HeadlessEmitter {
         match self.format {
             OutputFormat::Plain => {
                 use std::io::Write as _;
-                print!("{text}");
+                print!("{}", sanitize_plain_stdout(text));
                 let _ = std::io::stdout().flush();
             }
             OutputFormat::StreamingJson => {
@@ -914,7 +935,7 @@ impl HeadlessEmitter {
                 );
             }
             OutputFormat::Plain | OutputFormat::Json => {
-                eprintln!("warning: {message}");
+                eprintln!("warning: {}", sanitize_plain_stdout(message));
             }
         }
     }
@@ -1207,7 +1228,7 @@ impl HeadlessEmitter {
 
     fn on_error(&self, message: &str) {
         match self.format {
-            OutputFormat::Plain => eprintln!("{message}"),
+            OutputFormat::Plain => eprintln!("{}", sanitize_plain_stdout(message)),
             OutputFormat::StreamingJson | OutputFormat::Json => {
                 let mut err = serde_json::json!({"type":"error","message": message});
                 // Always include `usage` on terminal paths (H7): snapshot when
@@ -3398,7 +3419,10 @@ fn handle_ext_notification(
                         if error.trim().is_empty() {
                             eprintln!("Auto-compact failed.");
                         } else {
-                            eprintln!("Auto-compact failed: {error}");
+                            eprintln!(
+                                "{}",
+                                sanitize_plain_stdout(&format!("Auto-compact failed: {error}"))
+                            );
                         }
                     }
                     OutputFormat::Json => {}
@@ -3439,7 +3463,9 @@ fn handle_ext_notification(
                             serde_json::json!({"type": "image_compressed", "message": message})
                         );
                     }
-                    OutputFormat::Plain => eprintln!("{message}"),
+                    OutputFormat::Plain => {
+                        eprintln!("{}", sanitize_plain_stdout(&message))
+                    }
                     OutputFormat::Json => {}
                 }
                 return ExtEvent::None;
@@ -3550,7 +3576,10 @@ fn handle_ext_notification(
                 if error.trim().is_empty() {
                     eprintln!("Auto-compact failed.");
                 } else {
-                    eprintln!("Auto-compact failed: {error}");
+                    eprintln!(
+                        "{}",
+                        sanitize_plain_stdout(&format!("Auto-compact failed: {error}"))
+                    );
                 }
             }
             OutputFormat::Json => {}
@@ -3579,7 +3608,7 @@ fn handle_ext_notification(
                     serde_json::json!({"type": "image_compressed", "message": message})
                 );
             }
-            OutputFormat::Plain => eprintln!("{message}"),
+            OutputFormat::Plain => eprintln!("{}", sanitize_plain_stdout(&message)),
             OutputFormat::Json => {}
         },
         XaiUpdateLite::SubagentSpawned {
@@ -3639,6 +3668,17 @@ fn handle_ext_notification(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sanitize_plain_stdout_strips_esc_keeps_newlines() {
+        let raw = "hello\n\x1b]52;c;evil\x07\nworld";
+        let out = super::sanitize_plain_stdout(raw);
+        assert!(!out.contains('\u{001b}'), "{out:?}");
+        assert!(!out.contains('\u{0007}'), "{out:?}");
+        assert!(out.contains("hello\n"), "{out:?}");
+        assert!(out.contains("world"), "{out:?}");
+        assert_eq!(super::sanitize_plain_stdout("ok\tline"), "ok\tline");
+    }
+
     #[test]
     fn lifecycle_tracking_is_independent_of_wait_flag() {
         let mut pending = std::collections::HashSet::new();

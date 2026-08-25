@@ -81,9 +81,11 @@ impl xai_tool_runtime::Tool for BrowserClickTool {
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let handle = super::require_handle(&ctx).await?;
         let result = handle.click(&input.uid, input.confirm).await?;
-        Ok(super::text_output(format!(
+        Ok(super::untrusted_page_text(format!(
             "Clicked uid {} — now at {} (title: {})",
-            input.uid, result.url, result.title
+            input.uid,
+            result.url,
+            super::sanitize_page_title(&result.title)
         )))
     }
 }

@@ -46,7 +46,8 @@ pub use profiles::{
 pub use types::{SandboxEvent, SandboxEventType, SandboxMetrics};
 pub use paths::{
     command_mentions_grok_home_credential, command_mentions_grok_home_credential_in,
-    is_grok_home_credential_file, write_denied_grok_home_credential,
+    DEFAULT_CREDENTIAL_DENY_READ_GLOBS, is_grok_home_credential_file,
+    is_sensitive_credential_store, write_denied_grok_home_credential,
     write_denied_grok_home_credential_in,
 };
 /// Whether this profile requires direct-hook write protection (non-devbox

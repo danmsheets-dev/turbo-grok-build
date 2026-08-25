@@ -42,9 +42,8 @@ fn bundled_rg_file_name() -> &'static str {
 
 #[cfg(bundle_rg)]
 fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "windows")]
     use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     let vendor = crate::util::grok_home().join("vendor");
     let p = vendor.join(bundled_rg_file_name());
     // Windows: older installs left an extensionless PE (`rg-<ver>-<target>`).
@@ -77,17 +76,49 @@ fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
             // spawn on Windows.
         }
     }
-    if !p.exists() {
+    write_bundled_rg_if_needed(&p)?;
+    Ok(p)
+}
+
+#[cfg(bundle_rg)]
+fn rg_bytes_sha256() -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(RG_BYTES).into()
+}
+
+#[cfg(bundle_rg)]
+fn file_sha256(path: &std::path::Path) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    Some(Sha256::digest(&bytes).into())
+}
+
+/// Write the bundled ripgrep bytes when the vendor file is missing or does
+/// not match the compile-time SHA-256. A pre-planted `~/.grok/vendor/rg-*`
+/// must not be executed.
+#[cfg(bundle_rg)]
+fn write_bundled_rg_if_needed(p: &std::path::Path) -> std::io::Result<()> {
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let matches = p.is_file() && file_sha256(p).as_ref() == Some(&rg_bytes_sha256());
+    if !matches {
+        if p.exists() {
+            tracing::warn!(
+                path = %p.display(),
+                "grep: vendor ripgrep hash mismatch; rewriting from the embedded bundle"
+            );
+        }
         fs::create_dir_all(p.parent().unwrap())?;
-        fs::write(&p, RG_BYTES)?;
+        fs::write(p, RG_BYTES)?;
         #[cfg(unix)]
         {
-            let mut perms = fs::metadata(&p)?.permissions();
+            let mut perms = fs::metadata(p)?.permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&p, perms)?;
+            fs::set_permissions(p, perms)?;
         }
     }
-    Ok(p)
+    Ok(())
 }
 
 /// On Windows, if `path` is an existing extensionless PE (legacy vendor extract),
@@ -133,27 +164,20 @@ fn ensure_windows_exe_suffix(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Scan `~/.grok/vendor` for a previously extracted `rg-*` binary.
+/// Return the exact expected vendor filename, never a prefix scan.
+/// A pre-planted `~/.grok/vendor/rg-evil` must not be executed.
 fn find_vendor_rg() -> Option<PathBuf> {
-    let vendor = crate::util::grok_home().join("vendor");
-    let entries = std::fs::read_dir(&vendor).ok()?;
-    // Prefer an already-promoted `.exe`, then promote a bare name.
-    let mut bare: Option<PathBuf> = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("rg-") {
-            continue;
-        }
-        let p = entry.path();
-        if name.ends_with(".exe") {
-            return Some(p);
-        }
-        if bare.is_none() {
-            bare = Some(p);
-        }
+    #[cfg(bundle_rg)]
+    {
+        let p = crate::util::grok_home()
+            .join("vendor")
+            .join(bundled_rg_file_name());
+        p.is_file().then_some(p)
     }
-    bare.map(ensure_windows_exe_suffix)
+    #[cfg(not(bundle_rg))]
+    {
+        None
+    }
 }
 
 /// Get the path to the ripgrep executable.

@@ -219,6 +219,45 @@ pub fn write_denied_grok_home_credential(path: &Path) -> bool {
     write_denied_grok_home_credential_in(path, &grok_home())
 }
 
+/// Default-deny credential-store globs for Read/Grep (F69).
+pub const DEFAULT_CREDENTIAL_DENY_READ_GLOBS: &[&str] = &[
+    "**/.ssh/**",
+    "**/.aws/credentials",
+    "**/.gnupg/**",
+    "**/.netrc",
+    "**/.docker/config.json",
+];
+
+/// True when `path` names a well-known credential store (SSH, AWS, GnuPG, netrc, Docker).
+///
+/// Applied to Read/Grep regardless of `--confine` so a stock install cannot
+/// auto-allow `~/.ssh/id_rsa` or `~/.aws/credentials`.
+pub fn is_sensitive_credential_store(path: &Path) -> bool {
+    let comps: Vec<String> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_ascii_lowercase()))
+        .collect();
+    if comps.iter().any(|c| c == ".ssh" || c == ".gnupg") {
+        return true;
+    }
+    if comps
+        .windows(2)
+        .any(|w| w[0] == ".aws" && w[1] == "credentials")
+    {
+        return true;
+    }
+    if comps
+        .windows(2)
+        .any(|w| w[0] == ".docker" && w[1] == "config.json")
+    {
+        return true;
+    }
+    matches!(
+        comps.last().map(|s| s.as_str()),
+        Some(".netrc") | Some("_netrc")
+    )
+}
+
 /// Same as [`write_denied_grok_home_credential`] for an explicit home (tests).
 pub fn write_denied_grok_home_credential_in(path: &Path, home: &Path) -> bool {
     is_grok_home_credential_file(path) && path_is_under_home(path, home)
@@ -332,6 +371,32 @@ mod tests {
         assert!(!is_grok_home_credential_file(Path::new("config.toml")));
         assert!(!is_grok_home_credential_file(Path::new("sandbox.toml")));
         assert!(!is_grok_home_credential_file(Path::new("session.json")));
+    }
+
+    #[test]
+    fn sensitive_credential_store_covers_ssh_aws_gnupg_netrc_docker() {
+        assert!(is_sensitive_credential_store(Path::new(
+            "/home/x/.ssh/id_rsa"
+        )));
+        assert!(is_sensitive_credential_store(Path::new(
+            r"C:\Users\x\.ssh\id_rsa"
+        )));
+        assert!(is_sensitive_credential_store(Path::new(
+            "/home/x/.aws/credentials"
+        )));
+        assert!(is_sensitive_credential_store(Path::new(
+            "/home/x/.gnupg/secring.gpg"
+        )));
+        assert!(is_sensitive_credential_store(Path::new("/home/x/.netrc")));
+        assert!(is_sensitive_credential_store(Path::new(
+            "/home/x/.docker/config.json"
+        )));
+        assert!(!is_sensitive_credential_store(Path::new(
+            "/home/x/src/main.rs"
+        )));
+        assert!(!is_sensitive_credential_store(Path::new(
+            "/home/x/.aws/config"
+        )));
     }
 
     #[test]

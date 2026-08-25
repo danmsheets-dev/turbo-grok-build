@@ -1374,6 +1374,7 @@ fn access_targets_grok_home_credential(access: &AccessKind, cwd: &std::path::Pat
     };
     let resolved = resolve_model_path(cwd, None, path);
     xai_grok_sandbox::write_denied_grok_home_credential(&resolved)
+        || xai_grok_sandbox::is_sensitive_credential_store(&resolved)
 }
 
 fn strip_file_url_prefix(s: &str) -> &str {
@@ -2018,7 +2019,7 @@ fn spawn_permission_manager_with_pin(
 
                     if access_targets_grok_home_credential(&access, request_cwd) {
                         let decision = Decision::PolicyDeny(
-                            "reads of $GROK_HOME credential files are prohibited".to_owned(),
+                            "reads of credential-store files are prohibited".to_owned(),
                         );
                         let event =
                             emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
@@ -3081,6 +3082,21 @@ mod tests {
                 assert!(
                     matches!(normal, Decision::Allow),
                     "ordinary workspace reads remain safe commands: {normal:?}"
+                );
+
+                let ssh = std::path::PathBuf::from("/home/x/.ssh/id_rsa");
+                let ssh_decision = mgr
+                    .request(
+                        AccessKind::Read(Some(ssh.to_string_lossy().into_owned())),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    !matches!(ssh_decision, Decision::Allow),
+                    "~/.ssh must not be auto-allowed: {ssh_decision:?}"
                 );
             })
             .await;

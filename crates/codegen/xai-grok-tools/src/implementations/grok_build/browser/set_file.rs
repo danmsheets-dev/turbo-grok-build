@@ -95,6 +95,14 @@ impl xai_tool_runtime::Tool for BrowserSetFileTool {
                 canonical.display()
             )));
         }
+        if xai_grok_sandbox::is_sensitive_credential_store(&canonical)
+            || xai_grok_sandbox::write_denied_grok_home_credential(&canonical)
+        {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "browser_set_file: `{}` is a credential-store file and cannot be uploaded",
+                canonical.display()
+            )));
+        }
         let mut roots: Vec<&Path> = vec![cwd.as_path()];
         if let Some(ref root) = confine {
             roots.push(root);

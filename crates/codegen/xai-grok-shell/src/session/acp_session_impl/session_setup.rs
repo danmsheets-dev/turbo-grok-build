@@ -556,15 +556,16 @@ impl SessionActor {
     /// the Grep tool excludes policy-forbidden paths. No-op when empty. Called on
     /// session setup and re-called after an agent rebuild (the rebuilt bridge
     pub(super) async fn inject_deny_read_globs(&self) {
-        if self.deny_read_globs.is_empty() {
-            return;
+        let mut globs = self.deny_read_globs.clone();
+        for extra in xai_grok_sandbox::DEFAULT_CREDENTIAL_DENY_READ_GLOBS {
+            if !globs.iter().any(|g| g == extra) {
+                globs.push((*extra).to_string());
+            }
         }
         self.agent
             .borrow()
             .tool_bridge()
-            .update_resource(xai_grok_tools::types::resources::DenyReadGlobs(
-                self.deny_read_globs.clone(),
-            ))
+            .update_resource(xai_grok_tools::types::resources::DenyReadGlobs(globs))
             .await;
     }
     /// Shared by `/session-info`, `/context`, and `GetSessionInfo`.

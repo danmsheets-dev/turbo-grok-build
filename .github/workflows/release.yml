@@ -105,7 +105,7 @@ jobs:
           tool: cargo-zigbuild@0.23.2
 
       - name: Install dotslash (protoc launcher)
-        run: cargo install dotslash --locked
+        run: cargo install dotslash --version 0.5.7 --locked
 
       # Windows cannot exec the Unix dotslash launcher at bin/protoc (os error
       # 193). Install a real protoc.exe and point $PROTOC at it so

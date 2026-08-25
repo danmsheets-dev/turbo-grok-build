@@ -544,7 +544,8 @@ impl SessionActor {
     }
     /// Push a `<{tag}>`-wrapped user message.
     pub(super) fn push_system_reminder_with_tag(&self, content: &str, tag: &str) {
-        let content = content.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"));
+        let content = xai_grok_tools::reminders::neutralize_harness_tags(content)
+            .replace(&format!("</{tag}>"), &format!("&lt;/{tag}>"));
         let message = ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"));
         self.chat_state_handle.push_user_message(message);
     }

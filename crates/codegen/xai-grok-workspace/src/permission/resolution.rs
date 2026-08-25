@@ -305,18 +305,22 @@ pub async fn resolve_permission_config_with_fallback(
 /// from that same config, rather than re-resolving managed-only and missing CLI
 /// read denies.
 pub fn deny_read_globs_from_config(config: &PermissionConfig) -> Vec<String> {
-    config
-        .rules
+    let mut globs: Vec<String> = xai_grok_sandbox::DEFAULT_CREDENTIAL_DENY_READ_GLOBS
         .iter()
-        .filter(|r| {
-            r.action == RuleAction::Deny
-                && matches!(
-                    r.tool,
-                    ToolFilter::Read | ToolFilter::Grep | ToolFilter::Any
-                )
-        })
-        .filter_map(|r| r.pattern.clone())
-        .collect()
+        .map(|s| (*s).to_string())
+        .collect();
+    for pat in config.rules.iter().filter(|r| {
+        r.action == RuleAction::Deny
+            && matches!(
+                r.tool,
+                ToolFilter::Read | ToolFilter::Grep | ToolFilter::Any
+            )
+    }).filter_map(|r| r.pattern.clone()) {
+        if !globs.iter().any(|g| g == &pat) {
+            globs.push(pat);
+        }
+    }
+    globs
 }
 
 /// Result of permission resolution with provenance metadata.
@@ -1417,10 +1421,22 @@ mod tests {
             rule(RuleAction::Allow, ToolFilter::Read, "src/**"), // allow: excluded
             rule(RuleAction::Ask, ToolFilter::Read, "**/secrets/**"), // ask: excluded
         ]);
-        assert_eq!(
-            deny_read_globs_from_config(&config),
-            vec!["**/.env", "**/*.pem", "**/secret.txt"]
-        );
+        let globs = deny_read_globs_from_config(&config);
+        for expected in [
+            "**/.ssh/**",
+            "**/.aws/credentials",
+            "**/.gnupg/**",
+            "**/.netrc",
+            "**/.docker/config.json",
+            "**/.env",
+            "**/*.pem",
+            "**/secret.txt",
+        ] {
+            assert!(
+                globs.iter().any(|g| g == expected),
+                "missing {expected} in {globs:?}"
+            );
+        }
     }
 
     #[test]

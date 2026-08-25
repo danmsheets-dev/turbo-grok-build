@@ -68,6 +68,6 @@ impl xai_tool_runtime::Tool for BrowserTabsTool {
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let handle = super::require_handle(&ctx).await?;
         let result = handle.tabs().await?;
-        Ok(super::json_output(&result))
+        Ok(super::untrusted_page_output(&result))
     }
 }

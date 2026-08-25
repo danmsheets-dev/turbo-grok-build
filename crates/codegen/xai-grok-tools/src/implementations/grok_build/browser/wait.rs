@@ -90,9 +90,10 @@ impl xai_tool_runtime::Tool for BrowserWaitTool {
         let result = handle
             .wait(input.text, input.url_substring, input.timeout_ms)
             .await?;
-        Ok(super::text_output(format!(
+        Ok(super::untrusted_page_text(format!(
             "Waited — now at {} (title: {})",
-            result.url, result.title
+            result.url,
+            super::sanitize_page_title(&result.title)
         )))
     }
 }

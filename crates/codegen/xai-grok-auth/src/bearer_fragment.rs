@@ -5,13 +5,16 @@
 /// The tail, not the head: JWTs share a base64 header and xAI keys a prefix.
 pub const BEARER_SUFFIX_LEN: usize = 12;
 
-/// Last [`BEARER_SUFFIX_LEN`] characters, or the whole string if shorter.
+/// Last [`BEARER_SUFFIX_LEN`] characters.
+///
 /// Counts chars, not bytes: slicing at `len - N` panics mid-character, and
 /// tokens from `auth.json` or an auth-provider command are not ASCII-safe.
+/// Strings shorter than the fragment length return a fixed placeholder so a
+/// short opaque token is never logged or exported in full.
 pub fn bearer_suffix(s: &str) -> &str {
     match s.char_indices().rev().nth(BEARER_SUFFIX_LEN - 1) {
         Some((i, _)) => &s[i..],
-        None => s,
+        None => "<short>",
     }
 }
 
@@ -25,15 +28,15 @@ mod tests {
             // The tail, not the head: JWT headers and xAI key prefixes are shared.
             ("eyJ0eXAiOiJh.shared-head.tail-distinct", "ail-distinct"),
             ("xai-key-aaaaaaaaaaadistinct1", "aaadistinct1"),
-            // Shorter than the fragment: returned whole.
-            ("abc", "abc"),
-            ("", ""),
+            // Shorter than the fragment: never return the secret itself.
+            ("abc", "<short>"),
+            ("", "<short>"),
             ("123456789012", "123456789012"),
             // Characters, not bytes. A byte cut at `len - 12` lands
             // mid-character on the first two and would panic.
             ("éabcdefghijk", "éabcdefghijk"),
             ("ééééééééééééé", "éééééééééééé"),
-            ("🔑🔑🔑🔑🔑🔑🔑", "🔑🔑🔑🔑🔑🔑🔑"),
+            ("🔑🔑🔑🔑🔑🔑🔑", "<short>"),
         ] {
             assert_eq!(bearer_suffix(input), expected, "input={input:?}");
         }

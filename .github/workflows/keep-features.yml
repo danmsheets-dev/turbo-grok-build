@@ -39,7 +39,7 @@ jobs:
       # skipped. release.yml already installs this; keep-features never did,
       # which is why the gate was red rather than useful.
       - name: Install dotslash (protoc launcher)
-        run: cargo install dotslash --locked
+        run: cargo install dotslash --version 0.5.7 --locked
 
       - name: Isolation / subagents
         run: |

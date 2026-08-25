@@ -99,14 +99,15 @@ impl xai_tool_runtime::Tool for BrowserNavigateTool {
                 .to_ascii_lowercase()
                 .contains("download in progress")
         {
-            return Ok(super::text_output(format!(
+            return Ok(super::untrusted_page_text(format!(
                 "Navigated to {} (title: {}). A download was brokered into the session folder; list it with browser_downloads.",
-                result.url, result.title
+                result.url, super::sanitize_page_title(&result.title)
             )));
         }
-        Ok(super::text_output(format!(
+        Ok(super::untrusted_page_text(format!(
             "Navigated to {} (title: {})",
-            result.url, result.title
+            result.url,
+            super::sanitize_page_title(&result.title)
         )))
     }
 }

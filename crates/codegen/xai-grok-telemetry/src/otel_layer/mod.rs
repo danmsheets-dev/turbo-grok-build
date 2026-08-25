@@ -295,7 +295,9 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
         &self,
         batch: Vec<opentelemetry_sdk::trace::SpanData>,
     ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send {
-        let prepared = (crate::client::is_session_metrics_enabled()
+        // Full `Enabled` only: `session_metrics` is documented as metadata-only
+        // (no content / no file paths). Tool spans carry `path` / `file_path`.
+        let prepared = (crate::client::is_enabled()
             && self.credentials.has_usable_credential())
         .then(|| {
             let snapshot = self.credentials.snapshot();

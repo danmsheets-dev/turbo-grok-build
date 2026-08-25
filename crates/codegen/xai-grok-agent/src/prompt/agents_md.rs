@@ -320,19 +320,9 @@ pub fn format_agents_md_section(configs: &[AgentConfigFile]) -> Option<String> {
 pub const LEGACY_AGENTS_MD_REMINDER_PREFIX: &str =
     "\n\n<system-reminder>\nAs you answer the user's questions, you can use the following context";
 
-/// Open/close `system-reminder` (Grok) or `system_reminder` (Cursor/IDE), case-insensitive.
-/// Shared with unit tests so CI fails if the pattern is ever invalid or too narrow.
-const SYSTEM_REMINDER_TAG_PATTERN: &str = r"(?i)<(\s*/?\s*system[-_]reminder)";
-
-/// Literal pattern only — compile failure is a programmer bug, not a runtime input error.
-static SYSTEM_REMINDER_TAG_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(SYSTEM_REMINDER_TAG_PATTERN).unwrap());
-
 /// HTML-escape leading `<` so untrusted AGENTS.md cannot break out of / forge harness framing.
-fn neutralize_reminder_tags(content: &str) -> String {
-    SYSTEM_REMINDER_TAG_RE
-        .replace_all(content, "&lt;$1")
-        .into_owned()
+pub(crate) fn neutralize_reminder_tags(content: &str) -> String {
+    xai_grok_tools::reminders::neutralize_harness_tags(content)
 }
 
 fn render_agents_md(configs: &[AgentConfigFile]) -> Option<String> {
@@ -982,7 +972,7 @@ mod tests {
     /// CI pin: pattern must compile, and must hit the tag shapes we neutralize (not bare words).
     #[test]
     fn system_reminder_tag_pattern_compiles_and_matches() {
-        let re = regex::Regex::new(SYSTEM_REMINDER_TAG_PATTERN).unwrap();
+        let re = regex::Regex::new(xai_grok_tools::reminders::HARNESS_TAG_PATTERN).unwrap();
         for sample in [
             "<system-reminder>",
             "</system-reminder>",
