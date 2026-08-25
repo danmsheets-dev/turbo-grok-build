@@ -424,6 +424,11 @@ fn analyse_shell_tree(root: Node<'_>, src: &str) -> ConfineShellAnalysis {
             program: "opaque-shell".to_owned(),
         };
     }
+    if tree_has_confine_env_assignment(root, src) {
+        return ConfineShellAnalysis::Unmodelled {
+            program: "grok-confine-env".to_owned(),
+        };
+    }
     let invocations = shell_command_invocations(root, src);
     // `cmd /c …` is a valid bash parse of an unmodelled program. Peel it so
     // densify engines invoked that way still reach the Windows recovery.
@@ -2302,6 +2307,27 @@ fn decode_double_quoted_content(content: &str) -> Option<String> {
     Some(out)
 }
 
+fn tree_has_confine_env_assignment(node: Node<'_>, src: &str) -> bool {
+    if node.kind() == "variable_assignment"
+        && let Ok(text) = node.utf8_text(src.as_bytes())
+    {
+        let name = text.split('=').next().unwrap_or("").trim();
+        if name
+            .to_ascii_uppercase()
+            .starts_with("GROK_CONFINE")
+        {
+            return true;
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if tree_has_confine_env_assignment(child, src) {
+            return true;
+        }
+    }
+    false
+}
+
 fn shell_node_arg(node: Node<'_>, src: &str) -> Option<ArgText> {
     let text = || node.utf8_text(src.as_bytes()).ok().map(str::to_owned);
     match node.kind() {
@@ -3422,6 +3448,20 @@ mod tests {
                 r#"& "C:\Program Files\Evil\evil.exe" --write C:\Windows\x"#
             ),
             Some("unparseable".to_owned())
+        );
+    }
+
+    #[test]
+    fn grok_confine_env_assignment_is_unmodelled() {
+        assert_eq!(
+            shell_unmodelled_program_for_confine(
+                "GROK_CONFINE_SHELL_MODE=operand turbo -p 'python -c pass'"
+            ),
+            Some("grok-confine-env".to_owned())
+        );
+        assert_eq!(
+            shell_unmodelled_program_for_confine("GROK_CONFINE=/tmp/x turbo disk clean --safe"),
+            Some("grok-confine-env".to_owned())
         );
     }
 

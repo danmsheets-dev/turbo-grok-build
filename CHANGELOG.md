@@ -80,6 +80,22 @@ advisory flow, not xAI HackerOne.
 - **`read_file` / credential `Read`/`Grep` of `$GROK_HOME` auth files is
   policy-denied** (F17), matching the bash write-deny.
 
+#### Security (MEDIUM, this round)
+
+- Nested children inherit `GROK_CONFINE_SHELL_MODE`; `GROK_CONFINE*` env
+  prefixes are unmodelled (F65/F67).
+- Bash credential-path matching survives quoting; `mcp_credentials.json` is
+  a credential basename (F48/F49).
+- Secret redactor covers Groq/Cerebras/NIM/Fireworks prefixes, prefixed
+  env assignments, and DSN userinfo (F50/F51).
+- `unified.jsonl` is created 0600/0700 on Unix (F55).
+- Permission prompt default is allow-once, not always-approve (F44).
+- Project marketplace paths cannot escape the git root (F38).
+- `browser_navigate` checks URL policy before the direct-download broker (F57).
+- Codex OAuth loopback requires `state` (F52).
+- Installers reject non-GitHub `TURBO_UPDATE_BASE_URL` (F71).
+- `keep-features.yml` is `contents: read` with SHA-pinned actions (F28/F72).
+
 ---
 
 ## [1.0.0-rc.10] - 2026-08-24

@@ -262,25 +262,53 @@ fn open_writer() -> Option<LogWriter> {
 /// healing a stale handle rather than re-resolving `$GROK_HOME` — which also
 /// makes the healing path testable against a temp directory.
 fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
-    if let Some(parent) = path.parent()
-        && let Err(e) = fs::create_dir_all(parent)
-    {
-        tracing::warn!("[unified_log] failed to create log dir: {e}");
-        return None;
+    if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            if let Err(e) = fs::DirBuilder::new().recursive(true).mode(0o700).create(parent) {
+                tracing::warn!("[unified_log] failed to create log dir: {e}");
+                return None;
+            }
+        }
+        #[cfg(not(unix))]
+        if let Err(e) = fs::create_dir_all(parent) {
+            tracing::warn!("[unified_log] failed to create log dir: {e}");
+            return None;
+        }
     }
 
     if file_size(&path) >= MAX_SIZE {
         trim_file(&path);
     }
 
-    match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => Some(LogWriter {
-            file,
-            identity: path_identity(&path),
-            path,
-            last_maintenance: Instant::now(),
-            detached: false,
-        }),
+    #[cfg(unix)]
+    let open = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+    };
+    #[cfg(not(unix))]
+    let open = OpenOptions::new().create(true).append(true).open(&path);
+
+    match open {
+        Ok(file) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            }
+            Some(LogWriter {
+                file,
+                identity: path_identity(&path),
+                path,
+                last_maintenance: Instant::now(),
+                detached: false,
+            })
+        }
         Err(e) => {
             tracing::warn!("[unified_log] failed to open log file: {e}");
             None
@@ -606,6 +634,19 @@ mod tests {
             "the shared file must live under the temp dir, not grok_home(): {}",
             log_path().display()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unified_log_file_is_owner_rw_only() {
+        use std::os::unix::fs::PermissionsExt;
+        info("unified-log mode probe", Some("mode-probe-sid"), None);
+        let mode = fs::metadata(log_path())
+            .expect("log exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "unified.jsonl must be 0600, got {mode:o}");
     }
 
     #[test]

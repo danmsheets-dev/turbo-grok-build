@@ -150,10 +150,13 @@ async fn handle_callback(
         })
     } else {
         match params.get("code") {
-            Some(code) => Ok(Callback {
-                code: code.clone(),
-                state: params.get("state").cloned(),
-            }),
+            Some(code) => match params.get("state") {
+                Some(state) => Ok(Callback {
+                    code: code.clone(),
+                    state: Some(state.clone()),
+                }),
+                None => Err("Missing OAuth state.".to_owned()),
+            },
             None => Err("Missing authorization code.".to_owned()),
         }
     };
@@ -292,9 +295,10 @@ async fn wait_for_authorization_code(
     }
 
     let callback = result.map_err(|e| anyhow::anyhow!("OpenAI Codex login failed: {e}"))?;
-    if let Some(state) = callback.state.as_deref()
-        && state != expected_state_owned
-    {
+    let Some(state) = callback.state.as_deref() else {
+        bail!("missing OAuth state");
+    };
+    if state != expected_state_owned {
         bail!("State mismatch");
     }
     Ok(callback.code)

@@ -99,6 +99,8 @@ pub(crate) const GROK_HOME_CREDENTIAL_BASENAMES: &[&str] = &[
     "auth.json.lock",
     "credentials.json",
     "credentials.json.lock",
+    "mcp_credentials.json",
+    "mcp_credentials.json.lock",
     "secrets.json",
     "token.json",
     "tokens.json",
@@ -229,7 +231,11 @@ pub fn command_mentions_grok_home_credential(command: &str) -> bool {
 
 /// Same as [`command_mentions_grok_home_credential`] for an explicit home (tests).
 pub fn command_mentions_grok_home_credential_in(command: &str, home: &Path) -> bool {
-    let cmd = command.replace('\\', "/").to_ascii_lowercase();
+    let cmd = command
+        .replace(['\'', '"', '`'], "")
+        .replace('\\', "/")
+        .replace("/./", "/")
+        .to_ascii_lowercase();
     let home_n = normalize_path_for_prefix(home);
     let mentions_home = (!home_n.is_empty() && cmd.contains(&home_n))
         || cmd.contains("/.grok/")
@@ -444,5 +450,16 @@ mod tests {
             "cat /tmp/auth.json",
             home
         ));
+        assert!(command_mentions_grok_home_credential_in(
+            "cat ~/.grok/'auth.json'",
+            home
+        ));
+        assert!(command_mentions_grok_home_credential_in(
+            "cat $HOME/.grok/mcp_credentials.json",
+            home
+        ));
+        assert!(is_grok_home_credential_file(Path::new(
+            "/home/u/.grok/mcp_credentials.json"
+        )));
     }
 }

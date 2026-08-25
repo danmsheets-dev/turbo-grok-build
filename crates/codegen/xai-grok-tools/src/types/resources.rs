@@ -1118,12 +1118,17 @@ pub fn confine_shell_enforcement() -> ConfineShellEnforcement {
     }
 }
 
-/// Pin `GROK_CONFINE` / `GROK_CONFINE_INHERIT` on a child command so the model
-/// cannot unset them via `env -u` / request env. No-op when unconfined.
+/// Pin `GROK_CONFINE` / `GROK_CONFINE_INHERIT` / `GROK_CONFINE_SHELL_MODE` on a
+/// child command so the model cannot unset or downgrade them via `env -u` /
+/// request env. No-op when unconfined.
 pub fn pin_confine_env_on_tokio_command(cmd: &mut tokio::process::Command) {
     if let Some(root) = process_confine_root() {
         cmd.env(ENV_GROK_CONFINE, root.as_os_str());
         cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
+        cmd.env(
+            ENV_GROK_CONFINE_SHELL_MODE,
+            confine_shell_enforcement().as_str(),
+        );
     }
 }
 
@@ -1132,6 +1137,10 @@ pub fn pin_confine_env_on_std_command(cmd: &mut std::process::Command) {
     if let Some(root) = process_confine_root() {
         cmd.env(ENV_GROK_CONFINE, root.as_os_str());
         cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
+        cmd.env(
+            ENV_GROK_CONFINE_SHELL_MODE,
+            confine_shell_enforcement().as_str(),
+        );
     }
 }
 

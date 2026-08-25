@@ -9,6 +9,10 @@ const REDACTED_URL_VALUE: &str = "redacted";
 /// `task-`/`disk-`/`risk-` don't fold a stray `sk-`.
 static API_KEY_PREFIX_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\b(?:sk[-_]|xai-)[A-Za-z0-9_-]{20,}"));
+/// Product-supported providers whose prefixes do not match `sk-`/`xai-`
+/// (Groq `gsk_`, Cerebras `csk-`, NVIDIA NIM `nvapi-`, Fireworks `fw_`).
+static EXTRA_PROVIDER_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| compile(r"\b(?:gsk_|csk-|nvapi-|fw_)[A-Za-z0-9_-]{20,}"));
 /// AWS long-term (`AKIA`) and temporary (`ASIA`) access-key IDs.
 static AWS_ACCESS_KEY_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"));
@@ -37,14 +41,23 @@ static JWT_REGEX: LazyLock<Regex> =
 static SECRET_ASSIGNMENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     compile(
         r#"(?ix)
-        \b(
+        (^|[^A-Za-z0-9])
+        (
             api[_-]?key
           | (?:access|refresh|id)[_-]token
           | token
           | secret
           | client[_-]secret
+          | signing[_-]?secret
+          | private[_-]?key
+          | access[_-]?key
           | password
-        )\b
+          | passwd
+          | authorization
+          | cookie
+          | set-cookie
+          | credential
+        )
         (\s*[:=]\s*)
         (["']?)
         [^\s"',&]{8,}
@@ -73,11 +86,13 @@ static SENSITIVE_QUERY_PARAMS: &[&str] = &[
 
 /// Excludes trailing punctuation so backticks/brackets in surrounding text
 /// don't get folded into the URL match.
-static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| compile(r#"https?://[^\s"'<>(){}\[\],;`]+"#));
+static URL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| compile(r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>(){}\[\],;`]+"#));
 
 static MATCH_ANY: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new([
         API_KEY_PREFIX_REGEX.as_str(),
+        EXTRA_PROVIDER_KEY_REGEX.as_str(),
         AWS_ACCESS_KEY_REGEX.as_str(),
         GITHUB_TOKEN_REGEX.as_str(),
         VENDOR_TOKEN_REGEX.as_str(),
@@ -97,6 +112,7 @@ pub fn redact_secrets(input: &str) -> Cow<'_, str> {
     }
     let s = PEM_PRIVATE_KEY_REGEX.replace_all(input, REDACTED);
     let s = API_KEY_PREFIX_REGEX.replace_all(&s, REDACTED);
+    let s = EXTRA_PROVIDER_KEY_REGEX.replace_all(&s, REDACTED);
     let s = AWS_ACCESS_KEY_REGEX.replace_all(&s, REDACTED);
     let s = GITHUB_TOKEN_REGEX.replace_all(&s, REDACTED);
     let s = VENDOR_TOKEN_REGEX.replace_all(&s, REDACTED);
@@ -105,7 +121,7 @@ pub fn redact_secrets(input: &str) -> Cow<'_, str> {
     let s = JWT_REGEX.replace_all(&s, REDACTED);
     let s = redact_urls_in(&s);
     let s = SECRET_ASSIGNMENT_REGEX
-        .replace_all(&s, format!("$1$2$3{REDACTED}"))
+        .replace_all(&s, format!("$1$2$3$4{REDACTED}"))
         .into_owned();
     Cow::Owned(s)
 }
@@ -137,6 +153,7 @@ fn redact_urls_in(text: &str) -> String {
                 |_| raw.to_owned(),
                 |mut url| {
                     redact_url(&mut url);
+                    redact_webhook_path(&mut url);
                     url.to_string()
                 },
             )
@@ -315,6 +332,16 @@ pub fn redact_url(url: &mut url::Url) {
     url.set_query(Some(&serializer.finish()));
 }
 
+fn redact_webhook_path(url: &mut url::Url) {
+    let host = url.host_str().unwrap_or("");
+    let path = url.path();
+    if host.eq_ignore_ascii_case("hooks.slack.com")
+        || path.to_ascii_lowercase().contains("/api/webhooks/")
+    {
+        url.set_path("/redacted");
+    }
+}
+
 fn compile(pattern: &str) -> Regex {
     Regex::new(pattern).unwrap_or_else(|e| panic!("invalid regex `{pattern}`: {e}"))
 }
@@ -327,7 +354,7 @@ mod tests {
     /// pass in `redact_secrets` (and update this count).
     #[test]
     fn match_any_count_matches_redact_secrets_passes() {
-        assert_eq!(MATCH_ANY.patterns().len(), 10);
+        assert_eq!(MATCH_ANY.patterns().len(), 11);
     }
 
     #[test]
@@ -420,11 +447,43 @@ mod tests {
                 fixture(&["stripe sk_live_", "0123456789abcdefghijABCD"]),
                 "vendor sk_ key",
             ),
+            (
+                fixture(&["gsk_", "abcdefghijklmnopqrstuvwxyz0123456789ABCD"]),
+                "groq gsk_ key",
+            ),
+            (
+                fixture(&["csk-", "abcdefghijklmnopqrstuvwxyz0123456789ABCD"]),
+                "cerebras csk- key",
+            ),
+            (
+                fixture(&["nvapi-", "abcdefghijklmnopqrstuvwxyz0123456789"]),
+                "nvidia nvapi- key",
+            ),
+            (
+                fixture(&["fw_", "abcdefghijklmnopqrstuvwxyz0123456789ABCD"]),
+                "fireworks fw_ key",
+            ),
         ];
         for (input, label) in cases {
             let out = redact_secrets(&input);
             assert!(out.contains(REDACTED), "{label} not redacted: {out:?}");
         }
+    }
+
+    #[test]
+    fn redacts_prefixed_env_assignment_and_dsn_userinfo() {
+        let aws = fixture(&["AWS_SECRET_ACCESS_KEY=", "wJalrXUtnFEMIK7MDENGbPxR"]);
+        assert!(
+            redact_secrets(&aws).contains(REDACTED),
+            "AWS_SECRET_ACCESS_KEY must redact: {}",
+            redact_secrets(&aws)
+        );
+        let dsn = "postgres://admin:SuperSecret123@db:5432/prod";
+        let out = redact_secrets(dsn);
+        assert!(
+            !out.contains("SuperSecret123"),
+            "DSN password survived: {out}"
+        );
     }
 
     #[test]

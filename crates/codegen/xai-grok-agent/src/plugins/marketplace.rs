@@ -5,7 +5,7 @@
 //! - `~/.claude/plugins/known_marketplaces.json` (user-level registry)
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug)]
 pub struct ResolvedMarketplace {
@@ -51,7 +51,14 @@ pub fn resolve(git_root: &Path) -> Vec<ResolvedMarketplace> {
             continue;
         };
 
-        let marketplace_path = git_root.join(rel_path);
+        let Some(marketplace_path) = join_marketplace_rel(git_root, rel_path) else {
+            tracing::warn!(
+                marketplace = %name,
+                path = %rel_path,
+                "skipping extraKnownMarketplaces path that escapes the repo"
+            );
+            continue;
+        };
         let plugins_dir = marketplace_path.join("plugins");
         let Ok(entries) = std::fs::read_dir(&plugins_dir) else {
             continue;
@@ -77,6 +84,22 @@ pub fn resolve(git_root: &Path) -> Vec<ResolvedMarketplace> {
         });
     }
     result
+}
+
+fn join_marketplace_rel(git_root: &Path, rel: &str) -> Option<PathBuf> {
+    let path = Path::new(rel);
+    if path.is_absolute() {
+        return None;
+    }
+    if path.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    }) {
+        return None;
+    }
+    Some(git_root.join(rel))
 }
 
 /// Enabled plugin names from `enabledPlugins` (`"name@marketplace"` keys).
@@ -276,6 +299,14 @@ fn installed_plugin_keys(claude_dir: &Path) -> HashMap<String, Option<HashSet<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extra_known_marketplace_path_cannot_escape_repo() {
+        let root = Path::new("/repo");
+        assert!(join_marketplace_rel(root, "/tmp/shared").is_none());
+        assert!(join_marketplace_rel(root, "../../tmp/shared").is_none());
+        assert!(join_marketplace_rel(root, "vendor/mp").is_some());
+    }
 
     #[test]
     fn parse_enabled_disabled_both() {

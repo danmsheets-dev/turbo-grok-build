@@ -43,6 +43,16 @@ function Ensure-SafeDirectory([string]$Path, [string]$Label) {
 $Repo = "danmsheets-dev/turbo-grok-build"
 $ApiBase = if ($env:TURBO_UPDATE_BASE_URL) { $env:TURBO_UPDATE_BASE_URL } else { "https://api.github.com/repos/$Repo/releases" }
 $TurboHome = if ($env:TURBO_SHARE_DIR) { $env:TURBO_SHARE_DIR } else { Join-Path $env:USERPROFILE ".turbo" }
+
+# Fail closed: an env override must not point at a plaintext or third-party
+# origin that then gets executed as the installer payload.
+$ApiBaseTrim = $ApiBase.TrimEnd('/')
+if (-not (
+        $ApiBaseTrim.StartsWith('https://api.github.com/', [StringComparison]::OrdinalIgnoreCase) -or
+        $ApiBaseTrim.StartsWith('https://github.com/', [StringComparison]::OrdinalIgnoreCase)
+    )) {
+    Fail "TURBO_UPDATE_BASE_URL must be an https://api.github.com or https://github.com URL"
+}
 $Triple = "x86_64-pc-windows-msvc"
 
 # ── Platform gate ────────────────────────────────────────────────────────────

@@ -29,6 +29,15 @@ err() {
     exit 1
 }
 
+# Fail closed: an env override must not point at a plaintext or third-party
+# origin that then gets executed as the installer payload.
+case "$API_BASE" in
+    https://api.github.com/*|https://github.com/*) ;;
+    *)
+        err "TURBO_UPDATE_BASE_URL must be an https://api.github.com or https://github.com URL"
+        ;;
+esac
+
 usage() {
     sed -n '2,20p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
 }

@@ -76,16 +76,17 @@ impl DefaultSelectedPermission {
     }
 
     /// Parse a config.toml / registry value (trimmed, case-insensitive, no
-    /// aliases). The mapping is total — `always_allow_all_sessions` and any
-    /// unrecognised / empty value both resolve to
-    /// [`AlwaysAllowAllSessions`](Self::AlwaysAllowAllSessions), so no `Option`
-    /// has to be threaded through callers.
+    /// aliases). Unrecognised / empty values resolve to
+    /// [`AllowOnce`](Self::AllowOnce) so the first prompt does not highlight
+    /// always-approve. Explicit `always_allow_all_sessions` still selects that
+    /// row.
     pub fn from_config_value(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "allow_once" => Self::AllowOnce,
             "allow_command_always" => Self::AllowCommandAlways,
             "reject" => Self::Reject,
-            _ => Self::AlwaysAllowAllSessions,
+            "always_allow_all_sessions" => Self::AlwaysAllowAllSessions,
+            _ => Self::AllowOnce,
         }
     }
 
@@ -136,11 +137,11 @@ impl DefaultSelectedPermission {
 //
 // Read when queueing the first prompt of a session. Seeded by `prime` at
 // startup (and lazily on first read) so the path never hits disk mid-session.
-// `AlwaysAllowAllSessions` represents the effective default (unset).
+// `AllowOnce` is the effective default (unset): never pre-highlight always-approve.
 
 thread_local! {
     static CONFIG_CURRENT: Cell<DefaultSelectedPermission> =
-        const { Cell::new(DefaultSelectedPermission::AlwaysAllowAllSessions) };
+        const { Cell::new(DefaultSelectedPermission::AllowOnce) };
     static CONFIG_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -151,8 +152,7 @@ thread_local! {
 /// 1. `GROK_DEFAULT_SELECTED_PERMISSION` env var (headless / agent testing —
 ///    overrides `config.toml` without editing it),
 /// 2. `[ui].default_selected_permission` in the layered effective config,
-/// 3. [`AlwaysAllowAllSessions`](DefaultSelectedPermission::AlwaysAllowAllSessions)
-///    (the effective default).
+/// 3. [`AllowOnce`](DefaultSelectedPermission::AllowOnce) (the effective default).
 ///
 /// Unrecognised / empty values at any layer fall through to the next.
 pub fn load_default_selected_permission() -> DefaultSelectedPermission {
@@ -166,7 +166,7 @@ pub fn load_default_selected_permission() -> DefaultSelectedPermission {
                     load_string_from_effective_config("default_selected_permission")
                         .map(|s| DefaultSelectedPermission::from_config_value(&s))
                 })
-                .unwrap_or(DefaultSelectedPermission::AlwaysAllowAllSessions);
+                .unwrap_or(DefaultSelectedPermission::AllowOnce);
             CONFIG_CURRENT.with(|c| c.set(resolved));
             loaded.set(true);
         }
@@ -282,14 +282,14 @@ mod tests {
             DefaultSelectedPermission::from_config_value("always_allow_all_sessions"),
             DefaultSelectedPermission::AlwaysAllowAllSessions
         );
-        // Empty and garbage collapse to the effective default.
+        // Empty and garbage collapse to allow-once, not always-approve.
         assert_eq!(
             DefaultSelectedPermission::from_config_value(""),
-            DefaultSelectedPermission::AlwaysAllowAllSessions
+            DefaultSelectedPermission::AllowOnce
         );
         assert_eq!(
             DefaultSelectedPermission::from_config_value("bogus"),
-            DefaultSelectedPermission::AlwaysAllowAllSessions
+            DefaultSelectedPermission::AllowOnce
         );
     }
 

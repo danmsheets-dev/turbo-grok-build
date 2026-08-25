@@ -69,6 +69,8 @@ impl xai_tool_runtime::Tool for BrowserNavigateTool {
         input: BrowserNavigateInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let handle = super::require_handle(&ctx).await?;
+        xai_grok_browser::check_url_in_session(&input.url, handle.session_folder())
+            .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
         let looks_http = {
             let trimmed = input.url.trim();
             let scheme = trimmed.split(':').next().unwrap_or("").to_ascii_lowercase();
