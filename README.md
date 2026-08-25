@@ -96,14 +96,16 @@ Full notes: [`CHANGELOG.md`](./CHANGELOG.md).
 core while keeping Turbo’s product layer (worktrees, deep-audit, Game Mode,
 multi-provider, English-only).
 
-**1.0.0-rc.2** adds the **Agent WebView** — a product-owned WebView2 window the
-agent drives through first-class `browser_*` tools, mirrored in the TUI with
-`Ctrl+Shift+B` — plus the **Grok 4.6** default catalog, MCP disk-wins config
-merge, full Disk Clean, and harness polish for the Grok Build Claude plugin
-(identity card, permission aliases, job-object ergonomics). It also carries a
-confinement hardening pass: a `--confine` write-boundary escape and a
+**1.0.0-rc.2** adds the **Agent WebView** (**beta**) — a product-owned WebView2
+window the agent drives through first-class `browser_*` tools, mirrored in the
+TUI with `Ctrl+Shift+B` — plus the **Grok 4.6** default catalog, MCP disk-wins
+config merge, full Disk Clean, and harness polish for the Grok Build Claude
+plugin (identity card, permission aliases, job-object ergonomics). It also
+carries a confinement hardening pass: a `--confine` write-boundary escape and a
 snapshot-uid forgery vector were found and closed before release
-([`docs/RC2_UNRELEASED_AUDIT.md`](./docs/RC2_UNRELEASED_AUDIT.md)).
+([`docs/RC2_UNRELEASED_AUDIT.md`](./docs/RC2_UNRELEASED_AUDIT.md)). The WebView
+is a dedicated session profile, not the operator's daily Chrome; mutating
+`browser_eval` / navigate are permission-gated as of 1.0.0-rc.11.
 
 **1.0.0-rc.2.1** is the Agent WebView hotfix. rc.2 shipped it with a named-pipe
 defect that gave a fresh `browser_navigate` a four-in-five chance of never
@@ -219,7 +221,8 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **Game Mode** | `Ctrl+G` pixel office of supervisor + subagent desks; hover tooltips (Supervisor / MCP rack), 11 animations, parks when idle | RC11 / RC2 |
 | **Multi-provider** | Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, … | r2+ |
 | **Headless honesty** | Streaming-json tool/subagent events, confine, trust gates | RC6 |
-| **`/meeting` notetaker** | **Joins Teams as a guest bot** ("Turbo (Notetaker)" in the lobby); in-page audio tap; coworker `Turbo:` Q&A on read-only tools; work-only recap in `Meetings/` | **1.0-rc.4** / v3 **1.0-rc.9** |
+| **Agent WebView (`browser_*`)** | **Beta.** Product-owned WebView2 (not daily Chrome); `browser_*` tools + `Ctrl+Shift+B` TUI mirror. Mutating eval/navigate prompt. | **1.0-rc.2** / gate **1.0-rc.11** |
+| **`/meeting` notetaker** | **Joins Teams as a guest bot** ("Turbo (Notetaker)" in the lobby); in-page audio tap → xAI hosted STT; coworker `Turbo:` Q&A on workspace-confined reads; work-only recap in `Meetings/` | **1.0-rc.4** / v3 **1.0-rc.9** |
 | **`/schedule`** | Standing jobs (search / stat / meeting join); no 7-day expiry; `turbo schedule list` | **1.0-rc.8** |
 | **GitHub log sync** | Opt-in `turbo issues sync` / `turbo features sync` to a private Issues repo | **1.0-rc.8** |
 
@@ -252,6 +255,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **1.0-rc.8** | **`1.0.0-rc.8`** | **`/schedule`**, Meeting R2, Browser R3, GitHub Issues log sync, stock workflows |
 | **1.0-rc.9** | **`1.0.0-rc.9`** | **Meeting Tool v3:** joined Teams notetaker bot, in-page audio tap, read-only meeting Q&A |
 | **1.0-rc.10** | **`1.0.0-rc.10`** | **Teams Join Hardening:** web-join rewrite, protocol guard, honest fallback, GitHub sync preflight |
+| **1.0-rc.11** | **`1.0.0-rc.11`** | **Security honesty:** confine HIGH bypasses, permission mapping, skills trust, meeting-QA confine; Agent WebView **beta** |
 
 > RC numbering follows the **wire version**, which restarted at `r1` when RC15
 > synced upstream `0.2.119`. The 1.0 line starts at **`1.0.0-rc.1`**.

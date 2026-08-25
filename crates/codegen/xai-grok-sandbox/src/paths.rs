@@ -149,13 +149,67 @@ fn normalize_path_for_prefix(path: &Path) -> String {
     s
 }
 
-fn path_is_under_home(path: &Path, home: &Path) -> bool {
-    let path_n = normalize_path_for_prefix(path);
-    let home_n = normalize_path_for_prefix(home);
-    if home_n.is_empty() {
-        return false;
+fn collapse_dot_segments(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
     }
-    path_n == home_n || path_n.starts_with(&format!("{home_n}/"))
+    out
+}
+
+fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cur = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canon) = dunce::canonicalize(&cur) {
+            let mut out = canon;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return Some(out);
+        }
+        match cur.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                if !cur.pop() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    None
+}
+
+fn path_is_under_home(path: &Path, home: &Path) -> bool {
+    let lexical = {
+        let path_n = normalize_path_for_prefix(&collapse_dot_segments(path));
+        let home_n = normalize_path_for_prefix(&collapse_dot_segments(home));
+        !home_n.is_empty() && (path_n == home_n || path_n.starts_with(&format!("{home_n}/")))
+    };
+    match (
+        canonicalize_existing_ancestor(path),
+        canonicalize_existing_ancestor(home),
+    ) {
+        (Some(p), Some(h)) => {
+            let path_n = normalize_path_for_prefix(&p);
+            let home_n = normalize_path_for_prefix(&h);
+            !home_n.is_empty() && (path_n == home_n || path_n.starts_with(&format!("{home_n}/")))
+        }
+        // Unresolvable 8.3 / missing ancestor: keep lexical match so `/./`
+        // still denies, and fail closed (deny) when lexical already hits.
+        _ => lexical,
+    }
 }
 
 /// True when `path` is a credential file under `$GROK_HOME` and must not be written.
@@ -344,6 +398,13 @@ mod tests {
             Path::new("/home/u/project/tls.pem"),
             home
         ));
+        assert!(
+            write_denied_grok_home_credential_in(
+                Path::new("/home/u/./.grok/auth.json"),
+                home
+            ),
+            "/./ spelling of $GROK_HOME must still deny credential writes"
+        );
     }
 
     #[cfg(windows)]

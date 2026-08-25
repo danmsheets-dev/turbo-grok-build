@@ -222,6 +222,15 @@ pub enum DiskCommand {
     },
 }
 
+fn refuse_mutating_disk_under_confine(op: &str) -> Result<()> {
+    if xai_grok_tools::types::resources::process_confine_root().is_some() {
+        bail!(
+            "turbo disk {op} is refused under --confine (deletes outside the confine root)"
+        );
+    }
+    Ok(())
+}
+
 pub fn run(args: DiskArgs) -> Result<()> {
     match args.command {
         DiskCommand::Report { root, json } => report(root, json),
@@ -243,6 +252,7 @@ pub fn run(args: DiskArgs) -> Result<()> {
             json,
             active_build_grace_secs,
         } => {
+            refuse_mutating_disk_under_confine("clean")?;
             if !safe {
                 bail!("refusing clean without --safe (try: turbo disk clean --safe --dry-run)");
             }
@@ -270,6 +280,7 @@ pub fn run(args: DiskArgs) -> Result<()> {
             tree_days,
             json,
         } => {
+            refuse_mutating_disk_under_confine("recover")?;
             if !safe {
                 bail!("refusing recover without --safe (try: turbo disk recover --safe --dry-run)");
             }
@@ -297,6 +308,7 @@ pub fn run(args: DiskArgs) -> Result<()> {
             root,
             json,
         } => {
+            refuse_mutating_disk_under_confine("prune")?;
             let do_worktrees = all || worktrees;
             let do_tree = all || tree_store;
             let do_session = all || session_meta;

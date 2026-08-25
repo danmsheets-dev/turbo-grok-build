@@ -13,6 +13,9 @@ use crate::permission::policy::{
     CompiledPolicy, GateDecision, InlineShellScript, ShellWord, combine_gate_decisions,
     shell_dash_c_script,
 };
+use crate::permission::exec_risk::{
+    git_has_exec_risk_global, git_words_have_unsafe_query_option,
+};
 use crate::permission::types::{AccessKind, Decision};
 
 impl CompiledPolicy {
@@ -290,6 +293,9 @@ pub(crate) fn command_words_write_paths(words: &[String]) -> Vec<String> {
             out.push(token.to_owned());
         }
     }
+    if program == "sed" {
+        out.extend(sed_w_targets(inner));
+    }
     out
 }
 
@@ -368,6 +374,14 @@ pub(crate) fn analyse_shell_for_confine(cmd: &str) -> ConfineShellAnalysis {
     // segment fails closed as a policy decision (not a path hit).
     let segments = split_compound_shell_segments(trimmed);
     if segments.len() <= 1 {
+        // F21: a newline/CR means a later statement the peel would drop.
+        // The Windows engine recovery already fails closed on multiline;
+        // this path used to peel `(Get-Item x).Length` and allow the rest.
+        if trimmed.contains('\n') || trimmed.contains('\r') {
+            return ConfineShellAnalysis::Unmodelled {
+                program: "powershell-multiline".to_owned(),
+            };
+        }
         // Single segment still broken — try PS peel alone.
         let peeled = peel_powershell_expression(trimmed);
         if peeled != trimmed {
@@ -691,14 +705,38 @@ fn peel_powershell_expression(seg: &str) -> &str {
         return s;
     };
     let rest = s[close + 1..].trim_start();
-    // Property/method chain after the close paren, or bare subexpression.
-    if rest.is_empty() || rest.starts_with('.') {
-        let inner = s[1..close].trim();
-        if !inner.is_empty() {
-            return inner;
-        }
+    let inner = s[1..close].trim();
+    if inner.is_empty() {
+        return s;
+    }
+    // Peel only a pure member chain. `> file`, extra statements, or junk
+    // after `.Length` must stay on the original string (F21).
+    if rest.is_empty() || is_pure_powershell_member_chain(rest) {
+        return inner;
     }
     s
+}
+
+fn is_pure_powershell_member_chain(rest: &str) -> bool {
+    let mut s = rest;
+    if !s.starts_with('.') {
+        return false;
+    }
+    while s.starts_with('.') {
+        s = &s[1..];
+        let ident_len = s
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .count();
+        if ident_len == 0 {
+            return false;
+        }
+        s = &s[ident_len..];
+        if s.starts_with("()") {
+            s = &s[2..];
+        }
+    }
+    s.is_empty()
 }
 
 /// Recover the one environment-backed PowerShell writer form used by the
@@ -983,12 +1021,16 @@ fn tokenize_windows_cmdline(cmd: &str) -> Vec<String> {
 /// read-only / path-extracted `git`, and nested turbo/hyper/grok (inherits
 /// `GROK_CONFINE`). Everything else is fail-closed.
 fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> bool {
-    // Nested turbo/hyper/grok re-applies GROK_CONFINE on startup — allow under pin.
+    // Nested turbo/hyper/grok re-applies GROK_CONFINE on startup — except
+    // `disk`, which deletes paths the nested process never re-confines (F07).
     if matches!(
         program,
         "turbo" | "hyper" | "grok" | "xai-grok" | "xai-grok-pager"
     ) {
-        return true;
+        return !words.iter().skip(1).any(|w| w == "disk");
+    }
+    if program == "sed" && sed_is_unmodelled_for_confine(words) {
+        return false;
     }
     // Pure non-writing shell builtins / trivial utilities (no file args that
     // write). Redirects on these are still caught by command_write_paths_in_tree.
@@ -1540,6 +1582,10 @@ fn cargo_flag_takes_value(w: &str) -> bool {
 /// whose destinations we extract. Unknown / dangerous subcommands (e.g.
 /// `config --global`, arbitrary plumbing) fail closed.
 fn git_is_modelled_for_confine(words: &[String]) -> bool {
+    // `-c` / `--config-env` / retarget globals execute driver commands (F19).
+    if git_has_exec_risk_global(words) || git_words_have_unsafe_query_option(words) {
+        return false;
+    }
     // Always extract -C / --git-dir / --work-tree / --output as path operands
     // via git_write_path_operands; here we only decide modelled-ness.
     let Some(sub) = git_subcommand(words) else {
@@ -1972,7 +2018,7 @@ fn resolved_path_is_within_root(resolved_path: &Path, root: &Path) -> bool {
         .unwrap_or(true)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ShellFileMode {
     Read,
     Write,
@@ -1983,7 +2029,7 @@ pub(crate) enum ShellFileMode {
 fn shell_file_mode(program: &str) -> Option<ShellFileMode> {
     match program {
         "cat" | "tac" | "nl" | "head" | "tail" | "grep" | "egrep" | "fgrep" | "rg" | "sed"
-        | "awk" | "less" | "more" | "bat" | "strings" | "xxd" | "od" | "hexdump" | "base64"
+        | "less" | "more" | "bat" | "strings" | "xxd" | "od" | "hexdump" | "base64"
         | "base32" | "cut" | "sort" | "uniq" | "wc" | "type" | "get-content" | "gc" | "diff"
         | "comm" | "rev" | "jq" | "yq" | "select-string" | "sls" | "ag" | "ack" | "zcat"
         | "zless" | "zmore" | "zgrep" | "zegrep" | "zfgrep" | "bzcat" | "bzgrep" | "xzcat"
@@ -2441,6 +2487,250 @@ fn shell_sed_in_place(words: &[String]) -> bool {
     })
 }
 
+fn path_command_has_unmodelled_reorder(words: &[String]) -> bool {
+    words.iter().skip(1).any(|w| {
+        matches!(
+            w.as_str(),
+            "-T" | "--no-target-directory" | "--no-target-directory=true"
+        )
+    })
+}
+
+fn path_command_target_directory(words: &[String]) -> Option<&str> {
+    let mut i = 1usize;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            break;
+        }
+        if w == "-t" || w == "--target-directory" {
+            return words.get(i + 1).map(String::as_str);
+        }
+        if let Some(dir) = w.strip_prefix("--target-directory=") {
+            return Some(dir);
+        }
+        if let Some(dir) = w.strip_prefix("-t").filter(|s| !s.is_empty() && *s != "-") {
+            return Some(dir);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// GNU/BSD `e` execute or `-f` script file we will not read: fail closed.
+fn sed_is_unmodelled_for_confine(words: &[String]) -> bool {
+    let mut i = 1usize;
+    let mut saw_e = false;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            break;
+        }
+        if w == "-f" || w == "--file" || w.starts_with("--file=") {
+            return true;
+        }
+        if w == "-e" || w == "--expression" {
+            if let Some(script) = words.get(i + 1)
+                && sed_script_has_execute(script)
+            {
+                return true;
+            }
+            saw_e = true;
+            i += 2;
+            continue;
+        }
+        if let Some(script) = w.strip_prefix("--expression=") {
+            if sed_script_has_execute(script) {
+                return true;
+            }
+            saw_e = true;
+            i += 1;
+            continue;
+        }
+        if w.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        if !saw_e && sed_script_has_execute(w) {
+            return true;
+        }
+        break;
+    }
+    false
+}
+
+fn sed_script_has_execute(script: &str) -> bool {
+    if sed_substitution_has_e_flag(script) {
+        return true;
+    }
+    for part in script.split(|c| c == ';' || c == '\n') {
+        let t = part.trim();
+        let t = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '$' || c == ' ');
+        let t = t.trim_start();
+        if t == "e" || t.starts_with("e ") || t.starts_with("e\t") {
+            return true;
+        }
+    }
+    false
+}
+
+fn sed_substitution_has_e_flag(script: &str) -> bool {
+    let bytes = script.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b's' && i + 1 < bytes.len() {
+            let delim = bytes[i + 1];
+            if delim.is_ascii_whitespace() {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 2;
+            let mut seen_mid = false;
+            while j < bytes.len() {
+                if bytes[j] == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == delim {
+                    if !seen_mid {
+                        seen_mid = true;
+                        j += 1;
+                        continue;
+                    }
+                    j += 1;
+                    while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                        if bytes[j] == b'e' {
+                            return true;
+                        }
+                        j += 1;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+            i = j.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn sed_w_targets(words: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for script in sed_inline_scripts(words) {
+        for part in script.split(|c| c == ';' || c == '\n') {
+            let t = part.trim();
+            let t = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '$');
+            let t = t.trim_start();
+            if let Some(rest) = t.strip_prefix('w') {
+                let path = rest.trim();
+                if !path.is_empty() {
+                    out.push(path.to_owned());
+                }
+            }
+        }
+        out.extend(sed_s_w_flag_paths(&script));
+    }
+    out
+}
+
+fn sed_inline_scripts(words: &[String]) -> Vec<String> {
+    let mut scripts = Vec::new();
+    let mut i = 1usize;
+    let mut saw_e = false;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            break;
+        }
+        if w == "-e" || w == "--expression" {
+            if let Some(s) = words.get(i + 1) {
+                scripts.push(s.clone());
+                saw_e = true;
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(s) = w.strip_prefix("--expression=") {
+            scripts.push(s.to_owned());
+            saw_e = true;
+            i += 1;
+            continue;
+        }
+        if w.starts_with('-') {
+            if w == "-f" || w == "--file" {
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if !saw_e {
+            scripts.push(w.to_owned());
+        }
+        break;
+    }
+    scripts
+}
+
+fn sed_s_w_flag_paths(script: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = script.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b's' && i + 1 < bytes.len() {
+            let delim = bytes[i + 1];
+            if delim.is_ascii_whitespace() {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 2;
+            let mut seen_mid = false;
+            while j < bytes.len() {
+                if bytes[j] == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == delim {
+                    if !seen_mid {
+                        seen_mid = true;
+                        j += 1;
+                        continue;
+                    }
+                    j += 1;
+                    while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                        if bytes[j] == b'w' {
+                            j += 1;
+                            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                                j += 1;
+                            }
+                            let start = j;
+                            while j < bytes.len()
+                                && !bytes[j].is_ascii_whitespace()
+                                && bytes[j] != b';'
+                            {
+                                j += 1;
+                            }
+                            if j > start {
+                                out.push(String::from_utf8_lossy(&bytes[start..j]).into_owned());
+                            }
+                            break;
+                        }
+                        j += 1;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+            i = j.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
 fn shell_output_flag_values(words: &[String]) -> impl Iterator<Item = &str> {
     words.iter().enumerate().filter_map(|(i, token)| {
         token
@@ -2549,9 +2839,19 @@ fn shell_path_command_operands<'a>(
 ) -> Option<Vec<(&'a str, ShellFileMode)>> {
     match program {
         "cp" | "mv" | "ln" | "install" => {
+            if path_command_has_unmodelled_reorder(words) {
+                return None;
+            }
+            if let Some(dir) = path_command_target_directory(words) {
+                let mut out: Vec<(&str, ShellFileMode)> = vec![(dir, ShellFileMode::Write)];
+                out.extend(
+                    shell_file_candidates(words)
+                        .into_iter()
+                        .map(|s| (s, ShellFileMode::Read)),
+                );
+                return Some(out);
+            }
             // Last positional is the destination (Write), the rest sources (Read).
-            // The rare `-t DIR` reorder isn't parsed — bounded since denies match
-            // by basename.
             let operands = shell_file_candidates(words);
             let (dest, sources) = operands.split_last()?;
             Some(
@@ -2805,6 +3105,15 @@ mod tests {
             r#"env node -e "require('fs').writeFileSync('C:/x','p')""#,
             r#"/usr/bin/env python3 -c "print(1)""#,
             r#"command node -e "require('fs').writeFileSync('C:/x','p')""#,
+            r#"awk 'BEGIN{ print "x" > "/tmp/pwn" }'"#,
+            r#"awk 'BEGIN{ system("true") }'"#,
+            "git -c diff.external=true diff HEAD~1",
+            "git -c core.sshCommand=true fetch",
+            "git -c core.fsmonitor=./x.sh status",
+            "sed 's/.*/true/e' payload.txt",
+            "sed '1e true' f",
+            "turbo disk clean --safe",
+            "turbo disk prune --all --execute",
         ] {
             let hit = shell_unmodelled_program_for_confine(cmd);
             assert!(
@@ -2823,6 +3132,63 @@ mod tests {
                 "bare `{cmd}` must stay modelled, got {hit:?}"
             );
         }
+    }
+
+    #[test]
+    fn confine_git_minus_c_is_unmodelled() {
+        assert!(shell_unmodelled_program_for_confine("git log --oneline -5").is_none());
+        assert!(shell_unmodelled_program_for_confine("git show HEAD").is_none());
+        assert!(
+            shell_unmodelled_program_for_confine("git -c diff.external=true diff HEAD~1")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn confine_cp_target_directory_is_a_write() {
+        let words = [
+            "cp".into(),
+            "--target-directory=/outside".into(),
+            "payload".into(),
+        ];
+        let ops = shell_path_command_operands("cp", &words).expect("modelled");
+        assert!(
+            ops.iter()
+                .any(|(p, m)| *p == "/outside" && matches!(m, ShellFileMode::Write)),
+            "{ops:?}"
+        );
+    }
+
+    #[test]
+    fn confine_powershell_peel_does_not_drop_redirect_or_newline() {
+        assert!(
+            shell_unmodelled_program_for_confine("(Get-Item README.md).Length\nSet-Content C:\\x p")
+                .is_some()
+        );
+        let peeled = peel_powershell_expression("(gi a.txt).Length > C:\\Users\\x\\evil.txt");
+        assert!(
+            peeled.contains('>') || peeled.contains("evil"),
+            "redirect must survive peel, got {peeled:?}"
+        );
+        assert_eq!(
+            peel_powershell_expression("(Get-Item README.md).Length"),
+            "Get-Item README.md"
+        );
+    }
+
+    #[test]
+    fn confine_sed_w_extracts_write_target() {
+        let words = [
+            "sed".into(),
+            "-n".into(),
+            "w /outside".into(),
+            "payload.txt".into(),
+        ];
+        let targets = sed_w_targets(&words);
+        assert!(
+            targets.iter().any(|t| t == "/outside"),
+            "{targets:?}"
+        );
     }
 
     #[test]

@@ -51,6 +51,16 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
+### [1.0.0-rc.11] — security honesty (in progress)
+
+Fail-closed confine bypasses, permission mapping for mutating tools that were
+classified as pathless reads, folder-trust for project skills, meeting-QA
+workspace confine, Agent WebView called **beta** and permission-gated.
+
+Do not describe `--confine` as an OS jail. Meeting audio is transcribed by
+xAI hosted STT. Report vulnerabilities via this fork's GitHub private
+advisory flow, not xAI HackerOne.
+
 ---
 
 ## [1.0.0-rc.10] - 2026-08-24
