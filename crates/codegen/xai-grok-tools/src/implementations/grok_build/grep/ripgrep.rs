@@ -164,20 +164,40 @@ fn ensure_windows_exe_suffix(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Return the exact expected vendor filename, never a prefix scan.
-/// A pre-planted `~/.grok/vendor/rg-evil` must not be executed.
+/// Exact vendor filenames we will execute — never a `rg-*` prefix scan.
+/// A pre-planted `~/.grok/vendor/rg-evil` must not be picked up.
+fn expected_vendor_rg_names() -> Vec<String> {
+    let ver = option_env!("GROK_TOOLS_RG_VER").unwrap_or("15.0.0");
+    let target = option_env!("GROK_TOOLS_RG_TARGET").unwrap_or("unknown");
+    let mut names = vec![
+        format!("rg-{ver}-{target}"),
+        format!("rg-{ver}-{target}.exe"),
+        format!("rg-{ver}-override"),
+        format!("rg-{ver}-override.exe"),
+        "rg.exe".into(),
+        "rg".into(),
+    ];
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn find_vendor_rg() -> Option<PathBuf> {
+    let vendor = crate::util::grok_home().join("vendor");
     #[cfg(bundle_rg)]
     {
-        let p = crate::util::grok_home()
-            .join("vendor")
-            .join(bundled_rg_file_name());
-        p.is_file().then_some(p)
+        let p = vendor.join(bundled_rg_file_name());
+        if p.is_file() {
+            return Some(p);
+        }
     }
-    #[cfg(not(bundle_rg))]
-    {
-        None
+    for name in expected_vendor_rg_names() {
+        let p = vendor.join(name);
+        if p.is_file() {
+            return Some(ensure_windows_exe_suffix(p));
+        }
     }
+    None
 }
 
 /// Get the path to the ripgrep executable.

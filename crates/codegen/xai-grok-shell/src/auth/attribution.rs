@@ -542,10 +542,13 @@ mod tests {
         let (_dir, am) = empty_auth_manager();
         // Do NOT inject anything -- manager has no current token.
 
-        let payload = compute_attribution_payload(&am, "Test.absent", Some("any-token"));
+        let payload = compute_attribution_payload(&am, "Test.absent", Some("any-token-abcdefgh"));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), "any-token");
+        assert_eq!(
+            payload_field(&payload, "sent_key_prefix"),
+            xai_grok_auth::bearer_suffix("any-token-abcdefgh")
+        );
         assert!(payload_field(&payload, "current_key_prefix").is_null());
         assert_eq!(payload_field(&payload, "mint_age_seconds"), -1);
         assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 0);

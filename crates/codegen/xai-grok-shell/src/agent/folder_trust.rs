@@ -1062,19 +1062,20 @@ mod tests {
         // GROK_HOME-isolated so both the folder-trust store and the plugin trust
         // store start empty (deterministic untrusted); GROK_FOLDER_TRUST unset so
         // the default-on flag applies; `#[serial]` because both are process-global.
-        use xai_grok_agent::plugins::discovery::DiscoveryConfig;
+        use xai_grok_agent::plugins::discovery::{DiscoveryConfig, PluginId, PluginScope};
         use xai_grok_agent::plugins::{PluginRegistry, SharedPluginRegistryHandle};
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("GROK_HOME", home.path());
         let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
         let tmp = repo_tmp();
-        // A project plugin. Project scope is default-disabled, so name it in the
-        // `enabled` list to isolate the TRUST gate (not the enable gate).
+        // A project plugin. Project scope is default-disabled; F03 requires a
+        // fully-qualified PluginId (not a bare name) to enable it.
         let plugin = tmp.path().join(".grok").join("plugins").join("trustgate");
         std::fs::create_dir_all(&plugin).unwrap();
         std::fs::write(plugin.join("plugin.json"), r#"{"name":"trustgate"}"#).unwrap();
+        let plugin_canon = dunce::canonicalize(&plugin).unwrap_or_else(|_| plugin.clone());
         let cfg = DiscoveryConfig {
-            enabled: vec!["trustgate".to_string()],
+            enabled: vec![PluginId::new(PluginScope::Project, &plugin_canon, "trustgate").0],
             ..Default::default()
         };
         let handle = SharedPluginRegistryHandle::new(None, vec![]);

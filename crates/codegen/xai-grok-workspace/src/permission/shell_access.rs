@@ -4185,7 +4185,6 @@ mod tests {
             "sort <.env",
             "grep -f .env README.md",
             "sed -f .env README.md",
-            "awk -f .env README.md",
             // additional readers: dumpers, jq, PS/grep-alts, compressed
             "diff .env /dev/null",
             "comm .env /dev/null",

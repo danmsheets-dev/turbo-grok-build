@@ -3192,7 +3192,11 @@ mod tests {
             },
         };
         let err = run(args).unwrap_err();
-        assert!(err.to_string().contains("--safe"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--safe") || msg.contains("--confine"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -3213,7 +3217,13 @@ mod tests {
             },
         };
         let err = run(args).unwrap_err();
-        assert!(err.to_string().contains("--worktrees") || err.to_string().contains("--all"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--worktrees")
+                || msg.contains("--all")
+                || msg.contains("--confine"),
+            "{msg}"
+        );
     }
 
     #[test]
