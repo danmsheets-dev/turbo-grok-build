@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "xai-grok-extension-api"
 version = "0.1.0"
 edition.workspace = true
-description = "Shared types, capabilities, and WIT contract for Hyper WASM extensions (Pi-style lifecycle bus)"
+description = "Shared types, capabilities, and WIT contract for Turbo WASM extensions (Pi-style lifecycle bus)"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }

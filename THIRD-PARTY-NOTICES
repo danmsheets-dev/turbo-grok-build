@@ -19024,5 +19024,35 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ================================================================================
+PART — ADDITIONAL LINKED CRATES (rc.11)
+================================================================================
+
+The following crates are linked into the shipped `turbo` binary and were
+missing from the fork-time snapshot of this file (F37). Full license texts
+for Apache-2.0 and MIT appear in the license-text parts above.
+
+  rhai, rhai_codegen, smartstring
+    License: MIT OR Apache-2.0
+    https://crates.io/crates/rhai
+
+  wasmtime, wasmtime-cranelift, cranelift-codegen, cranelift-frontend,
+  cranelift-native, cranelift-bforest, cranelift-bitset, cranelift-control,
+  cranelift-entity, cranelift-isle, cranelift-module, winch-codegen,
+  pulley-interpreter, regalloc2
+    License: Apache-2.0 WITH LLVM-exception
+    https://crates.io/crates/wasmtime
+    LLVM Exceptions to the Apache 2.0 License:
+    https://spdx.org/licenses/LLVM-exception.html
+
+  alacritty_terminal, webview2-com, rust-i18n, objc2-app-kit, x25519-dalek,
+  rcgen, ureq, aws-sdk-bedrockruntime, quinn
+    License: Apache-2.0 OR MIT (see each crate on crates.io)
+
+Regenerate this file from the release-dist graph (`cargo about generate` /
+`cargo-bundle-licenses -p xai-grok-pager-bin --profile release-dist`) before
+the next tagged release so the notice list matches the shipped binary.
+
+================================================================================
 END OF THIRD-PARTY NOTICES
 ================================================================================
+

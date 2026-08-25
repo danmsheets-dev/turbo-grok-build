@@ -290,9 +290,10 @@ impl xai_tool_runtime::Tool for ReadTool {
 
             // Truncate long lines.
             let line = if line_text.len() > MAX_LINE_LENGTH {
+                let cut = crate::util::floor_char_boundary(line_text, MAX_LINE_LENGTH);
                 format!(
                     "{}... (line truncated to {} chars)",
-                    &line_text[..MAX_LINE_LENGTH],
+                    &line_text[..cut],
                     MAX_LINE_LENGTH
                 )
             } else {

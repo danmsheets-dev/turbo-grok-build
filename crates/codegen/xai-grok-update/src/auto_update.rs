@@ -34,9 +34,9 @@ const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version
 fn manual_install_cmd() -> &'static str {
     if cfg!(feature = "community-build") {
         if cfg!(windows) {
-            "irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex"
+            "irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex"
         } else {
-            "curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash"
+            "curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash"
         }
     } else if cfg!(windows) {
         "irm https://x.ai/cli/install.ps1 | iex"

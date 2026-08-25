@@ -641,6 +641,14 @@ pub async fn apply_file_content_with_union(
     }
     refuse_rel_land_path(rel)?;
     let dest = root.join(rel);
+    // Canonicalize after join so a parent-tree symlink/junction (tools ->
+    // /usr/local/bin) cannot land outside `root` (F60). Fail closed when no
+    // ancestor can be resolved.
+    if !crate::types::resources::path_is_under_confine_root(&dest, root) {
+        return Err(format!(
+            "land refused: path `{rel}` resolves outside the repository"
+        ));
+    }
     match content {
         Some(data) => {
             if let Some(parent) = dest.parent() {
@@ -1079,6 +1087,32 @@ mod manifest_merge_tests {
         assert_eq!(b["built_by"], "wave4");
         assert!(arr.iter().any(|x| x["name"] == "a"));
         assert!(arr.iter().any(|x| x["name"] == "c"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn land_refuses_symlink_directory_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("tools")).unwrap();
+        let err = apply_file_content(&root, "tools/pwn.sh", Some(b"x"))
+            .await
+            .expect_err("symlink land must fail closed");
+        assert!(
+            err.contains("outside the repository") || err.contains("land refused"),
+            "{err}"
+        );
+        assert!(
+            !outside.join("pwn.sh").exists(),
+            "must not write through the symlink"
+        );
+        apply_file_content(&root, "ok.txt", Some(b"in"))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(root.join("ok.txt")).unwrap(), b"in");
     }
 
     #[test]

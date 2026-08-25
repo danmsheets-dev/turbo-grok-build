@@ -84,13 +84,25 @@ impl PolicyParams {
     }
 
     /// True when any deny-command substring appears in the command.
+    ///
+    /// Matches the raw string and a dequoted/whitespace-collapsed haystack so
+    /// `cu''rl`, `cur\l`, and `rm  -rf` cannot dodge a `curl` / `rm -rf` rule
+    /// (F59). ANSI-C `$'\143url'` is decoded. This is still not a full shell
+    /// parser — glob/`eval` assembly can evade; those belong on `[permission]`.
     pub fn command_denied(&self, command: &str) -> Option<String> {
-        let lower = command.to_ascii_lowercase();
-        self.deny_commands
-            .iter()
-            .filter(|f| !f.trim().is_empty())
-            .find(|f| lower.contains(f.trim().to_ascii_lowercase().as_str()))
-            .cloned()
+        let raw = command.to_ascii_lowercase();
+        let dequoted = dequote_shell_haystack(command).to_ascii_lowercase();
+        self.deny_commands.iter().find(|f| {
+            let needle = f.trim().to_ascii_lowercase();
+            if needle.is_empty() {
+                return false;
+            }
+            let collapsed = collapse_ws(&needle);
+            raw.contains(&needle)
+                || dequoted.contains(&needle)
+                || collapse_ws(&raw).contains(&collapsed)
+                || collapse_ws(&dequoted).contains(&collapsed)
+        }).cloned()
     }
 
     /// True when an edit adding `added_lines` exceeds the configured ceiling.
@@ -102,6 +114,96 @@ impl PolicyParams {
             None
         }
     }
+}
+
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            prev_space = false;
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Strip shell quotes/backslashes and decode `$'\ooo'` / `$'\xHH'` so a
+/// substring deny list sees the command the shell will run, not the spelling.
+fn dequote_shell_haystack(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // ANSI-C quoting: $'...'
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\'' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                    match bytes[i] {
+                        b'n' => out.push('\n'),
+                        b't' => out.push('\t'),
+                        b'r' => out.push('\r'),
+                        b'\\' | b'\'' => out.push(bytes[i] as char),
+                        b'x' if i + 2 < bytes.len() => {
+                            let hex = &s[i + 1..i + 3];
+                            if let Ok(v) = u8::from_str_radix(hex, 16) {
+                                out.push(v as char);
+                                i += 2;
+                            } else {
+                                out.push('x');
+                            }
+                        }
+                        d if d.is_ascii_digit() => {
+                            let mut val = (d - b'0') as u32;
+                            let mut n = 1;
+                            while n < 3
+                                && i + n < bytes.len()
+                                && bytes[i + n].is_ascii_digit()
+                            {
+                                val = val * 8 + (bytes[i + n] - b'0') as u32;
+                                n += 1;
+                            }
+                            if let Some(ch) = char::from_u32(val) {
+                                out.push(ch);
+                            }
+                            i += n - 1;
+                        }
+                        other => out.push(other as char),
+                    }
+                    i += 1;
+                    continue;
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // closing quote
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'\\' if i + 1 < bytes.len() => {
+                i += 1;
+                out.push(bytes[i] as char);
+            }
+            b'\'' | b'"' | b'`' => {}
+            c if c.is_ascii_whitespace() => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            c => out.push(c as char),
+        }
+        i += 1;
+    }
+    out
 }
 
 fn split_env_list(raw: &str) -> Vec<String> {
@@ -178,6 +280,16 @@ mod tests {
                 .is_some()
         );
         assert!(p.command_denied("psql -c 'DROP TABLE users'").is_some());
+        assert!(p.command_denied("cargo build").is_none());
+    }
+
+    #[test]
+    fn deny_commands_see_through_quotes_escapes_and_whitespace() {
+        let p = policy(&[], &["curl", "rm -rf"], None);
+        assert!(p.command_denied("cu''rl -s https://evil.example").is_some());
+        assert!(p.command_denied("cur\\l -s https://evil.example").is_some());
+        assert!(p.command_denied("rm  -rf /data").is_some());
+        assert!(p.command_denied("$'\\143url' -s https://evil.example").is_some());
         assert!(p.command_denied("cargo build").is_none());
     }
 

@@ -126,11 +126,27 @@ fn list_names(dir: &Path) -> String {
     }
 }
 
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    let mut i = index.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    let mut i = index.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 fn cap(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}\n…(truncated)", &s[..max])
+        format!("{}\n…(truncated)", &s[..floor_char_boundary(s, max)])
     }
 }
 
@@ -138,7 +154,8 @@ fn tail(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("…(truncated)\n{}", &s[s.len() - max..])
+        let start = ceil_char_boundary(s, s.len() - max);
+        format!("…(truncated)\n{}", &s[start..])
     }
 }
 
@@ -162,5 +179,16 @@ mod tests {
         assert!(!b.contains("not attached"));
         assert!(b.contains("Do not create a new knowledge folder"));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cap_and_tail_do_not_panic_on_multibyte_cut() {
+        // é is two UTF-8 bytes; a 5-byte cap/tail used to panic (F43).
+        let s = "aéaéaéaéaé";
+        let _ = cap(s, 5);
+        let _ = tail(s, 5);
+        let cjk = "你好世界你好世界";
+        let _ = cap(cjk, 5);
+        let _ = tail(cjk, 5);
     }
 }

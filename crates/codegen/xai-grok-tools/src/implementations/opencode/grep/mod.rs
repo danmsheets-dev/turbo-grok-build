@@ -329,7 +329,8 @@ impl xai_tool_runtime::Tool for GrepTool {
                 output_lines.push(format!("{}:", m.path));
             }
             let display_text = if m.line_text.len() > MAX_LINE_LENGTH {
-                format!("{}...", &m.line_text[..MAX_LINE_LENGTH])
+                let cut = crate::util::floor_char_boundary(&m.line_text, MAX_LINE_LENGTH);
+                format!("{}...", &m.line_text[..cut])
             } else {
                 m.line_text.clone()
             };

@@ -8,7 +8,7 @@
 # atomic symlink in bin/).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | sh
+#   curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | sh
 #   sh install.sh --version v0.2.114-r11  # pin a specific release
 #
 # Environment:
@@ -275,6 +275,13 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
     err "SHA256 mismatch for $ASSET: expected $EXPECTED, got $ACTUAL"
 fi
 printf 'Checksum verified.\n'
+if command -v gh >/dev/null 2>&1; then
+    if gh attestation verify "$TMP_DIR/$ASSET" --repo danmsheets-dev/turbo-grok-build >/dev/null 2>&1; then
+        printf 'Provenance attestation verified.\n'
+    else
+        printf 'warning: gh attestation verify skipped (no attestation on this release, or gh not logged in). Checksum still matched.\n' >&2
+    fi
+fi
 
 # ── Extract + install ────────────────────────────────────────────────────────
 # Extract only trusted members: the root-level binary, plus optional

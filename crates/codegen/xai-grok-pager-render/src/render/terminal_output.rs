@@ -22,6 +22,9 @@ use crate::theme::color_support::quantize;
 /// already truncated upstream; these only guard against escape-code abuse.
 const MAX_ROWS: usize = 50_000;
 const MAX_COLS: usize = 8_192;
+/// Bound CSI cursor-forward amplification (F45). Independent row/col caps
+/// otherwise allow ~8 GB of blank cells from a few KB of `\x1b[8191Cx\n`.
+const MAX_TOTAL_CELLS: usize = 200_000;
 
 /// A single rendered transcript line: styled spans plus de-escaped plain text.
 pub struct RenderedLine {
@@ -66,6 +69,7 @@ struct TermSink {
     rows: Vec<Vec<Cell>>,
     row: usize,
     col: usize,
+    total_cells: usize,
 }
 
 impl TermSink {
@@ -76,6 +80,7 @@ impl TermSink {
             rows: vec![Vec::new()],
             row: 0,
             col: 0,
+            total_cells: 0,
         }
     }
 
@@ -89,7 +94,7 @@ impl TermSink {
     }
 
     fn put(&mut self, ch: char) {
-        if self.col >= MAX_COLS {
+        if self.col >= MAX_COLS || self.total_cells >= MAX_TOTAL_CELLS {
             return;
         }
         self.ensure_row();
@@ -99,7 +104,12 @@ impl TermSink {
         };
         let line = &mut self.rows[self.row];
         if self.col >= line.len() {
+            let add = self.col + 1 - line.len();
+            if self.total_cells.saturating_add(add) > MAX_TOTAL_CELLS {
+                return;
+            }
             line.resize(self.col + 1, blank);
+            self.total_cells += add;
         }
         line[self.col] = Cell {
             ch,
@@ -439,6 +449,19 @@ mod tests {
     #[test]
     fn empty_input_yields_no_lines() {
         assert!(render_terminal_lines("", Style::default()).is_empty());
+    }
+
+    #[test]
+    fn cursor_forward_does_not_materialise_unbounded_cells() {
+        // 400 rows of CSI 8191 C + x would be ~3k cells per row without a
+        // total-cell budget (~1.2M cells). Must stay under MAX_TOTAL_CELLS.
+        let raw = "\x1b[8191Cx\n".repeat(400);
+        let rendered = render_terminal_lines(&raw, Style::default());
+        let cells: usize = rendered.iter().map(|l| l.plain.chars().count()).sum();
+        assert!(
+            cells <= MAX_TOTAL_CELLS + MAX_COLS,
+            "CSI cursor-forward must not amplify past the cell budget, got {cells}"
+        );
     }
 
     #[test]

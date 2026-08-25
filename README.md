@@ -80,7 +80,7 @@ community updater and `install.ps1` / `install.sh` require:
 
 ```powershell
 # Managed install (enables `turbo update` / launch auto-update)
-irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 turbo update --check
 ```
 
@@ -294,12 +294,12 @@ Prebuilt binaries (macOS arm64/x86_64, Linux arm64/x86_64 glibc 2.17+, Windows x
 
 ```sh
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash
+curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 ```
 
 ```sh
@@ -311,7 +311,7 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash -s -- --version v1.0.0-rc.10
+curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash -s -- --version v1.0.0-rc.10
 ```
 
 ```powershell

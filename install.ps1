@@ -5,7 +5,7 @@
 # and installs the binary as %USERPROFILE%\.turbo\bin\turbo.exe.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+#   irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.114-r11
 #
 # Environment:
@@ -142,6 +142,14 @@ try {
         Fail "SHA256 mismatch for ${Asset}: expected $Expected, got $Actual"
     }
     Write-Host "Checksum verified."
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        & gh attestation verify $ArchivePath --repo danmsheets-dev/turbo-grok-build 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Provenance attestation verified."
+        } else {
+            Write-Host "warning: gh attestation verify skipped (no attestation on this release, or gh not logged in). Checksum still matched."
+        }
+    }
 
     # ── Extract + install ────────────────────────────────────────────────────
     # Materialize only the unique root-level executable, plus optional

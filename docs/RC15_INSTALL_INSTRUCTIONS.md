@@ -56,10 +56,10 @@ When a GitHub Release tag exists for this version:
 
 ```powershell
 # Latest
-irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 
 # Pin (example)
-# irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+# irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 # or: powershell -ExecutionPolicy Bypass -File install.ps1 -Version 0.2.119-r1
 ```
 

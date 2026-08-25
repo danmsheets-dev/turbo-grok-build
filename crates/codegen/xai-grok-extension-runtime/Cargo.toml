@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "xai-grok-extension-runtime"
 version = "0.1.0"
 edition.workspace = true
-description = "Wasmtime-backed runtime for Hyper WASM extensions (Phase 0 core-wasm ABI bootstrap)"
+description = "Wasmtime-backed runtime for Turbo WASM extensions (Phase 0 core-wasm ABI bootstrap)"
 
 [features]
 default = ["wasm"]

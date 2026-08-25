@@ -18,7 +18,7 @@ A raw `.exe` on the release is a convenience copy only; auto-update ignores it.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 turbo update --check
 # → turbo 1.0.0-rc.10 (latest: 1.0.0-rc.10) [stable]
 ```

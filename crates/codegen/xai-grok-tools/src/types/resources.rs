@@ -549,21 +549,24 @@ pub fn enforce_allowed_write_paths(
     if allowed.is_empty() {
         return Ok(());
     }
-    let rel: PathBuf = match resolved.strip_prefix(cwd) {
+    // Canonicalize before the relative-prefix check so a symlink under an
+    // allowed prefix (Schedules -> ~/.ssh) cannot lexical-match then write
+    // through the link (F66). Fail closed when no ancestor can be resolved.
+    let cwd_c = canonicalize_for_permission(cwd);
+    let res_c = canonicalize_for_permission(resolved);
+    if res_c.lexical_only {
+        return Err(AllowedPathsViolation {
+            path: resolved.display().to_string(),
+            allowed: allowed.to_vec(),
+        });
+    }
+    let rel: PathBuf = match res_c.compare.strip_prefix(&cwd_c.compare) {
         Ok(r) => r.to_path_buf(),
         Err(_) => {
-            // Try after canonicalize both sides (Windows case / long path).
-            let c_cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-            let c_res = dunce::canonicalize(resolved).unwrap_or_else(|_| resolved.to_path_buf());
-            match c_res.strip_prefix(&c_cwd) {
-                Ok(r) => r.to_path_buf(),
-                Err(_) => {
-                    return Err(AllowedPathsViolation {
-                        path: resolved.display().to_string(),
-                        allowed: allowed.to_vec(),
-                    });
-                }
-            }
+            return Err(AllowedPathsViolation {
+                path: resolved.display().to_string(),
+                allowed: allowed.to_vec(),
+            });
         }
     };
     let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -2544,6 +2547,23 @@ mod tests {
         // Clean under-prefix path is ok.
         let ok_path = cwd.join("docs").join("a.md");
         super::enforce_allowed_write_paths(cwd, &ok_path, &["docs".into()]).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_allowed_write_paths_refuses_symlink_prefix_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(cwd.join("ok")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, cwd.join("Schedules")).unwrap();
+        let target = cwd.join("Schedules").join("authorized_keys");
+        let err = super::enforce_allowed_write_paths(cwd, &target, &["Schedules".into()])
+            .expect_err("symlink out of tree must fail closed");
+        assert!(err.message().contains("allowed_paths") || err.message().contains("Re-spawn"));
+        super::enforce_allowed_write_paths(cwd, &cwd.join("ok").join("a.md"), &["ok".into()])
+            .unwrap();
     }
 
     #[test]

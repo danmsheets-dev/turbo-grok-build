@@ -2624,9 +2624,9 @@ pub(crate) async fn run_update(
         anyhow::anyhow!(
             "Turbo community update failed: {error:#}\n\nReinstall with:\n  {}",
             if cfg!(windows) {
-                "irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex"
+                "irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex"
             } else {
-                "curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash"
+                "curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash"
             }
         )
     })?;

@@ -334,18 +334,34 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: dist
           merge-multiple: true
 
+      - name: Attach bootstrap installers as release assets
+        run: |
+          cp install.sh install.ps1 dist/
+          ls -l dist
+
       - name: Generate SHA256SUMS
         working-directory: dist
         run: |
           ls -l
-          sha256sum turbo-* > SHA256SUMS
+          sha256sum turbo-* install.sh install.ps1 > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
 
       # v3 = Node 24. draft:false publishes (reuses/updates an existing draft if
       # present so a failed previous run cannot leave an untagged draft forever).
@@ -371,12 +387,12 @@ jobs:
 
             ```sh
             # macOS / Linux
-            curl -fsSL https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.sh | bash
+            curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash
             ```
 
             ```powershell
             # Windows PowerShell
-            irm https://raw.githubusercontent.com/danmsheets-dev/turbo-grok-build/dev/install.ps1 | iex
+            irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
             ```
 
             Pin a version: `bash install.sh --version ${{ github.ref_name }}`

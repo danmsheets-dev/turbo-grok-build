@@ -96,6 +96,24 @@ advisory flow, not xAI HackerOne.
 - Installers reject non-GitHub `TURBO_UPDATE_BASE_URL` (F71).
 - `keep-features.yml` is `contents: read` with SHA-pinned actions (F28/F72).
 
+#### Security (MEDIUM, remaining gates)
+
+- Session `deny_commands` matches a dequoted/whitespace-collapsed haystack so
+  `cu''rl` / `rm  -rf` cannot dodge the rule (F59).
+- `allowed_paths` and subagent land canonicalize and fail closed on symlink
+  escapes (F66/F60).
+- Release job attests `dist/*` (F29/F31); bootstrap installers are release
+  assets, not the mutable `dev` branch tip (F32).
+- Marketplace remote installs default to `require_sha` (F47).
+- Meeting briefing `cap`/`tail` and OpenCode read/grep truncate on UTF-8
+  char boundaries (F43/F61/F62).
+- Terminal emulator bounds total cells against CSI cursor-forward
+  amplification (F45).
+- NOTICE/LICENSE name Turbo Grok Build; THIRD-PARTY-NOTICES records linked
+  wasmtime/rhai crates (F34/F37). Direct SKILL.md registration already
+  requires workspace + vendor-compat (F63).
+
+
 ---
 
 ## [1.0.0-rc.10] - 2026-08-24
