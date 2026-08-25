@@ -285,28 +285,29 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let m401 = server
             .mock("GET", "/api")
-            .match_header("authorization", "Bearer stale-token")
+            .match_header("authorization", "Bearer stale-token-aaaaaa")
             .with_status(401)
             .create_async()
             .await;
         let m200 = server
             .mock("GET", "/api")
-            .match_header("authorization", "Bearer fresh-token")
+            .match_header("authorization", "Bearer fresh-token-bbbbbb")
             .with_status(200)
             .create_async()
             .await;
 
         let p = Arc::new(SimulatedAuthManager::simulated(
-            "stale-token",
-            "fresh-token",
+            "stale-token-aaaaaa",
+            "fresh-token-bbbbbb",
         ));
         let client = build_client(p, 1).await;
 
         let req = client.get(format!("{}/api", server.url())).build().unwrap();
         let (resp, stamp) = execute_with_stamp(&client, req).await.unwrap();
         assert_eq!(resp.status(), 200);
-        // ≤ 12 chars → the suffix is the whole token.
-        assert_eq!(stamp.expect("bearer was stamped").0, "fresh-token");
+        // Tokens are longer than BEARER_SUFFIX_LEN so the stamp is the tail,
+        // not the "<short>" placeholder. The fresh tail must differ from stale.
+        assert_eq!(stamp.expect("bearer was stamped").0, "token-bbbbbb");
         m401.assert_async().await;
         m200.assert_async().await;
     }
