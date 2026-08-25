@@ -1221,11 +1221,15 @@ pub(crate) async fn list_commands(
             tools: None,
         });
     }
-    let skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
+    let project_trusted = cwd
+        .map(std::path::Path::new)
+        .is_some_and(crate::agent::folder_trust::project_scope_allowed);
+    let skills = xai_grok_agent::prompt::skills::list_skills_with_trust(
         cwd,
         skills_config,
         plugin_registry,
         compat,
+        project_trusted,
     )
     .await;
     let workflows = crate::session::workflow::registry::list_workflows(

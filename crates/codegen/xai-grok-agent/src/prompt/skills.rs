@@ -89,9 +89,9 @@ fn project_skill_scope_allowed(scope: SkillScope, project_trusted: bool) -> bool
 /// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned; pass
 /// `CompatConfig::default()` to preserve the historical all-vendors behavior.
 ///
-/// Project (Local/Repo) skills are dropped when the folder is untrusted; see
-/// [`list_skills_with_trust`]. This wrapper keeps the historical load-all
-/// behavior (`project_trusted = true`).
+/// Project (Local/Repo) skills are dropped unless the folder is trusted; see
+/// [`list_skills_with_trust`]. This wrapper **fails closed** (`project_trusted
+/// = false`) so a missed caller cannot load repo skills into the model.
 pub async fn list_skills(
     working_directory: Option<&str>,
     config: &SkillsConfig,
@@ -113,7 +113,10 @@ pub async fn list_skills_with_plugins(
     plugins: Option<&crate::plugins::PluginRegistry>,
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
-    list_skills_with_trust(working_directory, config, plugins, compat, true).await
+    // Fail closed: Local/Repo skills require an explicit trust verdict via
+    // [`list_skills_with_trust`]. Production session paths pass
+    // `folder_trust::project_scope_allowed(cwd)`.
+    list_skills_with_trust(working_directory, config, plugins, compat, false).await
 }
 
 /// Like [`list_skills_with_plugins`], with an explicit folder-trust verdict.
@@ -833,6 +836,10 @@ mod tests {
         fs::write(dir.join("SKILL.md"), content).unwrap();
     }
 
+    async fn list_skills_trusted(wd: &str, config: &SkillsConfig) -> Vec<SkillInfo> {
+        list_skills_with_trust(Some(wd), config, None, CompatConfig::default(), true).await
+    }
+
     // ── Server-synced skills (injected server_skill_dirs) ────────────────
 
     #[tokio::test]
@@ -848,11 +855,12 @@ mod tests {
             server_skill_dirs: vec![server.path().to_string_lossy().into_owned()],
             ..Default::default()
         };
-        let skills = list_skills_with_plugins(
+        let skills = list_skills_with_trust(
             Some(&cwd.path().to_string_lossy()),
             &config,
             None,
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -884,11 +892,12 @@ mod tests {
             bundled_skill_dirs: vec![bundled.path().to_string_lossy().into_owned()],
             ..Default::default()
         };
-        let skills = list_skills_with_plugins(
+        let skills = list_skills_with_trust(
             Some(&cwd.path().to_string_lossy()),
             &config,
             None,
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -916,11 +925,12 @@ mod tests {
             bundled_skill_dirs: vec![bundled.path().to_string_lossy().into_owned()],
             ..Default::default()
         };
-        let skills = list_skills_with_plugins(
+        let skills = list_skills_with_trust(
             Some(&cwd.path().to_string_lossy()),
             &config,
             None,
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -1988,12 +1998,7 @@ mod tests {
             bundled_skill_dirs: vec![],
         };
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills_trusted(repo_root.to_str().unwrap(), &config).await;
         let count = skills.iter().filter(|s| s.name == "dup-skill").count();
 
         assert_eq!(count, 1, "dup-skill should only be loaded once");
@@ -2024,12 +2029,7 @@ mod tests {
             ..Default::default()
         };
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills_trusted(repo_root.to_str().unwrap(), &config).await;
 
         let overlaps: Vec<&SkillInfo> = skills
             .iter()
@@ -2111,12 +2111,7 @@ mod tests {
             bundled_skill_dirs: vec![],
         };
 
-        let skills = list_skills(
-            Some(cwd.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills_trusted(cwd.to_str().unwrap(), &config).await;
         let same_skills: Vec<&SkillInfo> = skills.iter().filter(|s| s.name == "same").collect();
 
         assert_eq!(
@@ -2162,12 +2157,7 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills_trusted(repo_root.to_str().unwrap(), &config).await;
 
         let commit = skills.iter().find(|s| s.name == "commit");
         let review = skills.iter().find(|s| s.name == "review");
@@ -2206,12 +2196,7 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills_trusted(repo_root.to_str().unwrap(), &config).await;
         assert!(
             skills.iter().all(|s| s.enabled),
             "all skills should be enabled when disabled list is empty"
@@ -2670,6 +2655,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn list_skills_with_plugins_fails_closed_on_project_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        init_git_repo(&repo_root);
+        write_skill_md(
+            &repo_root.join(".grok").join("skills").join("project-skill"),
+            "project-skill",
+        );
+        let skills = list_skills_with_plugins(
+            Some(repo_root.to_str().unwrap()),
+            &SkillsConfig::default(),
+            None,
+            CompatConfig::default(),
+        )
+        .await;
+        assert!(
+            skills.iter().all(|s| s.name != "project-skill"),
+            "list_skills_with_plugins must not load repo skills without a trust verdict"
+        );
+    }
+
     // ── Same-scope frontmatter-name collisions (copied skill dirs) ──────
 
     fn named_skill(name: &str, path: &str, scope: SkillScope) -> SkillInfo {
@@ -2870,12 +2878,8 @@ mod tests {
             "zz-copyfix-japandi",
         );
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &SkillsConfig::default(),
-            CompatConfig::default(),
-        )
-        .await;
+        let skills =
+            list_skills_trusted(repo_root.to_str().unwrap(), &SkillsConfig::default()).await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"zz-copyfix-japandi"),

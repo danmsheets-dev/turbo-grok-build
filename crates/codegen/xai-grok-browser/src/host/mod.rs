@@ -470,13 +470,14 @@ fn handle_ui_job(
                 },
             ),
         },
-        Ok((id, HostCall::Eval { function, confirm })) => {
-            if eval_looks_mutating(&function) && !confirm {
+        Ok((id, HostCall::Eval { function, confirm: _ })) => {
+            if eval_looks_mutating(&function) {
                 encode_rpc_error(
                     id,
                     JsonRpcError {
                         code: RPC_HOST_ERROR,
-                        message: "eval writes to the page; retry with confirm=true".into(),
+                        message: "eval writes to the page; prefer browser_click or browser_fill"
+                            .into(),
                         data: None,
                     },
                 )
@@ -1292,12 +1293,13 @@ mod tests {
         let err = decode_host_call(&line, None).unwrap_err();
         assert_eq!(err.error.code, RPC_HOST_ERROR);
         assert!(
-            err.error.message.contains("confirm=true"),
+            err.error.message.contains("browser_click")
+                || err.error.message.contains("writes to the page"),
             "{}",
             err.error.message
         );
 
-        let allowed = encode_rpc_request(
+        let still_denied = encode_rpc_request(
             JsonRpcId::Number(14),
             METHOD_EVAL,
             serde_json::json!({
@@ -1306,10 +1308,8 @@ mod tests {
             }),
         )
         .unwrap();
-        match decode_host_call(&allowed, None).unwrap() {
-            (_, HostCall::Eval { confirm: true, .. }) => {}
-            other => panic!("{other:?}"),
-        }
+        let err = decode_host_call(&still_denied, None).unwrap_err();
+        assert_eq!(err.error.code, RPC_HOST_ERROR, "{err:?}");
 
         let read = encode_rpc_request(
             JsonRpcId::Number(15),

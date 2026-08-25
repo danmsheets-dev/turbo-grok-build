@@ -1364,6 +1364,18 @@ fn looks_like_filesystem_path(s: &str) -> bool {
     false
 }
 
+fn access_targets_grok_home_credential(access: &AccessKind, cwd: &std::path::Path) -> bool {
+    let path = match access {
+        AccessKind::Read(Some(path)) => path,
+        AccessKind::Grep {
+            path: Some(path), ..
+        } => path,
+        _ => return false,
+    };
+    let resolved = resolve_model_path(cwd, None, path);
+    xai_grok_sandbox::write_denied_grok_home_credential(&resolved)
+}
+
 fn strip_file_url_prefix(s: &str) -> &str {
     s.strip_prefix("file://")
         .or_else(|| s.strip_prefix("file:"))
@@ -2004,6 +2016,19 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
+                    if access_targets_grok_home_credential(&access, request_cwd) {
+                        let decision = Decision::PolicyDeny(
+                            "reads of $GROK_HOME credential files are prohibited".to_owned(),
+                        );
+                        let event =
+                            emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
+                        continue;
+                    }
+
                     // Confine root: process `--confine` / `GROK_CONFINE`, else
                     // session isolation worktree root on the request. Path-prefix
                     // deny for Edit **and** Bash write/`cd` operands BEFORE YOLO.
@@ -2461,9 +2486,7 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Read(_) | AccessKind::Grep { .. } if policy_forced_prompt => {
                             None
                         }
-                        AccessKind::Read(Some(_)) => {
-                            Some((Decision::Allow, reasons::SAFE_COMMAND))
-                        }
+                        AccessKind::Read(Some(_)) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         AccessKind::Read(None) => None,
                         AccessKind::WebSearch(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         AccessKind::Grep { .. } => Some((Decision::Allow, reasons::SAFE_COMMAND)),
@@ -3018,6 +3041,46 @@ mod tests {
                 assert!(
                     !matches!(decision, Decision::Allow),
                     "unscoped Read(None) must prompt instead of auto-allowing: {decision:?}"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn read_grok_home_credential_is_not_safe_command_auto_allowed() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (mgr, _events) = test_manager(&cwd, false, None);
+                let credential = xai_grok_config::grok_home().join("auth.json");
+                let decision = mgr
+                    .request(
+                        AccessKind::Read(Some(credential.to_string_lossy().into_owned())),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    !matches!(decision, Decision::Allow),
+                    "$GROK_HOME credentials must not be auto-allowed: {decision:?}"
+                );
+
+                let normal = mgr
+                    .request(
+                        AccessKind::Read(Some("README.md".into())),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(normal, Decision::Allow),
+                    "ordinary workspace reads remain safe commands: {normal:?}"
                 );
             })
             .await;

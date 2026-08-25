@@ -219,9 +219,13 @@ impl PluginRegistry {
             // (callers use `DiscoveryConfig::populate_plugin_lists` to ensure this).
             // A plugin is enabled only if it is in the `enabled` list and NOT in
             // the `disabled` list (disabled takes precedence on conflict).
-            let explicitly_enabled = enabled
-                .iter()
-                .any(|e| e == &dp.id.0 || e == &dp.manifest.name);
+            let explicitly_enabled = if dp.scope == crate::plugins::discovery::PluginScope::Project {
+                enabled.iter().any(|e| e == &dp.id.0)
+            } else {
+                enabled
+                    .iter()
+                    .any(|e| e == &dp.id.0 || e == &dp.manifest.name)
+            };
             let enabled = !is_disabled(&dp, disabled) && explicitly_enabled;
 
             let loaded = LoadedPlugin {
@@ -1229,9 +1233,12 @@ mod tests {
             &["malicious".to_string()], // attacker got it into enabled list
         );
 
-        // Plugin is enabled but not trusted
+        // Bare name in enabled must not enable a project plugin (F03).
         let plugin = reg.get("malicious").unwrap();
-        assert!(plugin.enabled);
+        assert!(
+            !plugin.enabled,
+            "project plugin must not inherit a bare-name enable"
+        );
         assert!(!plugin.trusted);
 
         // Must NOT appear in active_plugins (hooks would fire)
@@ -1261,9 +1268,6 @@ mod tests {
 
     #[test]
     fn pre_enabled_project_plugin_blocked_without_trust() {
-        // End-to-end: populate_plugin_lists won't auto-disable a plugin
-        // that's already in the enabled list, but active_plugins() must
-        // still block it when untrusted.
         use super::super::discovery::DiscoveryConfig;
 
         let plugins = vec![make_discovered(
@@ -1277,16 +1281,33 @@ mod tests {
             ..Default::default()
         };
         config.populate_plugin_lists(&plugins);
-        // populate_plugin_lists skips it because it's already listed
-        assert!(config.enabled.contains(&"attacker-plugin".to_string()));
+        // Bare name in enabled does not skip default-disable for Project.
+        assert!(config.disabled.contains(&"attacker-plugin".to_string()));
 
         let reg = PluginRegistry::from_discovered(plugins, &config.disabled, &config.enabled);
         let plugin = reg.get("attacker-plugin").unwrap();
-        assert!(plugin.enabled, "plugin is in enabled list");
+        assert!(
+            !plugin.enabled,
+            "project plugin must not inherit a user/marketplace bare-name enable"
+        );
         assert!(!plugin.trusted, "project plugin is not trusted");
         assert!(
             reg.active_plugins().is_empty(),
             "untrusted plugin must not appear in active_plugins"
         );
+    }
+
+    #[test]
+    fn qualified_id_enables_trusted_project_plugin() {
+        let dp = make_discovered("team-tool", PluginScope::Project, true);
+        let id = dp.id.0.clone();
+        let reg = PluginRegistry::from_discovered(vec![dp], &[], &[id]);
+        let plugin = reg.get("team-tool").unwrap();
+        assert!(
+            plugin.enabled,
+            "fully-qualified PluginId must enable a project plugin"
+        );
+        assert!(plugin.trusted);
+        assert_eq!(reg.active_plugins().len(), 1);
     }
 }

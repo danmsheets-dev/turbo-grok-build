@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::util::config as cli_config;
 use xai_grok_agent::prompt::skills::{
-    CompatConfig, SkillInfo, SkillsConfig, list_skills_with_plugins,
+    CompatConfig, SkillInfo, SkillsConfig, list_skills_with_trust,
 };
 
 use super::ExtResult;
@@ -126,7 +126,13 @@ async fn reload_skills(
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     let config = cli_config::load_config().await.skills;
-    let discovery = list_skills_with_plugins(Some(cwd), &config, plugin_registry, compat);
+    let discovery = list_skills_with_trust(
+        Some(cwd),
+        &config,
+        plugin_registry,
+        compat,
+        crate::agent::folder_trust::project_scope_allowed(std::path::Path::new(cwd)),
+    );
     match tokio::time::timeout(std::time::Duration::from_secs(5), discovery).await {
         Ok(skills) => skills,
         Err(_) => {

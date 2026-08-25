@@ -17,6 +17,7 @@ mod redact;
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 const ENV_OTEL_FILTER: &str = "GROK_OTEL_FILTER";
 const DEFAULT_OTEL_FILTER: &str = "info";
+pub const INTERNAL_OTLP_CREDENTIALS_HEADER: &str = "x-grok-internal-otlp-credentials";
 /// Configuration for [`build_otel_layer`]. Encapsulates all the runtime values
 /// the layer needs that used to be reach-ins into shell-internal types
 /// (`AuthManager`, `EndpointsConfig`, `GrokComConfig`).
@@ -116,6 +117,7 @@ fn build_tracer_provider(client: OtelClientInfo, config: OtelLayerConfig) -> Sdk
 /// attempts a token refresh and retries once.
 struct RefreshableSpanExporter {
     endpoint: Arc<str>,
+    attach_live_credentials: bool,
     static_headers: Arc<std::collections::HashMap<String, String>>,
     credentials: Arc<dyn AuthCredentialProvider>,
     last_token: parking_lot::Mutex<String>,
@@ -144,6 +146,8 @@ impl std::fmt::Debug for RefreshableSpanExporter {
 }
 /// Build the header map for an OTLP export request.
 fn build_export_headers(
+    endpoint: &str,
+    attach_live_credentials: bool,
     static_headers: &std::collections::HashMap<String, String>,
     token: &str,
     token_auth_header: Option<&str>,
@@ -151,30 +155,51 @@ fn build_export_headers(
     snapshot: &xai_grok_auth::CredentialSnapshot,
 ) -> std::collections::HashMap<String, String> {
     let mut headers = static_headers.clone();
-    for (name, value) in [
-        ("x-userid", &snapshot.user_id),
-        ("x-teamid", &snapshot.team_id),
-    ] {
-        match value.as_deref().filter(|v| !v.is_empty()) {
-            Some(v) => {
-                headers.insert(name.to_string(), v.to_string());
-            }
-            None => {
-                headers.remove(name);
+    let attach_live_credentials =
+        attach_live_credentials && xai_grok_sampler::client::is_first_party_grok_endpoint(endpoint);
+    if attach_live_credentials {
+        for (name, value) in [
+            ("x-userid", &snapshot.user_id),
+            ("x-teamid", &snapshot.team_id),
+        ] {
+            match value.as_deref().filter(|v| !v.is_empty()) {
+                Some(v) => {
+                    headers.insert(name.to_string(), v.to_string());
+                }
+                None => {
+                    headers.remove(name);
+                }
             }
         }
-    }
-    headers.insert("Authorization".to_string(), format!("Bearer {token}"));
-    if let Some(value) = token_auth_header {
-        headers.insert("X-XAI-Token-Auth".to_string(), value.to_string());
+        headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+        if let Some(value) = token_auth_header {
+            headers.insert("X-XAI-Token-Auth".to_string(), value.to_string());
+        }
     }
     for (k, v) in extra_headers {
-        headers.insert(k.clone(), v.clone());
+        if !k.eq_ignore_ascii_case(INTERNAL_OTLP_CREDENTIALS_HEADER)
+            && (attach_live_credentials
+                || !matches!(
+                    k.to_ascii_lowercase().as_str(),
+                    "authorization" | "x-xai-token-auth" | "x-userid" | "x-teamid"
+                ))
+        {
+            headers.insert(k.clone(), v.clone());
+        }
+    }
+    if !attach_live_credentials {
+        headers.retain(|name, _| {
+            !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "authorization" | "x-xai-token-auth" | "x-userid" | "x-teamid"
+            )
+        });
     }
     headers
 }
 fn build_otlp_exporter(
     endpoint: &str,
+    attach_live_credentials: bool,
     static_headers: &std::collections::HashMap<String, String>,
     token: &str,
     token_auth_header: Option<&str>,
@@ -183,6 +208,8 @@ fn build_otlp_exporter(
     snapshot: &xai_grok_auth::CredentialSnapshot,
 ) -> Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError> {
     let headers = build_export_headers(
+        endpoint,
+        attach_live_credentials,
         static_headers,
         token,
         token_auth_header,
@@ -257,6 +284,7 @@ struct ExportInputs {
     resource: opentelemetry_sdk::Resource,
     credentials: Arc<dyn AuthCredentialProvider>,
     endpoint: Arc<str>,
+    attach_live_credentials: bool,
     static_headers: Arc<std::collections::HashMap<String, String>>,
     token_header_value: Arc<str>,
     http_client: crate::otlp_http::BlockingOtlpClient,
@@ -285,6 +313,7 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
             ExportInputs {
                 one_shot: build_otlp_exporter(
                     &self.endpoint,
+                    self.attach_live_credentials,
                     &self.static_headers,
                     &token,
                     token_auth.as_deref(),
@@ -295,6 +324,7 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
                 resource: resource_with_tenant_id(self.resource.lock().clone(), &snapshot),
                 credentials: Arc::clone(&self.credentials),
                 endpoint: Arc::clone(&self.endpoint),
+                attach_live_credentials: self.attach_live_credentials,
                 static_headers: Arc::clone(&self.static_headers),
                 token_header_value: Arc::clone(&self.token_header_value),
                 http_client: self.http_client.clone(),
@@ -307,6 +337,7 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
                 resource,
                 credentials,
                 endpoint,
+                attach_live_credentials,
                 static_headers,
                 token_header_value,
                 http_client,
@@ -350,6 +381,7 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
                 .then(|| token_header_value.as_ref());
             match build_otlp_exporter(
                 &endpoint,
+                attach_live_credentials,
                 &static_headers,
                 &new_token,
                 retry_token_auth,
@@ -411,6 +443,13 @@ fn build_server_provider(client: OtelClientInfo, config: OtelLayerConfig) -> Sdk
             .build(),
     );
     if config.exporter.enabled {
+        let mut extra_headers = config.exporter.extra_headers;
+        let attach_live_credentials = extra_headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(INTERNAL_OTLP_CREDENTIALS_HEADER))
+            .is_some_and(|(_, value)| value == "true");
+        extra_headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case(INTERNAL_OTLP_CREDENTIALS_HEADER));
         let traces_url = config.exporter.traces_url;
         let mut static_headers = std::collections::HashMap::new();
         static_headers.insert(
@@ -430,13 +469,14 @@ fn build_server_provider(client: OtelClientInfo, config: OtelLayerConfig) -> Sdk
         };
         let refreshable_exporter = RefreshableSpanExporter {
             endpoint: Arc::from(traces_url),
+            attach_live_credentials,
             static_headers: Arc::new(static_headers),
             credentials: config.credentials,
             last_token: parking_lot::Mutex::new(initial_token),
             http_client,
             resource: parking_lot::Mutex::new(opentelemetry_sdk::Resource::builder_empty().build()),
             token_header_value: Arc::from(config.token_header_value.as_str()),
-            extra_headers: Arc::new(config.exporter.extra_headers),
+            extra_headers: Arc::new(extra_headers),
         };
         let mut batch_builder =
             opentelemetry_sdk::trace::BatchConfigBuilder::default().with_max_export_batch_size(64);
@@ -551,6 +591,7 @@ mod tests {
     ) -> RefreshableSpanExporter {
         RefreshableSpanExporter {
             endpoint: Arc::from("http://localhost:4318/v1/traces"),
+            attach_live_credentials: false,
             static_headers: Arc::new(std::collections::HashMap::new()),
             credentials: provider,
             last_token: parking_lot::Mutex::new(last_token.to_string()),
@@ -565,30 +606,66 @@ mod tests {
         }
     }
     #[test]
-    fn build_export_headers_tracks_snapshot_and_respects_overrides() {
-        let static_headers = std::collections::HashMap::new();
-        for snapshot in [
-            CredentialSnapshot::default(),
-            CredentialSnapshot {
-                user_id: Some(String::new()),
-                team_id: Some(String::new()),
-                ..Default::default()
-            },
-        ] {
-            let headers = build_export_headers(&static_headers, "tok", None, &[], &snapshot);
-            assert!(!headers.contains_key("x-userid"));
-            assert!(!headers.contains_key("x-teamid"));
-        }
+    fn build_export_headers_attaches_credentials_only_to_first_party_https() {
+        let mut static_headers = std::collections::HashMap::new();
+        static_headers.insert("Authorization".to_string(), "Bearer stale".to_string());
         let snapshot = CredentialSnapshot {
             user_id: Some("u1".into()),
             team_id: Some("t9".into()),
             ..Default::default()
         };
-        let extra = vec![("Authorization".to_string(), "Bearer custom".to_string())];
-        let headers = build_export_headers(&static_headers, "auto-token", None, &extra, &snapshot);
-        assert_eq!(headers["x-userid"], "u1");
-        assert_eq!(headers["x-teamid"], "t9");
-        assert_eq!(headers["Authorization"], "Bearer custom");
+        let extra = vec![("X-XAI-Token-Auth".to_string(), "custom".to_string())];
+
+        let trusted = build_export_headers(
+            "https://api.x.ai/v1/traces",
+            true,
+            &static_headers,
+            "live-token",
+            Some("xai-grok-cli"),
+            &extra,
+            &snapshot,
+        );
+        assert_eq!(trusted["Authorization"], "Bearer live-token");
+        assert_eq!(trusted["X-XAI-Token-Auth"], "custom");
+        assert_eq!(trusted["x-userid"], "u1");
+
+        for endpoint in [
+            "http://collector.corp/v1/traces",
+            "https://evil.example/v1/traces",
+        ] {
+            let headers = build_export_headers(
+                endpoint,
+                true,
+                &static_headers,
+                "live-token",
+                Some("xai-grok-cli"),
+                &extra,
+                &snapshot,
+            );
+            for name in ["Authorization", "X-XAI-Token-Auth", "x-userid", "x-teamid"] {
+                assert!(
+                    !headers.keys().any(|key| key.eq_ignore_ascii_case(name)),
+                    "{name} leaked to {endpoint}: {headers:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_export_headers_refuses_standard_otlp_fallback_credentials() {
+        let headers = build_export_headers(
+            "https://api.x.ai/v1/traces",
+            false,
+            &std::collections::HashMap::new(),
+            "live-token",
+            Some("xai-grok-cli"),
+            &[],
+            &CredentialSnapshot {
+                user_id: Some("u1".into()),
+                ..Default::default()
+            },
+        );
+        assert!(headers.is_empty());
     }
     #[test]
     fn refreshable_exporter_uses_updated_provider_token() {

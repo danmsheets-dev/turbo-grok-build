@@ -26,23 +26,44 @@ pub use xai_grok_agent::prompt::skills::SkillsConfig;
 // Skill discovery
 // ---------------------------------------------------------------------------
 
+/// Folder-trust verdict for workspace RPC discovery (F04/F03).
+///
+/// `Prompt` is not a grant — fail closed until the shell records a decision.
+pub fn folder_is_project_trusted(cwd: &Path) -> bool {
+    let key = crate::trust::workspace_key(cwd);
+    let inputs = crate::folder_trust::decide_inputs(cwd, &key);
+    matches!(
+        crate::folder_trust::decide(crate::folder_trust::feature_enabled(None), &inputs),
+        crate::folder_trust::TrustOutcome::Trusted
+    )
+}
+
 /// Discover skills visible from the workspace root.
 ///
-/// Delegates to [`xai_grok_agent::prompt::skills::list_skills`] with
+/// Delegates to [`xai_grok_agent::prompt::skills::list_skills_with_trust`] with
 /// the workspace's `root_cwd` and the caller-supplied `SkillsConfig`.
 /// Returns each [`SkillInfo`] serialized to a `serde_json::Value`.
 ///
-/// The underlying `list_skills` implementation performs filesystem
-/// I/O (stat + read for each SKILL.md) and does not hold any async
-/// locks across `.await` points, so contention is not a concern.
+/// Local/Repo skills are omitted unless the folder is trusted (F04).
 pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Value> {
+    discover_skills_with_trust(root_cwd, config, folder_is_project_trusted(root_cwd)).await
+}
+
+/// Like [`discover_skills`], with an explicit folder-trust verdict.
+pub async fn discover_skills_with_trust(
+    root_cwd: &Path,
+    config: &SkillsConfig,
+    project_trusted: bool,
+) -> Vec<Value> {
     let cwd_str = root_cwd.to_string_lossy();
     // Workspace discovery is out of scope for per-vendor compat gating;
     // use the all-on default to preserve prior behavior.
-    let skills = xai_grok_agent::prompt::skills::list_skills(
+    let skills = xai_grok_agent::prompt::skills::list_skills_with_trust(
         Some(&cwd_str),
         config,
+        None,
         xai_grok_agent::prompt::skills::CompatConfig::default(),
+        project_trusted,
     )
     .await;
 
@@ -268,13 +289,23 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills =
+            discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), true).await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("my-skill"));
         assert!(found.is_some(), "should find my-skill");
         let skill = found.unwrap();
         assert_eq!(skill["description"].as_str(), Some("A test skill"));
+
+        let omitted =
+            discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), false).await;
+        assert!(
+            omitted
+                .iter()
+                .all(|s| s["name"].as_str() != Some("my-skill")),
+            "untrusted folder must omit project skills"
+        );
     }
 
     #[tokio::test]
@@ -295,7 +326,7 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = discover_skills(tmp.path(), &config).await;
+        let skills = discover_skills_with_trust(tmp.path(), &config, true).await;
         let found = skills.iter().any(|s| s["name"].as_str() == Some("ignored"));
         assert!(
             !found,
@@ -318,7 +349,8 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills =
+            discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), true).await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("serialized-check"))

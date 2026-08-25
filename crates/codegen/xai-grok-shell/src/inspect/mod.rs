@@ -771,11 +771,12 @@ async fn list_skills(
     skills_config: &xai_grok_agent::prompt::skills::SkillsConfig,
 ) -> Vec<SkillEntry> {
     // Discover with all vendors ON so inspect shows the full set.
-    let skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
+    let skills = xai_grok_agent::prompt::skills::list_skills_with_trust(
         Some(&cwd.display().to_string()),
         skills_config,
         Some(plugin_registry),
         xai_grok_agent::prompt::skills::CompatConfig::default(),
+        crate::agent::folder_trust::project_scope_allowed(cwd),
     )
     .await;
 

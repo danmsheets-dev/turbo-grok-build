@@ -137,6 +137,10 @@ pub struct AgentBuilder {
     /// When set, `build()` uses these directly instead of running
     /// `list_skills_with_plugins()`.
     preloaded_skills: Option<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>>,
+    /// Folder-trust verdict for `working_directory`. Default **false**
+    /// (fail closed): Local/Repo skills are omitted until the shell passes
+    /// `folder_trust::project_scope_allowed`.
+    project_trusted: bool,
 }
 /// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`,
 /// `ask_user_question`) are present in the tool config.
@@ -261,6 +265,7 @@ impl AgentBuilder {
             system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
             preloaded_skills: None,
+            project_trusted: false,
         }
     }
     /// Set persisted announced skill names for session resume.
@@ -612,6 +617,12 @@ impl AgentBuilder {
         self.skills_config = config;
         self
     }
+    /// Whether project-local skills/commands may load. Pass
+    /// `folder_trust::project_scope_allowed(cwd)` from the shell.
+    pub fn with_project_trusted(mut self, trusted: bool) -> Self {
+        self.project_trusted = trusted;
+        self
+    }
     /// Inject `[toolset.bash]` overrides from config.toml into bash tool params.
     pub fn with_bash_params(mut self, params: serde_json::Map<String, serde_json::Value>) -> Self {
         self.bash_params_json = Some(params);
@@ -686,11 +697,12 @@ impl AgentBuilder {
         let skill_info = if let Some(preloaded) = self.preloaded_skills.take() {
             preloaded
         } else if definition.discover_skills {
-            crate::prompt::skills::list_skills_with_plugins(
+            crate::prompt::skills::list_skills_with_trust(
                 Some(&working_dir_str),
                 &self.skills_config,
                 self.plugin_registry.as_deref(),
                 self.compat,
+                self.project_trusted,
             )
             .await
         } else {
@@ -1662,6 +1674,7 @@ mod tests {
             ToolNotificationHandle::noop(),
         )
         .from_definition(definition)
+        .with_project_trusted(true)
         .build()
         .await
         .expect("agent should build with local skill fixtures");

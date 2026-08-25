@@ -408,15 +408,29 @@ mod tests {
             ),
             "{err:?}"
         );
+        let err = host
+            .call(
+                crate::protocol::METHOD_EVAL,
+                serde_json::json!({
+                    "function": "() => location.assign('https://evil.test')",
+                    "confirm": true
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BrowserClientError::Eval(crate::protocol::EvalPolicyError::NeedsConfirm)
+            ),
+            "confirm must not unlock mutating eval: {err:?}"
+        );
         host.call(
             crate::protocol::METHOD_EVAL,
-            serde_json::json!({
-                "function": "() => location.assign('https://evil.test')",
-                "confirm": true
-            }),
+            serde_json::json!({ "function": "() => document.title" }),
         )
         .await
-        .expect("confirmed mutating eval");
+        .expect("read-only eval");
     }
 
     #[tokio::test]

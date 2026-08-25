@@ -10,8 +10,10 @@ on:
   push:
     tags: ["v*"]
 
+# Default read-only so matrix build jobs cannot mutate tags/releases.
+# The publish job opts into contents: write below.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,7 +60,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       # Node 24 majors: silence "Node.js 20 is deprecated" runner warnings.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Check tag matches VERSION file
         shell: bash
@@ -92,15 +94,15 @@ jobs:
       # Linux only: pin the dynamic symbol floor independent of the runner libc.
       - name: Install Zig (Linux glibc floor)
         if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Install cargo-zigbuild (Linux)
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.2
 
       - name: Install dotslash (protoc launcher)
         run: cargo install dotslash --locked
@@ -160,7 +162,7 @@ jobs:
           echo "GROK_TOOLS_BUNDLE_RG_PATH=${GITHUB_WORKSPACE}/tmp/rg/rg.exe" >> "$GITHUB_ENV"
           echo "GROK_SHELL_BUNDLE_RG_PATH=${GITHUB_WORKSPACE}/tmp/rg/rg.exe" >> "$GITHUB_ENV"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # Include the glibc floor so a floor bump does not reuse stale native
           # objects linked against a different libc abilist.
@@ -314,7 +316,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE=$archive"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ env.ARCHIVE }}
           path: ${{ env.ARCHIVE }}
@@ -330,8 +332,10 @@ jobs:
     name: publish GitHub Release
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: dist
           merge-multiple: true
@@ -346,7 +350,7 @@ jobs:
       # v3 = Node 24. draft:false publishes (reuses/updates an existing draft if
       # present so a failed previous run cannot leave an untagged draft forever).
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: dist/*
           draft: false

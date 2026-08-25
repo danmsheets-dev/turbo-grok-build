@@ -437,6 +437,16 @@ pub(crate) async fn run_read_file(
         }
         Err(_) => (joined_path, None),
     };
+    if xai_grok_sandbox::write_denied_grok_home_credential(&path) {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "policy_denied",
+            crate::implementations::grok_build::policy::denial(
+                "read_file",
+                "grok_home_credentials",
+                &format!("`{}` is a $GROK_HOME credential file", path.display()),
+            ),
+        ));
+    }
     let version = ReadFileVersion::from_contract(contract_version);
     let is_legacy = version.is_legacy();
     let skip_gitignore = is_legacy && versions::legacy_0_4_10::allows_gitignored_reads();
@@ -911,6 +921,30 @@ mod tests {
             other => panic!("Expected FileContent, got {:?}", other),
         }
     }
+    #[tokio::test]
+    async fn read_file_grok_home_credential_is_policy_denied() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ReadFileTool;
+        let input = ReadFileInput {
+            path: xai_grok_config::grok_home()
+                .join("auth.json")
+                .to_string_lossy()
+                .into_owned(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+        };
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            input,
+        )
+        .await
+        .expect_err("$GROK_HOME credentials must be denied");
+        assert!(err.to_string().contains("grok_home_credentials"));
+    }
+
     #[tokio::test]
     async fn legacy_read_file_not_found_returns_exact_historical_message() {
         let tmp = TempDir::new().unwrap();

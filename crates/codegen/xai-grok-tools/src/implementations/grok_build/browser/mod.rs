@@ -1206,8 +1206,16 @@ mod tests {
                 false,
             )
             .await
-            .expect_err("mutating eval needs confirm");
-        assert!(err.to_string().contains("confirm=true"), "{err}");
+            .expect_err("mutating eval is refused");
+        assert!(err.to_string().contains("browser_click"), "{err}");
+        let err = handle
+            .eval(
+                "() => document.querySelector('button[type=submit]').click()",
+                true,
+            )
+            .await
+            .expect_err("confirm is not user approval");
+        assert!(err.to_string().contains("browser_click"), "{err}");
         assert!(
             handle
                 .mock_host()

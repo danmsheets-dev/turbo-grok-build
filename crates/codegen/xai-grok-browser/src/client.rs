@@ -656,6 +656,18 @@ mod tests {
             client.transport().call_log().is_empty(),
             "mutating eval must not reach the host without confirm"
         );
+        let err = client
+            .eval_ex("() => document.querySelector('button').click()", true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BrowserClientError::Eval(EvalPolicyError::NeedsConfirm)),
+            "confirm must not unlock mutating eval: {err:?}"
+        );
+        assert!(
+            client.transport().call_log().is_empty(),
+            "mutating eval must not reach the host even with confirm"
+        );
         client
             .eval_ex("() => document.title", false)
             .await

@@ -366,6 +366,13 @@ impl EndpointsConfig {
         }
         format!("{}/traces", self.proxy_url().trim_end_matches('/'))
     }
+    /// Whether the resolved endpoint may receive live xAI credentials.
+    /// Standard `OTEL_EXPORTER_OTLP_*` endpoints are external collector fallbacks.
+    pub(crate) fn otlp_traces_endpoint_attaches_live_credentials(&self) -> bool {
+        blank_as_unset(&self.grok_internal_otlp_traces_endpoint).is_some()
+            || self.external_otel_master_switch
+            || self.legacy_internal_otlp_traces_endpoint().is_none()
+    }
     /// Legacy (standard-OTEL-var) internal traces endpoint, if any:
     /// `otel_exporter_otlp_traces_endpoint` verbatim, else
     /// `otel_exporter_otlp_endpoint` + `/v1/traces`. Ignores the master switch.
@@ -380,15 +387,19 @@ impl EndpointsConfig {
     /// first; legacy fallback to `otel_exporter_otlp_headers` ONLY when the
     /// external-OTEL master switch is unset (back-compat for existing users).
     pub(crate) fn resolve_otlp_headers(&self) -> Vec<(String, String)> {
-        if let Some(headers) = blank_as_unset(&self.grok_internal_otlp_headers) {
-            return parse_otlp_header_list(&headers);
-        }
-        if !self.external_otel_master_switch {
-            return parse_otlp_header_list(
-                self.otel_exporter_otlp_headers.as_deref().unwrap_or(""),
-            );
-        }
-        Vec::new()
+        let mut headers = if let Some(headers) = blank_as_unset(&self.grok_internal_otlp_headers) {
+            parse_otlp_header_list(&headers)
+        } else if !self.external_otel_master_switch {
+            parse_otlp_header_list(self.otel_exporter_otlp_headers.as_deref().unwrap_or(""))
+        } else {
+            Vec::new()
+        };
+        headers.push((
+            xai_grok_telemetry::otel_layer::INTERNAL_OTLP_CREDENTIALS_HEADER.to_string(),
+            self.otlp_traces_endpoint_attaches_live_credentials()
+                .to_string(),
+        ));
+        headers
     }
     /// Whether the legacy fallback actually supplied the internal endpoint OR
     /// internal headers from the standard `OTEL_EXPORTER_OTLP_*` vars — i.e.
@@ -12878,6 +12889,10 @@ agent_type = "cursor"
                 ("a".to_string(), "1".to_string()),
                 ("b".to_string(), "2".to_string()),
                 ("c".to_string(), String::new()),
+                (
+                    xai_grok_telemetry::otel_layer::INTERNAL_OTLP_CREDENTIALS_HEADER.to_string(),
+                    "true".to_string(),
+                ),
             ]
         );
     }
@@ -12940,6 +12955,20 @@ agent_type = "cursor"
             "https://legacy-base.example/v1/traces"
         );
     }
+    #[test]
+    fn standard_otlp_endpoint_does_not_attach_live_credentials() {
+        let standard = EndpointsConfig {
+            otel_exporter_otlp_traces_endpoint: Some("https://api.x.ai/v1/traces".to_string()),
+            ..internal_otlp_test_config()
+        };
+        assert!(!standard.otlp_traces_endpoint_attaches_live_credentials());
+
+        let internal = EndpointsConfig {
+            grok_internal_otlp_traces_endpoint: Some("https://api.x.ai/v1/traces".to_string()),
+            ..internal_otlp_test_config()
+        };
+        assert!(internal.otlp_traces_endpoint_attaches_live_credentials());
+    }
     /// Master switch SET → legacy `OTEL_*` endpoint/headers are completely
     /// ignored by the internal pipeline (the external stream owns them); the
     /// internal pipeline falls back to the proxy default and
@@ -12960,7 +12989,13 @@ agent_type = "cursor"
             "https://proxy.example/v1/traces",
             "internal firehose must never follow OTEL_* to the external collector"
         );
-        assert_eq!(cfg.resolve_otlp_headers(), Vec::<(String, String)>::new());
+        assert_eq!(
+            cfg.resolve_otlp_headers(),
+            vec![(
+                xai_grok_telemetry::otel_layer::INTERNAL_OTLP_CREDENTIALS_HEADER.to_string(),
+                "true".to_string(),
+            )]
+        );
         assert!(!cfg.internal_otlp_consumed_standard_vars());
     }
     /// `internal_otlp_consumed_standard_vars()` truth table.
@@ -13075,7 +13110,14 @@ agent_type = "cursor"
             };
             assert_eq!(
                 cfg.resolve_otlp_headers(),
-                vec![("x-debug".to_string(), "1".to_string())],
+                vec![
+                    ("x-debug".to_string(), "1".to_string()),
+                    (
+                        xai_grok_telemetry::otel_layer::INTERNAL_OTLP_CREDENTIALS_HEADER
+                            .to_string(),
+                        "true".to_string(),
+                    ),
+                ],
                 "switch={switch}"
             );
         }
@@ -13085,7 +13127,13 @@ agent_type = "cursor"
         };
         assert_eq!(
             legacy.resolve_otlp_headers(),
-            vec![("legacy".to_string(), "1".to_string())]
+            vec![
+                ("legacy".to_string(), "1".to_string()),
+                (
+                    xai_grok_telemetry::otel_layer::INTERNAL_OTLP_CREDENTIALS_HEADER.to_string(),
+                    "true".to_string(),
+                ),
+            ]
         );
     }
     fn ext_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {

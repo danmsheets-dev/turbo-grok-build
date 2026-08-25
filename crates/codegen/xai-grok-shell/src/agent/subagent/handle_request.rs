@@ -1822,11 +1822,12 @@ pub(crate) async fn run_shell_child(
     if inherit_skills && ctx.parent_skills.is_none() {
         let parent_cwd_str = ctx.parent_cwd.to_string_lossy().to_string();
         ctx.parent_skills = Some(
-            xai_grok_agent::prompt::skills::list_skills_with_plugins(
+            xai_grok_agent::prompt::skills::list_skills_with_trust(
                 Some(&parent_cwd_str),
                 &ctx.parent_skills_config,
                 ctx.plugin_registry.as_deref(),
                 ctx.parent_compat,
+                crate::agent::folder_trust::project_scope_allowed(&ctx.parent_cwd),
             )
             .await,
         );

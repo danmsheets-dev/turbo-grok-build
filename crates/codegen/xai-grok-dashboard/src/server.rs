@@ -4,7 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use axum::extract::FromRef;
+use axum::extract::{FromRef, Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use leptos::prelude::*;
 use leptos_axum::{LeptosRoutes, generate_route_list};
@@ -12,6 +15,8 @@ use leptos_axum::{LeptosRoutes, generate_route_list};
 use crate::api;
 use crate::app::App;
 use crate::store::DashboardStore;
+
+const DASHBOARD_TOKEN_HEADER: &str = "x-turbo-dashboard-token";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -48,9 +53,19 @@ impl DashboardServerConfig {
     }
 }
 
+#[derive(Clone)]
+struct DashboardGuard {
+    port: u16,
+    token: Arc<str>,
+}
+
 /// Build the complete router. A single state contains both dashboard data and
 /// Leptos options, allowing Axum to extract either through `FromRef`.
-pub async fn build_router(store: Arc<DashboardStore>) -> Result<Router> {
+pub async fn build_router(
+    store: Arc<DashboardStore>,
+    bind: SocketAddr,
+    token: &str,
+) -> Result<Router> {
     // This dashboard is embedded SSR, not a cargo-leptos application. Explicit
     // options avoid environment warnings and disable the development reload
     // client while keeping the fallback static root away from the working tree.
@@ -59,16 +74,27 @@ pub async fn build_router(store: Arc<DashboardStore>) -> Result<Router> {
         .site_root("target/site")
         .env(Env::PROD)
         .build();
-    Ok(build_router_with_options(store, leptos_options))
+    Ok(build_router_with_options(
+        store,
+        leptos_options,
+        bind,
+        token,
+    ))
 }
 
 pub fn build_router_with_options(
     store: Arc<DashboardStore>,
     leptos_options: LeptosOptions,
+    bind: SocketAddr,
+    token: &str,
 ) -> Router {
     let state = AppState {
         leptos_options: leptos_options.clone(),
         store: store.clone(),
+    };
+    let guard = DashboardGuard {
+        port: bind.port(),
+        token: Arc::from(token),
     };
     let routes = generate_route_list(App);
     let provide_store = {
@@ -95,6 +121,7 @@ pub fn build_router_with_options(
             _,
         >(provide_store, shell))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(guard, dashboard_guard))
 }
 
 /// Start the dashboard. Remote binding is intentionally rejected: session
@@ -111,10 +138,11 @@ pub async fn serve(config: DashboardServerConfig) -> Result<()> {
     if let Err(error) = store.refresh_active_sessions().await {
         tracing::warn!(%error, "unable to load active sessions; continuing with stored sessions");
     }
-    let app = build_router(store).await?;
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
-    let url = format!("http://{address}");
+    let token = mint_dashboard_token();
+    let app = build_router(store, address, &token).await?;
+    let url = format!("http://{address}/?token={token}");
     tracing::info!(%url, "Turbo dashboard listening");
 
     if config.open_browser {
@@ -130,6 +158,120 @@ pub async fn serve(config: DashboardServerConfig) -> Result<()> {
     Ok(())
 }
 
+fn mint_dashboard_token() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+async fn dashboard_guard(
+    State(guard): State<DashboardGuard>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !host_header_allowed(host, guard.port) {
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        let origin = origin.to_str().unwrap_or_default();
+        if !origin_header_allowed(origin) {
+            return (StatusCode::FORBIDDEN, "forbidden").into_response();
+        }
+    }
+
+    if request
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
+    {
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+
+    if is_api_path(request.uri().path()) && !request_has_valid_token(&request, &guard.token) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+
+    next.run(request).await
+}
+
+fn host_header_allowed(host: &str, port: u16) -> bool {
+    let host = host.trim();
+    let allowed = [
+        format!("127.0.0.1:{port}"),
+        format!("[::1]:{port}"),
+        format!("localhost:{port}"),
+    ];
+    allowed
+        .iter()
+        .any(|candidate| host.eq_ignore_ascii_case(candidate))
+}
+
+fn origin_header_allowed(origin: &str) -> bool {
+    origin_host(origin).is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    })
+}
+
+fn origin_host(origin: &str) -> Option<&str> {
+    let origin = origin.trim();
+    let rest = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(inner) = authority.strip_prefix('[') {
+        return inner.split(']').next().filter(|host| !host.is_empty());
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(host)
+        }
+        _ => Some(authority),
+    }
+}
+
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
+fn request_has_valid_token(request: &Request, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    if let Some(header) = request.headers().get(DASHBOARD_TOKEN_HEADER)
+        && let Ok(value) = header.to_str()
+        && token_eq(value.trim(), expected)
+    {
+        return true;
+    }
+    query_token(request.uri().query().unwrap_or_default())
+        .is_some_and(|value| token_eq(value, expected))
+}
+
+fn query_token(query: &str) -> Option<&str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "token" && !value.is_empty()).then_some(value)
+    })
+}
+
+fn token_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.bytes()
+        .zip(right.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
 fn shell(_options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -141,7 +283,10 @@ fn shell(_options: LeptosOptions) -> impl IntoView {
                 <title>"Turbo Observability"</title>
                 <style>{DASHBOARD_CSS}</style>
             </head>
-            <body><App/></body>
+            <body>
+                <App/>
+                <script>{DASHBOARD_TOKEN_SCRIPT}</script>
+            </body>
         </html>
     }
 }
@@ -184,3 +329,137 @@ th { position: sticky; top: 0; color: var(--muted); background: var(--panel); fo
 .error-box { border: 1px solid #67303b; background: #2b171c; color: #ff9b9b; padding: 12px; border-radius: 8px; }
 @media (max-width: 760px) { .container { padding: 14px; } .header { align-items: flex-start; flex-direction: column; } .timeline-event { grid-template-columns: 90px 1fr; } .log-row { grid-template-columns: 1fr; } }
 "#;
+
+const DASHBOARD_TOKEN_SCRIPT: &str = r#"
+(function(){
+  var k='turbo-dashboard-token';
+  var q=new URLSearchParams(location.search).get('token');
+  if(q){try{sessionStorage.setItem(k,q);}catch(e){}}
+  var t=q;if(!t){try{t=sessionStorage.getItem(k);}catch(e){}}
+  if(!t)return;
+  document.querySelectorAll('a[href^="/api/"]').forEach(function(a){
+    var h=a.getAttribute('href');
+    if(!h||h.indexOf('token=')>=0)return;
+    a.setAttribute('href', h+(h.indexOf('?')>=0?'&':'?')+'token='+encodeURIComponent(t));
+  });
+})();
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const TOKEN: &str = "test-dashboard-token-aaaaaaaa";
+
+    fn test_bind() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 9090))
+    }
+
+    async fn test_router() -> Router {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(DashboardStore::new(temp.path().to_owned()));
+        build_router(store, test_bind(), TOKEN).await.unwrap()
+    }
+
+    fn api_request(host: &str, token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri("/api/sessions").header("host", host);
+        if let Some(token) = token {
+            builder = builder.header(DASHBOARD_TOKEN_HEADER, token);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn host_allowlist_matches_loopback_forms() {
+        assert!(host_header_allowed("127.0.0.1:9090", 9090));
+        assert!(host_header_allowed("localhost:9090", 9090));
+        assert!(host_header_allowed("[::1]:9090", 9090));
+        assert!(host_header_allowed("LOCALHOST:9090", 9090));
+        assert!(!host_header_allowed("evil.test:9090", 9090));
+        assert!(!host_header_allowed("127.0.0.1:9091", 9090));
+        assert!(!host_header_allowed("127.0.0.1", 9090));
+    }
+
+    #[test]
+    fn origin_allowlist_rejects_cross_origin() {
+        assert!(origin_header_allowed("http://127.0.0.1:9090"));
+        assert!(origin_header_allowed("http://localhost:9090"));
+        assert!(origin_header_allowed("http://[::1]:9090"));
+        assert!(!origin_header_allowed("https://evil.test"));
+        assert!(!origin_header_allowed("null"));
+        assert!(!origin_header_allowed("https://evil.test:9090"));
+    }
+
+    #[tokio::test]
+    async fn host_evil_test_rejected() {
+        let app = test_router().await;
+        let response = app
+            .oneshot(api_request("evil.test:9090", Some(TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn origin_evil_test_rejected() {
+        let app = test_router().await;
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .header("host", "127.0.0.1:9090")
+            .header("origin", "https://evil.test")
+            .header(DASHBOARD_TOKEN_HEADER, TOKEN)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn missing_token_on_api_rejected() {
+        let app = test_router().await;
+        let response = app
+            .oneshot(api_request("127.0.0.1:9090", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn loopback_host_with_matching_token_allowed() {
+        let app = test_router().await;
+        let response = app
+            .oneshot(api_request("127.0.0.1:9090", Some(TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn query_token_on_api_allowed() {
+        let app = test_router().await;
+        let request = Request::builder()
+            .uri(format!("/api/sessions?token={TOKEN}"))
+            .header("host", "127.0.0.1:9090")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cross_site_fetch_rejected() {
+        let app = test_router().await;
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .header("host", "127.0.0.1:9090")
+            .header("sec-fetch-site", "cross-site")
+            .header(DASHBOARD_TOKEN_HEADER, TOKEN)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}

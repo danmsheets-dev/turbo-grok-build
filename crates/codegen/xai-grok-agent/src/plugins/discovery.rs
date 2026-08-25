@@ -191,8 +191,19 @@ impl DiscoveryConfig {
     pub fn populate_plugin_lists(&mut self, discovered: &[DiscoveredPlugin]) {
         for dp in discovered {
             let name = &dp.manifest.name;
-            let already_listed = self.enabled.iter().any(|e| e == name || e == &dp.id.0)
-                || self.disabled.iter().any(|d| d == name || d == &dp.id.0);
+            // Project plugins must not inherit a user/marketplace enable
+            // decision keyed on the bare name (F03). Only a fully-qualified
+            // PluginId in `enabled` counts as already-listed-enabled.
+            let already_listed = if dp.scope == PluginScope::Project {
+                self.enabled.iter().any(|e| e == &dp.id.0)
+                    || self
+                        .disabled
+                        .iter()
+                        .any(|d| d == &dp.id.0 || d == name)
+            } else {
+                self.enabled.iter().any(|e| e == name || e == &dp.id.0)
+                    || self.disabled.iter().any(|d| d == name || d == &dp.id.0)
+            };
             if already_listed {
                 tracing::debug!(plugin = %name, id = %dp.id.0, "plugin already in enabled/disabled list");
                 continue;
@@ -746,8 +757,9 @@ fn resolve_name_conflicts(candidates: &mut Vec<DiscoveredPlugin>) {
         match name_map.get(&name) {
             Some(&existing_idx) => {
                 let existing = &candidates[existing_idx];
-                // Lower scope ordinal = higher priority
-                if (candidate.scope as u8) < (existing.scope as u8) {
+                // Lower scope ordinal = higher priority, except Project must
+                // not shadow a User-installed plugin of the same name (F03).
+                if plugin_scope_outranks(candidate.scope, existing.scope) {
                     // New candidate wins
                     tracing::warn!(
                         plugin_name = %name,
@@ -796,6 +808,14 @@ fn resolve_name_conflicts(candidates: &mut Vec<DiscoveredPlugin>) {
     to_remove.dedup();
     for idx in to_remove.into_iter().rev() {
         candidates.remove(idx);
+    }
+}
+
+fn plugin_scope_outranks(candidate: PluginScope, existing: PluginScope) -> bool {
+    match (candidate, existing) {
+        (PluginScope::Project, PluginScope::User) => false,
+        (PluginScope::User, PluginScope::Project) => true,
+        _ => (candidate as u8) < (existing as u8),
     }
 }
 
@@ -1867,5 +1887,21 @@ mod tests {
             read_claude_installed_plugins(&json_path, Some(&project)).len(),
             1
         );
+    }
+
+    #[test]
+    fn user_scope_outranks_project_namesake() {
+        assert!(super::plugin_scope_outranks(
+            PluginScope::User,
+            PluginScope::Project
+        ));
+        assert!(!super::plugin_scope_outranks(
+            PluginScope::Project,
+            PluginScope::User
+        ));
+        assert!(super::plugin_scope_outranks(
+            PluginScope::CliOverride,
+            PluginScope::User
+        ));
     }
 }

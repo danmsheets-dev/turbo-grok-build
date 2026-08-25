@@ -181,11 +181,12 @@ impl SessionActor {
         let cwd = &self.session_info.cwd;
         let skills_config = crate::util::config::load_config().await.skills;
         let plugin_snapshot = self.plugin_registry.borrow().clone();
-        let new_skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
+        let new_skills = xai_grok_agent::prompt::skills::list_skills_with_trust(
             Some(cwd),
             &skills_config,
             plugin_snapshot.as_deref(),
             self.rebuild_spec.compat,
+            crate::agent::folder_trust::project_scope_allowed(std::path::Path::new(cwd)),
         )
         .await;
         let skill_count = new_skills.len();

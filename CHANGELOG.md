@@ -61,6 +61,25 @@ Do not describe `--confine` as an OS jail. Meeting audio is transcribed by
 xAI hosted STT. Report vulnerabilities via this fork's GitHub private
 advisory flow, not xAI HackerOne.
 
+#### Security (HIGH)
+
+- **Project skills/commands load only when the folder is trusted** (F04).
+  `list_skills` fails closed; session paths pass `project_scope_allowed`.
+- **Project plugins cannot inherit a user-scope enable-by-name** (F03). User
+  plugins outrank same-named project plugins; enable requires a fully-qualified
+  `PluginId`.
+- **`browser_eval` `confirm` is ignored** (F14). Mutating expressions are
+  always refused; prefer `browser_click` / `browser_fill`.
+- **`turbo dashboard --web` requires a per-launch token** (F05) and rejects
+  non-loopback `Host`, cross-origin `Origin`, and `Sec-Fetch-Site: cross-site`.
+- **Ripgrep tarballs are SHA-256 pinned before embed** (F09). Release actions
+  are SHA-pinned; `contents: write` is limited to the publish job (F02).
+- **Internal OTLP export no longer stamps live xAI credentials onto
+  user-repointed collectors** (F13). Standard `OTEL_EXPORTER_OTLP_*` endpoints
+  are treated as external.
+- **`read_file` / credential `Read`/`Grep` of `$GROK_HOME` auth files is
+  policy-denied** (F17), matching the bash write-deny.
+
 ---
 
 ## [1.0.0-rc.10] - 2026-08-24

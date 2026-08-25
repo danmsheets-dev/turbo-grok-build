@@ -285,6 +285,9 @@ impl AgentRebuildSpec {
         .with_role_instructions(role_instructions.clone())
         .with_persona_instructions(persona_instructions.clone())
         .with_skills_config(skills_config.clone())
+        .with_project_trusted(crate::agent::folder_trust::project_scope_allowed(
+            working_directory,
+        ))
         .with_compat_config(*compat)
         .with_context_window(*context_window_tokens)
         .with_mcp_max_output_bytes(

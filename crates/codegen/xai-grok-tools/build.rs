@@ -14,6 +14,32 @@ const FD_VER: &str = "10.4.2";
 // fd stopped publishing x86_64-apple-darwin assets after 10.3.0.
 const FD_VER_MACOS_X64: &str = "10.3.0";
 
+/// Pinned SHA-256 of each `(version, triple)` ripgrep release tarball we
+/// embed. Digests are GitHub release asset `digest` fields for BurntSushi/
+/// ripgrep 15.0.0 (also published as sibling `*.sha256` assets).
+const RG_TARBALL_SHA256: &[(&str, &str, &str)] = &[
+    (
+        "15.0.0",
+        "x86_64-unknown-linux-musl",
+        "253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7",
+    ),
+    (
+        "15.0.0",
+        "aarch64-unknown-linux-gnu",
+        "15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754",
+    ),
+    (
+        "15.0.0",
+        "aarch64-apple-darwin",
+        "98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b",
+    ),
+    (
+        "15.0.0",
+        "x86_64-apple-darwin",
+        "44128c733d127ddbda461e01225a68b5f9997cfe7635242a797f645ca674a71a",
+    ),
+];
+
 /// Pinned SHA-256 of each `(version, triple)` fd release tarball we embed.
 const FD_TARBALL_SHA256: &[(&str, &str, &str)] = &[
     (
@@ -134,24 +160,7 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
         resp.bytes()?.to_vec()
     };
 
-    // Verify the tarball against the pinned per-asset hash before unpacking.
-    let expected_sha = FD_TARBALL_SHA256
-        .iter()
-        .find(|(v, t, _)| *v == ver && *t == asset_triple)
-        .map(|(_, _, sha)| *sha)
-        .ok_or_else(|| format!("No pinned SHA-256 for fd {ver} {asset_triple}"))?;
-    let actual_sha = {
-        use sha2::Digest as _;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&bytes);
-        hex_encode(&hasher.finalize())
-    };
-    if actual_sha != expected_sha {
-        return Err(format!(
-            "SHA-256 mismatch for {url}:\n  expected {expected_sha}\n  actual   {actual_sha}"
-        )
-        .into());
-    }
+    verify_tarball_sha256(FD_TARBALL_SHA256, ver, asset_triple, &bytes, &url, "fd")?;
 
     let gz = flate2::read::GzDecoder::new(&bytes[..]);
     let mut ar = tar::Archive::new(gz);
@@ -187,6 +196,41 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+/// Look up a pinned `(version, triple)` SHA-256 and reject the download on
+/// mismatch. Missing table entries fail closed so a new triple cannot ship
+/// without a human-filled digest.
+fn verify_tarball_sha256(
+    table: &[(&str, &str, &str)],
+    ver: &str,
+    triple: &str,
+    bytes: &[u8],
+    url: &str,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expected_sha = table
+        .iter()
+        .find(|(v, t, _)| *v == ver && *t == triple)
+        .map(|(_, _, sha)| *sha)
+        .ok_or_else(|| {
+            format!(
+                "No pinned SHA-256 for {name} {ver} {triple}. Add the GitHub release asset digest to the pin table before enabling this triple."
+            )
+        })?;
+    let actual_sha = {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(bytes);
+        hex_encode(&hasher.finalize())
+    };
+    if actual_sha != expected_sha {
+        return Err(format!(
+            "SHA-256 mismatch for {url}:\n  expected {expected_sha}\n  actual   {actual_sha}"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Bundle a prebuilt **static** search-tool binary (`bfs`/`ugrep`) when
@@ -231,8 +275,10 @@ fn bundle_search_tool(
     Ok(())
 }
 
-/// Download + embed ripgrep. Unchanged behavior; split out of `main` so the new
-/// search-tool bundling runs regardless of ripgrep's early returns.
+/// Download + embed ripgrep (release-only or `GROK_TOOLS_BUNDLE_RG_PATH`
+/// override), plus pinned per-asset SHA-256 verification of the downloaded
+/// tarball. Split out of `main` so search-tool bundling runs regardless of
+/// ripgrep's early returns.
 fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
     // Only bundle in release builds to avoid slowing down cargo check.
     println!("cargo:rerun-if-env-changed=GROK_TOOLS_BUNDLE_RG_PATH");
@@ -320,6 +366,15 @@ fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
         }
         resp.bytes()?.to_vec()
     };
+
+    verify_tarball_sha256(
+        RG_TARBALL_SHA256,
+        RG_VER,
+        asset_triple,
+        &bytes,
+        &url,
+        "ripgrep",
+    )?;
 
     let gz = flate2::read::GzDecoder::new(&bytes[..]);
     let mut ar = tar::Archive::new(gz);

