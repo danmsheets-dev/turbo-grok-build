@@ -1506,7 +1506,8 @@ fn session_grant_pre_decision(
         | AccessKind::Grep { .. }
         | AccessKind::WebSearch(_)
         | AccessKind::Edit(_)
-        | AccessKind::EditMany(_) => None,
+        | AccessKind::EditMany(_)
+        | AccessKind::Tool { .. } => None,
     }
 }
 
@@ -1794,6 +1795,7 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Edit(path) => ("edit".to_string(), Some(path.clone())),
                         AccessKind::EditMany(paths) => ("edit".to_string(), Some(paths.join("\n"))),
                         AccessKind::Bash(cmd) => ("bash".to_string(), Some(cmd.clone())),
+                        AccessKind::Tool { name } => ("tool".to_string(), Some(name.clone())),
                         // Carry the MCP args (truncated) so the classifier and
                         // telemetry judge the call by what it does, not just its name.
                         AccessKind::MCPTool { name, input } => (
@@ -2459,7 +2461,10 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Read(_) | AccessKind::Grep { .. } if policy_forced_prompt => {
                             None
                         }
-                        AccessKind::Read(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
+                        AccessKind::Read(Some(_)) => {
+                            Some((Decision::Allow, reasons::SAFE_COMMAND))
+                        }
+                        AccessKind::Read(None) => None,
                         AccessKind::WebSearch(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         AccessKind::Grep { .. } => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         // CWE-862: MCP tools must prompt the user instead of
@@ -2533,6 +2538,7 @@ fn spawn_permission_manager_with_pin(
                                 )
                             }
                         }
+                        AccessKind::Tool { .. } => None,
                         AccessKind::WebFetch(url) => {
                             match url::Url::parse(url) {
                                 Ok(parsed_url) => {
@@ -2996,6 +3002,25 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn unscoped_read_is_not_auto_allowed_as_a_safe_command() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (mgr, _events) = test_manager(&cwd, false, None);
+                let decision = mgr
+                    .request(AccessKind::Read(None), tool_call(), None, None, None)
+                    .await;
+                assert!(
+                    !matches!(decision, Decision::Allow),
+                    "unscoped Read(None) must prompt instead of auto-allowing: {decision:?}"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]

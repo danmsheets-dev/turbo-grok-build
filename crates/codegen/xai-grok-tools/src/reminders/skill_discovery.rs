@@ -78,18 +78,48 @@ impl SkillDiscoveryReminder {
         }
     }
 
-    /// Check whether a SKILL.md path is inside a supported skills directory
-    /// (`.grok/skills/`, `.agents/skills/`, or `.claude/skills/`).
-    fn is_in_supported_skills_dir(path: &Path) -> bool {
+    /// Config-dir basename (`.grok` / `.agents` / `.claude` / `.cursor`) that
+    /// owns this `…/skills/…/SKILL.md` path, if any.
+    fn skills_vendor_dir(path: &Path) -> Option<&std::ffi::OsStr> {
         for ancestor in path.ancestors().skip(1) {
             if ancestor.file_name().is_some_and(|n| n == "skills") {
-                return ancestor
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .is_some_and(|n| SKILL_CONFIG_DIRS.iter().any(|d| *d == n));
+                return ancestor.parent().and_then(|p| p.file_name());
             }
         }
-        false
+        None
+    }
+
+    fn vendor_skills_allowed(path: &Path, compat: crate::types::compat::CompatConfig) -> bool {
+        let Some(vendor) = Self::skills_vendor_dir(path).and_then(|n| n.to_str()) else {
+            return false;
+        };
+        if !SKILL_CONFIG_DIRS.contains(&vendor) {
+            return false;
+        }
+        match vendor {
+            ".grok" | ".agents" => true,
+            ".claude" => compat.claude.skills,
+            ".cursor" => compat.cursor.skills,
+            _ => false,
+        }
+    }
+
+    fn path_under_workspace(path: &Path, cwd: Option<&Path>, git_root: Option<&Path>) -> bool {
+        cwd.is_some_and(|c| path.starts_with(c))
+            || git_root.is_some_and(|r| path.starts_with(r))
+    }
+
+    /// Direct `SKILL.md` registration is limited to workspace-local files in a
+    /// compat-enabled vendor skills dir.
+    fn should_register_direct_skill_md(
+        path: &Path,
+        cwd: Option<&Path>,
+        git_root: Option<&Path>,
+        compat: crate::types::compat::CompatConfig,
+    ) -> bool {
+        path.file_name().is_some_and(|n| n == "SKILL.md")
+            && Self::path_under_workspace(path, cwd, git_root)
+            && Self::vendor_skills_allowed(path, compat)
     }
 }
 
@@ -130,30 +160,40 @@ impl Reminder for SkillDiscoveryReminder {
         // Direct SKILL.md detection: when a tool writes (or reads) a
         // SKILL.md file, register it immediately. The normal upward-walk
         // discovery cannot find these because it looks for `.grok/skills/`
-        // sub-directories in *ancestor* dirs, and user-scope skills
-        // (~/.grok/) are outside the git root so the walk breaks early.
-        if target_path.file_name().is_some_and(|n| n == "SKILL.md")
-            && Self::is_in_supported_skills_dir(target_path)
-        {
-            let scope = {
+        // sub-directories in *ancestor* dirs. Only workspace-local files
+        // in a compat-enabled vendor dir are registered (no User fallback).
+        if target_path.file_name().is_some_and(|n| n == "SKILL.md") {
+            let (cwd, git_root, compat) = {
                 let res = resources.lock().await;
-                let tracker = res.get::<SkillManager>();
-                let cwd = tracker.and_then(|m| m.cwd.clone());
-                let git_root = tracker.and_then(|m| m.git_root.clone());
-                match (cwd, git_root) {
-                    (Some(cwd), _) if target_path.starts_with(&cwd) => SkillScope::Local,
-                    (_, Some(root)) if target_path.starts_with(&root) => SkillScope::Repo,
-                    _ => SkillScope::User,
+                match res.get::<SkillManager>() {
+                    Some(tracker) => (
+                        tracker.cwd.clone(),
+                        tracker.git_root.clone(),
+                        tracker.compat,
+                    ),
+                    None => (None, None, Default::default()),
                 }
             };
-            let skills = discovery::parse_skill_files(vec![(target_path.to_path_buf(), scope)]);
-            if !skills.is_empty() {
-                let mut res = resources.lock().await;
-                if let Some(tracker) = res.get_mut::<SkillManager>() {
-                    tracker.add_discovered(skills);
+            if Self::should_register_direct_skill_md(
+                target_path,
+                cwd.as_deref(),
+                git_root.as_deref(),
+                compat,
+            ) {
+                let scope = match (cwd.as_deref(), git_root.as_deref()) {
+                    (Some(cwd), _) if target_path.starts_with(cwd) => SkillScope::Local,
+                    (_, Some(root)) if target_path.starts_with(root) => SkillScope::Repo,
+                    _ => return vec![],
+                };
+                let skills = discovery::parse_skill_files(vec![(target_path.to_path_buf(), scope)]);
+                if !skills.is_empty() {
+                    let mut res = resources.lock().await;
+                    if let Some(tracker) = res.get_mut::<SkillManager>() {
+                        tracker.add_discovered(skills);
+                    }
                 }
+                return vec![];
             }
-            return vec![];
         }
 
         // 2. Snapshot context under lock, then RELEASE the lock before I/O.
@@ -223,6 +263,7 @@ impl Reminder for SkillDiscoveryReminder {
 mod tests {
     use super::*;
     use crate::types::output::ApplyPatchFileResult;
+    use std::path::Path;
 
     fn edited(path: &str, move_to: Option<&str>) -> ApplyPatchFileResult {
         ApplyPatchFileResult {
@@ -250,5 +291,72 @@ mod tests {
         );
         let failed_patch = ToolOutput::ApplyPatch(ApplyPatchOutput::ParseError("x".into()));
         assert!(SkillDiscoveryReminder::extract_activation_paths(&failed_patch).is_empty());
+    }
+
+    #[test]
+    fn direct_skill_md_requires_workspace_path() {
+        let cwd = Path::new("/ws");
+        let git_root = Path::new("/ws");
+        let inside = Path::new("/ws/.grok/skills/foo/SKILL.md");
+        let outside = Path::new("/tmp/.cursor/skills/evil/SKILL.md");
+        let compat = crate::types::compat::CompatConfig::default();
+        assert!(SkillDiscoveryReminder::should_register_direct_skill_md(
+            inside,
+            Some(cwd),
+            Some(git_root),
+            compat,
+        ));
+        assert!(
+            !SkillDiscoveryReminder::should_register_direct_skill_md(
+                outside,
+                Some(cwd),
+                Some(git_root),
+                compat,
+            ),
+            "SKILL.md outside cwd/git_root must not self-register"
+        );
+    }
+
+    #[test]
+    fn direct_skill_md_honours_cursor_compat() {
+        let cwd = Path::new("/tmp/proj");
+        let path = Path::new("/tmp/proj/.cursor/skills/evil/SKILL.md");
+        let mut compat = crate::types::compat::CompatConfig::default();
+        assert!(SkillDiscoveryReminder::should_register_direct_skill_md(
+            path,
+            Some(cwd),
+            Some(cwd),
+            compat,
+        ));
+        compat.cursor.skills = false;
+        assert!(
+            !SkillDiscoveryReminder::should_register_direct_skill_md(
+                path,
+                Some(cwd),
+                Some(cwd),
+                compat,
+            ),
+            "cursor SKILL.md must not register when cursor.skills is off"
+        );
+    }
+
+    #[test]
+    fn direct_skill_md_honours_claude_compat() {
+        let cwd = Path::new("/tmp/proj");
+        let path = Path::new("/tmp/proj/.claude/skills/commit/SKILL.md");
+        let mut compat = crate::types::compat::CompatConfig::default();
+        assert!(SkillDiscoveryReminder::should_register_direct_skill_md(
+            path,
+            Some(cwd),
+            Some(cwd),
+            compat,
+        ));
+        compat.claude.skills = false;
+        assert!(!SkillDiscoveryReminder::should_register_direct_skill_md(
+            path,
+            Some(cwd),
+            Some(cwd),
+            compat,
+        ));
     }
 }

@@ -46,6 +46,33 @@ pub struct SkillsConfig {
     pub bundled_skill_dirs: Vec<String>,
 }
 
+/// Project-level skill/command directories the folder-trust gate must detect.
+/// Matches the cwd→git-root walk skill discovery uses for Local/Repo sources
+/// (`.grok` / `.agents` plus vendor `.claude` / `.cursor`).
+const PROJECT_SKILL_SUBDIRS: &[&str] = &[
+    ".grok/skills",
+    ".agents/skills",
+    ".claude/skills",
+    ".cursor/skills",
+    ".grok/commands",
+    ".agents/commands",
+    ".claude/commands",
+    ".cursor/commands",
+];
+
+/// Existing project skill/command dirs under each dir of a precomputed
+/// cwd→git-root chain ([`crate::repo::RepoDirChain`]). Folder-trust reuses
+/// this so detection cannot drift from discovery.
+pub fn project_skill_dirs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    crate::repo::existing_subdirs_along(chain_dirs, PROJECT_SKILL_SUBDIRS)
+}
+
+/// Local/Repo skills are repo-controlled prompt content. Drop them when the
+/// folder is untrusted; User/Server/Bundled/Plugin stay.
+fn project_skill_scope_allowed(scope: SkillScope, project_trusted: bool) -> bool {
+    project_trusted || !matches!(scope, SkillScope::Local | SkillScope::Repo)
+}
+
 /// List all discovered skills with their metadata.
 ///
 /// Priority order: Local (cwd/.grok/skills, cwd/.agents/skills, cwd/.claude/skills) → Intermediate dirs →
@@ -61,6 +88,10 @@ pub struct SkillsConfig {
 ///
 /// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned; pass
 /// `CompatConfig::default()` to preserve the historical all-vendors behavior.
+///
+/// Project (Local/Repo) skills are dropped when the folder is untrusted; see
+/// [`list_skills_with_trust`]. This wrapper keeps the historical load-all
+/// behavior (`project_trusted = true`).
 pub async fn list_skills(
     working_directory: Option<&str>,
     config: &SkillsConfig,
@@ -82,6 +113,19 @@ pub async fn list_skills_with_plugins(
     plugins: Option<&crate::plugins::PluginRegistry>,
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
+    list_skills_with_trust(working_directory, config, plugins, compat, true).await
+}
+
+/// Like [`list_skills_with_plugins`], with an explicit folder-trust verdict.
+///
+/// When `project_trusted` is false, Local/Repo skill files are omitted.
+pub async fn list_skills_with_trust(
+    working_directory: Option<&str>,
+    config: &SkillsConfig,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+    compat: CompatConfig,
+    project_trusted: bool,
+) -> Vec<SkillInfo> {
     let _skill_discovery_timer = crate::timing::timer("skill_discovery");
     let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
 
@@ -90,6 +134,7 @@ pub async fn list_skills_with_plugins(
         workspace_user_dir.as_deref(),
         &xai_grok_tools::util::grok_home::grok_home(),
         compat,
+        project_trusted,
     )
     .await;
 
@@ -98,7 +143,11 @@ pub async fn list_skills_with_plugins(
             .ok()
             .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
     });
-    skills.extend(collect_config_skills(&config.paths, git_root.as_deref()));
+    skills.extend(collect_config_skills(
+        &config.paths,
+        git_root.as_deref(),
+        project_trusted,
+    ));
 
     skills.extend(collect_injected_skills(
         &config.server_skill_dirs,
@@ -113,7 +162,7 @@ pub async fn list_skills_with_plugins(
     skills.sort_by_key(|s| s.scope);
 
     let plugin_skills = if let Some(registry) = plugins {
-        collect_plugin_skills(registry)
+        collect_plugin_skills(registry, project_trusted)
     } else {
         vec![]
     };
@@ -146,6 +195,24 @@ pub fn collect_skill_config_dirs(
     config_paths: &[String],
     compat: CompatConfig,
 ) -> Vec<PathBuf> {
+    collect_skill_config_dirs_with_trust(
+        cwd,
+        workspace_user_dir,
+        global_dir,
+        config_paths,
+        compat,
+        true,
+    )
+}
+
+fn collect_skill_config_dirs_with_trust(
+    cwd: Option<&Path>,
+    workspace_user_dir: Option<&Path>,
+    global_dir: &Path,
+    config_paths: &[String],
+    compat: CompatConfig,
+    project_trusted: bool,
+) -> Vec<PathBuf> {
     let grok_home = global_dir.to_path_buf();
     let git_root = cwd.and_then(|c| {
         git2::Repository::discover(c)
@@ -172,8 +239,9 @@ pub fn collect_skill_config_dirs(
     // this list equals the historical `[".grok", ".agents", ".claude", ".cursor"]`.
     let config_dir_names = compat.skill_config_dirs();
 
-    // Priority 1 & 2: Walk from cwd up to the git root.
-    if let Some(cwd) = cwd {
+    // Priority 1 & 2: Walk from cwd up to the git root. Skip when the folder
+    // is untrusted — those dirs are Local/Repo scope.
+    if project_trusted && let Some(cwd) = cwd {
         if let Some(ref root) = git_root {
             let mut current = Some(cwd.to_path_buf());
             while let Some(dir) = current {
@@ -288,6 +356,7 @@ async fn list_skills_with_options(
     workspace_user_dir: Option<&Path>,
     global_dir: &Path,
     compat: CompatConfig,
+    project_trusted: bool,
 ) -> Vec<SkillInfo> {
     let cwd = working_directory.map(PathBuf::from);
 
@@ -297,14 +366,23 @@ async fn list_skills_with_options(
             .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
     });
 
-    let config_dirs =
-        collect_skill_config_dirs(cwd.as_deref(), workspace_user_dir, global_dir, &[], compat);
+    let config_dirs = collect_skill_config_dirs_with_trust(
+        cwd.as_deref(),
+        workspace_user_dir,
+        global_dir,
+        &[],
+        compat,
+        project_trusted,
+    );
 
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
 
     for config_dir in &config_dirs {
         let scope = scope_for_config_dir(config_dir, cwd.as_deref(), git_root.as_deref());
+        if !project_skill_scope_allowed(scope, project_trusted) {
+            continue;
+        }
 
         // Skills before commands: skills win name collisions.
         collect_discovered_paths(
@@ -363,7 +441,11 @@ fn expand_tilde(raw: &str) -> PathBuf {
 /// Each entry is either a direct SKILL.md file or a directory to walk recursively.
 /// `~` is expanded. Scope is `Repo` if the resolved path falls inside `git_root`,
 /// otherwise `User`.
-fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Vec<SkillInfo> {
+fn collect_config_skills(
+    config_paths: &[String],
+    git_root: Option<&Path>,
+    project_trusted: bool,
+) -> Vec<SkillInfo> {
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen = HashSet::new();
 
@@ -373,6 +455,9 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
             Some(root) if expanded.starts_with(root) => SkillScope::Repo,
             _ => SkillScope::User,
         };
+        if !project_skill_scope_allowed(scope, project_trusted) {
+            continue;
+        }
 
         if expanded.is_file() && expanded.file_name().is_some_and(|n| n == "SKILL.md") {
             collect_discovered_paths(
@@ -578,10 +663,16 @@ fn stamp_plugin_fields(skills: &mut [SkillInfo], plugin: &crate::plugins::Loaded
     }
 }
 
-fn collect_plugin_skills(registry: &crate::plugins::PluginRegistry) -> Vec<SkillInfo> {
+fn collect_plugin_skills(
+    registry: &crate::plugins::PluginRegistry,
+    project_trusted: bool,
+) -> Vec<SkillInfo> {
     let mut skills = Vec::new();
 
     for plugin in registry.enabled_plugins() {
+        if !project_trusted && plugin.scope == PluginScope::Project {
+            continue;
+        }
         let mut paths: Vec<(PathBuf, SkillScope)> = Vec::new();
 
         // Skills: shared discovery primitive (see `find_skill_md_paths`).
@@ -1347,6 +1438,7 @@ mod tests {
             Some(&user_dir),
             tmp.path(),
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -1377,6 +1469,7 @@ mod tests {
             Some(&user_dir),
             tmp.path(),
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -1405,6 +1498,7 @@ mod tests {
             None,
             tmp.path(),
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -1433,6 +1527,7 @@ mod tests {
             Some(&user_dir),
             tmp.path(),
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -1456,7 +1551,7 @@ mod tests {
         write_skill_md(&tmp.path().join("beta"), "beta");
 
         let paths = vec![tmp.path().to_str().unwrap().to_string()];
-        let skills = collect_config_skills(&paths, None);
+        let skills = collect_config_skills(&paths, None, true);
 
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"alpha"), "alpha not found: {names:?}");
@@ -1470,7 +1565,7 @@ mod tests {
         write_skill_md(&skill_dir, "my-skill");
 
         let paths = vec![skill_dir.join("SKILL.md").to_str().unwrap().to_string()];
-        let skills = collect_config_skills(&paths, None);
+        let skills = collect_config_skills(&paths, None, true);
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "my-skill");
@@ -1485,7 +1580,7 @@ mod tests {
         write_skill_md(&outside.join("ext-skill"), "ext-skill");
 
         let paths = vec![outside.to_str().unwrap().to_string()];
-        let skills = collect_config_skills(&paths, Some(&repo));
+        let skills = collect_config_skills(&paths, Some(&repo), true);
 
         assert_eq!(skills[0].scope, SkillScope::User);
     }
@@ -1498,7 +1593,7 @@ mod tests {
         write_skill_md(&inside.join("repo-skill"), "repo-skill");
 
         let paths = vec![inside.to_str().unwrap().to_string()];
-        let skills = collect_config_skills(&paths, Some(&repo));
+        let skills = collect_config_skills(&paths, Some(&repo), true);
 
         assert_eq!(skills[0].scope, SkillScope::Repo);
     }
@@ -1511,7 +1606,7 @@ mod tests {
         write_skill_md(tmp.path(), "root-skill");
 
         let paths = vec![tmp.path().to_str().unwrap().to_string()];
-        let skills = collect_config_skills(&paths, None);
+        let skills = collect_config_skills(&paths, None, true);
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "root-skill");
@@ -1520,7 +1615,7 @@ mod tests {
     #[test]
     fn collect_config_skills_nonexistent_path_is_skipped() {
         let paths = vec!["/nonexistent/path/to/skills".to_string()];
-        let skills = collect_config_skills(&paths, None);
+        let skills = collect_config_skills(&paths, None, true);
         assert!(skills.is_empty());
     }
 
@@ -1532,7 +1627,7 @@ mod tests {
         // Same directory listed twice
         let dir = tmp.path().to_str().unwrap().to_string();
         let paths = vec![dir.clone(), dir];
-        let skills = collect_config_skills(&paths, None);
+        let skills = collect_config_skills(&paths, None, true);
 
         assert_eq!(skills.len(), 1, "Same file should not appear twice");
     }
@@ -1543,7 +1638,7 @@ mod tests {
         write_skill_md(&tmp.path().join("cfg-skill"), "cfg-skill");
 
         let paths = vec![tmp.path().to_str().unwrap().to_string()];
-        let skills = collect_config_skills(&paths, None);
+        let skills = collect_config_skills(&paths, None, true);
 
         assert_eq!(skills.len(), 1);
         match &skills[0].config_source {
@@ -1708,7 +1803,7 @@ mod tests {
 
         let registry =
             make_registry_with_skill_dirs("listed", tmp.path(), vec![one.clone(), two.clone()]);
-        let skills = collect_plugin_skills(&registry);
+        let skills = collect_plugin_skills(&registry, true);
 
         assert_eq!(skills.len(), 2, "root-level SKILL.md dirs must load");
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -1734,7 +1829,7 @@ mod tests {
 
         let registry =
             make_registry_with_skill_dirs("mixed", tmp.path(), vec![parent.clone(), child.clone()]);
-        let merged = merge_skills_with_plugins(vec![], collect_plugin_skills(&registry));
+        let merged = merge_skills_with_plugins(vec![], collect_plugin_skills(&registry, true));
 
         let ones: Vec<_> = merged.iter().filter(|s| s.name == "one").collect();
         assert_eq!(ones.len(), 1, "skill must appear exactly once: {merged:?}");
@@ -2144,6 +2239,7 @@ mod tests {
             None,
             &home,
             CompatConfig::default(),
+            true,
         )
         .await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -2178,6 +2274,7 @@ mod tests {
             None,
             &home,
             CompatConfig::default(),
+            true,
         )
         .await;
 
@@ -2252,7 +2349,13 @@ mod tests {
 
         let repo_str = repo_root.to_str().unwrap_or_default();
         let skills =
-            list_skills_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
+            list_skills_with_options(
+                Some(repo_str),
+                None,
+                tmp.path(),
+                CompatConfig::default(),
+                true,
+            )
                 .await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
 
@@ -2329,7 +2432,13 @@ mod tests {
 
         let repo_str = repo_root.to_str().unwrap_or_default();
         let raw =
-            list_skills_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
+            list_skills_with_options(
+                Some(repo_str),
+                None,
+                tmp.path(),
+                CompatConfig::default(),
+                true,
+            )
                 .await;
 
         let deploy_entries: Vec<_> = raw.iter().filter(|s| s.name == "deploy").collect();
@@ -2457,6 +2566,7 @@ mod tests {
             None,
             &home,
             CompatConfig::default(),
+            true,
         )
         .await;
         let bundled: Vec<_> = skills
@@ -2503,6 +2613,61 @@ mod tests {
         );
         assert!(ends_with(&dirs, ".claude"), "claude must remain: {dirs:?}");
         assert!(ends_with(&dirs, ".grok"), "grok must remain: {dirs:?}");
+    }
+
+    #[tokio::test]
+    async fn untrusted_project_skills_are_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        init_git_repo(&repo_root);
+
+        write_skill_md(
+            &repo_root.join(".grok").join("skills").join("project-skill"),
+            "project-skill",
+        );
+        write_skill_md(&home.join("skills").join("user-skill"), "user-skill");
+        write_skill_md(
+            &home.join("bundled").join("skills").join("bundled-skill"),
+            "bundled-skill",
+        );
+
+        let trusted = list_skills_with_options(
+            Some(repo_root.to_str().unwrap()),
+            None,
+            &home,
+            CompatConfig::default(),
+            true,
+        )
+        .await;
+        let trusted_names: Vec<&str> = trusted.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            trusted_names.contains(&"project-skill"),
+            "trusted folder must load project skills, got: {trusted_names:?}"
+        );
+
+        let untrusted = list_skills_with_options(
+            Some(repo_root.to_str().unwrap()),
+            None,
+            &home,
+            CompatConfig::default(),
+            false,
+        )
+        .await;
+        let names: Vec<&str> = untrusted.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            !names.contains(&"project-skill"),
+            "untrusted project skills must be omitted, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"user-skill"),
+            "user-scope skills must remain when untrusted, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"bundled-skill"),
+            "bundled skills must remain when untrusted, got: {names:?}"
+        );
     }
 
     // ── Same-scope frontmatter-name collisions (copied skill dirs) ──────

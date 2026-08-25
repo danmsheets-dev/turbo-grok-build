@@ -258,12 +258,12 @@ pub fn repo_configs_present(cwd: &Path) -> bool {
 
 /// Display-only: which repo-local trust-sensitive config KINDS are present for
 /// `cwd` (`mcp`, `plugins`, `permission`, `lsp`, `envrc`, `claude`, `hooks`,
-/// `agents`, `roles`, `personas`, `workflows`), deduped in cheap→expensive
+/// `agents`, `skills`, `roles`, `personas`, `workflows`), deduped in cheap→expensive
 /// marker order. Single source with [`repo_configs_present`] (which is
 /// `!repo_config_kinds(cwd).is_empty()`), so a folder that the gate fired on
 /// always has a non-empty, accurate kind list — no `[plugins].paths` /
-/// `[permission]` / `.claude` / `.grok/agents` / subdir-launch gaps. NOT itself
-/// the trust gate.
+/// `[permission]` / `.claude` / `.grok/agents` / `.grok/skills` / subdir-launch
+/// gaps. NOT itself the trust gate.
 pub fn repo_config_kinds(cwd: &Path) -> Vec<&'static str> {
     collect_repo_config_kinds(cwd, false)
 }
@@ -431,6 +431,14 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     // can't drift from agent discovery — same pattern as the plugin line above.
     if !xai_grok_agent::discovery::project_agent_dirs_in(&chain.dirs).is_empty() {
         hit!("agents");
+    }
+    // Project SKILL/COMMAND dirs (`.grok/skills`, `.agents/skills`, vendor
+    // `skills/` + matching `commands/`): a project skill can shadow a bundled
+    // skill by name and inject repo-controlled prompt content, so a skills-only
+    // clone must still be gated. Uses the shared SSOT walk (cwd→git root) so
+    // detection cannot drift from skill discovery — same pattern as agents.
+    if !xai_grok_agent::prompt::skills::project_skill_dirs_in(&chain.dirs).is_empty() {
+        hit!("skills");
     }
     // Presence matches exact-cwd discovery without parsing repository content.
     let grok = cwd.join(".grok");
@@ -660,6 +668,65 @@ mod tests {
         let subdir = tmp.path().join("crates").join("inner");
         std::fs::create_dir_all(&subdir).unwrap();
         assert!(repo_configs_present(&subdir));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_project_skills() {
+        // A `.grok/skills`-only clone must be gated: project skills inject
+        // repo-controlled prompt content and can shadow bundled skills by name.
+        let tmp = repo_tmp();
+        let skill_dir = tmp.path().join(".grok").join("skills").join("foo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+        assert!(repo_configs_present(tmp.path()));
+        assert!(
+            repo_config_kinds(tmp.path()).contains(&"skills"),
+            "skills-only repo must report the skills kind"
+        );
+        assert_eq!(
+            decide(
+                true,
+                &DecideInputs {
+                    store_trusted: false,
+                    repo_configs_present: repo_configs_present(tmp.path()),
+                    is_interactive: false,
+                    key_recordable: true,
+                }
+            ),
+            TrustOutcome::Untrusted,
+            "skills-only repo must not auto-trust"
+        );
+    }
+
+    #[test]
+    fn repo_configs_present_detects_claude_skills_only() {
+        // A repo whose only extra file is `.claude/skills/commit/SKILL.md`
+        // must still trip the gate (vendor skill dirs load by default).
+        let tmp = repo_tmp();
+        let skill_dir = tmp.path().join(".claude").join("skills").join("commit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: commit\n---\n").unwrap();
+        assert!(repo_configs_present(tmp.path()));
+        assert!(repo_config_kinds(tmp.path()).contains(&"skills"));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_project_skills_from_subdir() {
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".grok").join("skills")).unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert!(repo_configs_present(&subdir));
+        assert!(repo_config_kinds(&subdir).contains(&"skills"));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_project_commands() {
+        // Commands are loaded as skills; a commands-only clone must still gate.
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".grok").join("commands")).unwrap();
+        assert!(repo_configs_present(tmp.path()));
+        assert!(repo_config_kinds(tmp.path()).contains(&"skills"));
     }
 
     #[test]

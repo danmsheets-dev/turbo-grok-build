@@ -230,10 +230,8 @@ pub(super) enum PlanEditGate {
 /// `apply_patch` maps to `AccessKind::Edit`/`EditMany` with real hunk paths and
 /// therefore never matches the plan file: it is always rejected in plan mode
 /// (conservative — per-file targets are only known after patch parsing).
-/// Non-edit tools (bash, read, grep, MCP, web) are never gated here; they
-/// flow to the normal permission path, where yolo may still auto-approve
-/// them. `enter_plan_mode` / `exit_plan_mode` map to `AccessKind::Read` and
-/// are likewise never gated.
+/// Every non-read-only tool is rejected by default so newly added tool inputs
+/// cannot silently gain plan-mode execution privileges.
 pub(super) fn plan_mode_edit_gate(
     tracker: &crate::session::plan_mode::PlanModeTracker,
     tool_input: &ToolInput,
@@ -242,19 +240,42 @@ pub(super) fn plan_mode_edit_gate(
     if !tracker.is_active() {
         return PlanEditGate::Allow;
     }
-    let _ = tool_input;
+
+    if matches!(
+        tool_input,
+        ToolInput::ReadFile(_)
+            | ToolInput::ListDir(_)
+            | ToolInput::Grep(_)
+            | ToolInput::TaskOutput(_)
+            | ToolInput::WaitTasks(_)
+            | ToolInput::WebSearch(_)
+            | ToolInput::WebFetch(_)
+            | ToolInput::CodexListDir(_)
+            | ToolInput::CodexGrepFiles(_)
+            | ToolInput::CodexReadFile(_)
+            | ToolInput::MemorySearch(_)
+            | ToolInput::MemoryGet(_)
+            | ToolInput::SearchTool(_)
+            | ToolInput::McpServerHealth(_)
+            | ToolInput::Lsp(_)
+            | ToolInput::SchedulerList(_)
+            | ToolInput::DiffSubagent(_)
+            | ToolInput::Receipts(_)
+            | ToolInput::GhPrStatus(_)
+            | ToolInput::GhCiStatus(_)
+            | ToolInput::WorkspaceTree(_)
+            | ToolInput::ResolvePath(_)
+            | ToolInput::EnterPlanMode(_)
+            | ToolInput::ExitPlanMode(_)
+    ) {
+        return PlanEditGate::Allow;
+    }
+
     match access_kind {
-        AccessKind::Edit(path) if !tracker.should_auto_approve_edit(Path::new(path)) => {
-            PlanEditGate::RejectNonPlanFile
+        AccessKind::Edit(path) if tracker.should_auto_approve_edit(Path::new(path)) => {
+            PlanEditGate::Allow
         }
-        AccessKind::EditMany(paths)
-            if paths
-                .iter()
-                .any(|p| !tracker.should_auto_approve_edit(Path::new(p))) =>
-        {
-            PlanEditGate::RejectNonPlanFile
-        }
-        _ => PlanEditGate::Allow,
+        _ => PlanEditGate::RejectNonPlanFile,
     }
 }
 /// Typed view of an `exit_plan_mode` approval decision. The wire type
@@ -352,6 +373,53 @@ fn meeting_ask_drains_queue(raw_input: &serde_json::Value) -> bool {
         Some(serde_json::Value::String(s)) => s.trim().is_empty(),
         Some(_) => true,
     }
+}
+
+/// Read-only kinds a meeting-QA turn may use. `WebFetch` is excluded: a guest
+/// question must not pull arbitrary URLs.
+fn meeting_qa_allows_kind(kind: xai_grok_tools::types::tool::ToolKind) -> bool {
+    use xai_grok_tools::types::tool::ToolKind;
+    matches!(
+        kind,
+        ToolKind::Read
+            | ToolKind::Search
+            | ToolKind::Lsp
+            | ToolKind::ListDir
+            | ToolKind::List
+            | ToolKind::MemorySearch
+            | ToolKind::MemoryGet
+            | ToolKind::WebSearch
+            | ToolKind::EnterPlan
+            | ToolKind::ExitPlan
+            | ToolKind::AskUser
+    )
+}
+
+fn meeting_qa_fs_paths(input: &ToolInput) -> Vec<&str> {
+    match input {
+        ToolInput::ReadFile(r) => vec![r.path.as_str()],
+        ToolInput::ListDir(l) => vec![l.target_directory.as_str()],
+        ToolInput::Grep(g) => g.path.as_deref().into_iter().collect(),
+        ToolInput::CodexReadFile(r) => vec![r.file_path.as_str()],
+        ToolInput::CodexListDir(l) => vec![l.dir_path.as_str()],
+        ToolInput::CodexGrepFiles(g) => g.path.as_deref().into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn meeting_qa_path_allowed(
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+    workspace_root: &std::path::Path,
+    path: &str,
+) -> bool {
+    xai_grok_tools::types::resources::resolve_model_path_confined(
+        cwd,
+        display_cwd,
+        workspace_root,
+        path,
+    )
+    .is_ok()
 }
 
 impl SessionActor {
@@ -1236,6 +1304,9 @@ impl SessionActor {
                     xai_grok_telemetry::events::AccessKind::Grep,
                     path.clone().or_else(|| glob.clone()).unwrap_or_default(),
                 ),
+                xai_grok_workspace::permission::AccessKind::Tool { name } => {
+                    (xai_grok_telemetry::events::AccessKind::Mcp, name.clone())
+                }
                 xai_grok_workspace::permission::AccessKind::MCPTool { name, .. } => {
                     (xai_grok_telemetry::events::AccessKind::Mcp, name.clone())
                 }
@@ -1584,11 +1655,12 @@ impl SessionActor {
                 "[exit_plan_mode] cursor SwitchMode(agent) with empty plan — skipping intercept"
             );
         }
-        let is_read_only = self
+        let tool_kind = self
             .agent
             .borrow()
             .tool_bridge()
-            .tool_kind(&call.function.name)
+            .tool_kind(&call.function.name);
+        let is_read_only = tool_kind
             .map(|k| {
                 use xai_grok_tools::types::tool::ToolKind;
                 matches!(
@@ -1610,9 +1682,10 @@ impl SessionActor {
             .unwrap_or(false);
 
         // A turn driven by meeting chat or speech is confined to the read-only
-        // set above. The question came from participants who may be outside the
-        // organization, so "do not run shell commands" is enforced here rather
-        // than merely asked for in the prompt.
+        // set above, minus `WebFetch`. The question came from participants who
+        // may be outside the organization, so "do not run shell commands" and
+        // "do not fetch arbitrary URLs" are enforced here rather than merely
+        // asked for in the prompt.
         //
         // The notetaker's own Q&A tools are exempt: every meeting tool is
         // `ToolKind::Meeting`, which is not read-only as a class, but reading
@@ -1646,27 +1719,48 @@ impl SessionActor {
             }));
         }
 
-        if !is_read_only && !meeting_qa_tool && self.turn_is_untrusted_third_party() {
-            let message = format!(
-                "`{}` is not available while answering a meeting question. Meeting text is \
-                 untrusted, so this turn may only use read-only tools (read, search, list, \
-                 LSP, memory lookup, web) plus meeting_ask/meeting_reply/meeting_transcript/\
-                 meeting_status. Answer from what you can read, or tell the meeting that the \
-                 operator has to make that change themselves.",
-                call.function.name
-            );
-            tracing::warn!(
-                tool = %call.function.name,
-                "blocked a write/exec tool in a meeting-question turn"
-            );
-            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                .await?;
-            // Non-terminal: the model still has to post an answer with
-            // meeting_reply. Cancelling here would leave the coworker with
-            // silence and contradict the refusal text.
-            return Ok(Err(ToolLoop::PolicyDenied {
-                policy: "meeting_read_only",
-            }));
+        if self.turn_is_untrusted_third_party() {
+            let kind_allowed = tool_kind.is_some_and(meeting_qa_allows_kind);
+            if !kind_allowed && !meeting_qa_tool {
+                let message = format!(
+                    "`{}` is not available while answering a meeting question. Meeting text is \
+                     untrusted, so this turn may only use workspace-local read-only tools (read, \
+                     search, list, LSP, memory lookup, web search) plus meeting_ask/meeting_reply/\
+                     meeting_transcript/meeting_status. Answer from what you can read, or tell \
+                     the meeting that the operator has to make that change themselves.",
+                    call.function.name
+                );
+                tracing::warn!(
+                    tool = %call.function.name,
+                    "blocked a write/exec/fetch tool in a meeting-question turn"
+                );
+                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                    .await?;
+                return Ok(Err(ToolLoop::PolicyDenied {
+                    policy: "meeting_read_only",
+                }));
+            }
+            let workspace_root = self.tool_context.cwd.as_path();
+            let display_cwd = self.display_cwd.get().map(std::path::Path::new);
+            for path in meeting_qa_fs_paths(&tool_input) {
+                if !meeting_qa_path_allowed(workspace_root, display_cwd, workspace_root, path) {
+                    let message = format!(
+                        "`{}` cannot read `{}` while answering a meeting question. Meeting text \
+                         is untrusted, so file access is limited to the workspace.",
+                        call.function.name, path
+                    );
+                    tracing::warn!(
+                        tool = %call.function.name,
+                        path = %path,
+                        "blocked an out-of-workspace read in a meeting-question turn"
+                    );
+                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                        .await?;
+                    return Ok(Err(ToolLoop::PolicyDenied {
+                        policy: "meeting_workspace_confine",
+                    }));
+                }
+            }
         }
 
         let prepared = PreparedToolCall {
@@ -3381,11 +3475,36 @@ mod plan_mode_edit_gate_tests {
             PlanEditGate::RejectNonPlanFile
         );
     }
-    /// Non-edit tools are never gated — they flow to the normal permission
-    /// path (where yolo may auto-approve them). Plan mode blocks
-    /// edits, not bash/reads.
     #[test]
-    fn non_edit_tools_not_gated() {
+    fn workflow_and_scheduler_create_are_rejected_in_plan_mode() {
+        use xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateInput;
+        use xai_grok_tools::implementations::grok_build::workflow::WorkflowToolInput;
+
+        let t = active_tracker();
+        let workflow = ToolInput::Workflow(WorkflowToolInput {
+            agent_budget: None,
+            name: Some("review".into()),
+            script: None,
+            script_path: None,
+            args: None,
+            resume_from_run_id: None,
+            validate_only: false,
+        });
+        let scheduler = ToolInput::SchedulerCreate(
+            serde_json::from_value::<SchedulerCreateInput>(serde_json::json!({
+                "interval": "1h",
+                "prompt": "do work"
+            }))
+            .unwrap(),
+        );
+
+        assert_eq!(gate(&t, &workflow), PlanEditGate::RejectNonPlanFile);
+        assert_eq!(gate(&t, &scheduler), PlanEditGate::RejectNonPlanFile);
+    }
+
+    /// Commands are not on the plan-mode read-only allowlist.
+    #[test]
+    fn bash_is_rejected_in_plan_mode() {
         use xai_grok_tools::implementations::BashToolInput;
         let t = active_tracker();
         assert_eq!(
@@ -3398,8 +3517,8 @@ mod plan_mode_edit_gate_tests {
                     is_background: false,
                 })
             ),
-            PlanEditGate::Allow,
-            "bash is deliberately not gated — plan mode blocks edits only"
+            PlanEditGate::RejectNonPlanFile,
+            "bash is not on the explicit plan-mode read-only allowlist"
         );
     }
     /// Inactive (or merely Pending) plan mode gates nothing.

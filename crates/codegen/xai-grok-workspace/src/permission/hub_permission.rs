@@ -133,6 +133,7 @@ fn scope_for_access(access: &AccessKind) -> &'static str {
         AccessKind::Bash(_)
         | AccessKind::Edit(_)
         | AccessKind::EditMany(_)
+        | AccessKind::Tool { .. }
         | AccessKind::MCPTool { .. } => "write",
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
@@ -143,6 +144,7 @@ fn scope_for_access(access: &AccessKind) -> &'static str {
 fn describe_access(access: &AccessKind) -> String {
     match access {
         AccessKind::Bash(_) => "Run a terminal command".to_owned(),
+        AccessKind::Tool { name } => format!("Run tool {name}"),
         AccessKind::Edit(path) => format!("Edit {path}"),
         AccessKind::EditMany(paths) => format!("Edit {} files", paths.len()),
         AccessKind::MCPTool { name, .. } => format!("Run MCP tool {name}"),
@@ -231,13 +233,13 @@ fn scope_kind_value(reply: &Value) -> Option<(&str, Option<String>)> {
     Some((kind, value))
 }
 /// Map a hub-served tool name + JSON args onto an [`AccessKind`] for the
-/// permission gate in [`crate::hub::SessionRoutedToolHandler`]. Returns `None`
-/// for tools that never need a user prompt (reads / todos / dynamic).
+/// permission gate in [`crate::hub::SessionRoutedToolHandler`]. Unknown tools
+/// are conservatively treated as execution-capable rather than skipped.
 pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessKind> {
     let name = tool_name.rsplit(':').next().unwrap_or(tool_name);
     let name = name.strip_prefix("GrokBuild:").unwrap_or(name);
     match name {
-        "run_terminal_command" | "run_terminal_cmd" | "bash" | "shell" => {
+        "run_terminal_command" | "run_terminal_cmd" | "bash" | "shell" | "monitor" => {
             let cmd = args
                 .get("command")
                 .or_else(|| args.get("full_command"))
@@ -288,11 +290,25 @@ pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessK
                 .to_owned();
             Some(AccessKind::WebFetch(url))
         }
+        "browser_navigate" => match args.get("url").and_then(Value::as_str) {
+            Some(url) => Some(AccessKind::WebFetch(url.to_owned())),
+            None => Some(AccessKind::Tool {
+                name: "browser_navigate".to_owned(),
+            }),
+        },
+        "task" | "Task" | "spawn_many" | "SpawnMany" | "scheduler_create" | "SchedulerCreate"
+        | "scheduler_delete" | "SchedulerDelete" | "workflow" | "Workflow" | "land_subagent"
+        | "LandSubagent" | "discard_subagent" | "DiscardSubagent" | "meeting_reply"
+        | "browser_eval" => Some(AccessKind::Tool {
+            name: name.to_owned(),
+        }),
         n if n.contains("__") || n.starts_with("mcp") => Some(AccessKind::MCPTool {
             name: tool_name.to_owned(),
             input: args.clone(),
         }),
-        _ => None,
+        _ => Some(AccessKind::Tool {
+            name: name.to_owned(),
+        }),
     }
 }
 /// Whether a [`PromptOutcome`] allows the tool call to proceed.
@@ -514,6 +530,26 @@ mod tests {
         .await;
         assert!(matches!(outcome, PromptOutcome::AllowAlways));
     }
+    #[test]
+    fn execution_capable_hub_tools_are_not_skipped() {
+        for name in [
+            "task",
+            "spawn_many",
+            "scheduler_create",
+            "scheduler_delete",
+            "workflow",
+            "land_subagent",
+            "meeting_reply",
+            "browser_eval",
+            "unknown_execute_tool",
+        ] {
+            assert!(matches!(
+                access_kind_for_hub_tool(name, &serde_json::json!({})),
+                Some(AccessKind::Tool { .. })
+            ));
+        }
+    }
+
     #[test]
     fn hitl_permission_live_defaults_off_without_env() {
         if std::env::var(HITL_PERMISSION_LIVE_ENV).is_err() {

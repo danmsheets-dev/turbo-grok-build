@@ -472,12 +472,14 @@ impl HeuristicPermissionClassifier {
             // defense-in-depth fallback so the user is prompted rather than
             // silently auto-approving; non-allowlisted MCP tools land
             // here too.
-            AccessKind::Edit(_) | AccessKind::EditMany(_) | AccessKind::MCPTool { .. } => {
-                ClassifierVerdict::Block
-            }
-            AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
+            AccessKind::Edit(_)
+            | AccessKind::EditMany(_)
+            | AccessKind::Tool { .. }
+            | AccessKind::MCPTool { .. } => ClassifierVerdict::Block,
+            AccessKind::Read(Some(_)) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
                 ClassifierVerdict::Allow
             }
+            AccessKind::Read(None) => ClassifierVerdict::Block,
         }
     }
 }
@@ -1142,7 +1144,7 @@ pub type SharedClassifier = Arc<dyn PermissionClassifier>;
 pub fn is_auto_mode_allowlisted_access(access: &AccessKind) -> bool {
     matches!(
         access,
-        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
+        AccessKind::Read(Some(_)) | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
     )
 }
 
@@ -1377,6 +1379,7 @@ pub fn build_classifier_messages(
         AccessKind::Grep { .. } => "grep",
         AccessKind::Edit(_) | AccessKind::EditMany(_) => "edit",
         AccessKind::Bash(_) => "bash",
+        AccessKind::Tool { .. } => "tool",
         AccessKind::MCPTool { .. } => "mcp",
         AccessKind::WebFetch(_) => "web_fetch",
         AccessKind::WebSearch(_) => "web_search",
@@ -1680,7 +1683,7 @@ mod tests {
     fn fast_path_allowlists_and_all_edits() {
         assert_eq!(
             auto_mode_fast_path(&AccessKind::Read(None), "read_file", false),
-            AutoFastPath::Allow
+            AutoFastPath::Classify
         );
         assert_eq!(
             auto_mode_fast_path(

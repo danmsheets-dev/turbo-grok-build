@@ -617,6 +617,9 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
             let cmd = cmd.trim_start();
             cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
         }
+        AccessKind::Tool { name } => {
+            glob_matches(name, MatchContext::Freeform, cr.matcher) || name.starts_with(pattern)
+        }
         // Path tools: match every spelling that resolves to the same operand —
         // the lexically normalised (and cwd-joined) forms AND the canonicalised
         // operand / rule prefix — so `../Main Repo/x`, `MAINRE~1\x`, `./x` and

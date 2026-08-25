@@ -204,6 +204,11 @@ pub enum AccessKind {
     /// checks every element; a single outside path is a denial.
     EditMany(Vec<String>),
     Bash(String),
+    /// A named built-in tool whose operation is not safely reducible to file,
+    /// shell, or web access.
+    Tool {
+        name: String,
+    },
     /// An MCP tool call: the tool name plus its raw JSON args. The args are
     /// carried so the auto-mode classifier (and telemetry) can judge what the
     /// call actually does, not just its name. Under `--confine`, path-shaped
@@ -336,12 +341,17 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
                 path: g.path.as_deref().map(gate_path),
                 glob: g.glob.clone(),
             },
-            ToolInput::TodoWrite(_)
-            | ToolInput::TaskOutput(_)
-            | ToolInput::WaitTasks(_)
-            | ToolInput::KillTask(_)
-            | ToolInput::Skill(_) => AccessKind::Read(None),
+            ToolInput::TodoWrite(_) => tool_access("todo_write"),
+            ToolInput::TaskOutput(_) | ToolInput::WaitTasks(_) => AccessKind::Read(None),
+            ToolInput::KillTask(_) => tool_access("kill_task"),
+            ToolInput::Skill(_) => tool_access("skill"),
+            ToolInput::Task(_) => tool_access("task"),
             ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
+            ToolInput::ImageGen(_) => tool_access("image_gen"),
+            ToolInput::ImageEdit(_) => tool_access("image_edit"),
+            ToolInput::ImageToVideo(_) => tool_access("image_to_video"),
+            ToolInput::ReferenceToVideo(_) => tool_access("reference_to_video"),
+            ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(gate_path(&search_replace.file_path.to_string()))
             }
@@ -354,32 +364,67 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
                 name: mcp.tool_name.to_string(),
                 input: mcp.tool_input.clone(),
             },
+            ToolInput::CodexListDir(l) => AccessKind::Read(Some(gate_path(&l.dir_path))),
+            ToolInput::CodexGrepFiles(g) => AccessKind::Grep {
+                path: g.path.as_deref().map(gate_path),
+                glob: g.include.clone(),
+            },
+            ToolInput::CodexReadFile(r) => AccessKind::Read(Some(gate_path(&r.file_path))),
+            ToolInput::MemorySearch(_) | ToolInput::MemoryGet(_) => AccessKind::Read(None),
+            ToolInput::SearchTool(_) | ToolInput::McpServerHealth(_) => AccessKind::Read(None),
             ToolInput::UseTool(u) => AccessKind::MCPTool {
                 name: u.tool_name.clone(),
                 input: u.tool_input.clone(),
             },
-            ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
-            // Mutating built-ins must never fall into the Read(None) catch-all
-            // below: rollback rewrites a file, gh rerun triggers CI, steer
-            // injects into a child session (control-plane write). Receipt ids
-            // are not paths, so rollback gates on a distinctive name the way
-            // unparseable apply_patch bodies do.
+            ToolInput::EnterPlanMode(_) => tool_access("enter_plan_mode"),
+            ToolInput::ExitPlanMode(_) => tool_access("exit_plan_mode"),
+            ToolInput::AskUserQuestion(_) => tool_access("ask_user_question"),
+            ToolInput::Lsp(l) => AccessKind::Read(l.file_path.as_deref().map(gate_path)),
+            ToolInput::SchedulerCreate(_) => tool_access("scheduler_create"),
+            ToolInput::SchedulerDelete(_) => tool_access("scheduler_delete"),
+            ToolInput::SchedulerList(_) => AccessKind::Read(None),
+            ToolInput::UpdateGoal(_) => tool_access("update_goal"),
+            ToolInput::Workflow(_) => tool_access("workflow"),
+            ToolInput::DiffSubagent(_) => AccessKind::Read(None),
+            ToolInput::LandSubagent(_) => tool_access("land_subagent"),
+            ToolInput::DiscardSubagent(_) => tool_access("discard_subagent"),
+            ToolInput::DeveloperLog(_) => tool_access("developer_log"),
+            ToolInput::FeatureRequestLog(_) => tool_access("feature_request_log"),
+            ToolInput::Receipts(_) => AccessKind::Read(None),
             ToolInput::Rollback(rb) => AccessKind::Edit(format!("<rollback:{}>", rb.receipt_id)),
-            ToolInput::GhCiRerun(rerun) => {
-                AccessKind::Bash(if rerun.failed_only {
-                    format!("gh run rerun {} --failed", rerun.run)
-                } else {
-                    format!("gh run rerun {}", rerun.run)
-                })
-            }
             ToolInput::Steer(steer) => {
                 AccessKind::Bash(format!("steer {} <guidance>", steer.subagent_id))
             }
-            ToolInput::Dynamic(_) => AccessKind::Read(None),
-            #[allow(unreachable_patterns)]
-            _ => AccessKind::Read(None),
+            ToolInput::GhPrStatus(_) | ToolInput::GhCiStatus(_) => AccessKind::Read(None),
+            ToolInput::GhCiRerun(rerun) => AccessKind::Bash(if rerun.failed_only {
+                format!("gh run rerun {} --failed", rerun.run)
+            } else {
+                format!("gh run rerun {}", rerun.run)
+            }),
+            ToolInput::WorkspaceTree(_) | ToolInput::ResolvePath(_) => AccessKind::Read(None),
+            ToolInput::SpawnMany(_) => tool_access("spawn_many"),
+            ToolInput::Dynamic(value) => dynamic_access_kind(value),
         }
     }
+}
+
+fn tool_access(name: &str) -> AccessKind {
+    AccessKind::Tool {
+        name: name.to_owned(),
+    }
+}
+
+fn dynamic_access_kind(value: &serde_json::Value) -> AccessKind {
+    let name = value
+        .get("__turbo_permission_tool")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("dynamic");
+    if name == "browser_navigate" {
+        if let Some(url) = value.get("url").and_then(serde_json::Value::as_str) {
+            return AccessKind::WebFetch(url.to_owned());
+        }
+    }
+    tool_access(name)
 }
 
 /// Map an apply_patch body onto real edit targets for the permission / confine
@@ -966,6 +1011,104 @@ mod tests {
             "Write should produce AccessKind::Edit with the file path, got {access:?}"
         );
     }
+    #[test]
+    fn sensitive_tool_inputs_are_not_unscoped_reads() {
+        use xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateInput;
+        use xai_grok_tools::implementations::grok_build::subagent_worktree::land::LandSubagentInput;
+        use xai_grok_tools::implementations::grok_build::workflow::WorkflowToolInput;
+        use xai_grok_tools::types::ToolInput;
+
+        let inputs = [
+            (
+                "workflow",
+                ToolInput::Workflow(WorkflowToolInput {
+                    agent_budget: None,
+                    name: Some("review".into()),
+                    script: None,
+                    script_path: None,
+                    args: None,
+                    resume_from_run_id: None,
+                    validate_only: false,
+                }),
+            ),
+            (
+                "dynamic",
+                ToolInput::Dynamic(serde_json::json!({"function": "() => document.body.remove()"})),
+            ),
+            (
+                "task",
+                ToolInput::Task(
+                    serde_json::from_value(serde_json::json!({
+                        "prompt": "do work",
+                        "description": "Do work"
+                    }))
+                    .unwrap(),
+                ),
+            ),
+            (
+                "land_subagent",
+                ToolInput::LandSubagent(LandSubagentInput {
+                    subagent_id: "sa-1".into(),
+                    mode: None,
+                    force: None,
+                    only_missing: None,
+                    json_union_by: None,
+                }),
+            ),
+            (
+                "scheduler_create",
+                ToolInput::SchedulerCreate(
+                    serde_json::from_value::<SchedulerCreateInput>(serde_json::json!({
+                        "interval": "1h",
+                        "prompt": "do work"
+                    }))
+                    .unwrap(),
+                ),
+            ),
+        ];
+
+        for (name, input) in inputs {
+            assert!(
+                !matches!(AccessKind::from(&input), AccessKind::Read(None)),
+                "{name} must not be classified as an unscoped read"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_eval_is_a_named_tool_access() {
+        use xai_grok_tools::implementations::grok_build::browser::BrowserEvalInput;
+        use xai_grok_tools::types::ToolInput;
+
+        let input: ToolInput = BrowserEvalInput {
+            function: "() => document.forms[0].submit()".into(),
+            confirm: true,
+        }
+        .into();
+        assert!(matches!(
+            AccessKind::from(&input),
+            AccessKind::Tool { name } if name == "browser_eval"
+        ));
+    }
+
+    #[test]
+    fn opencode_edit_maps_to_edit_access() {
+        use xai_grok_tools::implementations::opencode::edit::EditInput;
+        use xai_grok_tools::types::ToolInput;
+
+        let input: ToolInput = EditInput {
+            file_path: "src/main.rs".into(),
+            old_string: "old".into(),
+            new_string: "new".into(),
+            replace_all: false,
+        }
+        .into();
+        assert!(matches!(
+            AccessKind::from(&input),
+            AccessKind::Edit(path) if path == "src/main.rs"
+        ));
+    }
+
     #[test]
     fn client_type_deserializes_grok_shell_as_generic() {
         assert_eq!(

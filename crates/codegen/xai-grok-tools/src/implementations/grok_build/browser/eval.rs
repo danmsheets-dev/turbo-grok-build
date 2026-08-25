@@ -6,9 +6,9 @@
 //! click a submit button without the `browser_click` confirmation, or write a
 //! password field without the `browser_fill` credential check.
 //!
-//! [`check_eval_is_read_only`] closes that gap. Expressions that only read are
-//! allowed as before; expressions that mutate, submit, or navigate need the
-//! same `confirm=true` the equivalent `browser_click` would have needed.
+//! Permission classification closes that gap. `confirm=true` only carries the
+//! model's intent to the browser host; it is not a user approval and cannot
+//! bypass the permission gate. The substring check remains defense in depth.
 
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -37,10 +37,10 @@ pub fn mutates_page(function: &str) -> bool {
     xai_grok_browser::eval_looks_mutating(function)
 }
 
-/// Require `confirm` for an expression that acts on the page.
+/// Apply a local defense-in-depth check before forwarding an expression.
 ///
-/// Deliberately conservative: a false positive costs one extra confirmation,
-/// a false negative silently bypasses the click/fill policies.
+/// User approval is enforced by the permission gate; `confirm` only avoids an
+/// accidental host-side rejection after that approval.
 pub fn check_eval_is_read_only(function: &str, confirm: bool) -> Result<(), ToolError> {
     if confirm || !mutates_page(function) {
         return Ok(());

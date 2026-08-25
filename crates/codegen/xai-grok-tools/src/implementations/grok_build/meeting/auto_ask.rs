@@ -17,7 +17,9 @@ pub const MEETING_QA_TASK_PREFIX: &str = "meeting-qa-";
 pub fn auto_ask_enabled() -> bool {
     match std::env::var(AUTO_ASK_ENV) {
         Ok(s) => !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
-        Err(_) => true,
+        // Off unless the operator opts in: meeting-guest text must not start a
+        // workspace-reading turn by default.
+        Err(_) => false,
     }
 }
 
@@ -66,11 +68,47 @@ mod tests {
         assert!(a.starts_with("meeting-qa-"));
     }
 
+    static AUTO_ASK_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(val: &str) -> Self {
+            let prev = std::env::var(AUTO_ASK_ENV).ok();
+            unsafe { std::env::set_var(AUTO_ASK_ENV, val) };
+            Self { prev }
+        }
+
+        fn unset() -> Self {
+            let prev = std::env::var(AUTO_ASK_ENV).ok();
+            unsafe { std::env::remove_var(AUTO_ASK_ENV) };
+            Self { prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(prev) => unsafe { std::env::set_var(AUTO_ASK_ENV, prev) },
+                None => unsafe { std::env::remove_var(AUTO_ASK_ENV) },
+            }
+        }
+    }
+
+    #[test]
+    fn auto_ask_default_is_false() {
+        let _lock = AUTO_ASK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::unset();
+        assert!(!auto_ask_enabled());
+    }
+
     #[test]
     fn emit_sends_when_enabled() {
-        if !auto_ask_enabled() {
-            return;
-        }
+        let _lock = AUTO_ASK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("1");
+        assert!(auto_ask_enabled());
         let (h, mut rx) = ToolNotificationHandle::channel();
         assert!(emit_auto_ask(Some(&h), "alice", "How is the website?"));
         let n = rx.try_recv().expect("notification");
@@ -84,5 +122,14 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(!emit_auto_ask(None, "alice", "x"));
+    }
+
+    #[test]
+    fn emit_is_noop_when_default_off() {
+        let _lock = AUTO_ASK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::unset();
+        let (h, mut rx) = ToolNotificationHandle::channel();
+        assert!(!emit_auto_ask(Some(&h), "alice", "How is the website?"));
+        assert!(rx.try_recv().is_err());
     }
 }

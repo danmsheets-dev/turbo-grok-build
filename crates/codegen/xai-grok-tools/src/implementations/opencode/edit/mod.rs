@@ -88,25 +88,36 @@ pub struct EditInput {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// ToolInput conversions (via Dynamic variant)
+// ToolInput conversions
 // ───────────────────────────────────────────────────────────────────────────
 
 impl TryFrom<crate::types::tool_io::ToolInput> for EditInput {
     type Error = String;
     fn try_from(value: crate::types::tool_io::ToolInput) -> Result<Self, Self::Error> {
         match value {
+            crate::types::tool_io::ToolInput::SearchReplace(input) => Ok(Self {
+                file_path: input.file_path,
+                old_string: input.old_string,
+                new_string: input.new_string,
+                replace_all: input.replace_all,
+            }),
             crate::types::tool_io::ToolInput::Dynamic(v) => {
                 serde_json::from_value(v).map_err(|e| format!("EditInput: {e}"))
             }
-            _ => Err("expected Dynamic variant for EditInput".into()),
+            _ => Err("expected SearchReplace or Dynamic variant for EditInput".into()),
         }
     }
 }
 
 impl From<EditInput> for crate::types::tool_io::ToolInput {
     fn from(value: EditInput) -> Self {
-        crate::types::tool_io::ToolInput::Dynamic(
-            serde_json::to_value(value).expect("EditInput serializes to JSON"),
+        crate::types::tool_io::ToolInput::SearchReplace(
+            crate::implementations::grok_build::search_replace::SearchReplaceInput {
+                file_path: value.file_path,
+                old_string: value.old_string,
+                new_string: value.new_string,
+                replace_all: value.replace_all,
+            },
         )
     }
 }

@@ -58,6 +58,20 @@ fn dynamic_tool_input(value: &impl serde::Serialize) -> crate::types::tool_io::T
     )
 }
 
+fn named_dynamic_tool_input(
+    value: &impl serde::Serialize,
+    tool_name: &str,
+) -> crate::types::tool_io::ToolInput {
+    let mut value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "__turbo_permission_tool".to_owned(),
+            serde_json::Value::String(tool_name.to_owned()),
+        );
+    }
+    crate::types::tool_io::ToolInput::Dynamic(value)
+}
+
 impl From<BrowserDownloadsInput> for crate::types::tool_io::ToolInput {
     fn from(input: BrowserDownloadsInput) -> Self {
         dynamic_tool_input(&input)
@@ -66,7 +80,7 @@ impl From<BrowserDownloadsInput> for crate::types::tool_io::ToolInput {
 
 impl From<BrowserNavigateInput> for crate::types::tool_io::ToolInput {
     fn from(input: BrowserNavigateInput) -> Self {
-        dynamic_tool_input(&input)
+        named_dynamic_tool_input(&input, BROWSER_NAVIGATE_TOOL_NAME)
     }
 }
 
@@ -90,7 +104,7 @@ impl From<BrowserFillInput> for crate::types::tool_io::ToolInput {
 
 impl From<BrowserEvalInput> for crate::types::tool_io::ToolInput {
     fn from(input: BrowserEvalInput) -> Self {
-        dynamic_tool_input(&input)
+        named_dynamic_tool_input(&input, BROWSER_EVAL_TOOL_NAME)
     }
 }
 

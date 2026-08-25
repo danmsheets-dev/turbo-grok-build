@@ -892,6 +892,7 @@ pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::Edit(_) => "search_replace".to_owned(),
         AccessKind::EditMany(_) => "apply_patch".to_owned(),
         AccessKind::Bash(_) => "run_terminal_command".to_owned(),
+        AccessKind::Tool { name } => name.clone(),
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),
         AccessKind::WebSearch(_) => "web_search".to_owned(),
