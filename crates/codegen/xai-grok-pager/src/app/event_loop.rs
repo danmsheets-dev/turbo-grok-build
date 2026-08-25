@@ -3685,8 +3685,13 @@ const PASTE_DETECT_TIMEOUT: Duration = Duration::from_millis(2);
 /// Timeout for subsequent rounds once paste has been detected.
 const PASTE_CONTINUE_TIMEOUT: Duration = Duration::from_millis(10);
 
-/// Safety cap on events accumulated in one extension pass.
+/// Safety cap on timeout-extend rounds. Remaining buffered events are still
+/// drained so a large cmd.exe paste is one coalesce pass.
 const PASTE_EXTEND_MAX_EVENTS: usize = 5_000;
+
+/// A burst this long without Enter is still a paste (cmd.exe / no
+/// bracketed-paste). Below this, keep typed identifiers as key events.
+const PASTE_BURST_COALESCE: usize = 64;
 
 /// Returns `true` when the batch contains pasteable key events but no
 /// `Event::Paste` (i.e. bracketed paste is not handling it).
@@ -3725,6 +3730,10 @@ async fn collect_remaining_paste(
     let mut extended = 0usize;
     loop {
         if extended >= PASTE_EXTEND_MAX_EVENTS {
+            // Cap only the timeout-extend loop. Drain whatever is already
+            // buffered so a ~5KB cmd.exe paste is one coalesce pass, not
+            // thousands of leftover key events on later ticks.
+            drain_immediate(batch, input_rx);
             break;
         }
         match tokio::time::timeout(PASTE_CONTINUE_TIMEOUT, input_rx.recv()).await {
@@ -3929,6 +3938,7 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
 
             let run_len = i - run_start;
             let multiline_paste = run_len >= PASTE_COALESCE_THRESHOLD && has_char_after_enter;
+            let burst_paste = run_len >= PASTE_BURST_COALESCE;
             // Windows fallback for drag-drops that arrive as a key
             // burst instead of a bracketed paste — reuse the drop
             // classifier's anchor detector so the two layers can't
@@ -3938,7 +3948,7 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
                 && crate::prompt_images::starts_with_drop_anchor(&text);
             #[cfg(not(target_os = "windows"))]
             let path_shaped_drop = false;
-            if multiline_paste || path_shaped_drop {
+            if multiline_paste || path_shaped_drop || burst_paste {
                 tracing::debug!(
                     run_len,
                     text_len = text.len(),
@@ -5660,6 +5670,29 @@ mod tests {
             coalesce_rapid_keys(press_run(prose))
                 .iter()
                 .all(|e| matches!(e.event, Event::Key(_)))
+        );
+    }
+
+    /// cmd.exe has weak bracketed paste: a ~5KB clipboard arrives as one
+    /// key event per character. Coalesce that burst into a single Paste
+    /// so the TUI does not process thousands of inserts.
+    #[test]
+    fn coalesce_large_unbracketed_burst_into_one_paste() {
+        let text = "a".repeat(5_000);
+        let events: Vec<TimedInputEvent> = text.chars().map(|c| press(KeyCode::Char(c))).collect();
+        let result = coalesce_rapid_keys(events);
+        assert_eq!(result.len(), 1, "5KB burst must be one Paste, got {}", result.len());
+        assert_eq!(result[0].event, Event::Paste(text));
+    }
+
+    #[test]
+    fn coalesce_burst_threshold_does_not_eat_short_typed_runs() {
+        let text = "x".repeat(PASTE_BURST_COALESCE - 1);
+        let events: Vec<TimedInputEvent> = text.chars().map(|c| press(KeyCode::Char(c))).collect();
+        let result = coalesce_rapid_keys(events);
+        assert!(
+            result.iter().all(|e| matches!(e.event, Event::Key(_))),
+            "sub-threshold typed run must stay keys"
         );
     }
 

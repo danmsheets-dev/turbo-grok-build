@@ -640,6 +640,19 @@ mod tests {
     }
 
     #[test]
+    fn set_name_falls_back_when_name_input_is_absent() {
+        let tap = include_str!("tap.js");
+        assert!(
+            tap.contains("return !!q(SEL.joinButton)"),
+            "missing name field must not abort join when Join exists: {tap}"
+        );
+        assert!(
+            include_str!("selectors.rs").contains("prejoin-name-input"),
+            "name_input table must keep extra Teams data-tid candidates"
+        );
+    }
+
+    #[test]
     fn tap_detects_the_launcher_page_by_path() {
         let tap = include_str!("tap.js");
         assert!(tap.contains("/dl/launcher/"), "{tap}");

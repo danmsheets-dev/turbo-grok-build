@@ -86,6 +86,70 @@ impl HashlineEditTool {
     }
 }
 
+fn policy_refuse(
+    policy: &crate::implementations::grok_build::policy::PolicyParams,
+    path: &std::path::Path,
+    file_path: &str,
+) -> Option<crate::types::output::SearchReplaceOutput> {
+    if let Some(frag) = policy.path_denied(path) {
+        return Some(crate::types::output::SearchReplaceOutput::InvalidInput(
+            crate::implementations::grok_build::policy::denial(
+                "hashline_edit",
+                "deny_paths",
+                &format!("`{file_path}`"),
+            ) + &format!(" — matched deny-path fragment `{frag}`"),
+        ));
+    }
+    if crate::implementations::grok_build::policy::grok_home_credential_denied(path) {
+        return Some(crate::types::output::SearchReplaceOutput::InvalidInput(
+            crate::implementations::grok_build::policy::grok_home_credential_denial(
+                "hashline_edit",
+                path,
+            ),
+        ));
+    }
+    None
+}
+
+fn max_diff_limit_error(
+    policy: &crate::implementations::grok_build::policy::PolicyParams,
+    old: &str,
+    new: &str,
+) -> Option<crate::types::output::SearchReplaceOutput> {
+    let added_lines = crate::types::output::line_diff(old, new).0.max(0) as u64;
+    policy.diff_exceeds_limit(added_lines).map(|(added, max)| {
+        crate::types::output::SearchReplaceOutput::InvalidInput(
+            crate::implementations::grok_build::policy::denial(
+                "hashline_edit",
+                "max_diff_lines",
+                &format!("edit adding {added} lines (limit {max})"),
+            ),
+        )
+    })
+}
+
+async fn record_hashline_receipt(
+    session_folder: Option<&std::path::Path>,
+    path: &std::path::Path,
+    pre_edit_bytes: Option<Vec<u8>>,
+    after_bytes: Option<&[u8]>,
+) {
+    crate::implementations::grok_build::receipts::try_record(
+        session_folder,
+        "hashline_edit",
+        "edit",
+        Some(path.to_string_lossy().to_string()),
+        pre_edit_bytes
+            .as_deref()
+            .map(crate::implementations::grok_build::receipts::hash_bytes),
+        after_bytes.map(crate::implementations::grok_build::receipts::hash_bytes),
+        None,
+        None,
+        pre_edit_bytes,
+    )
+    .await;
+}
+
 fn to_search_replace(
     result: HashlineEditOutput,
     file_path: &std::path::Path,
@@ -294,7 +358,17 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             ));
         }
 
-        let (cwd, display_cwd, fs, scheme, hints_enabled, confine_root, allowed_paths) = {
+        let (
+            cwd,
+            display_cwd,
+            fs,
+            scheme,
+            hints_enabled,
+            confine_root,
+            allowed_paths,
+            policy,
+            session_folder,
+        ) = {
             let res = resources.lock().await;
             let cwd = match ctx.extensions.get::<xai_tool_runtime::Cwd>() {
                 Some(dir) => dir.0.clone(),
@@ -317,6 +391,16 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             let allowed_paths = res
                 .get::<crate::types::resources::AllowedWritePaths>()
                 .map(|a| a.0.clone());
+            let policy_params = res
+                .get::<crate::types::resources::Params<
+                    crate::implementations::grok_build::policy::PolicyParams,
+                >>();
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+                policy_params.map(|p| &p.0),
+            );
+            let session_folder = res
+                .get::<crate::types::resources::SessionFolder>()
+                .map(|s| s.0.clone());
             (
                 cwd,
                 display_cwd,
@@ -325,6 +409,8 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 hints_enabled,
                 confine_root,
                 allowed_paths,
+                policy,
+                session_folder,
             )
         };
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.
@@ -351,6 +437,11 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             crate::types::resources::enforce_allowed_write_paths(&cwd, &joined_path, prefixes)
                 .map_err(|e| e.into_tool_error())?;
         }
+        // Session policy: refuse denied paths / $GROK_HOME credentials before
+        // any create-or-overwrite, including the new-file Write arm below.
+        if let Some(out) = policy_refuse(&policy, &joined_path, &input.file_path) {
+            return Ok(out);
+        }
         // Error-preserving variant: the Err arm drives new-file creation.
         let path = match crate::util::fs::try_canonicalize(&joined_path).await {
             Ok(p) => p,
@@ -365,6 +456,9 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                     if input.edits.len() == 1
                         && let HashlineOp::Write { ref content } = input.edits[0]
                     {
+                        if let Some(out) = max_diff_limit_error(&policy, "", content) {
+                            return Ok(out);
+                        }
                         if let Err(e) = fs.write_file(&joined_path, content.as_bytes()).await {
                             let display_path = display_dcwd.join(&input.file_path);
                             return Ok(match e.io_error_kind() {
@@ -384,6 +478,13 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                             });
                         }
                         let abs = crate::util::fs::canonicalize_with_timeout(joined_path).await;
+                        record_hashline_receipt(
+                            session_folder.as_deref(),
+                            &abs,
+                            None,
+                            Some(content.as_bytes()),
+                        )
+                        .await;
                         let r = apply::apply_edits(content, &input.edits, &abs, &*scheme);
                         let edit_details = r.edit_details;
                         return Ok(to_search_replace(
@@ -407,6 +508,10 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 }
             }
         };
+
+        if let Some(out) = policy_refuse(&policy, &path, &input.file_path) {
+            return Ok(out);
+        }
 
         // Read current file content.
         let file_bytes = match fs.read_file(&path).await {
@@ -434,27 +539,37 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
 
         let apply_result = apply::apply_edits(&old_content, &input.edits, &path, &*scheme);
 
-        if let Some(ref new_content) = apply_result.new_content
-            && let Err(e) = fs.write_file(&path, new_content.as_bytes()).await
-        {
-            let err_output = HashlineEditOutput::Error(types::HashlineEditError {
-                error: types::HashlineEditErrorKind::IoError,
-                message: format!("Edits validated but failed to write file: {e}."),
-                requested_anchor: None,
-                current: None,
-                context: None,
-                context_start_line: None,
-                shifted_to: None,
-                shifted_anchor: None,
-                ambiguous_candidates: vec![],
-            });
-            return Ok(to_search_replace(
-                err_output,
+        if let Some(ref new_content) = apply_result.new_content {
+            if let Some(out) = max_diff_limit_error(&policy, &old_content, new_content) {
+                return Ok(out);
+            }
+            if let Err(e) = fs.write_file(&path, new_content.as_bytes()).await {
+                let err_output = HashlineEditOutput::Error(types::HashlineEditError {
+                    error: types::HashlineEditErrorKind::IoError,
+                    message: format!("Edits validated but failed to write file: {e}."),
+                    requested_anchor: None,
+                    current: None,
+                    context: None,
+                    context_start_line: None,
+                    shifted_to: None,
+                    shifted_anchor: None,
+                    ambiguous_candidates: vec![],
+                });
+                return Ok(to_search_replace(
+                    err_output,
+                    &path,
+                    &old_content,
+                    None,
+                    vec![],
+                ));
+            }
+            record_hashline_receipt(
+                session_folder.as_deref(),
                 &path,
-                &old_content,
-                None,
-                vec![],
-            ));
+                Some(file_bytes.clone()),
+                Some(new_content.as_bytes()),
+            )
+            .await;
         }
 
         let edit_details = apply_result.edit_details;
@@ -477,7 +592,7 @@ mod tests {
     use crate::notification::types::ToolNotificationHandle;
     use crate::types::output::SearchReplaceOutput;
     use crate::types::resources::{
-        Cwd, FileSystem, NotificationHandle, PathNotFoundHints, Resources,
+        Cwd, FileSystem, NotificationHandle, Params, PathNotFoundHints, Resources,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -679,6 +794,108 @@ mod tests {
             matches!(tool_output, ToolOutput::SearchReplace(_)),
             "hashline_edit must produce ToolOutput::SearchReplace, got: {tool_output:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn deny_paths_refuses_before_write() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join(".env");
+        std::fs::write(&file, "token=keep\n").unwrap();
+        let tool = HashlineEditTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(
+            crate::implementations::grok_build::policy::PolicyParams {
+                deny_paths: vec![".env".to_string()],
+                ..Default::default()
+            },
+        ));
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            HashlineEditInput {
+                file_path: ".env".to_string(),
+                edits: vec![HashlineOp::Write {
+                    content: "token=stolen\n".to_owned(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("policy denied (hashline_edit)"), "got: {msg}");
+                assert!(msg.contains("deny_paths"), "got: {msg}");
+            }
+            other => panic!("expected policy denial, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"token=keep\n");
+    }
+
+    #[tokio::test]
+    async fn deny_paths_refuses_new_file_write_op() {
+        let tmp = TempDir::new().unwrap();
+        let tool = HashlineEditTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(
+            crate::implementations::grok_build::policy::PolicyParams {
+                deny_paths: vec![".env".to_string()],
+                ..Default::default()
+            },
+        ));
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            HashlineEditInput {
+                file_path: ".env".to_string(),
+                edits: vec![HashlineOp::Write {
+                    content: "token=stolen\n".to_owned(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("policy denied (hashline_edit)"), "got: {msg}");
+            }
+            other => panic!("expected policy denial, got {other:?}"),
+        }
+        assert!(!tmp.path().join(".env").exists());
+    }
+
+    #[tokio::test]
+    async fn max_diff_limit_denial_leaves_existing_bytes_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("test.txt");
+        std::fs::write(&file, "before\n").unwrap();
+        let tool = HashlineEditTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(
+            crate::implementations::grok_build::policy::PolicyParams {
+                max_diff_lines: Some(1),
+                ..Default::default()
+            },
+        ));
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            HashlineEditInput {
+                file_path: "test.txt".to_string(),
+                edits: vec![HashlineOp::Write {
+                    content: "after\nsecond\nthird\n".to_owned(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("policy denied (hashline_edit)"), "got: {msg}");
+                assert!(msg.contains("max_diff_lines"), "got: {msg}");
+            }
+            other => panic!("expected policy denial, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"before\n");
     }
 
     // -- Diff detail tests (multi-edit compactness) -------------------------

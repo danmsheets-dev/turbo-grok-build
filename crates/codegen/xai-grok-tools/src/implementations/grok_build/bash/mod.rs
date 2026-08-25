@@ -1336,6 +1336,20 @@ impl BashTool {
         }
     }
 
+    /// FG budget for a single request. An explicit positive `timeout` waits
+    /// that long: skip the 15s short budget so `timeout_ms=9000000` cannot
+    /// auto-background after 15s.
+    pub(crate) fn request_foreground_block_budget(
+        input_timeout_ms: Option<u64>,
+        params: &BashParams,
+    ) -> Option<std::time::Duration> {
+        if input_timeout_ms.is_some_and(|ms| ms > 0) {
+            Some(std::time::Duration::MAX)
+        } else {
+            Self::effective_foreground_block_budget(params)
+        }
+    }
+
     /// Effective auto-bg wait: min(default_timeout, budget) when auto_bg is on
     /// and budget is finite; otherwise default_timeout.
     ///
@@ -2128,16 +2142,14 @@ impl xai_tool_runtime::Tool for BashTool {
                 // The previous gate (`input.timeout.is_none()`) hard-
                 // timed out commands with explicit timeouts even when
                 // the session had opted into auto-bg behavior.
-                // The relaxed semantics matter here:
-                // every Shell call carries an explicit `block_until_ms`
-                // and the harness's observed behavior is to auto-background
-                // past that deadline rather than kill the process.
-                // Backwards compatible because
-                // `auto_background_on_timeout` defaults to `false`;
-                // existing grok_build callers that never opted in are
-                // unaffected.
+                // An explicit positive `timeout` must wait that long: the
+                // 15s short FG budget is only for omitted timeout (the
+                // "if not specified, auto-background after default" path).
                 auto_background_on_timeout: Self::auto_background_on_timeout_enabled(&params),
-                foreground_block_budget: Self::effective_foreground_block_budget(&params),
+                foreground_block_budget: Self::request_foreground_block_budget(
+                    input.timeout,
+                    &params,
+                ),
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
@@ -4299,6 +4311,28 @@ mod tests {
                 ..BashParams::default()
             };
             assert_eq!(BashTool::effective_auto_bg_wait_ms(&params), Some(10_000));
+        }
+
+        #[test]
+        fn explicit_timeout_disables_short_fg_budget() {
+            // timeout_ms=9000000 must not auto-bg after the 15s short budget.
+            let params = BashParams {
+                auto_background_on_timeout: true,
+                foreground_block_budget_ms: None,
+                max_timeout_secs: Some(36_000.0),
+                ..BashParams::default()
+            };
+            let timeout = BashTool::resolve_effective_timeout_for_params(
+                Some(9_000_000),
+                false,
+                Duration::from_millis(120_000),
+                &params,
+            );
+            assert_eq!(timeout, Duration::from_millis(9_000_000));
+            let budget = BashTool::request_foreground_block_budget(Some(9_000_000), &params);
+            assert_eq!(budget, Some(Duration::MAX));
+            let omitted = BashTool::request_foreground_block_budget(None, &params);
+            assert!(omitted.is_none() || omitted != Some(Duration::MAX));
         }
 
         /// Descriptions already advertise max/default timeout numbers — those

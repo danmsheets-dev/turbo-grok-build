@@ -569,15 +569,28 @@
 
     setName(name) {
       const el = q(SEL.nameInput);
-      if (!el) return false;
-      const setter = Object.getOwnPropertyDescriptor(
-        globalThis.HTMLInputElement.prototype,
-        'value',
-      ).set;
-      setter.call(el, name);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
+      if (el) {
+        try {
+          const setter = Object.getOwnPropertyDescriptor(
+            globalThis.HTMLInputElement.prototype,
+            'value',
+          ).set;
+          setter.call(el, name);
+        } catch {
+          el.value = name;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        try {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, data: name }));
+        } catch {
+          /* InputEvent may be missing in older runtimes */
+        }
+        return true;
+      }
+      // Signed-in / new pre-join: Teams often omits the name field and
+      // uses the account display name. Join is still possible.
+      return !!q(SEL.joinButton);
     },
 
     // Mute mic and camera before joining. Belt and braces: getUserMedia is

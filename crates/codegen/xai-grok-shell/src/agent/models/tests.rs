@@ -2573,6 +2573,22 @@ fn gpt55_openai_slash_slug_aliases_to_openai_codex() {
 }
 
 #[test]
+fn gpt56_terra_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-5.6-terra".to_string(),
+        make_model_entry("gpt-5.6-terra"),
+    );
+    assert!(
+        task_model_error_for_catalog("openai/gpt-5.6-terra", &models, false).is_none(),
+        "openai/gpt-5.6-terra must resolve to openai-codex/gpt-5.6-terra"
+    );
+    let (key, _) =
+        find_task_model_entry(&models, "openai/gpt-5.6-terra").expect("terra alias must resolve");
+    assert_eq!(key, "openai-codex/gpt-5.6-terra");
+}
+
+#[test]
 fn exact_openai_catalog_key_wins_over_codex_alias() {
     let mut models = IndexMap::new();
     models.insert("openai/gpt-5.5".to_string(), make_model_entry("gpt-5.5"));
