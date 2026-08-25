@@ -3743,8 +3743,14 @@ mod wait_interrupt_tests {
 
 #[cfg(test)]
 mod meeting_confinement_tests {
-    use super::{meeting_ask_drains_queue, short_tool_name};
+    use super::{
+        meeting_ask_drains_queue, meeting_qa_allows_kind, meeting_qa_fs_paths,
+        meeting_qa_path_allowed, short_tool_name,
+    };
     use serde_json::json;
+    use xai_grok_tools::implementations::grok_build::read_file::ReadFileInput;
+    use xai_grok_tools::types::tool::ToolKind;
+    use xai_grok_tools::types::ToolInput;
 
     #[test]
     fn short_tool_name_strips_the_namespace_without_suffix_matching() {
@@ -3791,5 +3797,52 @@ mod meeting_confinement_tests {
         assert!(xai_grok_meetings::is_meeting_qa_tool_name("meeting_ask"));
         assert!(!xai_grok_meetings::is_meeting_qa_tool_name("meeting_join"));
         assert!(!xai_grok_meetings::is_meeting_qa_tool_name("meeting_stop"));
+    }
+
+    #[test]
+    fn meeting_qa_turn_denies_web_fetch() {
+        assert!(!meeting_qa_allows_kind(ToolKind::WebFetch));
+        assert!(meeting_qa_allows_kind(ToolKind::WebSearch));
+        assert!(meeting_qa_allows_kind(ToolKind::Read));
+        assert!(meeting_qa_allows_kind(ToolKind::Search));
+    }
+
+    #[test]
+    fn meeting_qa_turn_denies_read_outside_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("inside.txt"), "ok").unwrap();
+        assert!(
+            meeting_qa_path_allowed(workspace, None, workspace, "inside.txt"),
+            "workspace-relative reads must be allowed"
+        );
+        assert!(
+            !meeting_qa_path_allowed(workspace, None, workspace, "~/.aws/credentials"),
+            "home credentials must be denied"
+        );
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "nope").unwrap();
+        assert!(
+            !meeting_qa_path_allowed(
+                workspace,
+                None,
+                workspace,
+                outside_file.to_str().unwrap(),
+            ),
+            "absolute path outside workspace must be denied"
+        );
+    }
+
+    #[test]
+    fn meeting_qa_read_paths_come_from_read_file_input() {
+        let input = ToolInput::ReadFile(ReadFileInput {
+            path: "~/.aws/credentials".into(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+        });
+        assert_eq!(meeting_qa_fs_paths(&input), ["~/.aws/credentials"]);
     }
 }
