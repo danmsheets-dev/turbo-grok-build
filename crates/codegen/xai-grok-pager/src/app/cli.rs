@@ -235,6 +235,8 @@ See ~/.grok/README.md for more information.
     /// Sidecar: Agent WebView2 window (do not run interactively).
     #[command(name = "browser-host", hide = true)]
     BrowserHost(crate::browser_host_cmd::BrowserHostArgs),
+    /// Agent WebView profile (`turbo browser reset-profile`)
+    Browser(crate::app::browser_cmd::BrowserArgs),
     /// Open the Agent Dashboard, or launch its local web observability UI.
     ///
     /// Bare `dashboard` opens the terminal-native multi-agent dashboard.

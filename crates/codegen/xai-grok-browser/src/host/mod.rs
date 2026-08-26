@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use serde_json::Value;
 
-use crate::profile::{agent_browser_profile_dir, pipe_name};
+use crate::profile::pipe_name;
 use crate::protocol::{
     BrowserRequest, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion,
     check_eval_confirm, check_fill, check_navigation_hop, eval_looks_mutating,
@@ -134,9 +134,14 @@ impl HostArgs {
             self.pipe = pipe_name(&self.session_id);
         }
         if self.user_data_dir.as_os_str().is_empty() {
-            self.user_data_dir = agent_browser_profile_dir(&self.session_id);
+            self.user_data_dir = self.resolve_profile();
         }
         self
+    }
+
+    /// Resolve the WebView2 user-data-dir from env (fresh / session / durable).
+    pub fn resolve_profile(&self) -> PathBuf {
+        crate::profile::agent_browser_profile_dir(&self.session_id)
     }
 }
 
@@ -477,7 +482,13 @@ fn handle_ui_job(
                 },
             ),
         },
-        Ok((id, HostCall::Eval { function, confirm: _ })) => {
+        Ok((
+            id,
+            HostCall::Eval {
+                function,
+                confirm: _,
+            },
+        )) => {
             if eval_looks_mutating(&function) {
                 encode_rpc_error(
                     id,
@@ -986,6 +997,7 @@ mod tests {
 
     #[test]
     fn empty_pipe_and_profile_resolve_to_defaults() {
+        let _guard = crate::profile::ProfileEnvGuard::lock_cleared();
         let resolved = HostArgs {
             session_id: "abc".into(),
             pipe: String::new(),
@@ -995,7 +1007,76 @@ mod tests {
         .resolve_defaults();
         assert_eq!(resolved.session_id, "abc");
         assert_eq!(resolved.pipe, pipe_name("abc"));
-        assert_eq!(resolved.user_data_dir, agent_browser_profile_dir("abc"));
+        assert_eq!(
+            resolved.user_data_dir,
+            crate::profile::agent_browser_user_data_dir()
+        );
+    }
+
+    #[test]
+    fn user_data_dir_is_stable_across_two_constructed_hosts() {
+        let _guard = crate::profile::ProfileEnvGuard::lock_cleared();
+        let a = HostArgs {
+            session_id: "abc".into(),
+            pipe: String::new(),
+            user_data_dir: PathBuf::new(),
+            session_folder: None,
+        }
+        .resolve_defaults();
+        let b = HostArgs {
+            session_id: "xyz".into(),
+            pipe: String::new(),
+            user_data_dir: PathBuf::new(),
+            session_folder: None,
+        }
+        .resolve_defaults();
+        assert_eq!(a.user_data_dir, b.user_data_dir);
+        assert_eq!(
+            a.user_data_dir,
+            crate::profile::agent_browser_user_data_dir()
+        );
+        assert_eq!(a.user_data_dir, a.resolve_profile());
+    }
+
+    #[test]
+    fn session_profile_env_is_per_session() {
+        let guard = crate::profile::ProfileEnvGuard::lock_cleared();
+        guard.set_profile("session");
+        let resolved = HostArgs {
+            session_id: "abc".into(),
+            pipe: String::new(),
+            user_data_dir: PathBuf::new(),
+            session_folder: None,
+        }
+        .resolve_defaults();
+        assert_eq!(
+            resolved.user_data_dir,
+            crate::profile::agent_browser_user_data_dir()
+                .join("sessions")
+                .join("abc")
+        );
+    }
+
+    #[test]
+    fn fresh_profile_flag_uses_temp_dir() {
+        let guard = crate::profile::ProfileEnvGuard::lock_cleared();
+        guard.set_fresh("1");
+        let resolved = HostArgs {
+            session_id: "abc".into(),
+            pipe: String::new(),
+            user_data_dir: PathBuf::new(),
+            session_folder: None,
+        }
+        .resolve_defaults();
+        assert!(
+            resolved.user_data_dir.starts_with(std::env::temp_dir()),
+            "{:?}",
+            resolved.user_data_dir
+        );
+        assert_ne!(
+            resolved.user_data_dir,
+            crate::profile::agent_browser_user_data_dir()
+        );
     }
 
     #[test]

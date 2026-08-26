@@ -54,6 +54,8 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
+- Persisted Agent WebView profile so grok.com / Imagine login survives pager sessions (`$GROK_HOME/agent-browser`). `turbo browser reset-profile` or `GROK_BROWSER_FRESH_PROFILE=1` starts clean. `GROK_BROWSER_PROFILE=session` restores per-session isolation. Native `image_gen` still uses xAI API keys (`turbo login`); WebView cookies are never mixed into the Imagine API.
+
 ---
 
 ## [1.0.0-rc.12] - 2026-08-26

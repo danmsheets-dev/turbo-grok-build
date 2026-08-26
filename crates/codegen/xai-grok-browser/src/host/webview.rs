@@ -1025,7 +1025,8 @@ fn register_popup_download_permission(
             unsafe { operation.Uri(&mut uri) }.ok()?;
             Some(take_pwstr(uri))
         });
-        if let Err(err) = check_navigation_hop(source_uri.as_deref(), Some(session_folder.as_path()))
+        if let Err(err) =
+            check_navigation_hop(source_uri.as_deref(), Some(session_folder.as_path()))
         {
             let _ = unsafe { args.SetCancel(true) };
             download_blocked.set(format!("download cancelled: {err}"));

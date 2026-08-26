@@ -15,7 +15,8 @@ pub use client::{
 };
 pub use mock::{MockAction, MockBrowserHost};
 pub use profile::{
-    GROK_BROWSER_PROFILE_ENV, agent_browser_profile_dir, agent_browser_user_data_dir, pipe_name,
+    GROK_BROWSER_FRESH_PROFILE_ENV, GROK_BROWSER_PROFILE_ENV, agent_browser_profile_dir,
+    agent_browser_user_data_dir, pipe_name, reset_agent_browser_profile, reset_profile_dir,
 };
 pub use protocol::{
     AxNode, BrowserEvent, BrowserMethod, BrowserRequest, ClickResult, DownloadInfo,

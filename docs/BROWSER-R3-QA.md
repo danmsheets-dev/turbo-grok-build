@@ -129,9 +129,10 @@ cargo test -p xai-grok-tools --lib browser --offline -- --test-threads=4
 
 | # | Q / Action | Expected | Provenance | Observed | Pass? |
 |---|------------|----------|------------|----------|-------|
-| C.13.1 | `GROK_BROWSER_PROFILE=durable` | `$GROK_HOME/agent-browser/durable` (shared cookies path) | Unit | | |
-| C.13.2 | Default | `$GROK_HOME/agent-browser/sessions/<id>` | Unit | | |
-| C.13.3 | `browser.new_tab` / `select_tab` / `close_tab` | `v1 is a single tab` (not sent) | Unit | | |
+| C.13.1 | `GROK_BROWSER_PROFILE=durable` | `$GROK_HOME/agent-browser` (same as default; shared cookies) | Unit | | |
+| C.13.2 | Default | `$GROK_HOME/agent-browser` (shared cookies) | Unit | | |
+| C.13.3 | `GROK_BROWSER_FRESH_PROFILE=1` | temp dir | Unit | | |
+| C.13.4 | `browser.new_tab` / `select_tab` / `close_tab` | `v1 is a single tab` (not sent) | Unit | | |
 
 ---
 

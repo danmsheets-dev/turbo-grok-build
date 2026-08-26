@@ -78,10 +78,15 @@ interacting with the page underneath (LinkedIn Messaging is the usual case).
 
 ## Host, profile, TUI
 
-- Default profile: **`$GROK_HOME/agent-browser/sessions/<session-id>`**. Cookies
-  do not leak into the next pager session.
-- Durable profile (job-hunt continuity): set `GROK_BROWSER_PROFILE=durable` so
-  the host uses `$GROK_HOME/agent-browser/durable`. Ask before enabling it.
+- Default profile: **`$GROK_HOME/agent-browser`**. grok.com / Imagine cookies
+  persist across pager sessions. This is **not** Chrome MCP
+  `~/.grok/browser-profile`.
+- `GROK_BROWSER_FRESH_PROFILE=1` (true/yes/on) uses a temp dir.
+  `GROK_BROWSER_PROFILE=session` (or `ephemeral` / `private`) restores
+  per-session isolation. `turbo browser reset-profile` clears the persisted
+  jar (`--dry-run` prints the path).
+- Native `image_gen` / `/imagine` use xAI API keys (`turbo login`), not this
+  cookie jar. Do not mix secrets.
 - Sidecar: **`turbo browser-host`**. The first `browser_*` call lazy-starts it.
 - Closing the window **hides** it. The next `browser_*` call or `browser_raise`
   shows it again. `browser.shutdown` / pager teardown actually quit the host.

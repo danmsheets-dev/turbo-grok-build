@@ -2195,6 +2195,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::BrowserHost(_) => {
                 unreachable!("browser-host was consumed before runtime startup");
             }
+            Command::Browser(browser_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::app::browser_cmd::run(browser_args);
+            }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 xai_grok_shell::inspect::inspect(&cwd, json).await?;

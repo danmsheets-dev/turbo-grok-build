@@ -13,6 +13,7 @@ pub mod actions;
 pub mod agent;
 pub mod agent_view;
 pub mod app_view;
+pub mod browser_cmd;
 pub mod bundle;
 pub mod cli;
 pub use crate::link_opener;

@@ -239,7 +239,10 @@ pub fn create_frame_window(session_id: &str) -> Result<HWND, HostError> {
 /// the main class: that one hides on WM_CLOSE and posts WM_QUIT on destroy.
 pub fn create_oauth_popup_window(session_id: &str, url: &str) -> Result<HWND, HostError> {
     let class_name = wide_nul(WINDOW_CLASS_OAUTH);
-    let title = wide_nul(&format!("{} \u{2014} sign-in", frame_title(session_id, url)));
+    let title = wide_nul(&format!(
+        "{} \u{2014} sign-in",
+        frame_title(session_id, url)
+    ));
     let instance = unsafe { GetModuleHandleW(None) }
         .ok()
         .map(|h| HINSTANCE(h.0));
@@ -294,7 +297,9 @@ pub fn create_oauth_popup_window(session_id: &str, url: &str) -> Result<HWND, Ho
     }
     .map_err(|e| HostError::Failed(format!("CreateWindowExW oauth: {e}")))?;
     if hwnd.is_invalid() {
-        return Err(HostError::Failed("CreateWindowExW oauth returned NULL".into()));
+        return Err(HostError::Failed(
+            "CreateWindowExW oauth returned NULL".into(),
+        ));
     }
     Ok(hwnd)
 }

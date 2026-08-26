@@ -2,6 +2,11 @@
 //! them to the local filesystem so the model can reference them in code
 //! (e.g. `<img src="images/hero.jpg">`).
 //!
+//! Native `image_gen` uses the xAI Imagine API with the operator's xAI
+//! credentials (`turbo login` / API key). grok.com web login is the Agent
+//! WebView profile (`$GROK_HOME/agent-browser`) and is never mixed into this
+//! client.
+//!
 //! Architecture follows the same pattern as `web_search`:
 //!
 //! - [`ImageGenConfig`] is built from session credentials by the host and
@@ -399,7 +404,7 @@ impl crate::types::tool_metadata::ToolMetadata for ImageGenTool {
     }
 
     fn description_template(&self) -> &str {
-        "Generate a new image from a text description using Imagine; returns the saved image's absolute path. When telling the user where it was saved, refer to it by its short session-relative path (e.g. `images/1.jpg`) rather than the absolute path, so it renders as a clickable link that opens the image. To produce multiple images, emit multiple tool calls with distinct prompts."
+        "Generate a new image from a text description using Imagine; returns the saved image's absolute path. When telling the user where it was saved, refer to it by its short session-relative path (e.g. `images/1.jpg`) rather than the absolute path, so it renders as a clickable link that opens the image. To produce multiple images, emit multiple tool calls with distinct prompts. Uses the xAI Imagine API with xAI credentials, not grok.com WebView cookies."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -490,10 +495,9 @@ mod tests {
     fn tool_name_and_description() {
         let tool = ImageGenTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "image_gen");
-        assert!(
-            crate::types::tool_metadata::ToolMetadata::description_template(&tool)
-                .contains("Generate a new image from a text description")
-        );
+        let desc = crate::types::tool_metadata::ToolMetadata::description_template(&tool);
+        assert!(desc.contains("Generate a new image from a text description"));
+        assert!(desc.contains("xAI Imagine API"));
     }
 
     #[test]

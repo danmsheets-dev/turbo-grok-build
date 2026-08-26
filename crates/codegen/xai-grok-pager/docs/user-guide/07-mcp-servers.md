@@ -361,8 +361,11 @@ Turbo has two real-browser surfaces. They are **not** interchangeable.
 
 **Agent WebView** is first-class product (`browser_navigate`, `browser_snapshot`,
 `browser_click`, `browser_fill`, `browser_eval`, `browser_screenshot`,
-`browser_tabs`). The sidecar is `turbo browser-host`. The profile is always
-`~/.grok/agent-browser`. It never attaches to daily Chrome. **Ctrl+Shift+B**
+`browser_tabs`). The sidecar is `turbo browser-host`. The profile is
+`~/.grok/agent-browser` and persists grok.com cookies across pager sessions.
+`turbo browser reset-profile` clears it; `GROK_BROWSER_FRESH_PROFILE=1` starts
+a temp profile. Native `image_gen` uses xAI API keys (`turbo login`), not this
+cookie jar. It never attaches to daily Chrome. **Ctrl+Shift+B**
 mirrors the current URL and last accessibility snapshot in the TUI; it does
 not render HTML. v1 is Windows-only (WebView2). Prefer this for pages that
 need JavaScript, a headed window, or a login UI. Use `web_fetch` for static
