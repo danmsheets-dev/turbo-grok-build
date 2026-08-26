@@ -73,6 +73,7 @@ community updater and `install.ps1` / `install.sh` require:
 
 | Wire | Release | Windows asset |
 | --- | --- | --- |
+| `1.0.0-rc.12` | [v1.0.0-rc.12](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.12) | `turbo-1.0.0-rc.12-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.11.1` | [v1.0.0-rc.11.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.11.1) | `turbo-1.0.0-rc.11.1-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.11` | [v1.0.0-rc.11](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.11) | `turbo-1.0.0-rc.11-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.10` | [v1.0.0-rc.10](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.10) | `turbo-1.0.0-rc.10-x86_64-pc-windows-msvc.zip` |
@@ -321,12 +322,12 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash -s -- --version v1.0.0-rc.11.1
+curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash -s -- --version v1.0.0-rc.12
 ```
 
 ```powershell
 # Windows — pin this release
-.\install.ps1 -Version v1.0.0-rc.11.1
+.\install.ps1 -Version v1.0.0-rc.12
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`

@@ -8,6 +8,7 @@ limit, and public-fork LFS uploads are blocked on GitHub).
 
 | Wire version | Release | Asset |
 | --- | --- | --- |
+| `1.0.0-rc.12` | [v1.0.0-rc.12](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.12) | `turbo-1.0.0-rc.12-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.11.1` | [v1.0.0-rc.11.1](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.11.1) | `turbo-1.0.0-rc.11.1-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.11` | [v1.0.0-rc.11](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.11) | `turbo-1.0.0-rc.11-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.10` | [v1.0.0-rc.10](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.10) | `turbo-1.0.0-rc.10-x86_64-pc-windows-msvc.zip` |
@@ -22,10 +23,10 @@ A raw `.exe` on the release is a convenience copy only; auto-update ignores it.
 ```powershell
 irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 turbo update --check
-# → turbo 1.0.0-rc.11.1 (latest: 1.0.0-rc.11.1) [stable]
+# → turbo 1.0.0-rc.12 (latest: 1.0.0-rc.12) [stable]
 ```
 
-Or pin: `.\install.ps1 -Version v1.0.0-rc.11.1`
+Or pin: `.\install.ps1 -Version v1.0.0-rc.12`
 
 The zip must contain a root-level `turbo.exe` plus `bundled/`. The installer
 activates the binary at `%USERPROFILE%\.turbo\bin\turbo.exe` and the bundle at
@@ -35,7 +36,7 @@ activates the binary at `%USERPROFILE%\.turbo\bin\turbo.exe` and the bundle at
 
 ```text
 turbo version
-# → turbo 1.0.0-rc.11.1 (<commit>)
+# → turbo 1.0.0-rc.12 (<commit>)
 ```
 
 ## Local packaging note
