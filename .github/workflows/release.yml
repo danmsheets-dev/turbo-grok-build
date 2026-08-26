@@ -415,10 +415,11 @@ jobs:
 
             Pin a version: `bash install.sh --version ${{ github.ref_name }}`
 
-            Verify provenance (GitHub CLI):
+            Verify provenance (GitHub CLI). Archive names match `VERSION`
+            (no leading `v` from the tag):
 
             ```sh
-            gh attestation verify turbo-${{ github.ref_name }}-<target>.tar.gz \
+            gh attestation verify turbo-${{ replace(github.ref_name, 'v', '') }}-x86_64-unknown-linux-gnu.tar.gz \
               --repo danmsheets-dev/turbo-grok-build
             ```
 
