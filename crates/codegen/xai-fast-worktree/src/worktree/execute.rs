@@ -897,6 +897,11 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
     let source_root = git::find_worktree_root(&source)
         .with_context(|| format!("failed to find git root for {}", source.display()))?;
 
+    let method = if matches!(working_tree, WorkingTreeMode::CleanAll) {
+        "git_checkout"
+    } else {
+        "copy"
+    };
     tracing::info!(
         source = %source.display(),
         source_root = %source_root.display(),
@@ -904,7 +909,7 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
         parallelism = effective_parallelism,
         working_tree = ?working_tree,
         ignored_files = ?ignored_files,
-        method = "copy",
+        method,
         "creating fast worktree"
     );
 
@@ -923,9 +928,6 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
 
     let dest_str = dest.to_string_lossy().to_string();
 
-    // Get modified files from source (for dirty state preservation or clean modes).
-    // This runs in parallel with worktree creation conceptually, but since we're sync now,
-    // we run it after worktree add for simplicity (the worktree add is typically fast).
     git::worktree_add_no_checkout(&source, &dest_str, &git_ref)?;
     tracing::debug!(elapsed = ?start.elapsed(), "git worktree add --no-checkout complete");
 
@@ -941,55 +943,68 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
         anyhow::bail!("cancelled after git worktree add");
     }
 
-    // Get modified files
-    let modified_result = git::get_modified_files(&source_root)?;
-    let modified_files_in_source = Arc::new(modified_result.paths);
-    let dirty_files_report = Some(modified_result.report);
+    // CleanAll materializes from HEAD/index. Copying the parent working tree
+    // and then `git clean` (the old path) clones untracked dirt only to delete
+    // it — a large Windows I/O tax. Dirty/PreserveWorkingTree still copies WIP.
+    let (copy_result, dirty_files_report, modified_files_in_source) = match working_tree {
+        WorkingTreeMode::CleanAll => (
+            copy::types::ParallelCopyResult::default(),
+            None,
+            Arc::new(dashmap::DashSet::new()),
+        ),
+        WorkingTreeMode::PreserveWorkingTree | WorkingTreeMode::CleanTracked => {
+            let modified_result = git::get_modified_files(&source_root)?;
+            let modified_files_in_source = Arc::new(modified_result.paths);
+            let dirty_files_report = Some(modified_result.report);
+            let modified_files_for_skip = match &working_tree {
+                WorkingTreeMode::PreserveWorkingTree => None,
+                WorkingTreeMode::CleanTracked => Some(Arc::clone(&modified_files_in_source)),
+                WorkingTreeMode::CleanAll => unreachable!(),
+            };
 
-    // For CleanTracked/CleanAll: we need to skip modified files during copy
-    let modified_files_for_skip = match &working_tree {
-        WorkingTreeMode::PreserveWorkingTree => None,
-        WorkingTreeMode::CleanTracked | WorkingTreeMode::CleanAll => {
-            Some(Arc::clone(&modified_files_in_source))
+            let copy_start = std::time::Instant::now();
+            let copy_config = ParallelCopyConfig {
+                num_workers: effective_parallelism,
+                channel_buffer,
+                skip_files: modified_files_for_skip,
+                respect_gitignore: true,
+                skip_patterns: vec![],
+            };
+
+            let copy_result =
+                copy::copy_parallel(&source_root, &dest, copy_config, cancellation_token.clone())?;
+
+            tracing::debug!(
+                elapsed = ?copy_start.elapsed(),
+                files = copy_result.stats.files_copied,
+                dirs = copy_result.stats.dirs_created,
+                "parallel copy complete"
+            );
+
+            if cancellation_token.is_cancelled() {
+                anyhow::bail!("cancelled after parallel copy");
+            }
+
+            (copy_result, dirty_files_report, modified_files_in_source)
         }
     };
 
-    // Phase 2: Parallel CoW copy of unignored files.
-    // IMPORTANT: Copy from source_root (git root), not source (which might be a subdirectory).
-    let copy_start = std::time::Instant::now();
-    let copy_config = ParallelCopyConfig {
-        num_workers: effective_parallelism,
-        channel_buffer,
-        skip_files: modified_files_for_skip,
-        respect_gitignore: true,
-        skip_patterns: vec![],
-    };
-
-    let copy_result =
-        copy::copy_parallel(&source_root, &dest, copy_config, cancellation_token.clone())?;
-
-    tracing::debug!(
-        elapsed = ?copy_start.elapsed(),
-        files = copy_result.stats.files_copied,
-        dirs = copy_result.stats.dirs_created,
-        "parallel copy complete"
-    );
-
-    // Check cancellation after the heavy copy phase.
-    if cancellation_token.is_cancelled() {
-        anyhow::bail!("cancelled after parallel copy");
-    }
-
-    // Phase 3: Finalize (index copy / reset / clean).
+    // Phase 3: Finalize (index copy / reset / checkout).
     let finalize_start = std::time::Instant::now();
-
-    finalize_worktree(
-        &source_root,
-        &dest,
-        working_tree,
-        &modified_files_in_source,
-        copy_result.file_metadata,
-    )?;
+    match working_tree {
+        WorkingTreeMode::CleanAll => {
+            materialize_clean_from_head(&source_root, &dest, &git_ref)?;
+        }
+        WorkingTreeMode::PreserveWorkingTree | WorkingTreeMode::CleanTracked => {
+            finalize_worktree(
+                &source_root,
+                &dest,
+                working_tree,
+                &modified_files_in_source,
+                copy_result.file_metadata,
+            )?;
+        }
+    }
     tracing::debug!(elapsed = ?finalize_start.elapsed(), "finalize complete");
 
     // Phase 4: Copy ignored files (optional).
@@ -997,12 +1012,16 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
         IgnoredFilesMode::Skip | IgnoredFilesMode::CopyOnly { .. } => None,
         IgnoredFilesMode::Copy { skip_patterns } => {
             let ignored_start = std::time::Instant::now();
-            let already_copied = copy_result.copied_paths;
+            let skip_files = skip_set_for_ignored_copy(
+                &source_root,
+                copy_result.copied_paths,
+                effective_ignored_parallelism,
+            )?;
 
             let copy_config = ParallelCopyConfig {
                 num_workers: effective_ignored_parallelism,
                 channel_buffer,
-                skip_files: Some(Arc::new(already_copied)),
+                skip_files: Some(skip_files),
                 respect_gitignore: false, // We want all files.
                 skip_patterns,
             };
@@ -1042,6 +1061,40 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
     })
 }
 
+/// Checkout `dest` from HEAD/index after `git worktree add --no-checkout`.
+/// Prefer the source SHA when `git_ref` is HEAD so a briefly-unborn dest HEAD
+/// cannot fail with `Could not parse object 'HEAD'`.
+fn materialize_clean_from_head(source: &Path, dest: &Path, git_ref: &str) -> Result<()> {
+    let source_head = git::get_head_commit(source).ok();
+    let target = if git_ref != "HEAD" {
+        Some(git_ref)
+    } else {
+        source_head.as_deref()
+    };
+    git::git_reset_hard_command(dest, target)
+}
+
+/// Skip set for an ignored-files copy pass.
+///
+/// After a parent working-tree copy, `copied_paths` already lists unignored
+/// files. After a CleanAll HEAD/index materialize that set is empty, so walk
+/// the source for unignored paths instead — otherwise `respect_gitignore=false`
+/// would copy untracked parent dirt onto the clean seed.
+fn skip_set_for_ignored_copy(
+    source_root: &Path,
+    copied_paths: dashmap::DashSet<std::path::PathBuf>,
+    parallelism: usize,
+) -> Result<Arc<dashmap::DashSet<std::path::PathBuf>>> {
+    if copied_paths.is_empty() {
+        Ok(Arc::new(copy::collect_unignored_paths(
+            source_root,
+            parallelism,
+        )?))
+    } else {
+        Ok(Arc::new(copied_paths))
+    }
+}
+
 fn finalize_worktree(
     source: &Path,
     dest: &Path,
@@ -1067,9 +1120,10 @@ fn finalize_worktree(
             git::git_reset_hard_command(dest, source_head.as_deref())?;
         }
         WorkingTreeMode::CleanAll => {
+            // Callers that still go through finalize (none of the copy
+            // fallbacks) must not copy-then-clean: reset to HEAD only.
             let source_head = git::get_head_commit(source).ok();
             git::git_reset_hard_command(dest, source_head.as_deref())?;
-            git::git_clean_fd(dest, false)?;
         }
     }
 
@@ -1155,8 +1209,11 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
     // the fire-and-forget index stat update, NOT for the file copy itself. So we
     // run the scan in a background thread and start the copy immediately.
     //
-    // For CleanTracked/CleanAll, we need the modified files list to skip dirty
-    // files during the copy, so the scan must complete before the copy begins.
+    // For CleanTracked, we need the modified files list to skip dirty files
+    // during the copy, so the scan must complete before the copy begins.
+    //
+    // CleanAll skips the working-tree copy entirely and materializes from
+    // HEAD/index after the `.git/` copy (no copy-then-clean).
 
     let source_git = source_root.join(".git");
     let dest_git = dest.join(".git");
@@ -1180,7 +1237,8 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
         .context("failed to spawn .git/ copy thread")?;
 
     // For PreserveWorkingTree, run modified-files scan in parallel with the copy.
-    // For Clean modes, run it first (we need the result to skip dirty files).
+    // For CleanTracked, run it first (needed to skip dirty files). CleanAll
+    // skips the working-tree copy.
     let modified_files_for_skip;
     let modified_scan_handle;
     let mut dirty_files_report = None;
@@ -1209,7 +1267,7 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
                     .context("failed to spawn modified files scan thread")?,
             );
         }
-        WorkingTreeMode::CleanTracked | WorkingTreeMode::CleanAll => {
+        WorkingTreeMode::CleanTracked => {
             // Need modified files before copy to skip them.
             let modified_result = git::get_modified_files(&source_root)?;
             let modified_files_in_source = Arc::new(modified_result.paths);
@@ -1217,19 +1275,25 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
             modified_files_for_skip = Some(Arc::clone(&modified_files_in_source));
             modified_scan_handle = None;
         }
+        WorkingTreeMode::CleanAll => {
+            modified_files_for_skip = None;
+            modified_scan_handle = None;
+        }
     }
 
     let copy_start = std::time::Instant::now();
-    let copy_config = ParallelCopyConfig {
-        num_workers: effective_parallelism,
-        channel_buffer,
-        skip_files: modified_files_for_skip.clone(),
-        respect_gitignore: true,
-        skip_patterns: vec![],
+    let copy_result = if matches!(working_tree, WorkingTreeMode::CleanAll) {
+        Ok(copy::types::ParallelCopyResult::default())
+    } else {
+        let copy_config = ParallelCopyConfig {
+            num_workers: effective_parallelism,
+            channel_buffer,
+            skip_files: modified_files_for_skip.clone(),
+            respect_gitignore: true,
+            skip_patterns: vec![],
+        };
+        copy::copy_parallel(&source_root, &dest, copy_config, cancellation_token.clone())
     };
-
-    let copy_result =
-        copy::copy_parallel(&source_root, &dest, copy_config, cancellation_token.clone());
 
     // Join the background `.git/` copy thread BEFORE any teardown of `dest`, so
     // it is never still writing into `dest/.git` while we remove the directory
@@ -1302,9 +1366,7 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
         }
         WorkingTreeMode::CleanAll => {
             drop(file_metadata);
-            let source_head = git::get_head_commit(&source_root).ok();
-            git::git_reset_hard_command(&dest, source_head.as_deref())?;
-            git::git_clean_fd(&dest, false)?;
+            materialize_clean_from_head(&source_root, &dest, &git_ref)?;
         }
     }
     tracing::debug!(elapsed = ?finalize_start.elapsed(), "finalize complete");
@@ -1321,10 +1383,15 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
         IgnoredFilesMode::Copy { skip_patterns } => {
             let ignored_start = std::time::Instant::now();
 
+            let skip_files = skip_set_for_ignored_copy(
+                &source_root,
+                copied_paths,
+                effective_ignored_parallelism,
+            )?;
             let copy_config = ParallelCopyConfig {
                 num_workers: effective_ignored_parallelism,
                 channel_buffer,
-                skip_files: Some(Arc::new(copied_paths)),
+                skip_files: Some(skip_files),
                 respect_gitignore: false,
                 skip_patterns,
             };

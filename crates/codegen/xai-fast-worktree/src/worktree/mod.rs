@@ -682,6 +682,179 @@ mod tests {
         assert!(worktree_path.join(".gitignore").exists());
     }
 
+    /// Parent tree used to prove CleanAll does not copy-then-clean:
+    /// dirty tracked file, untracked dirt, gitignored dirt.
+    fn seed_parent_with_wip(repo_path: &std::path::Path) {
+        init_git_repo(repo_path);
+        std::fs::write(repo_path.join("committed.txt"), "committed").unwrap();
+        std::fs::write(repo_path.join(".gitignore"), "*.log\n").unwrap();
+        git_commit_all(repo_path, "initial");
+        std::fs::write(repo_path.join("committed.txt"), "DIRTY_WIP").unwrap();
+        std::fs::write(repo_path.join("untracked.txt"), "UNTRACKED_DIRT").unwrap();
+        std::fs::create_dir_all(repo_path.join("untracked_dir")).unwrap();
+        std::fs::write(repo_path.join("untracked_dir/nested.txt"), "NESTED_DIRT").unwrap();
+        std::fs::write(repo_path.join("debug.log"), "IGNORED").unwrap();
+    }
+
+    fn assert_clean_head_seed(worktree_path: &std::path::Path) {
+        let content = std::fs::read_to_string(worktree_path.join("committed.txt")).unwrap();
+        assert_eq!(
+            content, "committed",
+            "CleanAll must materialize HEAD, not parent WIP"
+        );
+        assert!(
+            !worktree_path.join("untracked.txt").exists(),
+            "CleanAll must not copy untracked parent dirt"
+        );
+        assert!(
+            !worktree_path.join("untracked_dir").exists()
+                && !worktree_path.join("untracked_dir/nested.txt").exists(),
+            "CleanAll must not copy untracked parent directories"
+        );
+        assert!(worktree_path.join(".gitignore").exists());
+    }
+
+    #[test]
+    fn clean_all_linked_materializes_from_head_not_copy_then_clean() {
+        xai_test_utils::require_git!();
+        use crate::CreationMode;
+
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        seed_parent_with_wip(&repo_path);
+
+        let worktree_path = temp.path().join("worktree");
+        let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
+            .creation_mode(CreationMode::Linked)
+            .working_tree_mode(WorkingTreeMode::CleanAll)
+            .create()
+            .unwrap();
+
+        assert_clean_head_seed(&result.worktree_path);
+        assert!(
+            !result.worktree_path.join("debug.log").exists(),
+            "CleanAll must not copy ignored parent dirt"
+        );
+        // Copy-then-clean would clone tracked parent files then `git clean`.
+        // Materializing from HEAD/index must not run that copy phase.
+        assert_eq!(
+            result.unignored_copy.files_copied, 0,
+            "CleanAll must not copy the parent working tree (got {} files)",
+            result.unignored_copy.files_copied
+        );
+    }
+
+    #[test]
+    fn clean_all_standalone_materializes_from_head_not_copy_then_clean() {
+        xai_test_utils::require_git!();
+
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        seed_parent_with_wip(&repo_path);
+
+        let worktree_path = temp.path().join("standalone");
+        let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
+            .standalone(true)
+            .working_tree_mode(WorkingTreeMode::CleanAll)
+            .create()
+            .unwrap();
+
+        assert_clean_head_seed(&result.worktree_path);
+        assert!(
+            !result.worktree_path.join("debug.log").exists(),
+            "standalone CleanAll must not copy ignored parent dirt"
+        );
+        assert_eq!(
+            result.unignored_copy.files_copied, 0,
+            "standalone CleanAll must not copy the parent working tree (got {} files)",
+            result.unignored_copy.files_copied
+        );
+        assert!(
+            result.worktree_path.join(".git").is_dir(),
+            "standalone seed must still have its own .git directory"
+        );
+    }
+
+    #[test]
+    fn preserve_working_tree_linked_still_copies_wip() {
+        xai_test_utils::require_git!();
+        use crate::CreationMode;
+
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        seed_parent_with_wip(&repo_path);
+
+        let worktree_path = temp.path().join("worktree");
+        let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
+            .creation_mode(CreationMode::Linked)
+            .working_tree_mode(WorkingTreeMode::PreserveWorkingTree)
+            .create()
+            .unwrap();
+
+        let wt = &result.worktree_path;
+        assert_eq!(
+            std::fs::read_to_string(wt.join("committed.txt")).unwrap(),
+            "DIRTY_WIP"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("untracked.txt")).unwrap(),
+            "UNTRACKED_DIRT"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("untracked_dir/nested.txt")).unwrap(),
+            "NESTED_DIRT"
+        );
+        // Ignored files are skipped unless IgnoredFilesMode::Copy.
+        assert!(!wt.join("debug.log").exists());
+    }
+
+    #[test]
+    fn clean_all_linked_ignored_copy_does_not_bring_untracked() {
+        xai_test_utils::require_git!();
+        use crate::CreationMode;
+
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        seed_parent_with_wip(&repo_path);
+
+        let worktree_path = temp.path().join("worktree");
+        let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
+            .creation_mode(CreationMode::Linked)
+            .working_tree_mode(WorkingTreeMode::CleanAll)
+            .ignored_files_mode(IgnoredFilesMode::Copy {
+                skip_patterns: vec![],
+            })
+            .create()
+            .unwrap();
+
+        let wt = &result.worktree_path;
+        assert_clean_head_seed(wt);
+        // Ignored copy is opt-in and must not undo the clean HEAD seed.
+        assert_eq!(
+            std::fs::read_to_string(wt.join("debug.log")).unwrap(),
+            "IGNORED"
+        );
+        assert!(
+            !wt.join("untracked.txt").exists(),
+            "ignored-files copy must not copy untracked parent dirt"
+        );
+        assert_eq!(
+            result.unignored_copy.files_copied, 0,
+            "CleanAll unignored phase must still skip parent working-tree copy"
+        );
+        assert!(
+            result
+                .ignored_copy
+                .as_ref()
+                .is_some_and(|s| s.files_copied >= 1),
+            "ignored file should have been copied"
+        );
+    }
+
     #[test]
     fn test_background_finalization() {
         xai_test_utils::require_git!();

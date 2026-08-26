@@ -104,10 +104,10 @@ pub enum WorkingTreeMode {
     ///
     /// Local modifications and untracked files from the source are not copied.
     CleanTracked,
-    /// Produce a clean worktree and also remove any untracked files (equivalent to
-    /// `git reset --hard` + `git clean -fd`).
-    ///
-    /// Note: ignored files are not removed by default `git clean`.
+    /// Produce a clean worktree populated from HEAD/index (`git worktree add`
+    /// / `git reset --hard` / checkout). Untracked parent dirt is never copied
+    /// and then `git clean`'d — that copy-then-clean path is expensive on
+    /// Windows. Ignored files are not present unless [`IgnoredFilesMode::Copy`].
     CleanAll,
 }
 

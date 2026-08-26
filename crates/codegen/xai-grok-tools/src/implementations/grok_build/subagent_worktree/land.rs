@@ -650,6 +650,9 @@ async fn land_snapshot_ref(
     };
 
     // Agent-only path list: baseline..snapshot (not HEAD..snapshot).
+    // Never checkout the snapshot tree: a behind-HEAD snap still carries
+    // stale copies of parent files the child did not touch; applying those
+    // would revert later parent commits.
     let name_status = git_capture(parent, &["diff", "--name-status", &base_rev, snap])
         .await
         .map_err(|e| {
@@ -707,6 +710,9 @@ async fn land_snapshot_ref(
         } else {
             None
         };
+        // ours = current parent bytes, base = spawn baseline, theirs = snap.
+        // Unchanged-on-child paths (base == theirs, ours diverged) keep ours
+        // so a stale snapshot cannot revert later parent commits.
         if base == ours {
             plan.push((path.clone(), theirs));
         } else if base != theirs {
@@ -928,4 +934,188 @@ fn extract_conflict_hints(stderr: &str) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::implementations::grok_build::subagent_worktree::{
+        ResolvedSubagentWork, SubagentMetaView,
+    };
+    use std::path::{Path, PathBuf};
+    use xai_test_utils::git::run_git;
+
+    const A_BASE: &[u8] = b"parent-a-at-baseline\n";
+    const A_LATER: &[u8] = b"parent-a-after-later-commit\n";
+    const B_BASE: &[u8] = b"parent-b-at-baseline\n";
+    const B_CHILD: &[u8] = b"child-b-from-snapshot\n";
+    const B_PARENT_LATER: &[u8] = b"parent-b-after-later-commit\n";
+
+    struct BehindHeadFixture {
+        _tmp: tempfile::TempDir,
+        repo: PathBuf,
+        meta_path: PathBuf,
+        baseline: String,
+        snap: String,
+    }
+
+    fn init_repo(dir: &Path) {
+        xai_test_utils::git::ensure_hermetic_git_on_path();
+        run_git(dir, &["init", "-b", "main"]);
+        run_git(dir, &["config", "user.email", "test@test.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+        run_git(dir, &["config", "core.autocrlf", "false"]);
+        run_git(dir, &["config", "commit.gpgsign", "false"]);
+    }
+
+    /// Parent later commit updates `a.txt`; child snapshot (behind HEAD) only
+    /// changes `b.txt` vs the spawn baseline.
+    fn behind_head_snapshot(parent_also_changed_b: bool) -> BehindHeadFixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+
+        std::fs::write(repo.join("a.txt"), A_BASE).unwrap();
+        std::fs::write(repo.join("b.txt"), B_BASE).unwrap();
+        run_git(&repo, &["add", "a.txt", "b.txt"]);
+        run_git(&repo, &["commit", "-m", "baseline a+b"]);
+        let baseline = run_git(&repo, &["rev-parse", "HEAD"]);
+        run_git(
+            &repo,
+            &[
+                "update-ref",
+                "refs/grok/subagent-baselines/s-behind",
+                &baseline,
+            ],
+        );
+
+        std::fs::write(repo.join("b.txt"), B_CHILD).unwrap();
+        run_git(&repo, &["add", "b.txt"]);
+        run_git(&repo, &["commit", "-m", "child changes only b"]);
+        let snap = run_git(&repo, &["rev-parse", "HEAD"]);
+        run_git(
+            &repo,
+            &["update-ref", "refs/grok/subagents/s-behind", &snap],
+        );
+
+        // Parent continues from baseline without the child's B.
+        run_git(&repo, &["reset", "--hard", &baseline]);
+        std::fs::write(repo.join("a.txt"), A_LATER).unwrap();
+        run_git(&repo, &["add", "a.txt"]);
+        if parent_also_changed_b {
+            std::fs::write(repo.join("b.txt"), B_PARENT_LATER).unwrap();
+            run_git(&repo, &["add", "b.txt"]);
+        }
+        run_git(&repo, &["commit", "-m", "parent later commit on a"]);
+
+        let meta_path = tmp.path().join("meta.json");
+        std::fs::write(
+            &meta_path,
+            r#"{"subagent_id":"s-behind","land_status":"pending"}"#,
+        )
+        .unwrap();
+
+        BehindHeadFixture {
+            _tmp: tmp,
+            repo,
+            meta_path,
+            baseline,
+            snap,
+        }
+    }
+
+    fn work(f: &BehindHeadFixture) -> ResolvedSubagentWork {
+        ResolvedSubagentWork {
+            subagent_id: "s-behind".into(),
+            meta: SubagentMetaView {
+                subagent_id: "s-behind".into(),
+                parent_session_id: None,
+                status: None,
+                worktree_path: None,
+                snapshot_ref: Some("refs/grok/subagents/s-behind".into()),
+                baseline_ref: Some("refs/grok/subagent-baselines/s-behind".into()),
+                patch_path: None,
+                worktree_state: None,
+                child_cwd: None,
+                display_cwd: None,
+                diffstat: None,
+                changed_paths: None,
+                allowed_paths: Some(vec![]),
+                schema_version: 1,
+            },
+            meta_path: f.meta_path.clone(),
+            subagent_dir: f.meta_path.parent().unwrap().to_path_buf(),
+            live_worktree: None,
+            snapshot_ref: Some(f.snap.clone()),
+            patch_path: None,
+            parent_git_root: f.repo.clone(),
+            parent_cwd: f.repo.clone(),
+            session_id: "sess".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn behind_head_snapshot_keeps_later_parent_a_and_lands_child_b() {
+        let f = behind_head_snapshot(false);
+        // Snapshot is behind HEAD and still carries the stale A blob.
+        let snap_a = git_show_blob(&f.repo, &f.snap, "a.txt").await.unwrap();
+        assert_eq!(
+            snap_a, A_BASE,
+            "fixture: behind-HEAD snapshot must still hold baseline A"
+        );
+        assert_eq!(std::fs::read(f.repo.join("a.txt")).unwrap(), A_LATER);
+        assert_eq!(std::fs::read(f.repo.join("b.txt")).unwrap(), B_BASE);
+        assert_ne!(
+            run_git(&f.repo, &["rev-parse", "HEAD"]),
+            f.snap,
+            "fixture: snapshot must be behind parent HEAD"
+        );
+        assert_eq!(
+            run_git(&f.repo, &["merge-base", "HEAD", &f.snap]),
+            f.baseline
+        );
+
+        let out = land_snapshot_ref(&work(&f), &f.snap, LandMode::Merge, false, None, false)
+            .await
+            .expect("land");
+
+        assert!(out.success, "{}", out.message);
+        assert_eq!(out.source, "snapshot_ref");
+        assert_eq!(out.files_landed, vec!["b.txt".to_string()]);
+        assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
+        assert_eq!(
+            std::fs::read(f.repo.join("a.txt")).unwrap(),
+            A_LATER,
+            "land must not checkout the child's whole tree / revert later parent A"
+        );
+        assert_eq!(std::fs::read(f.repo.join("b.txt")).unwrap(), B_CHILD);
+        // Baseline blob of A is what a whole-tree checkout would have restored.
+        assert_ne!(std::fs::read(f.repo.join("a.txt")).unwrap(), A_BASE);
+    }
+
+    #[tokio::test]
+    async fn behind_head_snapshot_conflict_on_b_fails_closed_and_keeps_parent_a() {
+        let f = behind_head_snapshot(true);
+        assert_eq!(std::fs::read(f.repo.join("a.txt")).unwrap(), A_LATER);
+        assert_eq!(std::fs::read(f.repo.join("b.txt")).unwrap(), B_PARENT_LATER);
+
+        let out = land_snapshot_ref(&work(&f), &f.snap, LandMode::Merge, false, None, false)
+            .await
+            .expect("land conflict is a successful tool result, not an error");
+
+        assert!(!out.success, "{}", out.message);
+        assert_eq!(out.files_landed, Vec::<String>::new());
+        assert_eq!(out.conflicts, vec!["b.txt".to_string()]);
+        assert_eq!(
+            std::fs::read(f.repo.join("a.txt")).unwrap(),
+            A_LATER,
+            "fail-closed land must not touch unrelated parent A"
+        );
+        assert_eq!(
+            std::fs::read(f.repo.join("b.txt")).unwrap(),
+            B_PARENT_LATER,
+            "fail-closed land must not apply child's B on conflict"
+        );
+    }
 }

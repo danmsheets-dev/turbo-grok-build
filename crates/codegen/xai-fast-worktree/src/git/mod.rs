@@ -10,7 +10,10 @@ pub(crate) mod status;
 pub(crate) mod worktree;
 
 pub(crate) use checkout::checkout_ref;
-pub(crate) use checkout::{git_clean_fd, git_reset_hard_command};
+pub(crate) use checkout::git_reset_hard_command;
+// Overlay/btrfs snapshot finalize (Linux) still `git clean`s snapshotted dirt.
+#[cfg(target_os = "linux")]
+pub(crate) use checkout::git_clean_fd;
 // Only consumed by the Linux-only snapshot finalize path.
 #[cfg(target_os = "linux")]
 pub(crate) use checkout::{has_staged_changes, worktree_at_ref, worktree_has_tracked_changes};
