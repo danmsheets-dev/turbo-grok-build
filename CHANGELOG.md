@@ -44,6 +44,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc9** | **`1.0.0-rc.9`** | Meeting Tool v3: joined Teams notetaker bot |
 | **1.0 rc10** | **`1.0.0-rc.10`** | Teams join hardening and incident log |
 | **1.0 rc11** | **`1.0.0-rc.11`** | Security honesty |
+| **1.0 rc11.1** | **`1.0.0-rc.11.1`** | Windows worktree isolation hotfix |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -51,6 +52,21 @@ Older release notes (r1–r13 detail) are archived under
 ---
 
 ## Unreleased
+
+---
+
+## [1.0.0-rc.11.1] - 2026-08-26
+
+**Windows isolation hotfix.** rc.11 moved worktrees to `{drive}:\t\w\{hash}` so
+`git worktree add` stays on the source volume under MAX_PATH. The start-gate
+honesty check still only accepted `~/.grok/worktrees/…` and
+`grok-subagent-worktrees/…`, so every default `isolation=worktree` spawn on
+Windows created a real tree then refused to start:
+
+`isolation=worktree claimed but resolved child CWD is not a subagent worktree`.
+
+That was fail-closed (not a silent parent share). The detector now accepts the
+short root and `$GROK_WORKTREE_ROOT`.
 
 ---
 

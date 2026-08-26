@@ -1208,6 +1208,22 @@ fn path_looks_like_subagent_worktree_patterns() {
     assert!(path_looks_like_subagent_worktree(Path::new(
         "/tmp/grok-subagent-worktrees/subagent-id"
     )));
+    // rc.11 Windows same-volume short root (`{drive}:\t\w\{8hex}\subagent-…`).
+    assert!(path_looks_like_subagent_worktree(Path::new(
+        r"H:\t\w\a86e802e\subagent-01a03e66-4f3b-7e51-b4e9-5ffbd241cd0c"
+    )));
+    assert!(path_looks_like_subagent_worktree(Path::new(
+        "h:/t/w/a86e802e/subagent-abc"
+    )));
+    assert!(path_looks_like_subagent_worktree(Path::new(
+        r"C:\t\w\ffffffff\subagent-xyz"
+    )));
+    assert!(!path_looks_like_subagent_worktree(Path::new(
+        r"H:\t\w\a86e802e"
+    )));
+    assert!(!path_looks_like_subagent_worktree(Path::new(
+        r"H:\t\w\notahex!\subagent-abc"
+    )));
     assert!(!path_looks_like_subagent_worktree(Path::new(
         "/home/user/projects/myrepo"
     )));

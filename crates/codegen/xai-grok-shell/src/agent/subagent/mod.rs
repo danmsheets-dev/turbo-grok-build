@@ -1495,8 +1495,13 @@ fn resolve_child_cwd(
         .unwrap_or_else(|| parent_cwd.to_path_buf())
 }
 
-/// True when `path` looks like a product subagent worktree
-/// (`…/.grok/worktrees/…/subagent-…` or temp `grok-subagent-worktrees/…`).
+/// True when `path` looks like a product subagent worktree.
+///
+/// Accepted layouts (must also contain `/subagent-`):
+/// - `…/.grok/worktrees/…/subagent-…`
+/// - temp `grok-subagent-worktrees/…`
+/// - Windows same-volume short root `{drive}:/t/w/{8hex}/subagent-…` (rc.11+)
+/// - `$GROK_WORKTREE_ROOT/{8hex}/subagent-…`
 ///
 /// Used as a fail-closed honesty check when isolation=worktree was requested
 /// and isolation_fallback is false — child CWD must not silently be the parent.
@@ -1505,10 +1510,47 @@ pub(crate) fn path_looks_like_subagent_worktree(path: &Path) -> bool {
         .to_string_lossy()
         .replace('\\', "/")
         .to_ascii_lowercase();
-    let has_subagent = s.contains("/subagent-");
-    let under_product = s.contains("/.grok/worktrees/");
-    let under_temp = s.contains("grok-subagent-worktrees");
-    has_subagent && (under_product || under_temp)
+    if !s.contains("/subagent-") {
+        return false;
+    }
+    if s.contains("/.grok/worktrees/") || s.contains("grok-subagent-worktrees") {
+        return true;
+    }
+    if short_volume_worktree_path(&s) {
+        return true;
+    }
+    grok_worktree_root_override_path(&s)
+}
+
+/// `{drive}:/t/w/{8hex}/subagent-…` (see `windows_same_volume_worktree_base`).
+fn short_volume_worktree_path(normalized: &str) -> bool {
+    let mut rest = normalized;
+    while let Some(i) = rest.find("/t/w/") {
+        let after = &rest[i + 5..];
+        if after.len() >= 8 {
+            let hash = &after[..8];
+            if hash.bytes().all(|b| b.is_ascii_hexdigit()) && after[8..].starts_with("/subagent-") {
+                return true;
+            }
+        }
+        rest = &rest[i + 5..];
+    }
+    false
+}
+
+fn grok_worktree_root_override_path(normalized: &str) -> bool {
+    let Ok(root) = std::env::var("GROK_WORKTREE_ROOT") else {
+        return false;
+    };
+    let root = root
+        .replace('\\', "/")
+        .trim()
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    if root.is_empty() {
+        return false;
+    }
+    normalized == root || normalized.starts_with(&format!("{root}/"))
 }
 
 /// Parse `GROK_SUBAGENT_WORKTREE_SEED` into a wire label + fast-worktree mode.
