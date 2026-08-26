@@ -93,7 +93,9 @@ jobs:
       - name: THIRD-PARTY-NOTICES covers ship-graph crates
         shell: bash
         run: |
-          for crate in wasmtime rhai cranelift-codegen alacritty_terminal; do
+          # Names as they appear in cargo-about output for the ship graph.
+          # alacritty_terminal is workspace-only (pty harness), not linked into turbo.
+          for crate in wasmtime rhai cranelift-codegen; do
             grep -F "$crate" THIRD-PARTY-NOTICES >/dev/null \
               || { echo "THIRD-PARTY-NOTICES missing $crate; run scripts/generate-third-party-notices.py" >&2; exit 1; }
           done
