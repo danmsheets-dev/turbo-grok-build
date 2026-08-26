@@ -71,12 +71,12 @@ fn partial_budget_results_require_new_plain_text_output() {
     );
 }
 #[test]
-fn unbounded_agent_does_not_gain_runtime_limits() {
+fn unbounded_gp_execution_budget_defaults_to_forty_five_minutes() {
     let definition = xai_grok_agent::config::AgentDefinition::general_purpose();
     let budget = SubagentExecutionBudget::resolve(& definition, None);
-    assert!(budget.is_unbounded());
-    assert!(budget.wire().is_none());
+    assert_eq!(budget.timeout_secs, Some(2_700));
     assert_eq!(budget.first_progress_timeout_ms, Some(720_000));
+    assert!(!budget.is_unbounded());
 }
 #[test]
 fn scoped_allowed_paths_uses_shorter_stall_and_first_progress() {
@@ -88,6 +88,7 @@ fn scoped_allowed_paths_uses_shorter_stall_and_first_progress() {
         None,
         Some("grok-4.6"),
         true,
+        None,
     );
     assert_eq!(budget.stall_timeout_ms, Some(180_000));
     assert_eq!(budget.first_progress_timeout_ms, Some(60_000));
@@ -104,6 +105,7 @@ fn nvidia_platform_default_budget_is_one_hour() {
         None,
         Some("nvidia/meta/muse-glimmer-30b"),
         false,
+        None,
     );
     assert_eq!(budget.timeout_secs, Some(3_600));
     assert_eq!(budget.stall_timeout_ms, Some(1_800_000));
@@ -120,8 +122,42 @@ fn explicit_timeout_ms_is_not_capped_at_thirty_minutes() {
         None,
         Some("nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"),
         false,
+        None,
     );
     assert_eq!(budget.timeout_secs, Some(7_200));
+}
+
+#[test]
+fn xhigh_without_timeout_ms_sets_execution_budget_timeout_secs_to_2700() {
+    let definition = xai_grok_agent::config::AgentDefinition::general_purpose();
+    let budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
+        &definition,
+        None,
+        None,
+        None,
+        Some("grok-4.6"),
+        false,
+        Some(SubagentReasoningEffort::Xhigh),
+    );
+    assert_eq!(budget.timeout_secs, Some(2_700));
+    assert_eq!(budget.first_progress_timeout_ms, Some(720_000));
+}
+
+#[test]
+fn max_reasoning_without_timeout_ms_sets_execution_budget_timeout_secs_to_2700() {
+    let mut definition = xai_grok_agent::config::AgentDefinition::general_purpose();
+    definition.max_tool_calls = Some(20);
+    let budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
+        &definition,
+        None,
+        None,
+        None,
+        Some("grok-4.6"),
+        false,
+        Some(SubagentReasoningEffort::Max),
+    );
+    assert_eq!(budget.timeout_secs, Some(2_700));
+    assert_eq!(budget.first_progress_timeout_ms, Some(720_000));
 }
 
 #[test]
@@ -135,6 +171,7 @@ fn reviewer_agents_default_to_forty_eight_tools() {
         None,
         Some("grok-4.6"),
         false,
+        None,
     );
     assert_eq!(budget.max_tool_calls, Some(48));
     assert_eq!(budget.timeout_secs, Some(600));
@@ -192,6 +229,7 @@ fn in_flight_tools_pause_stall_and_first_progress_but_not_wall_clock() {
         None,
         Some("grok-4.6"),
         true,
+        None,
     );
     assert_eq!(budget.stall_timeout_ms, Some(180_000));
     assert_eq!(budget.timeout_secs, Some(1_800));
@@ -727,6 +765,31 @@ fn retain_worktree_does_not_fill_live_children_cap() {
     unsafe { std::env::set_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES", "1") };
     ensure_live_worktree_cap(base.path()).expect("retain-only tree must not fill cap=1");
     unsafe { std::env::remove_var("GROK_SUBAGENT_MAX_LIVE_WORKTREES") };
+}
+
+/// Disk gate names the dest probe path (the worktree volume), not a hardcoded drive.
+#[test]
+fn ensure_min_free_space_error_contains_probe_path() {
+    use super::ensure_min_free_space_for_worktree;
+    let base = tempfile::TempDir::new().unwrap();
+    let probe = base.path();
+    let prev = std::env::var("GROK_MIN_FREE_GB").ok();
+    // SAFETY: this test restores the env var before returning.
+    unsafe { std::env::set_var("GROK_MIN_FREE_GB", "999999") };
+    let err = ensure_min_free_space_for_worktree(probe).expect_err("gate must refuse");
+    match prev {
+        Some(v) => unsafe { std::env::set_var("GROK_MIN_FREE_GB", v) },
+        None => unsafe { std::env::remove_var("GROK_MIN_FREE_GB") },
+    }
+    let path = probe.display().to_string();
+    assert!(
+        err.contains(&path),
+        "disk-gate error must name probe path `{path}`: {err}"
+    );
+    assert!(
+        err.contains("GiB"),
+        "disk-gate error should report GiB on the dest volume: {err}"
+    );
 }
 
 #[test]

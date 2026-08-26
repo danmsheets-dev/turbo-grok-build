@@ -1206,7 +1206,8 @@ pub(crate) async fn run_shell_child(
     }
     // Wall-clock / tool / stall budget AFTER model resolve so NVIDIA platform
     // defaults (1h timeout, 30 min stall) apply when spawn omits timeout_ms.
-    // Order: explicit timeout_ms > agent-def timeout_secs > NVIDIA 3600s > none.
+    // Order: explicit timeout_ms > agent-def timeout_secs > NVIDIA 3600s >
+    // xhigh/max or unbounded GP 2700s > none.
     let execution_budget = SubagentExecutionBudget::resolve_with_platform_and_scope(
         &definition,
         ctx.parent_max_turns,
@@ -1217,6 +1218,7 @@ pub(crate) async fn run_shell_child(
             .allowed_paths
             .as_ref()
             .is_some_and(|p| !p.is_empty()),
+        effective_runtime.reasoning_effort,
     );
     append_execution_budget_prompt(&mut definition, execution_budget);
     if let Some(effort) = effective_runtime.reasoning_effort

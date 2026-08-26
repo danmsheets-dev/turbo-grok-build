@@ -101,6 +101,58 @@ fn blank_to_none(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.trim().is_empty())
 }
 
+/// Named registered review/research workflows a depth-1 build subagent may launch.
+/// Inline `script` / `script_path` and mutating loops (e.g. `continuous-improve`) stay
+/// top-level-only.
+const NESTED_REVIEW_WORKFLOW_NAMES: &[&str] = &[
+    "review-current-branch",
+    "bug-sweep",
+    "security-sweep",
+    "test-gap",
+    "deep-audit",
+    "deep-research",
+    "perf-optimize",
+    "feature-planning",
+];
+
+/// Depth gate for the workflow tool.
+///
+/// * `depth == 0` (top-level session): any valid launch.
+/// * `depth == 1`: named allowlisted read-only workflow only (no inline script,
+///   `script_path`, or `resume_from_run_id`).
+/// * `depth >= 2`: always refused.
+fn workflow_launch_allowed(depth: u32, input: &WorkflowToolInput) -> Result<(), &'static str> {
+    if depth == 0 {
+        return Ok(());
+    }
+    if depth >= 2 {
+        return Err(
+            "Workflows can only be launched from a top-level session or a depth-1 subagent \
+             launching a named registered read-only workflow (depth >= 2 cannot start workflows)",
+        );
+    }
+    let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    if present(&input.script) || present(&input.script_path) || present(&input.resume_from_run_id) {
+        return Err(
+            "Depth-1 subagents cannot launch inline scripts, script_path, or resume a workflow; \
+             only named registered read-only workflows are allowed",
+        );
+    }
+    match input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(name) if NESTED_REVIEW_WORKFLOW_NAMES.contains(&name) => Ok(()),
+        _ => Err(
+            "Depth-1 subagents may only launch named registered read-only workflows \
+             (review-current-branch, bug-sweep, security-sweep, test-gap, deep-audit, \
+             deep-research, perf-optimize, feature-planning)",
+        ),
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkflowLaunchRequest {
     pub input: WorkflowToolInput,
@@ -174,7 +226,9 @@ impl crate::types::tool_metadata::ToolMetadata for WorkflowTool {
 
 Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives. Workflow metadata may declare a bounded `tasks` queue with `id`, `description`, optional `depends_on`, and `max_attempts`. Scripts can call `task_start(id)`, `task_complete(id, result)`, `task_fail(id, reason)`, and `task_queue()`; task transitions are durable, idempotent across resume, and dependency-aware. `task_complete` leaves the next eligible task pending; scripts explicitly call `task_start` so replay and branching remain deterministic. Paused runs survive process restart; a run that was active during an unclean session end is restored as an infrastructure-paused run with its current task made retryable. Use these task calls around long-running loop work so the harness, not prose, owns progress. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
 
-A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (persisted paused runs survive process restart; active runs restore as infrastructure-paused and retry their current task); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grok/workflows/<name>.rhai`."##
+A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (persisted paused runs survive process restart; active runs restore as infrastructure-paused and retry their current task); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grok/workflows/<name>.rhai`.
+
+A depth-1 build subagent may launch a named registered read-only workflow (`review-current-branch`, `bug-sweep`, `security-sweep`, `test-gap`, `deep-audit`, `deep-research`, `perf-optimize`, `feature-planning`). Inline `script`/`script_path`, resume, and depth >= 2 stay top-level-only."##
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -237,12 +291,10 @@ impl xai_tool_runtime::Tool for WorkflowTool {
             (depth, sender)
         };
 
-        // Workflows stay top-level-only regardless of configurable subagent depth.
-        if depth > 0 {
+        if let Err(detail) = workflow_launch_allowed(depth, &input) {
             return Err(xai_tool_runtime::ToolError::custom(
                 "workflow_depth_exceeded",
-                "Workflows can only be launched from a top-level session (subagents and \
-                 workflow-spawned agents cannot start workflows)",
+                detail,
             ));
         }
 
@@ -412,5 +464,56 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    fn named(name: &str) -> WorkflowToolInput {
+        WorkflowToolInput {
+            agent_budget: None,
+            name: Some(name.into()),
+            script: None,
+            script_path: None,
+            args: None,
+            resume_from_run_id: None,
+            validate_only: false,
+        }
+    }
+
+    #[test]
+    fn depth_one_named_review_workflow_is_not_workflow_depth_exceeded() {
+        assert!(workflow_launch_allowed(1, &named("review-current-branch")).is_ok());
+        for name in NESTED_REVIEW_WORKFLOW_NAMES {
+            assert!(
+                workflow_launch_allowed(1, &named(name)).is_ok(),
+                "{name} must be allowed at depth 1"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_workflow_gate_blocks_inline_and_deeper_depth() {
+        assert!(workflow_launch_allowed(0, &named("continuous-improve")).is_ok());
+        assert!(workflow_launch_allowed(1, &named("continuous-improve")).is_err());
+        assert!(workflow_launch_allowed(2, &named("review-current-branch")).is_err());
+
+        let script_only = WorkflowToolInput {
+            name: None,
+            script: Some("let meta = #{ name: \"x\", description: \"y\" };".into()),
+            ..named("unused")
+        };
+        assert!(workflow_launch_allowed(1, &script_only).is_err());
+
+        let path = WorkflowToolInput {
+            name: None,
+            script_path: Some("review.rhai".into()),
+            ..named("unused")
+        };
+        assert!(workflow_launch_allowed(1, &path).is_err());
+
+        let resume = WorkflowToolInput {
+            name: None,
+            resume_from_run_id: Some("wf_123".into()),
+            ..named("unused")
+        };
+        assert!(workflow_launch_allowed(1, &resume).is_err());
     }
 }

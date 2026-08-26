@@ -135,7 +135,9 @@ pub struct TaskToolInput {
     #[schemars(
         description = "Hard wall-clock limit for this child in milliseconds. Distinct from \
             get_task_output wait timeout: this cancels the child when exceeded. Overrides the \
-            agent-definition timeout when set."
+            agent-definition timeout when set. When omitted, xhigh/max reasoning effort \
+            (and unbounded general-purpose agents) default to 45 minutes wall-clock \
+            (2700000 ms)."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,

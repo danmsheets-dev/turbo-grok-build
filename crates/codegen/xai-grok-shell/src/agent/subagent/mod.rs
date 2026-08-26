@@ -2072,6 +2072,7 @@ impl SubagentExecutionBudget {
             stall_timeout_ms,
             model_id,
             false,
+            None,
         )
     }
 
@@ -2082,18 +2083,36 @@ impl SubagentExecutionBudget {
         stall_timeout_ms: Option<u64>,
         model_id: Option<&str>,
         allowed_paths_scoped: bool,
+        reasoning_effort: Option<xai_tool_types::SubagentReasoningEffort>,
     ) -> Self {
         let reviewer = agent_name_looks_like_reviewer(&definition.name);
+        let nvidia = model_is_nvidia_platform(model_id);
+        let long_reasoning = matches!(
+            reasoning_effort,
+            Some(
+                xai_tool_types::SubagentReasoningEffort::Xhigh
+                    | xai_tool_types::SubagentReasoningEffort::Max
+            )
+        );
+        // Unbounded GP (no def timeout/tools/turns): previously first-progress-only
+        // (12 min). Give a 45 min wall clock so xhigh/max work can finish.
+        let unbounded_gp = !reviewer
+            && definition.timeout_secs.is_none()
+            && definition.max_tool_calls.is_none()
+            && definition.max_turns.is_none();
         // explicit timeout_ms > AgentDefinition.timeout_secs > reviewer 10 min
         // > NVIDIA platform default (1h — cargo compile of tools/shell exceeds
-        // the old 10 min / 30 min budgets) > none. No upper cap on timeout_ms.
+        // the old 10 min / 30 min budgets) > xhigh/max or unbounded GP 45 min
+        // > none. No upper cap on timeout_ms.
         let timeout_secs = match timeout_ms_override {
             Some(ms) if ms > 0 => Some(ms.div_ceil(1000).max(1)),
             _ => definition.timeout_secs.or_else(|| {
                 if reviewer {
                     Some(600)
-                } else if model_is_nvidia_platform(model_id) {
+                } else if nvidia {
                     Some(3_600)
+                } else if long_reasoning || unbounded_gp {
+                    Some(2_700)
                 } else {
                     None
                 }
@@ -2113,7 +2132,7 @@ impl SubagentExecutionBudget {
         let stall_timeout_ms = match stall_timeout_ms {
             Some(ms) if ms > 0 => Some(ms),
             _ if allowed_paths_scoped => Some(180_000),
-            _ if model_is_nvidia_platform(model_id) => Some(1_800_000),
+            _ if nvidia => Some(1_800_000),
             _ if timeout_secs.is_some() || definition.max_tool_calls.is_some() => Some(600_000),
             _ => None,
         };
@@ -2121,12 +2140,16 @@ impl SubagentExecutionBudget {
         // First-progress: fail hung spawns, but do not kill xhigh/unbounded
         // children that spend minutes in reasoning before the first token.
         // Scoped allowlist jobs stay fail-fast (60s). NVIDIA catalog stalls
-        // get 3 min. Unbounded GP / xhigh get 12 min (FR xhigh default).
+        // get 3 min. Unbounded GP / xhigh keep 12 min even with the 45 min
+        // wall clock (FR xhigh default).
+        let used_explicit_timeout = matches!(timeout_ms_override, Some(ms) if ms > 0);
         let first_progress_timeout_ms = if allowed_paths_scoped {
             Some(60_000)
-        } else if model_is_nvidia_platform(model_id) {
+        } else if nvidia {
             Some(180_000)
-        } else if timeout_secs.is_none() {
+        } else if !used_explicit_timeout
+            && (long_reasoning || unbounded_gp || timeout_secs.is_none())
+        {
             Some(720_000)
         } else {
             Some(60_000)
@@ -3113,6 +3136,10 @@ pub(crate) fn prune_soft_preserved_worktrees_with_cap(base: &Path, keep: usize) 
 }
 
 /// Fail closed when free space under `base` is below the configured minimum.
+///
+/// Probes the dest path (`base`, or its parent if it does not exist yet) so a
+/// low system drive (e.g. C:) does not refuse a worktree on another volume
+/// (e.g. H:).
 pub(crate) fn ensure_min_free_space_for_worktree(base: &Path) -> Result<(), String> {
     let min = min_free_bytes_for_worktree();
     if min == 0 {
@@ -3130,16 +3157,27 @@ pub(crate) fn ensure_min_free_space_for_worktree(base: &Path) -> Result<(), Stri
         )
     })?;
     if available < min {
-        return Err(format!(
-            "spawn gate [disk]: not enough free disk space to create isolated worktree \
-             (available {available} bytes, need at least {min}). \
-             Run `turbo disk clean --safe` and/or `turbo subagent prune`; \
-             or lower the gate with GROK_MIN_FREE_GB / GROK_SUBAGENT_MIN_FREE_BYTES=0; \
-             or raise keep-N via GROK_SUBAGENT_KEEP_N. \
-             Original symptom: os error 112 / StorageFull."
-        ));
+        return Err(insufficient_worktree_space_error(&probe, available, min));
     }
     Ok(())
+}
+
+/// Probe `base` (the dest worktree volume), never a hardcoded system drive.
+/// Windows short-root worktrees live on the repo volume (e.g. H:), so a low
+/// C: must not fail a spawn destined for H:.
+fn insufficient_worktree_space_error(probe: &Path, available: u64, min: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let available_gib = available as f64 / GIB;
+    let need_gib = min as f64 / GIB;
+    format!(
+        "spawn gate [disk]: not enough free disk space to create isolated worktree \
+         (`{}` available {available_gib:.1} GiB, need {need_gib:.0} GiB). \
+         Run `turbo disk clean --safe` and/or `turbo subagent prune`; \
+         or lower the gate with GROK_MIN_FREE_GB / GROK_SUBAGENT_MIN_FREE_BYTES=0; \
+         or raise keep-N via GROK_SUBAGENT_KEEP_N. \
+         Original symptom: os error 112 / StorageFull.",
+        probe.display()
+    )
 }
 
 /// Cap on live (running) worktrees per base dir before spawn refuses
