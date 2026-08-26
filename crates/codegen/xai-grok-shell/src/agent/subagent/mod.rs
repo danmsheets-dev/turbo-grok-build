@@ -2729,7 +2729,8 @@ pub(crate) fn parse_live_worktree_marker(contents: &str) -> LiveWorktreeMarker {
             parsed.pid = v.trim().parse().ok();
         } else if let Some(v) = part.strip_prefix("retain=") {
             let v = v.trim();
-            parsed.retain = v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes");
+            parsed.retain =
+                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes");
         }
     }
     parsed
@@ -2925,10 +2926,7 @@ pub(crate) fn is_live_worktree_protected(worktree: &Path) -> bool {
         if parsed.retain {
             return true;
         }
-        if parsed
-            .pid
-            .is_some_and(crate::util::is_process_alive)
-        {
+        if parsed.pid.is_some_and(crate::util::is_process_alive) {
             return true;
         }
     }
@@ -3200,10 +3198,7 @@ fn path_is_under_workspace(path: &Path, workspace: &Path) -> bool {
     child == parent || child.starts_with(&format!("{parent}/"))
 }
 
-pub(crate) fn resolve_worktree_source_cwd(
-    parent_cwd: &Path,
-    spawn_cwd: Option<&str>,
-) -> PathBuf {
+pub(crate) fn resolve_worktree_source_cwd(parent_cwd: &Path, spawn_cwd: Option<&str>) -> PathBuf {
     if let Some(raw) = spawn_cwd {
         let explicit = PathBuf::from(raw.trim());
         if explicit.is_dir() && path_is_under_workspace(&explicit, parent_cwd) {

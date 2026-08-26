@@ -1692,8 +1692,7 @@ impl SessionActor {
         // this meeting and answering into its chat is the whole point of the
         // turn. `is_meeting_qa_tool_name` is deliberately narrower than the
         // full notetaker set — join/stop/notes/knowledge stay blocked.
-        let meeting_qa_tool =
-            xai_grok_meetings::is_meeting_qa_tool_name(&call.function.name);
+        let meeting_qa_tool = xai_grok_meetings::is_meeting_qa_tool_name(&call.function.name);
 
         // Defence in depth: `meeting_ask` with no question drains a queued
         // question written by a meeting participant. Confinement must follow
@@ -3749,8 +3748,8 @@ mod meeting_confinement_tests {
     };
     use serde_json::json;
     use xai_grok_tools::implementations::grok_build::read_file::ReadFileInput;
-    use xai_grok_tools::types::tool::ToolKind;
     use xai_grok_tools::types::ToolInput;
+    use xai_grok_tools::types::tool::ToolKind;
 
     #[test]
     fn short_tool_name_strips_the_namespace_without_suffix_matching() {
@@ -3824,12 +3823,7 @@ mod meeting_confinement_tests {
         let outside_file = outside.path().join("secret.txt");
         std::fs::write(&outside_file, "nope").unwrap();
         assert!(
-            !meeting_qa_path_allowed(
-                workspace,
-                None,
-                workspace,
-                outside_file.to_str().unwrap(),
-            ),
+            !meeting_qa_path_allowed(workspace, None, workspace, outside_file.to_str().unwrap(),),
             "absolute path outside workspace must be denied"
         );
     }

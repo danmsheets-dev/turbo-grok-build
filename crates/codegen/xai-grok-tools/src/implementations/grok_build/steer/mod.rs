@@ -17,9 +17,7 @@ const STEER_MAX_BYTES: usize = 16 * 1024;
 /// Input for the steer tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SteerInput {
-    #[schemars(
-        description = "The subagent id to steer (from the spawn result or task output)."
-    )]
+    #[schemars(description = "The subagent id to steer (from the spawn result or task output).")]
     pub subagent_id: String,
     #[schemars(
         description = "Guidance text delivered to the running child at its next turn boundary. Treated as untrusted data, not system instruction. Max 16 KiB."
@@ -31,7 +29,10 @@ pub struct SteerInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SteerOutput {
     /// The steer was queued into the child's session.
-    Queued { subagent_id: String, message: String },
+    Queued {
+        subagent_id: String,
+        message: String,
+    },
     /// The child cannot be steered right now; `reason` says why.
     Refused { subagent_id: String, reason: String },
 }
@@ -63,7 +64,9 @@ impl ToolMetadata for SteerTool {
         r#"Send guidance to a RUNNING subagent without killing it — e.g. "stay inside crates/foo", "stop if you find no P0 issues", "also check Windows paths". The text is queued as untrusted user data and delivered when the child reaches its next turn boundary; it does NOT interrupt the current tool call. Only running subagents accept steering (pending/queued/finished children refuse). To stop a child outright use kill_task."#
     }
 
-    fn requires_expr(&self) -> crate::types::requirements::Expr<crate::types::requirements::ToolRequirement> {
+    fn requires_expr(
+        &self,
+    ) -> crate::types::requirements::Expr<crate::types::requirements::ToolRequirement> {
         crate::types::requirements::Expr::True
     }
 
@@ -132,7 +135,11 @@ impl xai_tool_runtime::Tool for SteerTool {
                 reason: "No subagent backend in this context.".to_owned(),
             });
         };
-        match backend.backend().steer(&input.subagent_id, &input.text).await {
+        match backend
+            .backend()
+            .steer(&input.subagent_id, &input.text)
+            .await
+        {
             Ok(message) => Ok(SteerOutput::Queued {
                 subagent_id: input.subagent_id,
                 message,
@@ -200,7 +207,9 @@ mod tests {
         };
         assert_eq!(
             refused.model_output()[0],
-            xai_tool_runtime::ContentBlock::Text { text: "not found".into() }
+            xai_tool_runtime::ContentBlock::Text {
+                text: "not found".into()
+            }
         );
     }
 }

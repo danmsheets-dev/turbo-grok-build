@@ -96,7 +96,11 @@ pub(super) fn intersect_verbatim_fork_tools(
     let out: Vec<_> = parent
         .into_iter()
         .filter(|spec| {
-            if drop_mcp && spec.name.contains(crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER) {
+            if drop_mcp
+                && spec
+                    .name
+                    .contains(crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER)
+            {
                 return false;
             }
             names.contains(&spec.name)
@@ -1826,8 +1830,7 @@ pub(crate) async fn run_shell_child(
     } else {
         definition.mcp_inheritance.clone()
     };
-    let parent_mcp_pool =
-        resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &mcp_inheritance);
+    let parent_mcp_pool = resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &mcp_inheritance);
     let mcp_inherited_count = parent_mcp_pool
         .as_ref()
         .map(|p| p.len() as u32)

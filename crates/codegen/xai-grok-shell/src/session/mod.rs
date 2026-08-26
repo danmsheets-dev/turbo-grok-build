@@ -238,8 +238,7 @@ mod tests {
     fn meeting_prefix_matches_the_tools_constant() {
         // One constant drives the pager tag, the task id, and this parser.
         // If they drift, the read-only confinement silently stops applying.
-        let prefix =
-            xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX;
+        let prefix = xai_grok_tools::implementations::grok_build::meeting::MEETING_QA_TASK_PREFIX;
         assert_eq!(prefix, "meeting-qa-");
         assert_eq!(
             PromptOrigin::from_prompt_id(&format!("{prefix}deadbeef")),

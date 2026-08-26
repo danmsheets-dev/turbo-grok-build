@@ -228,7 +228,7 @@ prost-reflect = "0.16"
 pulldown-cmark = "0.13"
 quick-xml = "0.38"
 rand = "0.9"
-ratatui = { version = "0.29" }
+ratatui = { version = "=0.29.0" }
 ratatui-core = "0.1"
 rayon = "1"
 rcgen = { version = "0.13", features = ["pem"] }

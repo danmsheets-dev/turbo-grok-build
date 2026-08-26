@@ -271,9 +271,7 @@ fn git_cwd_for_land(cli_cwd: &Path, r: &Resolved) -> PathBuf {
         return cli_cwd.to_path_buf();
     }
     for ancestor in cli_cwd.ancestors().skip(1) {
-        if ancestor.join(".git").exists()
-            && git(ancestor, &["rev-parse", "--git-dir"]).is_ok()
-        {
+        if ancestor.join(".git").exists() && git(ancestor, &["rev-parse", "--git-dir"]).is_ok() {
             return ancestor.to_path_buf();
         }
     }

@@ -410,15 +410,17 @@ pub async fn resolve_subagent_work(
         ));
     }
 
-    let parent_git_root = resolve_land_git_root(&meta, &parent_cwd).await.map_err(|e| {
-        xai_tool_runtime::ToolError::custom(
-            "not_a_git_repo",
-            format!(
-                "could not resolve isolation/parent git root from cwd {}: {e}",
-                parent_cwd.display()
-            ),
-        )
-    })?;
+    let parent_git_root = resolve_land_git_root(&meta, &parent_cwd)
+        .await
+        .map_err(|e| {
+            xai_tool_runtime::ToolError::custom(
+                "not_a_git_repo",
+                format!(
+                    "could not resolve isolation/parent git root from cwd {}: {e}",
+                    parent_cwd.display()
+                ),
+            )
+        })?;
 
     Ok(ResolvedSubagentWork {
         subagent_id: subagent_id.trim().to_owned(),
@@ -441,8 +443,14 @@ async fn resolve_land_git_root(
 ) -> Result<PathBuf, String> {
     let child_is_worktree = match (meta.child_cwd.as_deref(), meta.worktree_path.as_deref()) {
         (Some(c), Some(w)) => {
-            let a = c.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
-            let b = w.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
+            let a = c
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase();
+            let b = w
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase();
             a == b
         }
         _ => false,
@@ -1307,9 +1315,25 @@ mod allowlist_tests {
     #[test]
     fn land_size_guard_after_path_discovery() {
         assert!(land_size_guard(Some(1), false, DEFAULT_LAND_MAX_FILES).is_ok());
-        assert!(land_size_guard(Some(DEFAULT_LAND_MAX_FILES), false, DEFAULT_LAND_MAX_FILES).is_ok());
-        assert!(land_size_guard(Some(DEFAULT_LAND_MAX_FILES + 1), false, DEFAULT_LAND_MAX_FILES).is_err());
-        assert!(land_size_guard(Some(DEFAULT_LAND_MAX_FILES + 1), true, DEFAULT_LAND_MAX_FILES).is_ok());
+        assert!(
+            land_size_guard(Some(DEFAULT_LAND_MAX_FILES), false, DEFAULT_LAND_MAX_FILES).is_ok()
+        );
+        assert!(
+            land_size_guard(
+                Some(DEFAULT_LAND_MAX_FILES + 1),
+                false,
+                DEFAULT_LAND_MAX_FILES
+            )
+            .is_err()
+        );
+        assert!(
+            land_size_guard(
+                Some(DEFAULT_LAND_MAX_FILES + 1),
+                true,
+                DEFAULT_LAND_MAX_FILES
+            )
+            .is_ok()
+        );
         let n = filter_harness_land_paths(&[
             "src/lib.rs".into(),
             ".grok-subagent-live".into(),

@@ -394,7 +394,16 @@ pub fn run(args: FeaturesArgs) -> Result<()> {
             let repo = resolve_repo(repo.as_deref(), &cfg)?;
             let direction = sync_direction(push, pull, both);
             let gh = GhCli::new();
-            let report = match sync_features(&store, &gh, &SyncOptions { repo, direction }) {
+            let report = match sync_features(
+                &store,
+                &gh,
+                &SyncOptions {
+                    repo,
+                    direction,
+                    allow_public: xai_grok_config::env_bool("GROK_GITHUB_SYNC_PUBLIC")
+                        == Some(true),
+                },
+            ) {
                 Ok(r) => r,
                 Err(e) if crate::issues_cmd::is_repo_capability_error(&e) => {
                     // Feature requests have no export pack of their own; the

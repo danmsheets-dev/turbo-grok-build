@@ -13,6 +13,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::notification::types::ToolNotificationHandle;
+use crate::types::SharedApiKeyProvider;
+use crate::types::output::ToolOutput;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use xai_grok_meetings::{
@@ -24,9 +27,6 @@ use xai_grok_meetings::{
 };
 use xai_grok_voice::auth::{SharedVoiceAuth, StaticVoiceAuth, VoiceAuthProvider};
 use xai_grok_voice::config::VoiceConfig;
-use crate::notification::types::ToolNotificationHandle;
-use crate::types::SharedApiKeyProvider;
-use crate::types::output::ToolOutput;
 
 mod ask;
 mod auto_ask;
@@ -52,9 +52,7 @@ pub use notes::{MEETING_NOTES_TOOL_NAME, MeetingNotesInput, MeetingNotesTool};
 pub use reply::{MEETING_REPLY_TOOL_NAME, MeetingReplyInput, MeetingReplyTool};
 pub use status::{MEETING_STATUS_TOOL_NAME, MeetingStatusInput, MeetingStatusTool};
 pub use stop::{MEETING_STOP_TOOL_NAME, MeetingStopInput, MeetingStopTool};
-pub use transcript::{
-    MEETING_TRANSCRIPT_TOOL_NAME, MeetingTranscriptInput, MeetingTranscriptTool,
-};
+pub use transcript::{MEETING_TRANSCRIPT_TOOL_NAME, MeetingTranscriptInput, MeetingTranscriptTool};
 
 pub use xai_grok_meetings::{
     MEETING_COMMAND_NAME, ask_instruction, detect_join_request, first_https_url,
@@ -264,9 +262,8 @@ impl MeetingHandle {
                 "meeting_* tools require a pager session id",
             ));
         }
-        let parsed = parse_meeting_url(url).map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_bad_url", e.to_string())
-        })?;
+        let parsed = parse_meeting_url(url)
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_bad_url", e.to_string()))?;
         let folder = self.folder()?.clone();
 
         {
@@ -291,9 +288,8 @@ impl MeetingHandle {
         // depends on which transport wins, which is not known until below.
         let id = new_meeting_id(parsed.platform);
         let intended = pipeline::choose_capture_source();
-        let store = MeetingStore::create(&folder, &id, &parsed, intended).map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-        })?;
+        let store = MeetingStore::create(&folder, &id, &parsed, intended)
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
         write_current(&folder, &id)
             .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
         if let Some(k) = read_knowledge_dir(&folder) {
@@ -306,8 +302,7 @@ impl MeetingHandle {
             .map(str::to_string);
         if title.is_none() {
             if let Some(token) = graph::graph_token() {
-                if let Ok(subject) =
-                    graph::meeting_subject_for_join_url(&token, &parsed.raw).await
+                if let Ok(subject) = graph::meeting_subject_for_join_url(&token, &parsed.raw).await
                 {
                     title = Some(subject);
                 }
@@ -339,8 +334,7 @@ impl MeetingHandle {
                     let auth = self.voice_auth()?;
                     let config = VoiceConfig::default();
                     let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<u8>>(64);
-                    match transport::try_join_bot(&parsed, &store, config.sample_rate, pcm_tx)
-                        .await
+                    match transport::try_join_bot(&parsed, &store, config.sample_rate, pcm_tx).await
                     {
                         Ok((joined, chat_ingress)) => {
                             let stt_store = store.clone();
@@ -431,8 +425,7 @@ impl MeetingHandle {
             bot_state: bot_state.as_ref(),
             shell_open,
             fallback_note: fallback_note.as_deref(),
-            loopback_only: pipeline::capture_pref_from_env()
-                == pipeline::CapturePref::LoopbackOnly,
+            loopback_only: pipeline::capture_pref_from_env() == pipeline::CapturePref::LoopbackOnly,
         }
         .render()
         .join("\n"))
@@ -497,9 +490,9 @@ impl MeetingHandle {
                 "no active meeting recording in this session",
             ));
         };
-        let meta = store.read_meta().map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-        })?;
+        let meta = store
+            .read_meta()
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
         // Keep current.txt so /meeting notes can still write the work-folder summary.
         // The notetaker line is what stops a stop-after-failed-join from being
         // shape-identical to a stop after a real one.
@@ -516,9 +509,10 @@ impl MeetingHandle {
 
     pub fn status_text(&self) -> Result<String, xai_tool_runtime::ToolError> {
         if let Some(live) = lock_live().get(&self.inner.session_id) {
-            let meta = live.store.read_meta().map_err(|e| {
-                xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-            })?;
+            let meta = live
+                .store
+                .read_meta()
+                .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
             let mut text = format_meta(&meta, Some(live.capture_source), &live.store);
             if let Some(bot) = &live.bot {
                 text.push_str(&format!(
@@ -532,9 +526,8 @@ impl MeetingHandle {
         }
         let folder = self.folder()?;
         if let Some(id) = read_current_id(folder).ok().flatten() {
-            let (store, meta) = MeetingStore::open(meeting_dir(folder, &id)).map_err(|e| {
-                xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-            })?;
+            let (store, meta) = MeetingStore::open(meeting_dir(folder, &id))
+                .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
             return Ok(format_meta(&meta, None, &store));
         }
         Ok("No meeting notetaker is running in this session.".into())
@@ -542,9 +535,9 @@ impl MeetingHandle {
 
     pub fn transcript_text(&self) -> Result<String, xai_tool_runtime::ToolError> {
         let store = self.active_or_current_store()?;
-        let text = store.transcript_text().map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-        })?;
+        let text = store
+            .transcript_text()
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
         if text.trim().is_empty() {
             Ok("(transcript empty so far)".into())
         } else {
@@ -565,7 +558,9 @@ impl MeetingHandle {
             dir
         } else {
             std::env::current_dir()
-                .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_knowledge", e.to_string()))?
+                .map_err(|e| {
+                    xai_tool_runtime::ToolError::custom("meeting_knowledge", e.to_string())
+                })?
                 .join(dir)
         };
         if !dir.is_dir() {
@@ -574,9 +569,8 @@ impl MeetingHandle {
                 format!("path is not a directory: {}", dir.display()),
             ));
         }
-        write_knowledge_dir(&folder, &dir).map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_knowledge", e.to_string())
-        })?;
+        write_knowledge_dir(&folder, &dir)
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_knowledge", e.to_string()))?;
         if let Ok(store) = self.active_or_current_store() {
             let _ = store.set_knowledge_dir(&dir);
         }
@@ -623,7 +617,12 @@ impl MeetingHandle {
         let cwd = workspace
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok());
-        Ok(briefing(&q, cwd.as_deref(), extra.as_deref(), store.as_ref()))
+        Ok(briefing(
+            &q,
+            cwd.as_deref(),
+            extra.as_deref(),
+            store.as_ref(),
+        ))
     }
 
     pub async fn reply(&self, answer: &str) -> Result<String, xai_tool_runtime::ToolError> {
@@ -632,9 +631,9 @@ impl MeetingHandle {
             text = format!("[Turbo] {text}");
         }
         let store = self.active_or_current_store()?;
-        store.write_last_reply(&text).map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-        })?;
+        store
+            .write_last_reply(&text)
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
         let mut lines = vec![format!("Saved {}", store.last_reply_path().display())];
 
         // Prefer the notetaker's own guest identity. This is what lets chat
@@ -688,9 +687,9 @@ impl MeetingHandle {
         workspace: Option<&std::path::Path>,
     ) -> Result<String, xai_tool_runtime::ToolError> {
         let store = self.active_or_current_store()?;
-        let mut meta = store.read_meta().map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-        })?;
+        let mut meta = store
+            .read_meta()
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
         let title = extract_title_from_markdown(markdown)
             .or_else(|| meta.title.clone())
             .filter(|s| !s.trim().is_empty())
@@ -707,9 +706,9 @@ impl MeetingHandle {
             meta.capture_source,
             markdown,
         );
-        store.write_notes(&doc).map_err(|e| {
-            xai_tool_runtime::ToolError::custom("meeting_store", e.to_string())
-        })?;
+        store
+            .write_notes(&doc)
+            .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
         let mut lines = vec![format!("Session notes: {}", store.notes_path().display())];
         if let Some(ws) = workspace {
             let dir = workspace_meetings_dir(ws);
@@ -822,7 +821,8 @@ impl JoinSummary<'_> {
             format!("id: {}", self.id),
             format!(
                 "name: {}",
-                self.title.unwrap_or("(will use Graph subject or recap title)")
+                self.title
+                    .unwrap_or("(will use Graph subject or recap title)")
             ),
             format!("url: {}", self.redacted_url),
             format!("capture: {:?} — {}", self.source, self.source.describe()),
@@ -861,7 +861,8 @@ impl JoinSummary<'_> {
                 );
             } else {
                 lines.push(
-                    "capturing system playback (all participants) mixed with the microphone.".into(),
+                    "capturing system playback (all participants) mixed with the microphone."
+                        .into(),
                 );
             }
         }
@@ -888,7 +889,11 @@ fn format_notetaker_line(meta: &MeetingMeta) -> String {
     }
 }
 
-fn format_meta(meta: &MeetingMeta, live_source: Option<CaptureSource>, store: &MeetingStore) -> String {
+fn format_meta(
+    meta: &MeetingMeta,
+    live_source: Option<CaptureSource>,
+    store: &MeetingStore,
+) -> String {
     let live = live_source.is_some();
     let source = live_source.unwrap_or(meta.capture_source);
     format!(
@@ -909,7 +914,9 @@ fn format_meta(meta: &MeetingMeta, live_source: Option<CaptureSource>, store: &M
         meta.final_segments,
         store.transcript_path().display(),
         store.notes_path().display(),
-        meta.workspace_summary_path.as_deref().unwrap_or("(not written yet)"),
+        meta.workspace_summary_path
+            .as_deref()
+            .unwrap_or("(not written yet)"),
         meta.knowledge_dir.as_deref().unwrap_or("(none)"),
         store.pending_question_count(),
     )
@@ -1086,7 +1093,10 @@ mod tests {
 
         let first = &lines[0];
         assert!(first.contains("NO GUEST IN THE MEETING"), "{first}");
-        assert!(first.contains("Teams app launcher"), "must name why: {first}");
+        assert!(
+            first.contains("Teams app launcher"),
+            "must name why: {first}"
+        );
         assert!(
             first.to_lowercase().contains("q&a"),
             "must name the feature that is not running: {first}"
@@ -1114,10 +1124,7 @@ mod tests {
         let outcome = NotetakerOutcome::Joined;
         let lines = summary(CaptureSource::MeetingBot, &outcome, None).render();
         assert!(lines[0].starts_with("Notetaker started"), "{:?}", lines[0]);
-        assert!(
-            !lines.iter().any(|l| l.contains("NO GUEST")),
-            "{lines:#?}"
-        );
+        assert!(!lines.iter().any(|l| l.contains("NO GUEST")), "{lines:#?}");
         assert!(
             lines.iter().any(|l| l.contains("wss://api.x.ai/v1/stt")),
             "join output must name the remote STT destination: {lines:#?}"
@@ -1161,7 +1168,10 @@ mod tests {
         assert!(!lines[0].contains("NO GUEST"), "{:?}", lines[0]);
         // The existing honesty line still lands, and still lands last.
         assert!(
-            lines.last().unwrap().contains("no participant joins the meeting"),
+            lines
+                .last()
+                .unwrap()
+                .contains("no participant joins the meeting"),
             "{lines:#?}"
         );
     }
@@ -1245,8 +1255,9 @@ mod tests {
     #[test]
     fn stale_disk_recording_is_not_live_and_redacts_passcode() {
         let root = temp_session("meet-stale");
-        let store = MeetingStore::create(&root, "teams-stale-1", &secret_url(), CaptureSource::None)
-            .unwrap();
+        let store =
+            MeetingStore::create(&root, "teams-stale-1", &secret_url(), CaptureSource::None)
+                .unwrap();
         write_current(&root, "teams-stale-1").unwrap();
         let created = store.read_meta().unwrap();
         assert!(!created.url.contains("secret"), "{}", created.url);

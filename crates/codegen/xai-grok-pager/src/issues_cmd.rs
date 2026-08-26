@@ -280,10 +280,7 @@ pub fn run(args: IssuesArgs) -> Result<()> {
                 )
                 .with_context(|| format!("resolve `{id}`"))?;
             match inc.resolution_sha.as_deref() {
-                Some(sha) => println!(
-                    "Resolved {} ({}) sha={}",
-                    inc.incident_id, inc.title, sha
-                ),
+                Some(sha) => println!("Resolved {} ({}) sha={}", inc.incident_id, inc.title, sha),
                 None => println!("Resolved {} ({})", inc.incident_id, inc.title),
             }
             Ok(())
@@ -409,7 +406,16 @@ pub fn run(args: IssuesArgs) -> Result<()> {
             let repo = resolve_repo(repo.as_deref(), &cfg)?;
             let direction = sync_direction(push, pull, both);
             let gh = GhCli::new();
-            let report = match sync_incidents(&store, &gh, &SyncOptions { repo, direction }) {
+            let report = match sync_incidents(
+                &store,
+                &gh,
+                &SyncOptions {
+                    repo,
+                    direction,
+                    allow_public: xai_grok_config::env_bool("GROK_GITHUB_SYNC_PUBLIC")
+                        == Some(true),
+                },
+            ) {
                 Ok(r) => r,
                 Err(e) if is_repo_capability_error(&e) => {
                     eprintln!("{e}");
@@ -432,7 +438,6 @@ pub fn run(args: IssuesArgs) -> Result<()> {
     }
 }
 
-
 /// A GitHub refusal must never strand the log.
 ///
 /// The three capability errors mean the remote cannot accept issues at all --
@@ -443,7 +448,10 @@ pub fn run(args: IssuesArgs) -> Result<()> {
 pub(crate) fn is_repo_capability_error(err: &SyncError) -> bool {
     matches!(
         err,
-        SyncError::IssuesDisabled { .. } | SyncError::NoPushAccess { .. } | SyncError::RepoArchived { .. }
+        SyncError::IssuesDisabled { .. }
+            | SyncError::NoPushAccess { .. }
+            | SyncError::RepoArchived { .. }
+            | SyncError::PublicRepo { .. }
     )
 }
 

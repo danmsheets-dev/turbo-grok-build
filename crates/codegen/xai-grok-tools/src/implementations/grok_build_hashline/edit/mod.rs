@@ -391,10 +391,9 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             let allowed_paths = res
                 .get::<crate::types::resources::AllowedWritePaths>()
                 .map(|a| a.0.clone());
-            let policy_params = res
-                .get::<crate::types::resources::Params<
-                    crate::implementations::grok_build::policy::PolicyParams,
-                >>();
+            let policy_params = res.get::<crate::types::resources::Params<
+                crate::implementations::grok_build::policy::PolicyParams,
+            >>();
             let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
                 policy_params.map(|p| &p.0),
             );

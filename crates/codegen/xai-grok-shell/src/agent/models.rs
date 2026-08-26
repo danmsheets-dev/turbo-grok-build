@@ -301,7 +301,10 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
         ("gpt-5.6-sol-pro", "openai-codex/gpt-5.6-sol-pro"),
         ("openai/gpt-5.6-terra", "openai-codex/gpt-5.6-terra"),
         ("openai/gpt-5.6-terra-pro", "openai-codex/gpt-5.6-terra-pro"),
-        ("openrouter/openai/gpt-5.6-terra", "openai-codex/gpt-5.6-terra"),
+        (
+            "openrouter/openai/gpt-5.6-terra",
+            "openai-codex/gpt-5.6-terra",
+        ),
         (
             "openrouter/openai/gpt-5.6-terra-pro",
             "openai-codex/gpt-5.6-terra-pro",

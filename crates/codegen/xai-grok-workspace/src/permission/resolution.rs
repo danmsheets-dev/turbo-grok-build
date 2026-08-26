@@ -309,13 +309,18 @@ pub fn deny_read_globs_from_config(config: &PermissionConfig) -> Vec<String> {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-    for pat in config.rules.iter().filter(|r| {
-        r.action == RuleAction::Deny
-            && matches!(
-                r.tool,
-                ToolFilter::Read | ToolFilter::Grep | ToolFilter::Any
-            )
-    }).filter_map(|r| r.pattern.clone()) {
+    for pat in config
+        .rules
+        .iter()
+        .filter(|r| {
+            r.action == RuleAction::Deny
+                && matches!(
+                    r.tool,
+                    ToolFilter::Read | ToolFilter::Grep | ToolFilter::Any
+                )
+        })
+        .filter_map(|r| r.pattern.clone())
+    {
         if !globs.iter().any(|g| g == &pat) {
             globs.push(pat);
         }

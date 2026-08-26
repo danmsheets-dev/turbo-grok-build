@@ -16,7 +16,10 @@ pub const MEETING_QA_TASK_PREFIX: &str = "meeting-qa-";
 
 pub fn auto_ask_enabled() -> bool {
     match std::env::var(AUTO_ASK_ENV) {
-        Ok(s) => !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Ok(s) => !matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         // Off unless the operator opts in: meeting-guest text must not start a
         // workspace-reading turn by default.
         Err(_) => false,
@@ -32,11 +35,7 @@ pub fn meeting_qa_task_id(from: &str, question: &str) -> String {
 }
 
 /// Queue a research+reply turn. No-op if auto-ask is off or there is no sink.
-pub fn emit_auto_ask(
-    handle: Option<&ToolNotificationHandle>,
-    from: &str,
-    question: &str,
-) -> bool {
+pub fn emit_auto_ask(handle: Option<&ToolNotificationHandle>, from: &str, question: &str) -> bool {
     if !auto_ask_enabled() {
         return false;
     }

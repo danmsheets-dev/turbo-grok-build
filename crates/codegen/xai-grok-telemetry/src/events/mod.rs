@@ -13,6 +13,14 @@ use serde::Serialize;
 use super::enums::PermissionMode;
 pub use super::enums::PrCreationSource;
 
+/// Mixpanel / internal event JSON: emit a count, never the raw names (F84).
+fn serialize_name_count<S: serde::Serializer>(
+    names: &Vec<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(names.len() as u64)
+}
+
 mod permission_analytics;
 pub use permission_analytics::*;
 
@@ -1010,11 +1018,20 @@ pub struct SessionHarness {
     pub model_id: String,
     pub agent_name: String,
     pub permission_mode: PermissionMode,
+    #[serde(serialize_with = "serialize_name_count", rename = "mcp_server_count")]
     pub mcp_server_names: Vec<String>,
+    #[serde(serialize_with = "serialize_name_count", rename = "plugin_count")]
     pub plugin_names: Vec<String>,
+    #[serde(serialize_with = "serialize_name_count", rename = "skill_count")]
     pub skill_names: Vec<String>,
+    #[serde(serialize_with = "serialize_name_count", rename = "lsp_server_count")]
     pub lsp_server_names: Vec<String>,
+    #[serde(serialize_with = "serialize_name_count", rename = "hook_count")]
     pub hook_names: Vec<String>,
+    #[serde(
+        serialize_with = "serialize_name_count",
+        rename = "agents_md_dir_count"
+    )]
     pub agents_md_dir_names: Vec<String>,
     pub memory_enabled: bool,
     /// Whether the session cwd is inside a git repo (same value `SessionNew`

@@ -208,7 +208,10 @@ mod tests {
     #[test]
     fn non_teams_platforms_fall_back_with_a_named_reason() {
         let r = bot_candidate(MeetingPlatform::Zoom).unwrap_err();
-        assert_eq!(r, FallbackReason::UnsupportedPlatform(MeetingPlatform::Zoom));
+        assert_eq!(
+            r,
+            FallbackReason::UnsupportedPlatform(MeetingPlatform::Zoom)
+        );
         let line = r.line();
         assert!(line.contains("Zoom"), "{line}");
         assert!(
@@ -256,7 +259,10 @@ mod tests {
             (BotError::NoBrowser("x".into()), JoinFailureStage::NoBrowser),
             (BotError::Audio("x".into()), JoinFailureStage::Audio),
             (
-                BotError::Selector { step: "s", env: "E" },
+                BotError::Selector {
+                    step: "s",
+                    env: "E",
+                },
                 JoinFailureStage::Selector,
             ),
             (
@@ -269,10 +275,7 @@ mod tests {
                 JoinFailureStage::Verification,
             ),
             (BotError::SignInRequired, JoinFailureStage::SignInRequired),
-            (
-                BotError::LauncherHandoff,
-                JoinFailureStage::LauncherHandoff,
-            ),
+            (BotError::LauncherHandoff, JoinFailureStage::LauncherHandoff),
             (
                 BotError::JoinTimeout { secs: 1 },
                 JoinFailureStage::JoinTimeout,
@@ -298,8 +301,14 @@ mod tests {
         }
         .outcome();
         assert!(!failed.guest_present());
-        assert!(failed.headline().contains("NO GUEST IN THE MEETING"), "{failed:?}");
-        assert!(failed.headline().contains("Teams app launcher"), "{failed:?}");
+        assert!(
+            failed.headline().contains("NO GUEST IN THE MEETING"),
+            "{failed:?}"
+        );
+        assert!(
+            failed.headline().contains("Teams app launcher"),
+            "{failed:?}"
+        );
     }
 
     /// The rewrite happens once, here, and never touches `url.raw`.
@@ -314,12 +323,18 @@ mod tests {
         .unwrap();
         let raw_before = url.raw.clone();
         let navigate = navigate_url(&url);
-        assert_eq!(url.raw, raw_before, "navigate_url must not mutate the parse");
+        assert_eq!(
+            url.raw, raw_before,
+            "navigate_url must not mutate the parse"
+        );
         assert!(
             navigate.starts_with("https://teams.microsoft.com/meet/2907709513066"),
             "{navigate}"
         );
-        assert!(navigate.contains("s3cret"), "passcode must survive: {navigate}");
+        assert!(
+            navigate.contains("s3cret"),
+            "passcode must survive: {navigate}"
+        );
     }
 
     /// Non-Teams URLs must never acquire Teams query parameters.
@@ -347,10 +362,9 @@ mod tests {
         let root = std::env::temp_dir().join("turbo-transport-profile");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let url = xai_grok_meetings::parse_meeting_url(
-            "https://teams.microsoft.com/l/meetup-join/x",
-        )
-        .unwrap();
+        let url =
+            xai_grok_meetings::parse_meeting_url("https://teams.microsoft.com/l/meetup-join/x")
+                .unwrap();
         let store = MeetingStore::create(
             &root,
             "teams-profile-1",

@@ -2430,26 +2430,31 @@ impl Config {
         self.resolve_two_pass_compaction().value
     }
     pub(crate) fn resolve_telemetry_mode(&self) -> Resolved<TelemetryMode> {
-        if let Some(mode) = self.requirements.telemetry.pinned() {
-            return Resolved::new(mode, ConfigSource::Requirement);
-        }
-        if let Some(mode) = env_telemetry_mode("GROK_TELEMETRY_ENABLED") {
-            return Resolved::new(mode, ConfigSource::Env);
-        }
-        if let Some(mode) = self.features.telemetry {
-            return Resolved::new(mode, ConfigSource::Config);
-        }
-        if let Some(rs) = self.remote_settings.as_ref() {
-            if let Some(mode_str) = rs.telemetry_mode.as_deref()
-                && let Some(mode) = TelemetryMode::parse(mode_str)
-            {
-                return Resolved::new(mode, ConfigSource::Remote);
+        let (local, source) = if let Some(mode) = self.requirements.telemetry.pinned() {
+            (mode, ConfigSource::Requirement)
+        } else if let Some(mode) = env_telemetry_mode("GROK_TELEMETRY_ENABLED") {
+            (mode, ConfigSource::Env)
+        } else if let Some(mode) = self.features.telemetry {
+            (mode, ConfigSource::Config)
+        } else {
+            (TelemetryMode::Disabled, ConfigSource::Default)
+        };
+        // Remote settings are restrictive-only (F81), matching the external
+        // OTEL stream: a `/settings` response may disable or reduce disclosure
+        // but must never enable telemetry the user did not opt into locally.
+        let remote = self.remote_settings.as_ref().and_then(|rs| {
+            rs.telemetry_mode
+                .as_deref()
+                .and_then(TelemetryMode::parse)
+                .or_else(|| rs.telemetry_enabled.map(TelemetryMode::from))
+        });
+        if let Some(remote) = remote {
+            let restricted = local.min_disclosure(remote);
+            if restricted != local {
+                return Resolved::new(restricted, ConfigSource::Remote);
             }
-            if let Some(val) = rs.telemetry_enabled {
-                return Resolved::new(TelemetryMode::from(val), ConfigSource::Remote);
-            }
         }
-        Resolved::new(TelemetryMode::Disabled, ConfigSource::Default)
+        Resolved::new(local, source)
     }
     pub(crate) fn resolve_trace_upload(&self) -> Resolved<bool> {
         let mode = self.resolve_telemetry_mode();
@@ -13888,6 +13893,39 @@ hooks = true
             toml::from_str(r#"telemetry = "metrics_v3""#).expect("unknown string must not error");
         assert_eq!(cfg.telemetry, Some(TelemetryMode::Disabled));
         assert!(toml::from_str::<Features>("telemetry = 42").is_err());
+    }
+    #[test]
+    #[serial]
+    fn resolve_telemetry_mode_remote_cannot_enable_from_default() {
+        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
+        let cfg = Config {
+            remote_settings: Some(crate::util::config::RemoteSettings {
+                telemetry_enabled: Some(true),
+                telemetry_mode: Some("full".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let r = cfg.resolve_telemetry_mode();
+        assert!(
+            r.value.is_disabled(),
+            "remote must not enable telemetry from the Disabled default"
+        );
+        assert_eq!(r.source, ConfigSource::Default);
+    }
+    #[test]
+    #[serial]
+    fn resolve_telemetry_mode_remote_can_restrict_local_enable() {
+        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
+        let mut cfg = Config::default();
+        cfg.features.telemetry = Some(TelemetryMode::Enabled);
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+            telemetry_mode: Some("disabled".into()),
+            ..Default::default()
+        });
+        let r = cfg.resolve_telemetry_mode();
+        assert!(r.value.is_disabled());
+        assert_eq!(r.source, ConfigSource::Remote);
     }
     #[test]
     fn telemetry_enabled_from_toml_recognizes_modes() {

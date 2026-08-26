@@ -158,10 +158,16 @@ impl xai_tool_runtime::Tool for DiscardSubagentTool {
                     worktree_removed = true;
                 }
                 Ok(Err(e)) => {
-                    remove_err = Some(format!("failed to remove live worktree {}: {e}", wt.display()));
+                    remove_err = Some(format!(
+                        "failed to remove live worktree {}: {e}",
+                        wt.display()
+                    ));
                 }
                 Err(e) => {
-                    remove_err = Some(format!("failed to remove live worktree {}: {e}", wt.display()));
+                    remove_err = Some(format!(
+                        "failed to remove live worktree {}: {e}",
+                        wt.display()
+                    ));
                 }
             }
         } else {

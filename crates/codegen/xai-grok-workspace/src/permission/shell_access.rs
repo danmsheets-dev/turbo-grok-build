@@ -9,12 +9,10 @@ use crate::permission::bash_command_splitting::{
     MAX_INLINE_SHELL_DEPTH, decode_shell_literal_spelling, normalize_command_words,
     try_parse_shell, unwrap_wrappers,
 };
+use crate::permission::exec_risk::{git_has_exec_risk_global, git_words_have_unsafe_query_option};
 use crate::permission::policy::{
     CompiledPolicy, GateDecision, InlineShellScript, ShellWord, combine_gate_decisions,
     shell_dash_c_script,
-};
-use crate::permission::exec_risk::{
-    git_has_exec_risk_global, git_words_have_unsafe_query_option,
 };
 use crate::permission::types::{AccessKind, Decision};
 
@@ -2334,10 +2332,7 @@ fn tree_has_confine_env_assignment(node: Node<'_>, src: &str) -> bool {
         && let Ok(text) = node.utf8_text(src.as_bytes())
     {
         let name = text.split('=').next().unwrap_or("").trim();
-        if name
-            .to_ascii_uppercase()
-            .starts_with("GROK_CONFINE")
-        {
+        if name.to_ascii_uppercase().starts_with("GROK_CONFINE") {
             return true;
         }
     }
@@ -3187,8 +3182,7 @@ mod tests {
         assert!(shell_unmodelled_program_for_confine("git log --oneline -5").is_none());
         assert!(shell_unmodelled_program_for_confine("git show HEAD").is_none());
         assert!(
-            shell_unmodelled_program_for_confine("git -c diff.external=true diff HEAD~1")
-                .is_some()
+            shell_unmodelled_program_for_confine("git -c diff.external=true diff HEAD~1").is_some()
         );
     }
 
@@ -3210,8 +3204,10 @@ mod tests {
     #[test]
     fn confine_powershell_peel_does_not_drop_redirect_or_newline() {
         assert!(
-            shell_unmodelled_program_for_confine("(Get-Item README.md).Length\nSet-Content C:\\x p")
-                .is_some()
+            shell_unmodelled_program_for_confine(
+                "(Get-Item README.md).Length\nSet-Content C:\\x p"
+            )
+            .is_some()
         );
         let peeled = peel_powershell_expression("(gi a.txt).Length > C:\\Users\\x\\evil.txt");
         assert!(
@@ -3233,10 +3229,7 @@ mod tests {
             "payload.txt".into(),
         ];
         let targets = sed_w_targets(&words);
-        assert!(
-            targets.iter().any(|t| t == "/outside"),
-            "{targets:?}"
-        );
+        assert!(targets.iter().any(|t| t == "/outside"), "{targets:?}");
     }
 
     #[test]

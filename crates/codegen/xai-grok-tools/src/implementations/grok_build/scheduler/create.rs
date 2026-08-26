@@ -4,9 +4,7 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 use super::interval::{interval_to_human, parse_interval, task_human_schedule};
 use super::types::{ScheduledTask, SchedulerCommand, SchedulerHandle, scheduler_tool_error};
-use super::when::{
-    AtSpec, next_weekday_clock, next_weekly_clock, parse_at, seconds_until,
-};
+use super::when::{AtSpec, next_weekday_clock, next_weekly_clock, parse_at, seconds_until};
 
 // Canonical /loop and /schedule wording lives in the light API crate so other
 // consumers can link it without the tools implementation crate; re-exported
@@ -373,16 +371,13 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             input.fire_immediately && first_fire.is_none(),
         );
         task.foreground = input.foreground.unwrap_or(false);
-        task.title = input
-            .title
-            .filter(|t| !t.trim().is_empty())
-            .or_else(|| {
-                if is_recipe || standing {
-                    Some(recipe_title)
-                } else {
-                    None
-                }
-            });
+        task.title = input.title.filter(|t| !t.trim().is_empty()).or_else(|| {
+            if is_recipe || standing {
+                Some(recipe_title)
+            } else {
+                None
+            }
+        });
         task.weekdays_only = weekdays_only;
         task.meeting_join = meeting_join;
         if standing || !recurring || weekdays_only || at_spec.is_some() {

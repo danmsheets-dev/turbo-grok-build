@@ -2333,15 +2333,14 @@ mod tests {
         );
 
         let repo_str = repo_root.to_str().unwrap_or_default();
-        let skills =
-            list_skills_with_options(
-                Some(repo_str),
-                None,
-                tmp.path(),
-                CompatConfig::default(),
-                true,
-            )
-                .await;
+        let skills = list_skills_with_options(
+            Some(repo_str),
+            None,
+            tmp.path(),
+            CompatConfig::default(),
+            true,
+        )
+        .await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
 
         assert!(
@@ -2416,15 +2415,14 @@ mod tests {
         .expect("write deploy.md command");
 
         let repo_str = repo_root.to_str().unwrap_or_default();
-        let raw =
-            list_skills_with_options(
-                Some(repo_str),
-                None,
-                tmp.path(),
-                CompatConfig::default(),
-                true,
-            )
-                .await;
+        let raw = list_skills_with_options(
+            Some(repo_str),
+            None,
+            tmp.path(),
+            CompatConfig::default(),
+            true,
+        )
+        .await;
 
         let deploy_entries: Vec<_> = raw.iter().filter(|s| s.name == "deploy").collect();
         assert_eq!(deploy_entries.len(), 2);

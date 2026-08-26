@@ -111,9 +111,7 @@ async fn run_gh(
         .stderr(Stdio::piped());
     xai_tty_utils::detach_command(&mut cmd);
 
-    let timeout = timeout_secs
-        .map(Duration::from_secs)
-        .unwrap_or(GH_TIMEOUT);
+    let timeout = timeout_secs.map(Duration::from_secs).unwrap_or(GH_TIMEOUT);
 
     let result = tokio::time::timeout(timeout, cmd.output()).await;
 
@@ -186,11 +184,18 @@ async fn current_git_branch() -> Option<String> {
 }
 
 /// Truncate captured output to `cap` bytes, appending a marker if truncated.
+///
+/// Cuts on a UTF-8 code-point boundary so a later `from_utf8_lossy` cannot
+/// insert a U+FFFD that straddles `cap` (F87).
 fn cap_bytes(input: Vec<u8>, cap: usize) -> Vec<u8> {
     if input.len() <= cap {
         return input;
     }
-    let mut truncated = input[..cap].to_vec();
+    let mut cut = cap.min(input.len());
+    while cut > 0 && (input[cut] & 0b1100_0000) == 0b1000_0000 {
+        cut -= 1;
+    }
+    let mut truncated = input[..cut].to_vec();
     truncated.extend_from_slice(b"\n[truncated]");
     truncated
 }
@@ -360,7 +365,9 @@ impl xai_tool_runtime::Tool for GhPrStatusTool {
     }
 }
 
-async fn run_gh_pr_status(input: GhPrStatusInput) -> Result<GhPrStatusOutput, xai_tool_runtime::ToolError> {
+async fn run_gh_pr_status(
+    input: GhPrStatusInput,
+) -> Result<GhPrStatusOutput, xai_tool_runtime::ToolError> {
     // Early guard: refuse if gh is not installed.
     resolve_gh()?;
 
@@ -425,12 +432,23 @@ async fn run_gh_pr_status(input: GhPrStatusInput) -> Result<GhPrStatusOutput, xa
 
 /// Format the PR status output into a human-readable message.
 fn parse_pr_status(parsed: &serde_json::Value, pr_input: Option<String>) -> GhPrStatusOutput {
-    let number = parsed
-        .get("number")
-        .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_u64().map(|n| n.to_string())));
-    let title = parsed.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let state = parsed.get("state").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let url = parsed.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let number = parsed.get("number").and_then(|v| {
+        v.as_str()
+            .map(|s| s.to_string())
+            .or_else(|| v.as_u64().map(|n| n.to_string()))
+    });
+    let title = parsed
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let state = parsed
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let url = parsed
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let review_decision = parsed
         .get("reviewDecision")
@@ -467,7 +485,12 @@ fn parse_pr_status(parsed: &serde_json::Value, pr_input: Option<String>) -> GhPr
     );
 
     if !failing_names.is_empty() {
-        let display = failing_names.iter().take(10).cloned().collect::<Vec<_>>().join(", ");
+        let display = failing_names
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         message.push_str(&format!("\nFailing checks: {}", display));
     }
 
@@ -488,7 +511,9 @@ fn parse_pr_status(parsed: &serde_json::Value, pr_input: Option<String>) -> GhPr
 
 /// Tally check runs from the `statusCheckRollup` field.
 /// Returns (pass, fail, pending, failing_names).
-fn tally_checks(status_check_rollup: Option<&serde_json::Value>) -> (usize, usize, usize, Vec<String>) {
+fn tally_checks(
+    status_check_rollup: Option<&serde_json::Value>,
+) -> (usize, usize, usize, Vec<String>) {
     let mut pass = 0;
     let mut fail = 0;
     let mut pending = 0;
@@ -499,7 +524,10 @@ fn tally_checks(status_check_rollup: Option<&serde_json::Value>) -> (usize, usiz
     };
 
     for entry in arr {
-        let state = entry.get("state").and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
+        let state = entry
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN");
         match state.to_uppercase().as_str() {
             "SUCCESS" | "COMPLETED" => pass += 1,
             "FAILURE" | "FAILED" | "ERROR" => {
@@ -523,7 +551,8 @@ fn truncate_for_display(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}... [truncated]", &s[..max])
+        let cut = crate::util::floor_char_boundary(s, max);
+        format!("{}... [truncated]", &s[..cut])
     }
 }
 
@@ -637,7 +666,9 @@ impl xai_tool_runtime::Tool for GhCiStatusTool {
     }
 }
 
-async fn run_gh_ci_status(input: GhCiStatusInput) -> Result<GhCiStatusOutput, xai_tool_runtime::ToolError> {
+async fn run_gh_ci_status(
+    input: GhCiStatusInput,
+) -> Result<GhCiStatusOutput, xai_tool_runtime::ToolError> {
     resolve_gh()?;
 
     if let Some(run_id) = input.run.as_deref() {
@@ -767,12 +798,30 @@ async fn run_gh_ci_view(run_id: &str) -> Result<GhCiStatusOutput, xai_tool_runti
 /// Format run data from `gh run view` (or `gh run list` item) into output.
 fn parse_run_view(parsed: &serde_json::Value) -> GhCiStatusOutput {
     let run_id = parsed.get("databaseId").map(|v| v.to_string());
-    let run_name = parsed.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let status = parsed.get("status").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let conclusion = parsed.get("conclusion").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let head_branch = parsed.get("headBranch").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let event = parsed.get("event").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let url = parsed.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let run_name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let status = parsed
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let conclusion = parsed
+        .get("conclusion")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let head_branch = parsed
+        .get("headBranch")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let event = parsed
+        .get("event")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let url = parsed
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // `gh run view --json ...jobs` supplies job-level conclusions.
     // Fall back to steps for richer payloads from compatible gh versions.
@@ -790,7 +839,12 @@ fn parse_run_view(parsed: &serde_json::Value) -> GhCiStatusOutput {
     );
 
     if !failing_jobs.is_empty() {
-        let display = failing_jobs.iter().take(10).cloned().collect::<Vec<_>>().join(", ");
+        let display = failing_jobs
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         message.push_str(&format!("\nFailing jobs: {}", display));
     }
 
@@ -816,11 +870,11 @@ fn extract_failing_jobs(parsed: &serde_json::Value) -> Vec<String> {
     // are available in the normal tool response.
     if let Some(jobs) = parsed.get("jobs").and_then(|v| v.as_array()) {
         for job in jobs {
-            let job_conclusion = job
-                .get("conclusion")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if job_conclusion == "failure" || job_conclusion == "timed_out" || job_conclusion == "cancelled" {
+            let job_conclusion = job.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
+            if job_conclusion == "failure"
+                || job_conclusion == "timed_out"
+                || job_conclusion == "cancelled"
+            {
                 if let Some(name) = job.get("name").and_then(|v| v.as_str()) {
                     failing.push(name.to_string());
                 }
@@ -858,9 +912,7 @@ pub const GH_CI_RERUN_TOOL_NAME: &str = "gh_ci_rerun";
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GhCiRerunInput {
     /// CI run ID to rerun.
-    #[schemars(
-        description = "CI run ID to rerun. Required."
-    )]
+    #[schemars(description = "CI run ID to rerun. Required.")]
     pub run: String,
 
     /// If true, only rerun failed jobs within the run.
@@ -957,7 +1009,9 @@ impl xai_tool_runtime::Tool for GhCiRerunTool {
     }
 }
 
-async fn run_gh_ci_rerun(input: GhCiRerunInput) -> Result<GhCiRerunOutput, xai_tool_runtime::ToolError> {
+async fn run_gh_ci_rerun(
+    input: GhCiRerunInput,
+) -> Result<GhCiRerunOutput, xai_tool_runtime::ToolError> {
     // Refuse early if gh is not installed — do not even build the command.
     let _gh_path = resolve_gh()?;
 
@@ -998,7 +1052,11 @@ async fn run_gh_ci_rerun(input: GhCiRerunInput) -> Result<GhCiRerunOutput, xai_t
         None
     };
 
-    let scope = if input.failed_only { "failed jobs only" } else { "full run" };
+    let scope = if input.failed_only {
+        "failed jobs only"
+    } else {
+        "full run"
+    };
     let message = format!(
         "CI run `{}` rerun started ({}). A new run has been triggered on GitHub.",
         run_id, scope
@@ -1088,14 +1146,7 @@ mod tests {
         let argv = build_pr_status_argv(Some("12345"));
         assert_eq!(
             argv.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            vec![
-                "pr",
-                "view",
-                "--json",
-                PR_STATUS_JSON_FIELDS,
-                "--",
-                "12345",
-            ]
+            vec!["pr", "view", "--json", PR_STATUS_JSON_FIELDS, "--", "12345",]
         );
     }
 
@@ -1157,7 +1208,9 @@ mod tests {
         assert_eq!(
             argv,
             vec!["run", "rerun", "--failed", "--", "12345"]
-                .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1167,7 +1220,9 @@ mod tests {
         assert_eq!(
             argv,
             vec!["run", "rerun", "--", "12345"]
-                .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1401,6 +1456,25 @@ mod tests {
         let truncated = truncate_for_display(s, 20);
         assert!(truncated.ends_with("[truncated]"));
         assert!(truncated.len() < s.len());
+    }
+
+    #[test]
+    fn truncate_for_display_does_not_panic_on_multibyte_cut() {
+        // "é" is 2 bytes; cutting at byte 1 used to panic.
+        let s = format!("{}{}", "x".repeat(10), "ééééé");
+        let truncated = truncate_for_display(&s, 11);
+        assert!(truncated.ends_with("[truncated]"));
+        assert!(truncated.is_char_boundary(truncated.find('.').unwrap_or(truncated.len())));
+    }
+
+    #[test]
+    fn cap_bytes_does_not_split_utf8_characters() {
+        let mut input = b"x".repeat(10);
+        input.extend_from_slice("中".as_bytes()); // 3 bytes
+        let capped = cap_bytes(input, 11);
+        assert!(capped.ends_with(b"[truncated]"));
+        let text = String::from_utf8(capped).expect("cap_bytes must emit valid UTF-8");
+        assert!(!text.contains('\u{FFFD}'));
     }
 
     // --- Tool metadata tests ---

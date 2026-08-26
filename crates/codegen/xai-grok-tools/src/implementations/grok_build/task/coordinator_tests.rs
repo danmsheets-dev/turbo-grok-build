@@ -404,10 +404,11 @@ async fn steer_reaches_active_child_and_refuses_unknown() {
     assert_eq!(started_id, "sa-steer");
 
     // Active child: steer delivered through ChildControl.
-    let outcome = backend
-        .steer("sa-steer", "focus on crates/foo only")
-        .await;
-    assert!(outcome.is_ok(), "active child must accept steer: {outcome:?}");
+    let outcome = backend.steer("sa-steer", "focus on crates/foo only").await;
+    assert!(
+        outcome.is_ok(),
+        "active child must accept steer: {outcome:?}"
+    );
     let steered = steers.recv().await.expect("steer text forwarded");
     assert_eq!(steered, "focus on crates/foo only");
 

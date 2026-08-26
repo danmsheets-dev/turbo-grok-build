@@ -176,7 +176,10 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let path = write_schedule_briefing(&root, "daily search", "# hi\n", now).unwrap();
-        assert!(schedule_dest_is_safe(&workspace_schedules_dir(&root), &path));
+        assert!(schedule_dest_is_safe(
+            &workspace_schedules_dir(&root),
+            &path
+        ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "# hi\n");
         let _ = fs::remove_dir_all(&root);
     }

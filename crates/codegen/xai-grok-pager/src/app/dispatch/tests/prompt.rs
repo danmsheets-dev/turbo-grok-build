@@ -2832,10 +2832,7 @@ fn slash_meeting_join_never_passthrough_when_tools_unknown() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let url = "https://teams.microsoft.com/meet/2907709513066?p=x";
-    let effects = dispatch(
-        Action::SendPrompt(format!("/meeting join {url}")),
-        &mut app,
-    );
+    let effects = dispatch(Action::SendPrompt(format!("/meeting join {url}")), &mut app);
     let text = meeting_join_blocks_text(&effects);
     assert!(text.contains("meeting_join"), "{text}");
     assert!(text.contains("2907709513066"), "{text}");
@@ -2866,15 +2863,9 @@ fn slash_meeting_join_accepts_qualified_advertised_tool() {
         .prompt
         .slash_controller
         .registry_mut()
-        .set_available_tools(
-            ["GrokBuild:meeting_join".to_string()]
-                .into_iter()
-                .collect(),
-        );
+        .set_available_tools(["GrokBuild:meeting_join".to_string()].into_iter().collect());
     let effects = dispatch(
-        Action::SendPrompt(
-            "/meeting join https://teams.microsoft.com/meet/1?p=x Standup".into(),
-        ),
+        Action::SendPrompt("/meeting join https://teams.microsoft.com/meet/1?p=x Standup".into()),
         &mut app,
     );
     let text = meeting_join_blocks_text(&effects);
@@ -2915,8 +2906,7 @@ fn nl_join_operator_meeting_link_and_qa_phrasing() {
 #[test]
 fn ticket_link_without_join_intent_is_plain_prompt() {
     let mut app = test_app_with_agent();
-    let prompt =
-        "see the recording later at https://teams.microsoft.com/meet/1?p=x in the ticket";
+    let prompt = "see the recording later at https://teams.microsoft.com/meet/1?p=x in the ticket";
     let effects = dispatch(Action::SendPrompt(prompt.into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(

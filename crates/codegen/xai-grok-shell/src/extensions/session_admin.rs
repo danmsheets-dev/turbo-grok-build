@@ -1005,8 +1005,6 @@ mod turbo_internal_method_tests {
         assert!(!is_turbo_only_internal_method(
             "x.ai/internal/reload_models"
         ));
-        assert!(!is_turbo_only_internal_method(
-            "x.ai/internal/auth_cleared"
-        ));
+        assert!(!is_turbo_only_internal_method("x.ai/internal/auth_cleared"));
     }
 }

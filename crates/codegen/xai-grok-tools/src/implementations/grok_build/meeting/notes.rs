@@ -75,6 +75,8 @@ impl xai_tool_runtime::Tool for MeetingNotesTool {
                 .ok(),
             Err(_) => None,
         };
-        Ok(text_output(handle.write_notes(&input.markdown, cwd.as_deref())?))
+        Ok(text_output(
+            handle.write_notes(&input.markdown, cwd.as_deref())?,
+        ))
     }
 }

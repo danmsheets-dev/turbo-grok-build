@@ -25,7 +25,10 @@ async fn graph_get(token: &str, path_and_query: &str) -> Result<Value, String> {
     let status = resp.status();
     let text = resp.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("Graph GET {status}: {}", truncate_graph_body(&text)));
+        return Err(format!(
+            "Graph GET {status}: {}",
+            truncate_graph_body(&text)
+        ));
     }
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
@@ -33,7 +36,10 @@ async fn graph_get(token: &str, path_and_query: &str) -> Result<Value, String> {
 async fn first_online_meeting(token: &str, join_url: &str) -> Result<Value, String> {
     let literal = join_url.replace('\'', "''");
     let filter = format!("JoinWebUrl eq '{literal}'");
-    let path = format!("/me/onlineMeetings?$filter={}", percent_encode_query(&filter));
+    let path = format!(
+        "/me/onlineMeetings?$filter={}",
+        percent_encode_query(&filter)
+    );
     let v = graph_get(token, &path).await?;
     let arr = v
         .get("value")
@@ -93,7 +99,10 @@ pub async fn meeting_subject_for_join_url(token: &str, join_url: &str) -> Result
         .ok_or_else(|| "onlineMeeting has no subject".to_string())
 }
 
-pub async fn recent_messages(token: &str, chat_id: &str) -> Result<Vec<(String, String, String)>, String> {
+pub async fn recent_messages(
+    token: &str,
+    chat_id: &str,
+) -> Result<Vec<(String, String, String)>, String> {
     let path = format!(
         "/chats/{}/messages?$top=25&$orderby=createdDateTime desc",
         percent_encode_path_segment(chat_id)
@@ -102,7 +111,11 @@ pub async fn recent_messages(token: &str, chat_id: &str) -> Result<Vec<(String, 
     let mut out = Vec::new();
     if let Some(arr) = v.get("value").and_then(|x| x.as_array()) {
         for m in arr {
-            let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let id = m
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let from = m
                 .pointer("/from/user/displayName")
                 .or_else(|| m.pointer("/from/application/displayName"))
@@ -124,7 +137,10 @@ pub async fn recent_messages(token: &str, chat_id: &str) -> Result<Vec<(String, 
 }
 
 pub async fn post_chat(token: &str, chat_id: &str, text: &str) -> Result<(), String> {
-    let url = format!("{GRAPH}/chats/{}/messages", percent_encode_path_segment(chat_id));
+    let url = format!(
+        "{GRAPH}/chats/{}/messages",
+        percent_encode_path_segment(chat_id)
+    );
     let body = serde_json::json!({
         "body": { "contentType": "text", "content": text }
     });

@@ -42,7 +42,6 @@ pub mod live;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
-pub mod schedule_cmd;
 pub mod mcps;
 pub mod meeting;
 pub mod model;
@@ -62,6 +61,7 @@ pub mod remember;
 pub mod rename;
 pub mod resume;
 pub mod rewind;
+pub mod schedule_cmd;
 pub mod scoped_models;
 pub mod screen_mode_switch;
 pub mod scroll_debug;
@@ -289,7 +289,10 @@ mod tests {
             "scheduler_list".to_string(),
             "scheduler_delete".to_string(),
         ]));
-        assert!(reg.get("schedule").is_some(), "/schedule should be registered");
+        assert!(
+            reg.get("schedule").is_some(),
+            "/schedule should be registered"
+        );
     }
     #[test]
     fn schedule_command_declares_scheduler_tool_requirements() {

@@ -51,12 +51,12 @@ use xai_grok_workspace::folder_trust::{
 use crate::session::managed_mcp::mcp_server_name;
 use crate::util::config::{MCP_SCOPE_PROJECT, RemoteSettings};
 
-// NOTE: this folder-trust store (`~/.grok/trusted_folders.toml`) is SEPARATE
-// from the pre-existing per-plugin trust store
-// (`xai_grok_agent::plugins::TrustStore` at `~/.grok/trusted-plugins`, plus the
-// hooks' own project-trust gating). Trusting a folder here does NOT imply plugin
-// trust and vice versa; the two are independent and non-contradicting.
-// Unifying them is a tracked follow-up (out of scope for this PR).
+// Folder-trust (`~/.grok/trusted_folders.toml`) is the project-plugin trust
+// decision: `PluginScope::Project` uses `project_scope_allowed(cwd)`, not
+// `TrustStore`. Granting folder trust covers every current and future plugin
+// under `.grok/plugins/` and `.claude/plugins/` in that worktree. The legacy
+// per-plugin `~/.grok/trusted-plugins` file still exists for older callers
+// but is not the project-plugin gate.
 
 /// Per-workspace resolved decision: `true` = repo-local (project-scoped)
 /// servers are allowed to spawn. Keyed by canonical workspace key.

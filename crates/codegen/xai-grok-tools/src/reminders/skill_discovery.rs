@@ -105,8 +105,7 @@ impl SkillDiscoveryReminder {
     }
 
     fn path_under_workspace(path: &Path, cwd: Option<&Path>, git_root: Option<&Path>) -> bool {
-        cwd.is_some_and(|c| path.starts_with(c))
-            || git_root.is_some_and(|r| path.starts_with(r))
+        cwd.is_some_and(|c| path.starts_with(c)) || git_root.is_some_and(|r| path.starts_with(r))
     }
 
     /// Direct `SKILL.md` registration is limited to workspace-local files in a

@@ -61,9 +61,7 @@ fn local_naive_to_utc(naive: NaiveDateTime) -> Result<DateTime<Utc>, SchedulerEr
         .single()
         .map(|dt| dt.with_timezone(&Utc))
         .ok_or_else(|| {
-            SchedulerError::InvalidAt(format!(
-                "ambiguous or invalid local time {naive}"
-            ))
+            SchedulerError::InvalidAt(format!("ambiguous or invalid local time {naive}"))
         })
 }
 
@@ -128,11 +126,7 @@ pub fn next_weekday_clock(now: DateTime<Utc>, time: NaiveTime) -> DateTime<Utc> 
 }
 
 /// Next local `weekday` at `time` strictly after `now`.
-pub fn next_weekly_clock(
-    now: DateTime<Utc>,
-    weekday: Weekday,
-    time: NaiveTime,
-) -> DateTime<Utc> {
+pub fn next_weekly_clock(now: DateTime<Utc>, weekday: Weekday, time: NaiveTime) -> DateTime<Utc> {
     let mut candidate = local_on_date(now, time);
     for _ in 0..8 {
         if candidate > now && candidate.with_timezone(&Local).weekday() == weekday {
@@ -172,7 +166,10 @@ mod tests {
             panic!("expected Once");
         };
         let local = dt.with_timezone(&Local);
-        assert_eq!(local.format("%Y-%m-%dT%H:%M").to_string(), "2026-08-24T09:00");
+        assert_eq!(
+            local.format("%Y-%m-%dT%H:%M").to_string(),
+            "2026-08-24T09:00"
+        );
     }
 
     #[test]
@@ -181,12 +178,20 @@ mod tests {
         let AtSpec::Once(dt) = spec else {
             panic!("expected Once");
         };
-        assert_eq!(dt, DateTime::parse_from_rfc3339("2026-08-24T09:00:00Z").unwrap().with_timezone(&Utc));
+        assert_eq!(
+            dt,
+            DateTime::parse_from_rfc3339("2026-08-24T09:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
     }
 
     #[test]
     fn parse_weekday_clocks() {
-        assert!(matches!(parse_at("weekday 08:00").unwrap(), AtSpec::Weekdays(_)));
+        assert!(matches!(
+            parse_at("weekday 08:00").unwrap(),
+            AtSpec::Weekdays(_)
+        ));
         assert!(matches!(
             parse_at("every weekday 08:00").unwrap(),
             AtSpec::Weekdays(_)

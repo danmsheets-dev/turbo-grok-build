@@ -100,10 +100,7 @@ mod policy_tests {
         ] {
             assert!(mutates_page(f), "must flag {f}");
             let err = check_eval_is_read_only(f, false).unwrap_err();
-            assert!(
-                err.to_string().contains("browser_click"),
-                "{f}: {err}"
-            );
+            assert!(err.to_string().contains("browser_click"), "{f}: {err}");
             assert!(
                 check_eval_is_read_only(f, true).is_err(),
                 "{f} must stay refused with confirm"

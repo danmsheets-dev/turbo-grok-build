@@ -196,10 +196,7 @@ impl DiscoveryConfig {
             // PluginId in `enabled` counts as already-listed-enabled.
             let already_listed = if dp.scope == PluginScope::Project {
                 self.enabled.iter().any(|e| e == &dp.id.0)
-                    || self
-                        .disabled
-                        .iter()
-                        .any(|d| d == &dp.id.0 || d == name)
+                    || self.disabled.iter().any(|d| d == &dp.id.0 || d == name)
             } else {
                 self.enabled.iter().any(|e| e == name || e == &dp.id.0)
                     || self.disabled.iter().any(|d| d == name || d == &dp.id.0)

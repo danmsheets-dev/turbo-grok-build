@@ -83,12 +83,36 @@ pub fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
+/// Session latch: imagine-web / chrome-mcp skill invoke opts into daily Chrome
+/// for the rest of this process. Not a global default (C12); env still wins.
+static CHROME_DEVTOOLS_SESSION_OPT_IN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Opt-in: expose chrome-devtools MCP tools to the model.
 ///
 /// Unset/false: those tools are stripped so Agent WebView (`browser_*`) is the
 /// only headed browser. The MCP server pin may still be connected.
 pub fn chrome_devtools_mcp_opted_in() -> bool {
     env_bool("GROK_CHROME_MCP") == Some(true)
+        || CHROME_DEVTOOLS_SESSION_OPT_IN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Latch chrome-devtools MCP tools on for this process (skill invoke).
+pub fn chrome_devtools_session_opt_in() {
+    CHROME_DEVTOOLS_SESSION_OPT_IN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Clear the session latch. Tests only; also used to restore isolation between
+/// env-gated unit tests in other crates.
+pub fn chrome_devtools_session_opt_in_clear() {
+    CHROME_DEVTOOLS_SESSION_OPT_IN.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `/imagine-web` and `/chrome-mcp` skills need daily Chrome MCP tools.
+pub fn skill_name_opts_in_chrome_devtools(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    let base = n.rsplit_once(':').map(|(_, rest)| rest).unwrap_or(&n);
+    matches!(base, "imagine-web" | "chrome-mcp")
 }
 
 /// True when a tool id, qualified name, or MCP server is chrome-devtools
@@ -104,11 +128,27 @@ mod chrome_devtools_gate_tests {
 
     #[test]
     fn chrome_devtools_ids_match_pin_and_qualified_names() {
+        chrome_devtools_session_opt_in_clear();
         assert!(is_chrome_devtools_mcp_id("chrome-devtools"));
         assert!(is_chrome_devtools_mcp_id("chrome-devtools__navigate_page"));
         assert!(is_chrome_devtools_mcp_id("mcp__chrome-devtools__click"));
         assert!(is_chrome_devtools_mcp_id("Chrome_DevTools"));
         assert!(!is_chrome_devtools_mcp_id("GrokBuild:browser_navigate"));
         assert!(!is_chrome_devtools_mcp_id("chrome-mcp-skill"));
+        assert!(skill_name_opts_in_chrome_devtools("imagine-web"));
+        assert!(skill_name_opts_in_chrome_devtools("user:imagine-web"));
+        assert!(skill_name_opts_in_chrome_devtools("chrome-mcp"));
+        assert!(!skill_name_opts_in_chrome_devtools("chrome-mcp-skill"));
+    }
+
+    #[test]
+    fn chrome_devtools_session_latch_opts_in_without_env() {
+        chrome_devtools_session_opt_in_clear();
+        unsafe { std::env::remove_var("GROK_CHROME_MCP") };
+        assert!(!chrome_devtools_mcp_opted_in());
+        chrome_devtools_session_opt_in();
+        assert!(chrome_devtools_mcp_opted_in());
+        chrome_devtools_session_opt_in_clear();
+        assert!(!chrome_devtools_mcp_opted_in());
     }
 }

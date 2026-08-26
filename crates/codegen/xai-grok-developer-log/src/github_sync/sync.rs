@@ -6,10 +6,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::mapping::{
-    LogKind, feature_issue_body, feature_labels, feature_remote_status,
-    feature_status_from_remote, fingerprint_from_labels, incident_issue_body, incident_labels,
-    incident_remote_status, incident_status_from_remote, label_diff, parse_marker,
-    proving_sha_comment, seen_comment,
+    LogKind, feature_issue_body, feature_labels, feature_remote_status, feature_status_from_remote,
+    fingerprint_from_labels, incident_issue_body, incident_labels, incident_remote_status,
+    incident_status_from_remote, label_diff, parse_marker, proving_sha_comment, seen_comment,
 };
 use super::{GithubTransport, IssueDraft, RemoteIssue, SyncDirection, SyncError};
 use crate::feature_request::schema::RequestStatus;
@@ -22,6 +21,9 @@ use crate::store::{DeveloperLogStore, ListFilter};
 pub struct SyncOptions {
     pub repo: String,
     pub direction: SyncDirection,
+    /// Allow the first push to a public GitHub repo (F78). Also honored via
+    /// `GROK_GITHUB_SYNC_PUBLIC=1`. Pull is never gated on visibility.
+    pub allow_public: bool,
 }
 
 /// Result of a push/pull pass.
@@ -30,6 +32,7 @@ pub struct SyncReport {
     pub repo: String,
     pub is_private: bool,
     pub private_warning: bool,
+    pub public_warning: bool,
     pub created: u32,
     pub updated: u32,
     pub skipped: u32,
@@ -58,9 +61,13 @@ impl SyncReport {
             "GitHub sync ({kind}) → {} ({vis})\n  pushed:  {} created, {} updated, {} skipped\n  pulled:  {} status close(s)\n  comments: {}",
             self.repo, self.created, self.updated, self.skipped, self.pulled, self.comments
         );
-        if self.private_warning {
+        if self.public_warning {
             s.push_str(
-                "\nWarning: this is a private GitHub repository. Already-redacted JSON is uploaded as Issues. Disable with github_sync = \"off\".",
+                "\nWarning: this repository is PUBLIC — incident/feature JSON will be world-readable. Disable with github_sync = \"off\" or target a private repo.",
+            );
+        } else if self.private_warning {
+            s.push_str(
+                "\nNote: this is a private GitHub repository. Already-redacted JSON is uploaded as Issues. Disable with github_sync = \"off\".",
             );
         }
         for r in &self.skipped_reasons {
@@ -78,6 +85,8 @@ struct GithubIndex {
     repo: String,
     #[serde(default)]
     private_warned: bool,
+    #[serde(default)]
+    public_warned: bool,
     #[serde(default)]
     items: HashMap<String, GithubIndexEntry>,
 }
@@ -108,8 +117,7 @@ fn load_index(root: &Path, repo: &str) -> GithubIndex {
     if idx.repo != repo {
         idx = GithubIndex {
             repo: repo.to_string(),
-            private_warned: false,
-            items: HashMap::new(),
+            ..Default::default()
         };
     }
     idx
@@ -169,6 +177,34 @@ fn title_for_github(title: &str) -> String {
     }
 }
 
+fn public_sync_allowed(opts: &SyncOptions) -> bool {
+    opts.allow_public || xai_grok_config::env_bool("GROK_GITHUB_SYNC_PUBLIC") == Some(true)
+}
+
+fn apply_visibility_policy(
+    meta: &super::RepoMeta,
+    idx: &mut GithubIndex,
+    report: &mut SyncReport,
+    pushing: bool,
+    allow_public: bool,
+) -> Result<(), SyncError> {
+    if pushing && !meta.is_private && !allow_public {
+        return Err(SyncError::PublicRepo {
+            repo: meta.name_with_owner.clone(),
+        });
+    }
+    if !meta.is_private {
+        if !idx.public_warned {
+            report.public_warning = true;
+            idx.public_warned = true;
+        }
+    } else if !idx.private_warned {
+        report.private_warning = true;
+        idx.private_warned = true;
+    }
+    Ok(())
+}
+
 /// Push + optional pull for all incidents in `store`.
 pub fn sync_incidents(
     store: &DeveloperLogStore,
@@ -190,10 +226,13 @@ pub fn sync_incidents(
         ..Default::default()
     };
     let mut idx = load_index(store.root(), &opts.repo);
-    if meta.is_private && !idx.private_warned {
-        report.private_warning = true;
-        idx.private_warned = true;
-    }
+    apply_visibility_policy(
+        &meta,
+        &mut idx,
+        &mut report,
+        matches!(opts.direction, SyncDirection::Push | SyncDirection::Both),
+        public_sync_allowed(opts),
+    )?;
     // Unconditional: every direction needs the remote map, and the old guard
     // was a tautology over a three-variant enum.
     let listed = remote_map(gh.list_issues(&opts.repo, LogKind::Incident)?);
@@ -263,10 +302,13 @@ pub fn sync_features(
         ..Default::default()
     };
     let mut idx = load_index(store.root(), &opts.repo);
-    if meta.is_private && !idx.private_warned {
-        report.private_warning = true;
-        idx.private_warned = true;
-    }
+    apply_visibility_policy(
+        &meta,
+        &mut idx,
+        &mut report,
+        matches!(opts.direction, SyncDirection::Push | SyncDirection::Both),
+        public_sync_allowed(opts),
+    )?;
     let listed = remote_map(gh.list_issues(&opts.repo, LogKind::Feature)?);
 
     if matches!(opts.direction, SyncDirection::Push | SyncDirection::Both) {
@@ -321,9 +363,17 @@ pub fn sync_one_incident(
     fingerprint: &str,
 ) -> Result<(), SyncError> {
     gh.ensure_gh_and_auth()?;
+    let meta = gh.repo_meta(repo)?;
     let mut idx = load_index(store.root(), repo);
-    let listed = remote_map(gh.list_issues(repo, LogKind::Incident).unwrap_or_default());
     let mut report = SyncReport::default();
+    apply_visibility_policy(
+        &meta,
+        &mut idx,
+        &mut report,
+        true,
+        xai_grok_config::env_bool("GROK_GITHUB_SYNC_PUBLIC") == Some(true),
+    )?;
+    let listed = remote_map(gh.list_issues(repo, LogKind::Incident).unwrap_or_default());
     push_incident(store, gh, repo, fingerprint, &listed, &mut idx, &mut report)?;
     let _ = save_index(store.root(), &idx);
     Ok(())
@@ -337,9 +387,17 @@ pub fn sync_one_feature(
     fingerprint: &str,
 ) -> Result<(), SyncError> {
     gh.ensure_gh_and_auth()?;
+    let meta = gh.repo_meta(repo)?;
     let mut idx = load_index(store.root(), repo);
-    let listed = remote_map(gh.list_issues(repo, LogKind::Feature).unwrap_or_default());
     let mut report = SyncReport::default();
+    apply_visibility_policy(
+        &meta,
+        &mut idx,
+        &mut report,
+        true,
+        xai_grok_config::env_bool("GROK_GITHUB_SYNC_PUBLIC") == Some(true),
+    )?;
+    let listed = remote_map(gh.list_issues(repo, LogKind::Feature).unwrap_or_default());
     push_feature(store, gh, repo, fingerprint, &listed, &mut idx, &mut report)?;
     let _ = save_index(store.root(), &idx);
     Ok(())
@@ -800,6 +858,7 @@ mod tests {
         let opts = SyncOptions {
             repo: "o/logs".into(),
             direction: SyncDirection::Push,
+            allow_public: false,
         };
         let r1 = sync_incidents(&store, &gh, &opts).unwrap();
         assert_eq!(r1.created, 1);
@@ -838,6 +897,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/logs".into(),
                 direction: SyncDirection::Push,
+                allow_public: true,
             },
         )
         .unwrap();
@@ -876,6 +936,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/logs".into(),
                 direction: SyncDirection::Push,
+                allow_public: true,
             },
         )
         .unwrap();
@@ -907,6 +968,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/logs".into(),
                 direction: SyncDirection::Push,
+                allow_public: true,
             },
         )
         .unwrap();
@@ -921,6 +983,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/logs".into(),
                 direction: SyncDirection::Pull,
+                allow_public: true,
             },
         )
         .unwrap();
@@ -950,6 +1013,7 @@ mod tests {
             &SyncOptions {
                 repo: "danmsheets-dev/turbo-grok-build".into(),
                 direction: SyncDirection::Push,
+                allow_public: true,
             },
         )
         .expect_err("a repo with Issues off must not report success");
@@ -973,6 +1037,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/r".into(),
                 direction: SyncDirection::Push,
+                allow_public: true,
             },
         )
         .expect_err("read access cannot file issues");
@@ -987,6 +1052,7 @@ mod tests {
                 &SyncOptions {
                     repo: "o/r".into(),
                     direction: SyncDirection::Pull,
+                    allow_public: true,
                 },
             )
             .is_ok(),
@@ -1006,6 +1072,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/r".into(),
                 direction: SyncDirection::Push,
+                allow_public: true,
             },
         )
         .expect("an unknown permission must not block a push");
@@ -1052,6 +1119,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/logs".into(),
                 direction: SyncDirection::Push,
+                allow_public: true,
             },
         )
         .unwrap_err();
@@ -1078,6 +1146,7 @@ mod tests {
             &SyncOptions {
                 repo: "o/logs".into(),
                 direction: SyncDirection::Both,
+                allow_public: true,
             },
         )
         .unwrap();
@@ -1087,5 +1156,65 @@ mod tests {
             gh.issue_bodies()[0].contains("kind=feature"),
             "feature marker missing"
         );
+    }
+
+    #[test]
+    fn public_repo_push_is_refused_without_opt_in() {
+        let (_dir, store) = tmp_incident_store();
+        store
+            .report(ReportRequest {
+                title: "A".into(),
+                summary: "s".into(),
+                error_class: ErrorClass::DocsGap,
+                ..Default::default()
+            })
+            .unwrap();
+        let gh = MemoryGithub::new("o/logs", false);
+        let err = sync_incidents(
+            &store,
+            &gh,
+            &SyncOptions {
+                repo: "o/logs".into(),
+                direction: SyncDirection::Push,
+                allow_public: false,
+            },
+        )
+        .expect_err("public push must opt in");
+        assert!(matches!(err, SyncError::PublicRepo { .. }), "got {err:?}");
+        assert_eq!(gh.issue_count(), 0, "nothing may be filed");
+        let text = err.to_string();
+        assert!(text.contains("PUBLIC"), "{text}");
+        assert!(text.contains("GROK_GITHUB_SYNC_PUBLIC"), "{text}");
+    }
+
+    #[test]
+    fn public_repo_pull_is_allowed_without_opt_in() {
+        let (_dir, store) = tmp_incident_store();
+        let gh = MemoryGithub::new("o/logs", false);
+        sync_incidents(
+            &store,
+            &gh,
+            &SyncOptions {
+                repo: "o/logs".into(),
+                direction: SyncDirection::Pull,
+                allow_public: false,
+            },
+        )
+        .expect("pull from a public repo must not require GROK_GITHUB_SYNC_PUBLIC");
+    }
+
+    #[test]
+    fn human_summary_warns_on_public_visibility() {
+        let report = SyncReport {
+            repo: "o/logs".into(),
+            is_private: false,
+            public_warning: true,
+            created: 1,
+            ..Default::default()
+        };
+        let text = report.human_summary("incidents");
+        assert!(text.contains("PUBLIC"), "{text}");
+        assert!(text.contains("world-readable"), "{text}");
+        assert!(!text.contains("private GitHub repository"), "{text}");
     }
 }

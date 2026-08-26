@@ -1023,6 +1023,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("GROK_CHROME_MCP") };
+        xai_grok_config::chrome_devtools_session_opt_in_clear();
         let baseline = ToolServerConfig {
             tools: vec![test_support::tc(
                 "GrokBuild:browser_navigate",
@@ -1050,6 +1051,35 @@ mod tests {
             "GROK_CHROME_MCP=1 must restore the tools: {opted_ids:?}"
         );
         unsafe { std::env::remove_var("GROK_CHROME_MCP") };
+        xai_grok_config::chrome_devtools_session_opt_in_clear();
+    }
+
+    #[test]
+    fn chrome_devtools_session_latch_restores_tools() {
+        let _guard = super::TOOL_STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("GROK_CHROME_MCP") };
+        xai_grok_config::chrome_devtools_session_opt_in_clear();
+        let baseline = ToolServerConfig {
+            tools: vec![test_support::tc(
+                "GrokBuild:browser_navigate",
+                Some(ToolKind::Other),
+            )],
+            behavior_preset: None,
+        };
+        let mcp = vec![test_support::tc(
+            "chrome-devtools__navigate_page",
+            Some(ToolKind::Other),
+        )];
+        xai_grok_config::chrome_devtools_session_opt_in();
+        let filtered = merge_and_filter(&baseline, &mcp, &[], CapabilityMode::All, "test");
+        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            ids.contains(&"chrome-devtools__navigate_page"),
+            "session latch must restore chrome-devtools: {ids:?}"
+        );
+        xai_grok_config::chrome_devtools_session_opt_in_clear();
     }
     #[test]
     fn empty_hub_snapshot_is_noop() {

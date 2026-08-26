@@ -2571,7 +2571,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         let ga = cwd.join(".gitattributes");
-        let err = super::enforce_allowed_write_paths(cwd, &ga, &["crates/foo/".into()]).unwrap_err();
+        let err =
+            super::enforce_allowed_write_paths(cwd, &ga, &["crates/foo/".into()]).unwrap_err();
         assert!(err.message().contains("Re-spawn with allowed_paths"));
         let gi = cwd.join(".gitignore");
         assert!(super::enforce_allowed_write_paths(cwd, &gi, &["crates/foo/".into()]).is_err());

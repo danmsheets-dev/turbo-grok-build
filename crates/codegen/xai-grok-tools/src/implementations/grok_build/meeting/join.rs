@@ -96,10 +96,8 @@ mod tests {
         .unwrap();
         assert_eq!(v.url, "https://teams.microsoft.com/meet/1");
         assert_eq!(v.title.as_deref(), Some("Standup"));
-        let v2: MeetingJoinInput = serde_json::from_str(
-            r#"{"url":"https://zoom.us/j/1","title":"Retro"}"#,
-        )
-        .unwrap();
+        let v2: MeetingJoinInput =
+            serde_json::from_str(r#"{"url":"https://zoom.us/j/1","title":"Retro"}"#).unwrap();
         assert_eq!(v2.title.as_deref(), Some("Retro"));
     }
 }

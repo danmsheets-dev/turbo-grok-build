@@ -1962,8 +1962,11 @@ impl xai_tool_runtime::Tool for BashTool {
         // --- Validate: session policy engine v1 (deny_commands) ---
         {
             let res = resources.lock().await;
-            let params = res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
-            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0));
+            let params =
+                res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+                params.map(|p| &p.0),
+            );
             if let Some(frag) = policy.command_denied(&input.command) {
                 return Err(xai_tool_runtime::ToolError::custom(
                     "policy_denied",

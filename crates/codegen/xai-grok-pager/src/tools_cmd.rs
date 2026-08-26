@@ -122,7 +122,8 @@ fn tool_names_for_preset(
     subagents_enabled: bool,
     cwd: &Path,
 ) -> Result<(Vec<String>, AgentBuilderGates)> {
-    let mut config = if preset.trim().eq_ignore_ascii_case("grok-build") || preset.trim().is_empty() {
+    let mut config = if preset.trim().eq_ignore_ascii_case("grok-build") || preset.trim().is_empty()
+    {
         workspace_grok_build_toolset()
     } else {
         xai_grok_agent::config::toolset_for_preset(preset).ok_or_else(|| {

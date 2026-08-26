@@ -688,7 +688,10 @@ pub fn worktree_base_dir(git_root: &Path) -> std::path::PathBuf {
 
 /// Stable 8-hex fingerprint of a git root (path spelling normalized).
 fn short_repo_hash(git_root: &Path) -> String {
-    let s = git_root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let s = git_root
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
         h ^= b as u64;
@@ -3554,5 +3557,4 @@ mod label_path_guard_tests {
             short_repo_hash(Path::new(r"H:\Apps\b"))
         );
     }
-
 }

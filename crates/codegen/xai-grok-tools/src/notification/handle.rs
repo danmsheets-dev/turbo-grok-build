@@ -7,8 +7,7 @@ use super::types::{
     BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
     LspServerRetrying, LspServerStarting, MeetingQuestion, MonitorEvent, PlanModeEntered,
     PlanModeExited, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved,
-    SubagentCompleted,
-    ToolNotification, UserQuestionAsked,
+    SubagentCompleted, ToolNotification, UserQuestionAsked,
 };
 use crate::types::TaskSnapshot;
 

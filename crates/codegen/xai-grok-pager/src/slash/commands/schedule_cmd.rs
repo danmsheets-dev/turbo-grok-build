@@ -1,9 +1,9 @@
 use agent_client_protocol as acp;
+use xai_grok_tools::implementations::grok_build::SCHEDULER_DELETE_TOOL_NAME;
 use xai_grok_tools::implementations::grok_build::scheduler::create::{
     SCHEDULE_COMMAND_NAME, SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_LIST_TOOL_NAME, ScheduleVerb,
     parse_schedule_verb, schedule_instruction, schedule_usage_message,
 };
-use xai_grok_tools::implementations::grok_build::SCHEDULER_DELETE_TOOL_NAME;
 
 use crate::slash::command::{
     AppCtx, ArgItem, CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand,
@@ -52,7 +52,12 @@ impl SlashCommand for ScheduleCommand {
             ArgItem::new("show", "show", "show ", "Show one job by id"),
             ArgItem::new("cancel", "cancel", "cancel ", "Cancel a job by id"),
             ArgItem::new("at", "at", "at ", "One-shot datetime (ISO-8601)"),
-            ArgItem::new("every", "every", "every ", "Recurring interval or weekday clock"),
+            ArgItem::new(
+                "every",
+                "every",
+                "every ",
+                "Recurring interval or weekday clock",
+            ),
         ])
     }
 
@@ -150,11 +155,7 @@ mod tests {
     fn requires_all_scheduler_tools() {
         assert_eq!(
             ScheduleCommand.required_tools(),
-            &[
-                "scheduler_create",
-                "scheduler_list",
-                "scheduler_delete"
-            ]
+            &["scheduler_create", "scheduler_list", "scheduler_delete"]
         );
     }
 

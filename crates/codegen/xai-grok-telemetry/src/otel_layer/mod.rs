@@ -297,42 +297,41 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
     ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send {
         // Full `Enabled` only: `session_metrics` is documented as metadata-only
         // (no content / no file paths). Tool spans carry `path` / `file_path`.
-        let prepared = (crate::client::is_enabled()
-            && self.credentials.has_usable_credential())
-        .then(|| {
-            let snapshot = self.credentials.snapshot();
-            let token = snapshot.token.clone().unwrap_or_else(|| {
-                tracing::debug!(
-                    "auth: otel credential snapshot has no token, using cached last_token"
-                );
-                self.last_token.lock().clone()
+        let prepared = (crate::client::is_enabled() && self.credentials.has_usable_credential())
+            .then(|| {
+                let snapshot = self.credentials.snapshot();
+                let token = snapshot.token.clone().unwrap_or_else(|| {
+                    tracing::debug!(
+                        "auth: otel credential snapshot has no token, using cached last_token"
+                    );
+                    self.last_token.lock().clone()
+                });
+                *self.last_token.lock() = token.clone();
+                let token_auth = self
+                    .credentials
+                    .needs_token_auth_header()
+                    .then(|| Arc::clone(&self.token_header_value));
+                ExportInputs {
+                    one_shot: build_otlp_exporter(
+                        &self.endpoint,
+                        self.attach_live_credentials,
+                        &self.static_headers,
+                        &token,
+                        token_auth.as_deref(),
+                        &self.extra_headers,
+                        self.http_client.clone(),
+                        &snapshot,
+                    ),
+                    resource: resource_with_tenant_id(self.resource.lock().clone(), &snapshot),
+                    credentials: Arc::clone(&self.credentials),
+                    endpoint: Arc::clone(&self.endpoint),
+                    attach_live_credentials: self.attach_live_credentials,
+                    static_headers: Arc::clone(&self.static_headers),
+                    token_header_value: Arc::clone(&self.token_header_value),
+                    http_client: self.http_client.clone(),
+                    extra_headers: Arc::clone(&self.extra_headers),
+                }
             });
-            *self.last_token.lock() = token.clone();
-            let token_auth = self
-                .credentials
-                .needs_token_auth_header()
-                .then(|| Arc::clone(&self.token_header_value));
-            ExportInputs {
-                one_shot: build_otlp_exporter(
-                    &self.endpoint,
-                    self.attach_live_credentials,
-                    &self.static_headers,
-                    &token,
-                    token_auth.as_deref(),
-                    &self.extra_headers,
-                    self.http_client.clone(),
-                    &snapshot,
-                ),
-                resource: resource_with_tenant_id(self.resource.lock().clone(), &snapshot),
-                credentials: Arc::clone(&self.credentials),
-                endpoint: Arc::clone(&self.endpoint),
-                attach_live_credentials: self.attach_live_credentials,
-                static_headers: Arc::clone(&self.static_headers),
-                token_header_value: Arc::clone(&self.token_header_value),
-                http_client: self.http_client.clone(),
-                extra_headers: Arc::clone(&self.extra_headers),
-            }
-        });
         async move {
             let Some(ExportInputs {
                 one_shot,

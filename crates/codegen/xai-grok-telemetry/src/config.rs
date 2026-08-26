@@ -30,6 +30,22 @@ impl TelemetryMode {
     pub fn session_metrics_enabled(&self) -> bool {
         matches!(self, Self::SessionMetrics | Self::Enabled)
     }
+    /// Disclosure rank: `Disabled` (0) < `SessionMetrics` (1) < `Enabled` (2).
+    pub fn disclosure_rank(self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::SessionMetrics => 1,
+            Self::Enabled => 2,
+        }
+    }
+    /// Restrictive-only combine: never increases disclosure.
+    pub fn min_disclosure(self, other: Self) -> Self {
+        if self.disclosure_rank() <= other.disclosure_rank() {
+            self
+        } else {
+            other
+        }
+    }
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" | "enabled" | "full" => Some(Self::Enabled),

@@ -403,7 +403,9 @@ fn filename_has_extension(name: &str) -> bool {
         .is_some_and(|e| !e.is_empty())
 }
 
-fn prepare_session_downloads(session_folder: &Path) -> Result<PathBuf, xai_tool_runtime::ToolError> {
+fn prepare_session_downloads(
+    session_folder: &Path,
+) -> Result<PathBuf, xai_tool_runtime::ToolError> {
     let downloads = session_folder.join("downloads");
     std::fs::create_dir_all(&downloads).map_err(|e| {
         xai_tool_runtime::ToolError::custom(

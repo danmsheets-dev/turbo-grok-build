@@ -488,7 +488,7 @@ impl BackendToolCallItem {
                     .as_deref()
                     .map(|c| {
                         if c.len() > 100 {
-                            format!("{}...", &c[..100])
+                            format!("{}...", truncate_bytes(c, 100))
                         } else {
                             c.to_string()
                         }

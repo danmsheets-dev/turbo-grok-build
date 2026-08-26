@@ -289,8 +289,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills =
-            discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), true).await;
+        let skills = discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), true).await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("my-skill"));
@@ -298,8 +297,7 @@ mod tests {
         let skill = found.unwrap();
         assert_eq!(skill["description"].as_str(), Some("A test skill"));
 
-        let omitted =
-            discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), false).await;
+        let omitted = discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), false).await;
         assert!(
             omitted
                 .iter()
@@ -349,8 +347,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills =
-            discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), true).await;
+        let skills = discover_skills_with_trust(tmp.path(), &SkillsConfig::default(), true).await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("serialized-check"))

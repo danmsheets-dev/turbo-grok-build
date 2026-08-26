@@ -423,9 +423,7 @@ mod tests {
         let mut task = ScheduledTask::new(3600, "once".into(), false, true);
         let first = Utc::now() + chrono::Duration::hours(2);
         task.anchor_first_fire(first);
-        let delta = (task.next_fire_at() - first)
-            .num_seconds()
-            .unsigned_abs();
+        let delta = (task.next_fire_at() - first).num_seconds().unsigned_abs();
         assert!(delta <= 1, "next_fire_at should match first, delta={delta}");
         assert!(task.next_fire_at() > Utc::now());
     }

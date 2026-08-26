@@ -88,22 +88,31 @@ pub struct OurFrame<'a> {
     pub(crate) count: usize,
 }
 
+fn assert_frame_layout() {
+    assert_eq!(
+        std::mem::size_of::<Frame<'_>>(),
+        std::mem::size_of::<OurFrame<'_>>()
+    );
+    // Layout is not guaranteed between two distinct repr(Rust) types (F90).
+    // Workspace Cargo.toml pins `ratatui = "=0.29.0"` so a caret bump cannot
+    // reorder fields behind this transmute. Field offsets of *our* struct
+    // stay in declaration order; rustc still size-checks the transmute.
+    let _ = std::mem::offset_of!(OurFrame<'_>, cursor_position);
+    let _ = std::mem::offset_of!(OurFrame<'_>, viewport_area);
+    let _ = std::mem::offset_of!(OurFrame<'_>, buffer);
+    let _ = std::mem::offset_of!(OurFrame<'_>, count);
+}
+
 impl<'a> From<OurFrame<'a>> for Frame<'a> {
     fn from(value: OurFrame<'a>) -> Self {
-        assert_eq!(
-            std::mem::size_of::<Frame>(),
-            std::mem::size_of::<OurFrame>()
-        );
+        assert_frame_layout();
         unsafe { std::mem::transmute(value) }
     }
 }
 
 impl<'a> From<Frame<'a>> for OurFrame<'a> {
     fn from(value: Frame<'a>) -> Self {
-        assert_eq!(
-            std::mem::size_of::<Frame>(),
-            std::mem::size_of::<OurFrame>()
-        );
+        assert_frame_layout();
         unsafe { std::mem::transmute(value) }
     }
 }

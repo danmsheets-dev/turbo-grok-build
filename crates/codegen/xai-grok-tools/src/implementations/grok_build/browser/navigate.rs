@@ -101,7 +101,8 @@ impl xai_tool_runtime::Tool for BrowserNavigateTool {
         {
             return Ok(super::untrusted_page_text(format!(
                 "Navigated to {} (title: {}). A download was brokered into the session folder; list it with browser_downloads.",
-                result.url, super::sanitize_page_title(&result.title)
+                result.url,
+                super::sanitize_page_title(&result.title)
             )));
         }
         Ok(super::untrusted_page_text(format!(

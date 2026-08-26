@@ -57,6 +57,7 @@ pub struct SkillOutput {
 /// Used on both the invocation path (skill tool, slash expansion) and
 /// preloading paths (agent definitions) — no separate instruct prefix.
 pub fn build_skill_message(skill: &SkillInfo, content: &str) -> String {
+    maybe_opt_in_chrome_devtools(&skill.name);
     format!(
         "<skill name=\"{}\" description=\"{}\" path=\"{}\">\n{}\n</skill>",
         skill.name, skill.description, skill.path, content
@@ -74,7 +75,14 @@ pub fn build_skill_message(skill: &SkillInfo, content: &str) -> String {
 /// {body}
 /// </skill>
 /// ```
+fn maybe_opt_in_chrome_devtools(name: &str) {
+    if xai_grok_config::skill_name_opts_in_chrome_devtools(name) {
+        xai_grok_config::chrome_devtools_session_opt_in();
+    }
+}
+
 pub fn build_skill_block(name: &str, args: &str, content: &str) -> String {
+    maybe_opt_in_chrome_devtools(name);
     if args.is_empty() {
         format!("<skill name=\"{name}\">\n{content}\n</skill>")
     } else {
@@ -725,6 +733,44 @@ It has multiple lines."#;
         let mut no_name = skill.clone();
         no_name.plugin_name = None;
         assert_eq!(format_skill_name(&no_name), "plugin:deploy");
+    }
+
+    #[test]
+    fn imagine_web_skill_latches_chrome_devtools() {
+        xai_grok_config::chrome_devtools_session_opt_in_clear();
+        unsafe { std::env::remove_var("GROK_CHROME_MCP") };
+        assert!(!xai_grok_config::chrome_devtools_mcp_opted_in());
+        let skill = SkillInfo {
+            name: "imagine-web".to_string(),
+            display_name: None,
+            description: "Imagine".to_string(),
+            short_description: None,
+            author: None,
+            argument_hint: None,
+            path: "/skills/imagine-web/SKILL.md".to_string(),
+            scope: SkillScope::User,
+            config_source: None,
+            plugin_name: None,
+            plugin_version: None,
+            plugin_root: None,
+            plugin_data: None,
+            allowed_tools: None,
+            license: None,
+            compatibility: None,
+            metadata: None,
+            model: None,
+            effort: None,
+            user_invocable: true,
+            disable_model_invocation: false,
+            when_to_use: None,
+            has_user_specified_description: true,
+            paths: None,
+            enabled: true,
+            body: None,
+        };
+        let _ = build_skill_message(&skill, "body");
+        assert!(xai_grok_config::chrome_devtools_mcp_opted_in());
+        xai_grok_config::chrome_devtools_session_opt_in_clear();
     }
 
     #[test]

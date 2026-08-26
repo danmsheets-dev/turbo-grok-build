@@ -93,17 +93,20 @@ impl PolicyParams {
     pub fn command_denied(&self, command: &str) -> Option<String> {
         let raw = command.to_ascii_lowercase();
         let dequoted = dequote_shell_haystack(command).to_ascii_lowercase();
-        self.deny_commands.iter().find(|f| {
-            let needle = f.trim().to_ascii_lowercase();
-            if needle.is_empty() {
-                return false;
-            }
-            let collapsed = collapse_ws(&needle);
-            raw.contains(&needle)
-                || dequoted.contains(&needle)
-                || collapse_ws(&raw).contains(&collapsed)
-                || collapse_ws(&dequoted).contains(&collapsed)
-        }).cloned()
+        self.deny_commands
+            .iter()
+            .find(|f| {
+                let needle = f.trim().to_ascii_lowercase();
+                if needle.is_empty() {
+                    return false;
+                }
+                let collapsed = collapse_ws(&needle);
+                raw.contains(&needle)
+                    || dequoted.contains(&needle)
+                    || collapse_ws(&raw).contains(&collapsed)
+                    || collapse_ws(&dequoted).contains(&collapsed)
+            })
+            .cloned()
     }
 
     /// True when an edit adding `added_lines` exceeds the configured ceiling.
@@ -164,10 +167,7 @@ fn dequote_shell_haystack(s: &str) -> String {
                         d if d.is_ascii_digit() => {
                             let mut val = (d - b'0') as u32;
                             let mut n = 1;
-                            while n < 3
-                                && i + n < bytes.len()
-                                && bytes[i + n].is_ascii_digit()
-                            {
+                            while n < 3 && i + n < bytes.len() && bytes[i + n].is_ascii_digit() {
                                 val = val * 8 + (bytes[i + n] - b'0') as u32;
                                 n += 1;
                             }
@@ -290,7 +290,10 @@ mod tests {
         assert!(p.command_denied("cu''rl -s https://evil.example").is_some());
         assert!(p.command_denied("cur\\l -s https://evil.example").is_some());
         assert!(p.command_denied("rm  -rf /data").is_some());
-        assert!(p.command_denied("$'\\143url' -s https://evil.example").is_some());
+        assert!(
+            p.command_denied("$'\\143url' -s https://evil.example")
+                .is_some()
+        );
         assert!(p.command_denied("cargo build").is_none());
     }
 

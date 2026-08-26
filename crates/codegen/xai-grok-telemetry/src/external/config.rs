@@ -224,6 +224,24 @@ const DEFAULT_OTLP_HTTP_BASE: &str = "http://localhost:4318";
 /// OTLP gRPC default endpoint per spec.
 const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
 
+/// True when `endpoint` is `http://` (or another non-https scheme) and the
+/// host is not loopback. Used to refuse prompt/tool content gates (F85).
+fn endpoint_is_cleartext_non_loopback(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    if url.scheme() == "https" {
+        return false;
+    }
+    let host = url
+        .host_str()
+        .unwrap_or("")
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.");
+    !loopback
+}
+
 fn resolve_signal_endpoint(
     signal_specific: Option<String>,
     base: Option<&str>,
@@ -372,7 +390,7 @@ impl ExternalOtelConfig {
         let metrics_ca_certificate =
             resolve_signal_certificate("OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE");
 
-        let gates = ContentGates {
+        let mut gates = ContentGates {
             log_user_prompts: getenv("OTEL_LOG_USER_PROMPTS")
                 .as_deref()
                 .and_then(env_bool)
@@ -384,6 +402,19 @@ impl ExternalOtelConfig {
                 .or_else(|| file.and_then(|f| f.log_tool_details))
                 .unwrap_or(false),
         };
+        // F85: content-bearing records must not ride cleartext to a remote
+        // collector. Loopback http:// (the OTLP spec default sidecar) is fine.
+        if (gates.log_user_prompts || gates.log_tool_details)
+            && (endpoint_is_cleartext_non_loopback(&logs_endpoint)
+                || endpoint_is_cleartext_non_loopback(&metrics_endpoint))
+        {
+            tracing::warn!(
+                logs_endpoint = %logs_endpoint,
+                metrics_endpoint = %metrics_endpoint,
+                "external otel: refusing content gates over cleartext non-loopback OTLP"
+            );
+            gates = ContentGates::default();
+        }
 
         let temporality = match getenv("OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE")
             .map(|s| s.trim().to_ascii_lowercase())
@@ -487,6 +518,59 @@ mod tests {
         assert!(!cfg.include_version_on_metrics);
         assert_eq!(cfg.temporality, TemporalityPreference::Delta);
         assert_eq!(cfg.transport, OtlpTransport::HttpProtobuf);
+    }
+
+    #[test]
+    fn cleartext_remote_disables_content_gates() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                (
+                    "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "http://otel.corp.example:4318",
+                ),
+                ("OTEL_LOG_USER_PROMPTS", "1"),
+                ("OTEL_LOG_TOOL_DETAILS", "1"),
+            ]),
+            None,
+        )
+        .expect("must activate");
+        assert!(
+            !cfg.gates.log_user_prompts && !cfg.gates.log_tool_details,
+            "content gates must refuse cleartext remote OTLP"
+        );
+    }
+
+    #[test]
+    fn loopback_http_keeps_content_gates() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_LOG_USER_PROMPTS", "1"),
+            ]),
+            None,
+        )
+        .expect("must activate");
+        assert!(
+            cfg.gates.log_user_prompts,
+            "localhost OTLP sidecar may carry gated content"
+        );
+    }
+
+    #[test]
+    fn endpoint_cleartext_non_loopback_detects_hosts() {
+        assert!(endpoint_is_cleartext_non_loopback(
+            "http://otel.corp.example:4318/v1/logs"
+        ));
+        assert!(!endpoint_is_cleartext_non_loopback(
+            "http://localhost:4318/v1/logs"
+        ));
+        assert!(!endpoint_is_cleartext_non_loopback(
+            "https://otel.corp.example:4318/v1/logs"
+        ));
+        assert!(!endpoint_is_cleartext_non_loopback("http://127.0.0.1:4318"));
     }
 
     #[test]

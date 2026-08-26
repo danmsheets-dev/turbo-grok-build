@@ -76,6 +76,8 @@ impl xai_tool_runtime::Tool for MeetingAskTool {
                 .ok(),
             Err(_) => None,
         };
-        Ok(text_output(handle.ask(input.question.as_deref(), cwd.as_deref())?))
+        Ok(text_output(
+            handle.ask(input.question.as_deref(), cwd.as_deref())?,
+        ))
     }
 }

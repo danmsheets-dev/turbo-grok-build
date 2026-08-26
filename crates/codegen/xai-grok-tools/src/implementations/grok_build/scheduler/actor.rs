@@ -20,11 +20,11 @@ use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 
 use super::disk;
 use super::interval::{interval_to_human, task_human_schedule};
-use super::when::is_local_weekend;
 use super::types::{
     LOOP_COMPLETION_OUTPUT_CAP, LOOP_FRESH_CHAIN_EVERY, ScheduledTask, SchedulerClock,
     SchedulerCommand, SchedulerError, SchedulerSnapshot, SchedulerState, SchedulerVersion,
 };
+use super::when::is_local_weekend;
 
 const MAX_SCHEDULED_TASKS: usize = 50;
 const DURABILITY_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -165,7 +165,11 @@ impl SchedulerActor {
     /// Launch-workspace cwd from resources only (no process-cwd fallback: tests
     /// must not write `{repo}/.grok/schedules.json`).
     async fn schedule_workspace(&self) -> Option<std::path::PathBuf> {
-        self.resources.lock().await.get::<Cwd>().map(|c| c.0.clone())
+        self.resources
+            .lock()
+            .await
+            .get::<Cwd>()
+            .map(|c| c.0.clone())
     }
 
     async fn persist_standing_index(&self) {
@@ -795,9 +799,7 @@ impl SchedulerActor {
             prior_summary.as_deref(),
             stamp,
         );
-        if product_schedule
-            && let Some(cwd) = parent_cwd.as_ref()
-        {
+        if product_schedule && let Some(cwd) = parent_cwd.as_ref() {
             let title = title.unwrap_or("schedule");
             let dest = super::schedules::workspace_schedules_dir(cwd).join(
                 super::schedules::schedule_filename(

@@ -5681,7 +5681,12 @@ mod tests {
         let text = "a".repeat(5_000);
         let events: Vec<TimedInputEvent> = text.chars().map(|c| press(KeyCode::Char(c))).collect();
         let result = coalesce_rapid_keys(events);
-        assert_eq!(result.len(), 1, "5KB burst must be one Paste, got {}", result.len());
+        assert_eq!(
+            result.len(),
+            1,
+            "5KB burst must be one Paste, got {}",
+            result.len()
+        );
         assert_eq!(result[0].event, Event::Paste(text));
     }
 

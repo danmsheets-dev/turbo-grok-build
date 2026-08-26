@@ -1139,12 +1139,12 @@ impl ToolOutput {
             ToolOutput::Receipts(o) => o.text.clone(),
             ToolOutput::Rollback(o) => o.message.clone(),
             ToolOutput::Steer(o) => match o {
-                crate::implementations::grok_build::steer::SteerOutput::Queued { message, .. } => {
-                    message.clone()
-                }
-                crate::implementations::grok_build::steer::SteerOutput::Refused { reason, .. } => {
-                    reason.clone()
-                }
+                crate::implementations::grok_build::steer::SteerOutput::Queued {
+                    message, ..
+                } => message.clone(),
+                crate::implementations::grok_build::steer::SteerOutput::Refused {
+                    reason, ..
+                } => reason.clone(),
             },
             ToolOutput::GhPrStatus(o) => o.message.clone(),
             ToolOutput::GhCiStatus(o) => o.message.clone(),

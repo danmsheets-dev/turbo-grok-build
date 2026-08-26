@@ -30,16 +30,15 @@ pub const DEFAULT_REMINDER_TAG: &str = "system-reminder";
 pub const HARNESS_TAG_PATTERN: &str =
     r"(?i)<(\s*/?\s*(?:system[-_]reminder|workspace_tree_card|goal[-_]state))";
 
-static HARNESS_TAG_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(HARNESS_TAG_PATTERN).expect("valid harness tag pattern"));
+static HARNESS_TAG_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(HARNESS_TAG_PATTERN).expect("valid harness tag pattern")
+});
 
 /// HTML-escape the leading `<` of harness framing tags so untrusted content
 /// cannot close or reopen `<system-reminder>` / `<workspace_tree_card>` /
 /// `<goal-state>` blocks.
 pub fn neutralize_harness_tags(content: &str) -> String {
-    HARNESS_TAG_RE
-        .replace_all(content, "&lt;$1")
-        .into_owned()
+    HARNESS_TAG_RE.replace_all(content, "&lt;$1").into_owned()
 }
 
 /// Wrap plain text in `<system-reminder>` tags (default hyphen variant).

@@ -770,25 +770,28 @@ pub(crate) async fn spawn_session_actor(
         let raw = tool_context.cwd.as_path();
         dunce::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf())
     });
-    let fs_backend: std::sync::Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem> =
+    // Both ACP and local backends share ConfinedFs: process `--confine`, then
+    // the optional session worktree jail. ACP previously skipped this layer
+    // (F82), so writes that reached `fs.write_file` without the tool-layer
+    // resolve gate had no confine chokepoint.
+    let inner_fs: std::sync::Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem> =
         if client_fs_capable && tool_context.gateway.is_some() {
             std::sync::Arc::new(xai_grok_workspace::file_system::AcpFsAdapter::new(
                 tool_context.gateway.clone().unwrap(),
                 tool_context.session_id.clone().unwrap(),
             ))
         } else {
-            // Process --confine choke point, then optional session worktree jail.
-            let process_fs = xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(
-                std::sync::Arc::new(xai_grok_tools::computer::local::LocalFs),
-            );
-            if let Some(ref root) = session_confine_root {
-                std::sync::Arc::new(xai_grok_tools::computer::local::ConfinedFs::new(
-                    process_fs,
-                    root.clone(),
-                ))
-            } else {
-                process_fs
-            }
+            std::sync::Arc::new(xai_grok_tools::computer::local::LocalFs)
+        };
+    let process_fs = xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(inner_fs);
+    let fs_backend: std::sync::Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem> =
+        if let Some(ref root) = session_confine_root {
+            std::sync::Arc::new(xai_grok_tools::computer::local::ConfinedFs::new(
+                process_fs,
+                root.clone(),
+            ))
+        } else {
+            process_fs
         };
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");

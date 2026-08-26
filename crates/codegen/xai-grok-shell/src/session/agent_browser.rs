@@ -399,16 +399,20 @@ mod tests {
 
     #[test]
     fn inject_browser_tools_strips_chrome_devtools_unless_opted_in() {
+        xai_grok_config::chrome_devtools_session_opt_in_clear();
+        unsafe { std::env::remove_var("GROK_CHROME_MCP") };
         let mut config = xai_grok_tools::registry::types::ToolServerConfig::default();
-        config.tools.push(xai_grok_tools::registry::types::ToolConfig {
-            id: "chrome-devtools__click".into(),
-            params: None,
-            name_override: None,
-            params_name_overrides: None,
-            description_override: None,
-            behavior_version: None,
-            kind: Some(xai_grok_tools::types::tool::ToolKind::Other),
-        });
+        config
+            .tools
+            .push(xai_grok_tools::registry::types::ToolConfig {
+                id: "chrome-devtools__click".into(),
+                params: None,
+                name_override: None,
+                params_name_overrides: None,
+                description_override: None,
+                behavior_version: None,
+                kind: Some(xai_grok_tools::types::tool::ToolKind::Other),
+            });
         inject_browser_tools(&mut config);
         assert!(
             !config

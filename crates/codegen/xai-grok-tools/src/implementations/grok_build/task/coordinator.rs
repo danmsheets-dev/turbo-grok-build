@@ -850,7 +850,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             && belongs_to_session(&child.request, parent_session_id)
         {
             if child.request.owner.is_workflow() {
-                return Err(format!("subagent {id} is workflow-owned; steering is unsupported"));
+                return Err(format!(
+                    "subagent {id} is workflow-owned; steering is unsupported"
+                ));
             }
             if child.steer(trimmed) {
                 tracing::info!(subagent_id = %id, "steer delivered to running child");

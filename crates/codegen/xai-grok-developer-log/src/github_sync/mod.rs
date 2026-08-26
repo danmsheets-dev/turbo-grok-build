@@ -76,6 +76,16 @@ pub enum SyncError {
         /// `owner/name`.
         repo: String,
     },
+    #[error(
+        "`{repo}` is a PUBLIC GitHub repository. Incident/feature JSON would be \
+         world-readable. Point github_repo at a private repo, or set \
+         GROK_GITHUB_SYNC_PUBLIC=1 to opt in. Nothing was lost: items stay in \
+         the local log."
+    )]
+    PublicRepo {
+        /// `owner/name`.
+        repo: String,
+    },
     #[error("`gh` failed: {0}")]
     Gh(String),
     #[error("io error: {0}")]
@@ -183,7 +193,10 @@ mod repo_meta_tests {
         m.has_issues_enabled = false;
         let err = m.check_can_receive(true).unwrap_err();
         let text = err.to_string();
-        assert!(text.contains("/settings"), "must link the exact page: {text}");
+        assert!(
+            text.contains("/settings"),
+            "must link the exact page: {text}"
+        );
         assert!(text.contains("Features"), "{text}");
         assert!(
             text.contains("forks"),

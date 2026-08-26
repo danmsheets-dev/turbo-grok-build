@@ -224,9 +224,7 @@ pub enum DiskCommand {
 
 fn refuse_mutating_disk_under_confine(op: &str) -> Result<()> {
     if xai_grok_tools::types::resources::process_confine_root().is_some() {
-        bail!(
-            "turbo disk {op} is refused under --confine (deletes outside the confine root)"
-        );
+        bail!("turbo disk {op} is refused under --confine (deletes outside the confine root)");
     }
     Ok(())
 }
@@ -3193,10 +3191,7 @@ mod tests {
         };
         let err = run(args).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("--safe") || msg.contains("--confine"),
-            "{msg}"
-        );
+        assert!(msg.contains("--safe") || msg.contains("--confine"), "{msg}");
     }
 
     #[test]
@@ -3219,9 +3214,7 @@ mod tests {
         let err = run(args).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("--worktrees")
-                || msg.contains("--all")
-                || msg.contains("--confine"),
+            msg.contains("--worktrees") || msg.contains("--all") || msg.contains("--confine"),
             "{msg}"
         );
     }

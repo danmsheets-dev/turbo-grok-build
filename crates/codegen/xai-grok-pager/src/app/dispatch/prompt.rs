@@ -603,17 +603,13 @@ pub(super) fn dispatch_send_prompt_inner(
                     // `/meeting` is a pager builtin: never PassThrough as a
                     // coding user_query when meeting_join is missing from the
                     // advertised set (qualified names, late handshake).
-                    let command = reg
-                        .get_for_dispatch(invocation.token)
-                        .cloned()
-                        .or_else(|| {
-                            if invocation.token.eq_ignore_ascii_case("meeting") {
-                                reg.get_ignoring_tool_gate(invocation.token)
-                                    .cloned()
-                            } else {
-                                None
-                            }
-                        });
+                    let command = reg.get_for_dispatch(invocation.token).cloned().or_else(|| {
+                        if invocation.token.eq_ignore_ascii_case("meeting") {
+                            reg.get_ignoring_tool_gate(invocation.token).cloned()
+                        } else {
+                            None
+                        }
+                    });
                     (is_builtin, command)
                 };
                 {
@@ -804,23 +800,24 @@ pub(super) fn dispatch_send_prompt_inner(
     {
         // Natural-language (or bare Teams/Zoom/Meet/Webex URL) join.
         // Same InjectSkill as `/meeting join` — never bash/Start-Process.
-        let instruction = xai_grok_tools::implementations::grok_build::join_instruction(
-            &url,
-            title.as_deref(),
-        );
+        let instruction =
+            xai_grok_tools::implementations::grok_build::join_instruction(&url, title.as_deref());
         let id = agent.session.next_queue_id;
         agent.session.next_queue_id += 1;
-        agent.session.pending_prompts.push_back(crate::app::agent::QueuedPrompt {
-            wire_blocks: Some(vec![acp::ContentBlock::Text(acp::TextContent::new(
-                instruction,
-            ))]),
-            display_as_skill: false,
-            ..crate::app::agent::QueuedPrompt::plain(
-                id,
-                text.clone(),
-                crate::app::agent::QueueEntryKind::Prompt,
-            )
-        });
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::agent::QueuedPrompt {
+                wire_blocks: Some(vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    instruction,
+                ))]),
+                display_as_skill: false,
+                ..crate::app::agent::QueuedPrompt::plain(
+                    id,
+                    text.clone(),
+                    crate::app::agent::QueueEntryKind::Prompt,
+                )
+            });
         if consume_input {
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");

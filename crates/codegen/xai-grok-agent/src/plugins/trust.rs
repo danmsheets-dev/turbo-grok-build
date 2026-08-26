@@ -4,10 +4,14 @@
 //! are an execution surface.  A cloned repository could contain plugins with
 //! hook scripts or MCP server commands that run arbitrary code.
 //!
-//! **Trust granularity**: per-plugin-root (not per-worktree).  Trusting one
-//! plugin in a repo does not automatically trust other plugins in the same repo.
+//! **Trust granularity**: this store (`~/.grok/trusted-plugins`) is the
+//! legacy per-plugin-root list. Project plugins (`.grok/plugins/`,
+//! `.claude/plugins/`) are **not** consulted here — their trust comes from
+//! folder-trust (`folder_trust::project_scope_allowed`), which is
+//! whole-workspace and cascades to subdirectories, including plugins added
+//! after the grant (F76). User-scope / CLI-override plugins are auto-trusted.
 //!
-//! **Trust key**: canonical absolute path of the plugin root directory,
+//! **Trust key** (legacy store): canonical absolute path of the plugin root,
 //! resolved via `dunce::canonicalize()`.
 //!
 //! **Trust storage**: `~/.grok/trusted-plugins` (one canonical path per line).

@@ -122,12 +122,6 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
         let snapshot = tool_index.search_snapshot("", 1);
         let summaries = tool_index.list_server_summaries();
 
-        let failed_names: std::collections::HashSet<&str> = snapshot
-            .failed_servers
-            .iter()
-            .map(|f| f.name.as_str())
-            .collect();
-
         let overall = if snapshot.is_ready && snapshot.failed_servers.is_empty() {
             "ready"
         } else {
@@ -137,8 +131,15 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
         let mut servers: Vec<serde_json::Value> = summaries
             .iter()
             .map(|s| {
-                let status = if failed_names.contains(s.name.as_str()) {
-                    "failed"
+                let failed = snapshot.failed_servers.iter().find(|f| f.name == s.name);
+                // Tools bound after a timed-out health ping are usable:
+                // report `partial`, not `failed` (docs-mcp honesty).
+                let status = if failed.is_some() {
+                    if s.tool_count > 0 {
+                        "partial"
+                    } else {
+                        "failed"
+                    }
                 } else if snapshot.is_ready {
                     "ready"
                 } else if s.tool_count > 0 {
@@ -147,11 +148,17 @@ impl xai_tool_runtime::Tool for McpServerHealthTool {
                 } else {
                     "unknown"
                 };
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "name": s.name,
                     "tool_count": s.tool_count,
                     "status": status,
-                })
+                });
+                if let Some(f) = failed {
+                    obj["reason"] = serde_json::Value::String(redact_mcp_reason(&f.reason));
+                    obj["diagnostic"] =
+                        serde_json::Value::String(failure_diagnostic(&f.reason).to_string());
+                }
+                obj
             })
             .collect();
 
@@ -373,6 +380,56 @@ mod tests {
         assert_eq!(json["failed_servers"][0]["name"], "broken");
         assert_eq!(json["servers"][0]["name"], "broken");
         assert_eq!(json["servers"][0]["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn mcp_server_health_failed_with_tools_is_partial() {
+        use crate::types::tool_index::FailedServerInfo;
+        let resources = crate::types::resources::Resources::default().into_shared();
+        resources
+            .lock()
+            .await
+            .insert(ToolIndex(std::sync::Arc::new(StaticToolIndex {
+                snapshot: SearchSnapshot {
+                    results: vec![],
+                    total_hidden_tools: 0,
+                    is_ready: true,
+                    failed_servers: vec![FailedServerInfo {
+                        name: "docs-mcp".into(),
+                        reason: "timed out after 30s".into(),
+                    }],
+                },
+                servers: vec![ServerSummary {
+                    name: "docs-mcp".into(),
+                    description: Some("docs".into()),
+                    tool_count: 10,
+                    tool_names: vec!["search".into()],
+                }],
+            })));
+        let mut ctx =
+            xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+        ctx.extensions.insert(resources);
+
+        let output = McpServerHealthTool
+            .run(ctx, McpServerHealthInput {})
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = output else {
+            panic!("expected Text output");
+        };
+        let json: serde_json::Value = serde_json::from_str(&text.text).unwrap();
+        assert_eq!(json["status"], "partial");
+        assert_eq!(json["servers"][0]["name"], "docs-mcp");
+        assert_eq!(json["servers"][0]["tool_count"], 10);
+        assert_eq!(json["servers"][0]["status"], "partial");
+        assert!(
+            json["servers"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("timed out"),
+            "{}",
+            json["servers"][0]
+        );
     }
 
     #[tokio::test]

@@ -266,7 +266,11 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            if let Err(e) = fs::DirBuilder::new().recursive(true).mode(0o700).create(parent) {
+            if let Err(e) = fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+            {
                 tracing::warn!("[unified_log] failed to create log dir: {e}");
                 return None;
             }

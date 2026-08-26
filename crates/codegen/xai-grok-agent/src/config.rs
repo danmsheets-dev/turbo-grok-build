@@ -354,9 +354,7 @@ fn meeting_pin_index(tools: &[xai_grok_tools::registry::types::ToolConfig]) -> u
 /// file/shell cluster so a trailing-tool truncation (hosted crowding,
 /// model schema cap) cannot drop them. Existing entries are moved, not
 /// duplicated.
-pub fn pin_meeting_notetaker_tools(
-    tools: &mut Vec<xai_grok_tools::registry::types::ToolConfig>,
-) {
+pub fn pin_meeting_notetaker_tools(tools: &mut Vec<xai_grok_tools::registry::types::ToolConfig>) {
     let mut existing: Vec<xai_grok_tools::registry::types::ToolConfig> = Vec::new();
     tools.retain(|t| {
         if is_meeting_notetaker_tool_id(&t.id) {
@@ -369,10 +367,7 @@ pub fn pin_meeting_notetaker_tools(
     let mut to_insert = Vec::new();
     for stock in meeting_notetaker_tools() {
         let name = short_tool_name(&stock.id);
-        if let Some(found) = existing
-            .iter()
-            .find(|t| short_tool_name(&t.id) == name)
-        {
+        if let Some(found) = existing.iter().find(|t| short_tool_name(&t.id) == name) {
             to_insert.push(found.clone());
         } else {
             to_insert.push(stock);
@@ -2855,7 +2850,10 @@ description: Test default tool config
             ("orchestrator", orchestrator_toolset()),
         ] {
             assert!(
-                toolset.tools.iter().any(|t| t.id.rsplit(':').next() == Some("meeting_join")),
+                toolset
+                    .tools
+                    .iter()
+                    .any(|t| t.id.rsplit(':').next() == Some("meeting_join")),
                 "{name} grok-build toolset must expose meeting_join so live schema matches turbo tools list"
             );
         }

@@ -219,7 +219,8 @@ impl PluginRegistry {
             // (callers use `DiscoveryConfig::populate_plugin_lists` to ensure this).
             // A plugin is enabled only if it is in the `enabled` list and NOT in
             // the `disabled` list (disabled takes precedence on conflict).
-            let explicitly_enabled = if dp.scope == crate::plugins::discovery::PluginScope::Project {
+            let explicitly_enabled = if dp.scope == crate::plugins::discovery::PluginScope::Project
+            {
                 enabled.iter().any(|e| e == &dp.id.0)
             } else {
                 enabled
