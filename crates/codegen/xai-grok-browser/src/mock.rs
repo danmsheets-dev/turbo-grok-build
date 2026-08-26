@@ -12,9 +12,9 @@ use serde_json::Value;
 use crate::client::{BrowserClientError, BrowserTransport};
 use crate::protocol::{
     AxNode, BrowserRequest, ClickResult, DownloadsResult, JsonRpcId, JsonRpcRequest,
-    JsonRpcVersion, NavigateResult, ScreenshotResult, SnapshotResult, TabInfo, TabsResult,
-    WaitResult, check_eval_confirm, check_eval_result, check_fill, check_navigation_hop,
-    single_tab_v1_error,
+    JsonRpcVersion, MAIN_TAB_ID, NavigateResult, NewWindowDisposition, ScreenshotResult,
+    SnapshotResult, TabInfo, TabsResult, WaitResult, check_eval_confirm, check_eval_result,
+    check_fill, check_navigation_hop, classify_new_window, single_tab_v1_error,
 };
 
 /// Recorded click/fill from the mock host.
@@ -35,6 +35,14 @@ pub enum MockAction {
 }
 
 #[derive(Debug)]
+struct MockPopup {
+    tab_id: u32,
+    url: String,
+    title: String,
+    nodes: Vec<AxNode>,
+}
+
+#[derive(Debug)]
 struct MockState {
     url: String,
     title: String,
@@ -43,6 +51,9 @@ struct MockState {
     calls: Vec<String>,
     shutdown: bool,
     session_folder: Option<std::path::PathBuf>,
+    popups: Vec<MockPopup>,
+    active: u32,
+    next_tab: u32,
 }
 
 impl MockState {
@@ -55,6 +66,9 @@ impl MockState {
             calls: Vec::new(),
             shutdown: false,
             session_folder: None,
+            popups: Vec::new(),
+            active: MAIN_TAB_ID,
+            next_tab: MAIN_TAB_ID + 1,
         }
     }
 }
@@ -121,6 +135,29 @@ impl MockBrowserHost {
         self.lock().session_folder = Some(folder.into());
     }
 
+    /// Open a host-owned OAuth popup tab (same policy as `NewWindowRequested`).
+    pub fn open_oauth_popup(&self, url: &str) -> Result<u32, BrowserClientError> {
+        match classify_new_window(Some(url), None) {
+            NewWindowDisposition::OauthPopup { url, host } => {
+                let mut state = self.lock();
+                let tab_id = state.next_tab;
+                state.next_tab = state.next_tab.saturating_add(1);
+                state.popups.push(MockPopup {
+                    tab_id,
+                    url,
+                    title: host,
+                    nodes: canned_nodes(),
+                });
+                Ok(tab_id)
+            }
+            NewWindowDisposition::Block { error, .. } => Err(BrowserClientError::Url(error)),
+            NewWindowDisposition::SameTab { url } => Err(BrowserClientError::Rpc {
+                code: -32000,
+                message: format!("not an OAuth popup origin: {url}"),
+            }),
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, MockState> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -167,24 +204,27 @@ fn dispatch(
             code: -32601,
             message: single_tab_v1_error("browser.new_tab"),
         }),
-        BrowserRequest::SelectTab { .. } => Err(BrowserClientError::Rpc {
-            code: -32601,
-            message: single_tab_v1_error("browser.select_tab"),
-        }),
-        BrowserRequest::CloseTab { .. } => Err(BrowserClientError::Rpc {
-            code: -32601,
-            message: single_tab_v1_error("browser.close_tab"),
-        }),
+        BrowserRequest::SelectTab { tab_id } => {
+            select_tab(&mut state, tab_id)?;
+            Ok(empty_object())
+        }
+        BrowserRequest::CloseTab { tab_id } => {
+            close_tab(&mut state, tab_id)?;
+            Ok(empty_object())
+        }
         BrowserRequest::Snapshot {
             verbose: _,
             include_text,
+            tab_id,
         } => {
+            let id = tab_id.unwrap_or(MAIN_TAB_ID);
+            let (url, title, nodes) = tab_view(&state, id)?;
             let text = include_text.then(|| "Example Domain".to_owned());
             to_value(SnapshotResult {
-                url: state.url.clone(),
-                title: state.title.clone(),
+                url,
+                title,
                 source: crate::protocol::SnapshotSource::Dom,
-                nodes: state.nodes.clone(),
+                nodes,
                 overlay: None,
                 text,
             })
@@ -275,14 +315,72 @@ fn apply_navigate(state: &mut MockState, url: String) {
 }
 
 fn current_tabs(state: &MockState) -> TabsResult {
-    TabsResult {
-        tabs: vec![TabInfo {
-            tab_id: 1,
-            url: state.url.clone(),
-            title: state.title.clone(),
-            active: true,
-        }],
+    let mut tabs = vec![TabInfo {
+        tab_id: MAIN_TAB_ID,
+        url: state.url.clone(),
+        title: state.title.clone(),
+        active: state.active == MAIN_TAB_ID,
+    }];
+    for popup in &state.popups {
+        tabs.push(TabInfo {
+            tab_id: popup.tab_id,
+            url: popup.url.clone(),
+            title: popup.title.clone(),
+            active: state.active == popup.tab_id,
+        });
     }
+    TabsResult { tabs }
+}
+
+fn tab_view(
+    state: &MockState,
+    tab_id: u32,
+) -> Result<(String, String, Vec<AxNode>), BrowserClientError> {
+    if tab_id == MAIN_TAB_ID {
+        return Ok((state.url.clone(), state.title.clone(), state.nodes.clone()));
+    }
+    state
+        .popups
+        .iter()
+        .find(|p| p.tab_id == tab_id)
+        .map(|p| (p.url.clone(), p.title.clone(), p.nodes.clone()))
+        .ok_or_else(|| BrowserClientError::Rpc {
+            code: -32000,
+            message: format!("unknown tab_id {tab_id}"),
+        })
+}
+
+fn select_tab(state: &mut MockState, tab_id: u32) -> Result<(), BrowserClientError> {
+    if tab_id == MAIN_TAB_ID || state.popups.iter().any(|p| p.tab_id == tab_id) {
+        state.active = tab_id;
+        Ok(())
+    } else {
+        Err(BrowserClientError::Rpc {
+            code: -32000,
+            message: format!("unknown tab_id {tab_id}"),
+        })
+    }
+}
+
+fn close_tab(state: &mut MockState, tab_id: u32) -> Result<(), BrowserClientError> {
+    if tab_id == MAIN_TAB_ID {
+        return Err(BrowserClientError::Rpc {
+            code: -32000,
+            message: "cannot close the main Agent WebView tab".into(),
+        });
+    }
+    let before = state.popups.len();
+    state.popups.retain(|p| p.tab_id != tab_id);
+    if state.popups.len() == before {
+        return Err(BrowserClientError::Rpc {
+            code: -32000,
+            message: format!("unknown tab_id {tab_id}"),
+        });
+    }
+    if state.active == tab_id {
+        state.active = MAIN_TAB_ID;
+    }
+    Ok(())
 }
 
 fn canned_nodes() -> Vec<AxNode> {
@@ -442,5 +540,76 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("v1 is a single tab"), "{err}");
         assert_eq!(host.url(), "about:blank");
+    }
+
+    #[tokio::test]
+    async fn mock_oauth_popup_is_a_second_tab_agent_can_snapshot_and_close() {
+        let host = MockBrowserHost::new();
+        let err = host
+            .open_oauth_popup("https://evil.test/accounts.google.com/gsi?ux_mode=popup")
+            .unwrap_err();
+        assert!(err.to_string().contains("not an OAuth popup"), "{err}");
+        let err = host.open_oauth_popup("javascript:alert(1)").unwrap_err();
+        assert!(
+            matches!(err, BrowserClientError::Url(_)),
+            "popup navigation must be URL-policy checked: {err:?}"
+        );
+
+        let tab_id = host
+            .open_oauth_popup("https://accounts.google.com/gsi/select")
+            .unwrap();
+        assert_eq!(tab_id, 2);
+        let tabs: TabsResult = serde_json::from_value(
+            host.call(crate::protocol::METHOD_TABS, serde_json::json!({}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tabs.tabs.len(), 2);
+        assert_eq!(tabs.tabs[0].tab_id, 1);
+        assert!(tabs.tabs[0].active);
+        assert_eq!(tabs.tabs[1].tab_id, 2);
+        assert!(tabs.tabs[1].url.contains("accounts.google.com"));
+        assert!(!tabs.tabs[1].active);
+
+        let snap: SnapshotResult = serde_json::from_value(
+            host.call(
+                crate::protocol::METHOD_SNAPSHOT,
+                serde_json::json!({ "tab_id": 2 }),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(snap.url.contains("accounts.google.com"), "{}", snap.url);
+
+        host.call(
+            crate::protocol::METHOD_SELECT_TAB,
+            serde_json::json!({ "tab_id": 2 }),
+        )
+        .await
+        .unwrap();
+        host.call(
+            crate::protocol::METHOD_CLOSE_TAB,
+            serde_json::json!({ "tab_id": 2 }),
+        )
+        .await
+        .unwrap();
+        let err = host
+            .call(
+                crate::protocol::METHOD_CLOSE_TAB,
+                serde_json::json!({ "tab_id": 1 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot close the main"), "{err}");
+        let tabs: TabsResult = serde_json::from_value(
+            host.call(crate::protocol::METHOD_TABS, serde_json::json!({}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tabs.tabs.len(), 1);
+        assert_eq!(tabs.tabs[0].tab_id, 1);
     }
 }

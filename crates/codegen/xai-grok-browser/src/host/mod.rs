@@ -155,7 +155,7 @@ pub(crate) enum HostCall {
     },
     /// `browser.screenshot`
     Screenshot,
-    /// `browser.tabs` (single-tab v1).
+    /// `browser.tabs` (main view plus host-owned OAuth popups).
     Tabs,
     /// `browser.downloads` (session-scoped broker directory).
     Downloads,
@@ -169,6 +169,18 @@ pub(crate) enum HostCall {
         verbose: bool,
         /// Include truncated main-landmark text.
         include_text: bool,
+        /// Optional tab (`1` = main, `2+` = OAuth popup).
+        tab_id: Option<u32>,
+    },
+    /// `browser.select_tab`
+    SelectTab {
+        /// Main tab is `1`; OAuth popups are `2+`.
+        tab_id: u32,
+    },
+    /// `browser.close_tab`
+    CloseTab {
+        /// OAuth popup tab to close. The main tab cannot be closed.
+        tab_id: u32,
     },
     /// `browser.click`
     Click {
@@ -413,7 +425,7 @@ fn handle_ui_job(
                 },
             ),
         },
-        Ok((id, HostCall::Tabs)) => match agent.current_tab() {
+        Ok((id, HostCall::Tabs)) => match agent.list_tabs() {
             Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
             Err(message) => encode_rpc_error(
                 id,
@@ -436,7 +448,7 @@ fn handle_ui_job(
             ),
         },
         Ok((id, HostCall::Raise)) => {
-            window::raise(hwnd);
+            window::raise(agent.selected_hwnd());
             encode_rpc_ok(id, Value::Object(serde_json::Map::new()))
         }
         Ok((id, HostCall::Shutdown)) => {
@@ -448,9 +460,32 @@ fn handle_ui_job(
             HostCall::Snapshot {
                 verbose,
                 include_text,
+                tab_id,
             },
-        )) => match agent.snapshot(verbose, include_text) {
+        )) => match agent.snapshot(verbose, include_text, tab_id) {
             Ok(result) => encode_rpc_ok(id, serde_json::to_value(result).unwrap_or(Value::Null)),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::SelectTab { tab_id })) => match agent.select_tab(tab_id) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
+            Err(message) => encode_rpc_error(
+                id,
+                JsonRpcError {
+                    code: RPC_HOST_ERROR,
+                    message,
+                    data: None,
+                },
+            ),
+        },
+        Ok((id, HostCall::CloseTab { tab_id })) => match agent.close_tab(tab_id) {
+            Ok(()) => encode_rpc_ok(id, Value::Object(serde_json::Map::new())),
             Err(message) => encode_rpc_error(
                 id,
                 JsonRpcError {
@@ -601,8 +636,8 @@ pub(crate) struct DecodedRpcError {
 /// Decode one newline-delimited JSON-RPC request into a host call.
 ///
 /// Applies [`check_url`] on navigate and [`check_fill`] on fill (fail
-/// closed). Invalid click/fill uids become `unknown_uid`. Multi-tab
-/// methods stay JSON-RPC errors (Task 6).
+/// closed). Invalid click/fill uids become `unknown_uid`. `browser.new_tab`
+/// stays unimplemented; `select_tab` / `close_tab` address OAuth popups.
 pub(crate) fn decode_host_call(
     line: &str,
     session_folder: Option<&Path>,
@@ -663,13 +698,17 @@ pub(crate) fn decode_host_call(
         BrowserRequest::Snapshot {
             verbose,
             include_text,
+            tab_id,
         } => Ok((
             id,
             HostCall::Snapshot {
                 verbose,
                 include_text,
+                tab_id,
             },
         )),
+        BrowserRequest::SelectTab { tab_id } => Ok((id, HostCall::SelectTab { tab_id })),
+        BrowserRequest::CloseTab { tab_id } => Ok((id, HostCall::CloseTab { tab_id })),
         BrowserRequest::Click { uid } => {
             if let Err(message) = ax::resolve_uid(&uid) {
                 return Err(DecodedRpcError {
@@ -869,9 +908,7 @@ pub(crate) fn decode_host_call(
                 }
             }
         }
-        BrowserRequest::NewTab { .. }
-        | BrowserRequest::SelectTab { .. }
-        | BrowserRequest::CloseTab { .. } => Err(DecodedRpcError {
+        BrowserRequest::NewTab { .. } => Err(DecodedRpcError {
             id: Some(id),
             error: JsonRpcError {
                 code: RPC_METHOD_NOT_FOUND,
@@ -1246,6 +1283,7 @@ mod tests {
                 HostCall::Snapshot {
                     verbose: true,
                     include_text: false,
+                    tab_id: None,
                 },
             ) => {}
             other => panic!("{other:?}"),
@@ -1349,21 +1387,26 @@ mod tests {
     }
 
     #[test]
-    fn decode_select_and_close_tab_are_honest_single_tab() {
-        for method in [METHOD_SELECT_TAB, METHOD_CLOSE_TAB] {
-            let line = encode_rpc_request(
-                JsonRpcId::Number(12),
-                method,
-                serde_json::json!({ "tab_id": 2 }),
-            )
-            .unwrap();
-            let err = decode_host_call(&line, None).unwrap_err();
-            assert_eq!(err.error.code, RPC_METHOD_NOT_FOUND, "{method}");
-            assert!(
-                err.error.message.contains("v1 is a single tab"),
-                "{method}: {}",
-                err.error.message
-            );
+    fn decode_select_and_close_tab_are_host_calls() {
+        let select = encode_rpc_request(
+            JsonRpcId::Number(12),
+            METHOD_SELECT_TAB,
+            serde_json::json!({ "tab_id": 2 }),
+        )
+        .unwrap();
+        match decode_host_call(&select, None).unwrap() {
+            (_, HostCall::SelectTab { tab_id: 2 }) => {}
+            other => panic!("{other:?}"),
+        }
+        let close = encode_rpc_request(
+            JsonRpcId::Number(12),
+            METHOD_CLOSE_TAB,
+            serde_json::json!({ "tab_id": 2 }),
+        )
+        .unwrap();
+        match decode_host_call(&close, None).unwrap() {
+            (_, HostCall::CloseTab { tab_id: 2 }) => {}
+            other => panic!("{other:?}"),
         }
     }
 

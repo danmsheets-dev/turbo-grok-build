@@ -318,6 +318,9 @@ pub enum BrowserRequest {
         /// Include truncated main-landmark text.
         #[serde(default)]
         include_text: bool,
+        /// Optional tab (`1` = main, `2+` = host-owned OAuth popup).
+        #[serde(default)]
+        tab_id: Option<u32>,
     },
     /// `browser.click`
     #[serde(rename = "browser.click")]
@@ -510,7 +513,7 @@ pub struct TabInfo {
 /// Result of `browser.tabs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabsResult {
-    /// Open tabs (v1 may be a single entry).
+    /// Open tabs (main Agent view plus host-owned OAuth popups).
     pub tabs: Vec<TabInfo>,
 }
 
@@ -642,7 +645,66 @@ pub fn check_navigation_hop(
     check_url_in_session(url, session_folder)
 }
 
-/// JSON-RPC / client error when a multi-tab method is requested.
+/// Main Agent WebView tab. Host-owned OAuth popups are `2` and up.
+pub const MAIN_TAB_ID: u32 = 1;
+
+/// How `NewWindowRequested` is handled after URL policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewWindowDisposition {
+    /// Policy cancelled the popup (including a missing URI).
+    Block {
+        /// Requested URI when WebView2 reported one.
+        url: Option<String>,
+        /// [`check_url_in_session`] failure.
+        error: UrlPolicyError,
+    },
+    /// Ordinary `window.open` / `target=_blank` — load in the existing tab.
+    SameTab {
+        /// Policy-checked URL.
+        url: String,
+    },
+    /// Exact-origin OAuth — host-owned HWND listed as a second tab.
+    ///
+    /// Subsequent `NavigationStarting` hops on that view still run
+    /// [`check_url_in_session`] (via [`check_navigation_hop`]).
+    OauthPopup {
+        /// Policy-checked URL.
+        url: String,
+        /// Exact allowlisted host (`accounts.google.com`, …).
+        host: String,
+    },
+}
+
+/// Decide `NewWindowRequested` the same way the host does.
+///
+/// Policy first (so `javascript:`, public `http:`, and allowlist misses never
+/// become a real window), then exact-origin OAuth vs same-tab redirect.
+pub fn classify_new_window(
+    uri: Option<&str>,
+    session_folder: Option<&Path>,
+) -> NewWindowDisposition {
+    match check_navigation_hop(uri, session_folder) {
+        Err(error) => NewWindowDisposition::Block {
+            url: uri
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            error,
+        },
+        Ok(()) => {
+            let url = uri.unwrap_or("").trim().to_owned();
+            match oauth_popup_host(&url) {
+                Some(host) => NewWindowDisposition::OauthPopup { url, host },
+                None => NewWindowDisposition::SameTab { url },
+            }
+        }
+    }
+}
+
+/// JSON-RPC / client error when `browser.new_tab` is requested.
+///
+/// `select_tab` / `close_tab` are implemented for host-owned OAuth popups;
+/// arbitrary extra tabs are still out of scope.
 pub fn single_tab_v1_error(method: &str) -> String {
     format!("{method} is not implemented (v1 is a single tab)")
 }
@@ -1887,6 +1949,90 @@ mod tests {
             Some("accounts.google.com".into())
         );
         assert_eq!(oauth_popup_host("https://evil.test/oauth/authorize"), None);
+    }
+
+    #[test]
+    fn oauth_popup_navigations_run_url_policy() {
+        // Opening the popup is policy-checked, then classified as a host-owned tab.
+        match classify_new_window(Some("https://accounts.google.com/gsi/select"), None) {
+            NewWindowDisposition::OauthPopup { host, .. } => {
+                assert_eq!(host, "accounts.google.com");
+            }
+            other => panic!("{other:?}"),
+        }
+        match classify_new_window(
+            Some("https://login.microsoftonline.com/common/oauth2/v2.0/authorize"),
+            None,
+        ) {
+            NewWindowDisposition::OauthPopup { host, .. } => {
+                assert_eq!(host, "login.microsoftonline.com");
+            }
+            other => panic!("{other:?}"),
+        }
+        match classify_new_window(Some("https://appleid.apple.com/auth/authorize"), None) {
+            NewWindowDisposition::OauthPopup { host, .. } => {
+                assert_eq!(host, "appleid.apple.com");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Later hops on that HWND share NavigationStarting with the agent tab:
+        // check_url_in_session / check_navigation_hop, fail closed.
+        for hop in [
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "http://evil.test/",
+            "file:///C:/Windows/notepad.exe",
+            "about:srcdoc",
+        ] {
+            assert!(
+                check_url_in_session(hop, None).is_err(),
+                "popup hop must cancel: {hop}"
+            );
+            assert!(
+                check_navigation_hop(Some(hop), None).is_err(),
+                "popup NavigationStarting must cancel: {hop}"
+            );
+        }
+        assert!(
+            check_url_in_session("https://accounts.google.com/signin/oauth/consent", None).is_ok()
+        );
+        assert_eq!(
+            check_navigation_hop(None, None),
+            Err(UrlPolicyError::Empty),
+            "missing popup URI must fail closed"
+        );
+
+        // Substring heuristic cannot open a real OAuth window.
+        match classify_new_window(
+            Some("https://evil.test/accounts.google.com/gsi/select?ux_mode=popup"),
+            None,
+        ) {
+            NewWindowDisposition::SameTab { url } => {
+                assert!(url.contains("evil.test"));
+            }
+            other => panic!("substring URL must not be an OAuth popup: {other:?}"),
+        }
+        assert!(matches!(
+            classify_new_window(Some("javascript:alert(1)"), None),
+            NewWindowDisposition::Block { .. }
+        ));
+        assert!(matches!(
+            classify_new_window(None, None),
+            NewWindowDisposition::Block {
+                error: UrlPolicyError::Empty,
+                ..
+            }
+        ));
+        with_browser_allow("www.linkedin.com", || {
+            assert!(matches!(
+                classify_new_window(Some("https://accounts.google.com/gsi"), None),
+                NewWindowDisposition::Block {
+                    error: UrlPolicyError::AllowlistDenied(_),
+                    ..
+                }
+            ));
+        });
     }
 
     #[test]

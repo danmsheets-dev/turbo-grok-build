@@ -327,7 +327,7 @@ impl<T: BrowserTransport> BrowserClient<T> {
             .await
     }
 
-    /// `browser.new_tab`. v1 is a single tab; this fails closed without sending.
+    /// `browser.new_tab`. Arbitrary extra tabs are still unimplemented.
     pub async fn new_tab(&self, url: Option<String>) -> Result<TabsResult, BrowserClientError> {
         let _ = url;
         Err(BrowserClientError::Rpc {
@@ -336,22 +336,16 @@ impl<T: BrowserTransport> BrowserClient<T> {
         })
     }
 
-    /// `browser.select_tab`. v1 is a single tab; this fails closed without sending.
+    /// `browser.select_tab`. Main tab is `1`; host-owned OAuth popups are `2+`.
     pub async fn select_tab(&self, tab_id: u32) -> Result<(), BrowserClientError> {
-        let _ = tab_id;
-        Err(BrowserClientError::Rpc {
-            code: -32601,
-            message: single_tab_v1_error(METHOD_SELECT_TAB),
-        })
+        self.send_ok(METHOD_SELECT_TAB, serde_json::json!({ "tab_id": tab_id }))
+            .await
     }
 
-    /// `browser.close_tab`. v1 is a single tab; this fails closed without sending.
+    /// `browser.close_tab`. Closes a host-owned OAuth popup; the main tab cannot close.
     pub async fn close_tab(&self, tab_id: u32) -> Result<(), BrowserClientError> {
-        let _ = tab_id;
-        Err(BrowserClientError::Rpc {
-            code: -32601,
-            message: single_tab_v1_error(METHOD_CLOSE_TAB),
-        })
+        self.send_ok(METHOD_CLOSE_TAB, serde_json::json!({ "tab_id": tab_id }))
+            .await
     }
 
     /// `browser.snapshot`.
@@ -365,11 +359,21 @@ impl<T: BrowserTransport> BrowserClient<T> {
         verbose: bool,
         include_text: bool,
     ) -> Result<SnapshotResult, BrowserClientError> {
-        self.roundtrip(
-            METHOD_SNAPSHOT,
-            serde_json::json!({ "verbose": verbose, "include_text": include_text }),
-        )
-        .await
+        self.snapshot_on(None, verbose, include_text).await
+    }
+
+    /// `browser.snapshot` of a specific tab (`1` = main, `2+` = OAuth popup).
+    pub async fn snapshot_on(
+        &self,
+        tab_id: Option<u32>,
+        verbose: bool,
+        include_text: bool,
+    ) -> Result<SnapshotResult, BrowserClientError> {
+        let mut params = serde_json::json!({ "verbose": verbose, "include_text": include_text });
+        if let Some(tab_id) = tab_id {
+            params["tab_id"] = tab_id.into();
+        }
+        self.roundtrip(METHOD_SNAPSHOT, params).await
     }
 
     /// `browser.click`.
@@ -676,21 +680,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_tab_methods_fail_closed_without_send() {
+    async fn new_tab_fails_closed_without_send() {
         let client = BrowserClient::with_transport("sess", MockBrowserHost::new());
         let err = client
             .new_tab(Some("https://example.com/".into()))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("v1 is a single tab"), "{err}");
-        let err = client.select_tab(2).await.unwrap_err();
-        assert!(err.to_string().contains("v1 is a single tab"), "{err}");
-        let err = client.close_tab(1).await.unwrap_err();
-        assert!(err.to_string().contains("v1 is a single tab"), "{err}");
         assert!(
             client.transport().call_log().is_empty(),
-            "multi-tab RPCs must not be sent"
+            "new_tab RPC must not be sent"
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_popup_tab_can_be_snapshotted_and_closed() {
+        let host = MockBrowserHost::new();
+        let tab_id = host
+            .open_oauth_popup("https://accounts.google.com/gsi")
+            .unwrap();
+        let client = BrowserClient::with_transport("sess", host);
+        let tabs = client.tabs().await.unwrap();
+        assert_eq!(tabs.tabs.len(), 2);
+        assert_eq!(tabs.tabs[1].tab_id, tab_id);
+        let snap = client
+            .snapshot_on(Some(tab_id), false, false)
+            .await
+            .unwrap();
+        assert!(snap.url.contains("accounts.google.com"), "{}", snap.url);
+        client.select_tab(tab_id).await.unwrap();
+        client.close_tab(tab_id).await.unwrap();
+        let err = client.close_tab(1).await.unwrap_err();
+        assert!(err.to_string().contains("cannot close the main"), "{err}");
+        assert_eq!(client.tabs().await.unwrap().tabs.len(), 1);
     }
 
     #[tokio::test]

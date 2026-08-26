@@ -265,6 +265,8 @@ fn method_label(call: &HostCall) -> &'static str {
         HostCall::Select { .. } => "browser.select",
         HostCall::Hover { .. } => "browser.hover",
         HostCall::SetFile { .. } => "browser.set_file",
+        HostCall::SelectTab { .. } => "browser.select_tab",
+        HostCall::CloseTab { .. } => "browser.close_tab",
     }
 }
 
@@ -394,6 +396,7 @@ mod tests {
             HostCall::Snapshot {
                 verbose: false,
                 include_text: false,
+                tab_id: None,
             }
         ));
 

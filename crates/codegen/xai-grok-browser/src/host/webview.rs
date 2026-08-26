@@ -27,7 +27,7 @@ use webview2_com::{
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     DownloadStartingEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
     NewWindowRequestedEventHandler, PermissionRequestedEventHandler, StateChangedEventHandler,
-    take_pwstr,
+    WindowCloseRequestedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{E_POINTER, HWND};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -48,9 +48,9 @@ use super::window::{
 };
 use super::{HostError, next_screenshot_path, screenshot_dir};
 use crate::protocol::{
-    AxNode, ClickResult, DownloadsResult, FillTarget, NavigateResult, ScreenshotResult,
-    SnapshotResult, SnapshotSource, TabInfo, TabsResult, WaitResult, check_fill_target,
-    check_navigation_hop, is_oauth_popup_url,
+    AxNode, ClickResult, DownloadsResult, FillTarget, MAIN_TAB_ID, NavigateResult,
+    NewWindowDisposition, ScreenshotResult, SnapshotResult, SnapshotSource, TabInfo, TabsResult,
+    WaitResult, check_fill_target, check_navigation_hop, classify_new_window,
 };
 
 /// Ceiling on a single script / CDP round trip before the host gives up.
@@ -94,7 +94,67 @@ impl BlockLog {
     }
 }
 
-/// Single-tab WebView2 controller owned by the UI thread.
+/// Host-owned OAuth popup, listed as tab `2+`.
+struct OauthPopupView {
+    tab_id: u32,
+    hwnd: HWND,
+    controller: ICoreWebView2Controller,
+    webview: ICoreWebView2,
+    ax_world: Option<i64>,
+}
+
+/// Second-tab book for OAuth HWNDs. Shared with `NewWindowRequested`.
+struct PopupBook {
+    next_id: u32,
+    active: u32,
+    popups: Vec<OauthPopupView>,
+}
+
+impl PopupBook {
+    fn new() -> Self {
+        Self {
+            next_id: MAIN_TAB_ID + 1,
+            active: MAIN_TAB_ID,
+            popups: Vec::new(),
+        }
+    }
+
+    fn prune(&mut self) {
+        self.popups.retain(|p| super::window::is_alive(p.hwnd));
+        if self.active != MAIN_TAB_ID && !self.popups.iter().any(|p| p.tab_id == self.active) {
+            self.active = MAIN_TAB_ID;
+        }
+    }
+
+    fn insert(
+        &mut self,
+        hwnd: HWND,
+        controller: ICoreWebView2Controller,
+        webview: ICoreWebView2,
+    ) -> u32 {
+        let tab_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.popups.push(OauthPopupView {
+            tab_id,
+            hwnd,
+            controller,
+            webview,
+            ax_world: None,
+        });
+        tab_id
+    }
+
+    fn get_mut(&mut self, tab_id: u32) -> Option<&mut OauthPopupView> {
+        self.popups.iter_mut().find(|p| p.tab_id == tab_id)
+    }
+
+    fn take(&mut self, tab_id: u32) -> Option<OauthPopupView> {
+        let idx = self.popups.iter().position(|p| p.tab_id == tab_id)?;
+        Some(self.popups.remove(idx))
+    }
+}
+
+/// Single-tab WebView2 controller owned by the UI thread, plus OAuth popup tabs.
 pub struct AgentWebView {
     hwnd: HWND,
     controller: ICoreWebView2Controller,
@@ -106,6 +166,7 @@ pub struct AgentWebView {
     /// Isolated-world execution context for the collector; dropped on navigate.
     ax_world: Option<i64>,
     blocked: Rc<BlockLog>,
+    popups: Rc<RefCell<PopupBook>>,
 }
 
 impl AgentWebView {
@@ -139,6 +200,7 @@ impl AgentWebView {
         apply_settings(&webview)?;
         let blocked = Rc::new(BlockLog::default());
         let active_downloads = Rc::new(RefCell::new(HashSet::new()));
+        let popups = Rc::new(RefCell::new(PopupBook::new()));
         register_navigation_policy(&webview, session_folder.clone(), Rc::clone(&blocked))?;
         register_popup_download_permission(
             &webview,
@@ -147,6 +209,7 @@ impl AgentWebView {
             session_folder.clone(),
             Rc::clone(&blocked),
             Rc::clone(&active_downloads),
+            Rc::clone(&popups),
         )?;
         attach_controller(hwnd, controller.clone());
 
@@ -160,6 +223,7 @@ impl AgentWebView {
             screenshot_n: 0,
             ax_world: None,
             blocked,
+            popups,
         };
         // First paint has to explain itself. `run_windows` shows the frame on
         // the line after this constructor returns, so whatever is in the
@@ -297,52 +361,24 @@ impl AgentWebView {
     }
 
     /// Compact AX snapshot from the isolated-world collector (CDP fallback).
+    ///
+    /// `tab_id` `None`/`1` is the main Agent view; `2+` is a host-owned OAuth popup.
     pub fn snapshot(
         &mut self,
         verbose: bool,
         include_text: bool,
+        tab_id: Option<u32>,
     ) -> Result<SnapshotResult, String> {
-        let loc = self.location()?;
-        let cap = snapshot_cap(verbose);
-        let js = format!("window.__turboAx.collect({cap})");
-        let (dom_nodes, overlay) = match self.eval_in_world(&js) {
-            Ok(value) => {
-                let overlay = value.get("overlay").and_then(Value::as_bool);
-                (
-                    parse_collected_nodes(&value, cap).unwrap_or_default(),
-                    overlay,
-                )
-            }
-            Err(_) => (Vec::new(), None),
-        };
-        let ax_fallback = if dom_nodes.is_empty() {
-            self.snapshot_cdp_fallback(verbose)
-        } else {
-            Ok(Vec::new())
-        };
-        let (nodes, source) = super::ax::pick_snapshot_nodes(dom_nodes, ax_fallback, &loc.url)?;
-        let text = if include_text && source == SnapshotSource::Dom {
-            self.eval_in_world("window.__turboAx.pageText()")
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .filter(|s| !s.is_empty())
-        } else {
-            None
-        };
-        Ok(SnapshotResult {
-            url: loc.url,
-            title: loc.title,
-            source,
-            overlay,
-            text,
-            nodes,
-        })
-    }
-
-    fn snapshot_cdp_fallback(&self, verbose: bool) -> Result<Vec<AxNode>, String> {
-        let _ = call_cdp(&self.webview, "Accessibility.enable", "{}");
-        let tree = call_cdp(&self.webview, "Accessibility.getFullAXTree", "{}")?;
-        compact_ax_tree(&tree, verbose)
+        self.popups.borrow_mut().prune();
+        let id = tab_id.unwrap_or(MAIN_TAB_ID);
+        if id == MAIN_TAB_ID {
+            return snapshot_view(&self.webview, &mut self.ax_world, verbose, include_text);
+        }
+        let mut book = self.popups.borrow_mut();
+        let popup = book
+            .get_mut(id)
+            .ok_or_else(|| format!("unknown tab_id {id}"))?;
+        snapshot_view(&popup.webview, &mut popup.ax_world, verbose, include_text)
     }
 
     /// Click `[data-turbo-uid=…]`. Missing or stale node → `unknown_uid`.
@@ -575,75 +611,10 @@ impl AgentWebView {
         parse_eval_cdp(&json)
     }
 
-    /// Id of the main frame, for `Page.createIsolatedWorld`.
-    fn main_frame_id(&self) -> Result<String, String> {
-        let _ = call_cdp(&self.webview, "Page.enable", "{}");
-        let tree = call_cdp(&self.webview, "Page.getFrameTree", "{}")?;
-        let value: Value =
-            serde_json::from_str(&tree).map_err(|e| format!("Page.getFrameTree JSON: {e}"))?;
-        value
-            .pointer("/frameTree/frame/id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| "Page.getFrameTree has no main frame id".to_owned())
-    }
-
-    /// Create the collector's isolated world and define `__turboAx` in it.
-    fn create_ax_world(&mut self) -> Result<i64, String> {
-        let frame_id = self.main_frame_id()?;
-        let params = serde_json::json!({
-            "frameId": frame_id,
-            "worldName": AX_WORLD,
-            // CDP really does spell it this way.
-            "grantUniveralAccess": false,
-        })
-        .to_string();
-        let json = call_cdp(&self.webview, "Page.createIsolatedWorld", &params)?;
-        let value: Value = serde_json::from_str(&json)
-            .map_err(|e| format!("Page.createIsolatedWorld JSON: {e}"))?;
-        let context = value
-            .get("executionContextId")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| "Page.createIsolatedWorld returned no executionContextId".to_owned())?;
-        let install = serde_json::json!({
-            "expression": turbo_ax_js_injected().as_ref(),
-            "contextId": context,
-            "returnByValue": true,
-        })
-        .to_string();
-        let installed = call_cdp(&self.webview, "Runtime.evaluate", &install)?;
-        parse_world_result(&installed)?;
-        self.ax_world = Some(context);
-        Ok(context)
-    }
-
     /// Evaluate `js` in the collector's isolated world, recreating it if the
     /// context went away (navigation, renderer restart).
     fn eval_in_world(&mut self, js: &str) -> Result<Value, String> {
-        let context = match self.ax_world {
-            Some(id) => id,
-            None => self.create_ax_world()?,
-        };
-        match self.eval_in_context(js, context) {
-            Ok(value) => Ok(value),
-            Err(_) => {
-                // Stale context: rebuild the world once and retry.
-                self.ax_world = None;
-                let context = self.create_ax_world()?;
-                self.eval_in_context(js, context)
-            }
-        }
-    }
-
-    fn eval_in_context(&self, js: &str, context: i64) -> Result<Value, String> {
-        let params = serde_json::json!({
-            "expression": js,
-            "contextId": context,
-            "returnByValue": true,
-        })
-        .to_string();
-        let json = call_cdp(&self.webview, "Runtime.evaluate", &params)?;
-        parse_world_result(&json)
+        eval_js_in_world(&self.webview, &mut self.ax_world, js)
     }
 
     /// CDP `Page.captureScreenshot` → PNG file + IHDR size.
@@ -670,17 +641,84 @@ impl AgentWebView {
         })
     }
 
-    /// Single-tab `browser.tabs` result.
-    pub fn current_tab(&self) -> Result<TabsResult, String> {
+    /// Main Agent tab plus host-owned OAuth popups.
+    pub fn list_tabs(&self) -> Result<TabsResult, String> {
+        self.popups.borrow_mut().prune();
         let loc = self.location()?;
-        Ok(TabsResult {
-            tabs: vec![TabInfo {
-                tab_id: 1,
+        let book = self.popups.borrow();
+        let mut tabs = vec![TabInfo {
+            tab_id: MAIN_TAB_ID,
+            url: loc.url,
+            title: loc.title,
+            active: book.active == MAIN_TAB_ID,
+        }];
+        for popup in &book.popups {
+            let loc = webview_location(&popup.webview).unwrap_or_else(|_| NavigateResult {
+                url: String::new(),
+                title: String::new(),
+            });
+            tabs.push(TabInfo {
+                tab_id: popup.tab_id,
                 url: loc.url,
                 title: loc.title,
-                active: true,
-            }],
-        })
+                active: book.active == popup.tab_id,
+            });
+        }
+        Ok(TabsResult { tabs })
+    }
+
+    /// Focus a tab and raise its HWND. `1` is the main Agent view.
+    pub fn select_tab(&mut self, tab_id: u32) -> Result<(), String> {
+        self.popups.borrow_mut().prune();
+        if tab_id == MAIN_TAB_ID {
+            self.popups.borrow_mut().active = MAIN_TAB_ID;
+            super::window::raise(self.hwnd);
+            return Ok(());
+        }
+        let hwnd = {
+            let book = self.popups.borrow();
+            book.popups
+                .iter()
+                .find(|p| p.tab_id == tab_id)
+                .map(|p| p.hwnd)
+                .ok_or_else(|| format!("unknown tab_id {tab_id}"))?
+        };
+        self.popups.borrow_mut().active = tab_id;
+        super::window::raise(hwnd);
+        Ok(())
+    }
+
+    /// Close a host-owned OAuth popup. The main tab cannot be closed this way.
+    pub fn close_tab(&mut self, tab_id: u32) -> Result<(), String> {
+        if tab_id == MAIN_TAB_ID {
+            return Err("cannot close the main Agent WebView tab".into());
+        }
+        self.popups.borrow_mut().prune();
+        let popup = self
+            .popups
+            .borrow_mut()
+            .take(tab_id)
+            .ok_or_else(|| format!("unknown tab_id {tab_id}"))?;
+        if self.popups.borrow().active == tab_id {
+            self.popups.borrow_mut().active = MAIN_TAB_ID;
+        }
+        let _ = unsafe { popup.controller.Close() };
+        super::window::destroy(popup.hwnd);
+        Ok(())
+    }
+
+    /// HWND of the selected tab (main frame or OAuth popup).
+    pub fn selected_hwnd(&self) -> HWND {
+        let book = self.popups.borrow();
+        if book.active == MAIN_TAB_ID {
+            return self.hwnd;
+        }
+        book.popups
+            .iter()
+            .find(|p| p.tab_id == book.active)
+            .map(|p| p.hwnd)
+            .filter(|h| super::window::is_alive(*h))
+            .unwrap_or(self.hwnd)
     }
 
     /// List regular files in the session-scoped download broker directory.
@@ -691,30 +729,162 @@ impl AgentWebView {
         )
     }
 
-    /// Current Source + DocumentTitle.
+    /// Current Source + DocumentTitle of the main tab.
     pub fn location(&self) -> Result<NavigateResult, String> {
-        let mut uri = PWSTR::null();
-        unsafe {
-            self.webview
-                .Source(&mut uri)
-                .map_err(|e| format!("Source: {e}"))?;
-        }
-        let url = take_pwstr(uri);
-
-        let mut title = PWSTR::null();
-        unsafe {
-            self.webview
-                .DocumentTitle(&mut title)
-                .map_err(|e| format!("DocumentTitle: {e}"))?;
-        }
-        let title = take_pwstr(title);
-        Ok(NavigateResult { url, title })
+        webview_location(&self.webview)
     }
 
-    /// Close the controller (window teardown also closes it).
+    /// Close the controller and any OAuth popup HWNDs (window teardown also closes).
     pub fn close(&self) {
-        let _ = self.hwnd;
+        let mut book = self.popups.borrow_mut();
+        let popups = std::mem::take(&mut book.popups);
+        book.active = MAIN_TAB_ID;
+        drop(book);
+        for popup in popups {
+            super::window::destroy(popup.hwnd);
+        }
         let _ = unsafe { self.controller.Close() };
+    }
+}
+
+fn webview_location(webview: &ICoreWebView2) -> Result<NavigateResult, String> {
+    let mut uri = PWSTR::null();
+    unsafe {
+        webview
+            .Source(&mut uri)
+            .map_err(|e| format!("Source: {e}"))?;
+    }
+    let url = take_pwstr(uri);
+
+    let mut title = PWSTR::null();
+    unsafe {
+        webview
+            .DocumentTitle(&mut title)
+            .map_err(|e| format!("DocumentTitle: {e}"))?;
+    }
+    let title = take_pwstr(title);
+    Ok(NavigateResult { url, title })
+}
+
+fn snapshot_view(
+    webview: &ICoreWebView2,
+    ax_world: &mut Option<i64>,
+    verbose: bool,
+    include_text: bool,
+) -> Result<SnapshotResult, String> {
+    let loc = webview_location(webview)?;
+    let cap = snapshot_cap(verbose);
+    let js = format!("window.__turboAx.collect({cap})");
+    let (dom_nodes, overlay) = match eval_js_in_world(webview, ax_world, &js) {
+        Ok(value) => {
+            let overlay = value.get("overlay").and_then(Value::as_bool);
+            (
+                parse_collected_nodes(&value, cap).unwrap_or_default(),
+                overlay,
+            )
+        }
+        Err(_) => (Vec::new(), None),
+    };
+    let ax_fallback = if dom_nodes.is_empty() {
+        snapshot_cdp_fallback(webview, verbose)
+    } else {
+        Ok(Vec::new())
+    };
+    let (nodes, source) = super::ax::pick_snapshot_nodes(dom_nodes, ax_fallback, &loc.url)?;
+    let text = if include_text && source == SnapshotSource::Dom {
+        eval_js_in_world(webview, ax_world, "window.__turboAx.pageText()")
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    Ok(SnapshotResult {
+        url: loc.url,
+        title: loc.title,
+        source,
+        overlay,
+        text,
+        nodes,
+    })
+}
+
+fn snapshot_cdp_fallback(webview: &ICoreWebView2, verbose: bool) -> Result<Vec<AxNode>, String> {
+    let _ = call_cdp(webview, "Accessibility.enable", "{}");
+    let tree = call_cdp(webview, "Accessibility.getFullAXTree", "{}")?;
+    compact_ax_tree(&tree, verbose)
+}
+
+fn main_frame_id_of(webview: &ICoreWebView2) -> Result<String, String> {
+    let _ = call_cdp(webview, "Page.enable", "{}");
+    let tree = call_cdp(webview, "Page.getFrameTree", "{}")?;
+    let value: Value =
+        serde_json::from_str(&tree).map_err(|e| format!("Page.getFrameTree JSON: {e}"))?;
+    value
+        .pointer("/frameTree/frame/id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Page.getFrameTree has no main frame id".to_owned())
+}
+
+fn create_ax_world(webview: &ICoreWebView2) -> Result<i64, String> {
+    let frame_id = main_frame_id_of(webview)?;
+    let params = serde_json::json!({
+        "frameId": frame_id,
+        "worldName": AX_WORLD,
+        "grantUniveralAccess": false,
+    })
+    .to_string();
+    let json = call_cdp(webview, "Page.createIsolatedWorld", &params)?;
+    let value: Value =
+        serde_json::from_str(&json).map_err(|e| format!("Page.createIsolatedWorld JSON: {e}"))?;
+    let context = value
+        .get("executionContextId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Page.createIsolatedWorld returned no executionContextId".to_owned())?;
+    let install = serde_json::json!({
+        "expression": turbo_ax_js_injected().as_ref(),
+        "contextId": context,
+        "returnByValue": true,
+    })
+    .to_string();
+    let installed = call_cdp(webview, "Runtime.evaluate", &install)?;
+    parse_world_result(&installed)?;
+    Ok(context)
+}
+
+fn eval_js_in_context(webview: &ICoreWebView2, js: &str, context: i64) -> Result<Value, String> {
+    let params = serde_json::json!({
+        "expression": js,
+        "contextId": context,
+        "returnByValue": true,
+    })
+    .to_string();
+    let json = call_cdp(webview, "Runtime.evaluate", &params)?;
+    parse_world_result(&json)
+}
+
+fn eval_js_in_world(
+    webview: &ICoreWebView2,
+    ax_world: &mut Option<i64>,
+    js: &str,
+) -> Result<Value, String> {
+    let context = match *ax_world {
+        Some(id) => id,
+        None => {
+            let id = create_ax_world(webview)?;
+            *ax_world = Some(id);
+            id
+        }
+    };
+    match eval_js_in_context(webview, js, context) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            *ax_world = None;
+            let context = create_ax_world(webview)?;
+            *ax_world = Some(context);
+            eval_js_in_context(webview, js, context)
+        }
     }
 }
 
@@ -934,6 +1104,7 @@ fn register_popup_download_permission(
     session_folder: Option<PathBuf>,
     blocked: Rc<BlockLog>,
     active_downloads: Rc<RefCell<HashSet<PathBuf>>>,
+    popups: Rc<RefCell<PopupBook>>,
 ) -> Result<(), HostError> {
     // window.open / target=_blank. Unhandled, WebView2 spawns a runtime-owned
     // popup the agent cannot see, drive, or close — and browser.tabs would
@@ -943,6 +1114,7 @@ fn register_popup_download_permission(
     let popup_folder = session_folder.clone();
     let popup_downloads = Rc::clone(&active_downloads);
     let popup_session = session_id.to_owned();
+    let popup_book = Rc::clone(&popups);
     let popup = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
         let Some(args) = args else {
             return Ok(());
@@ -954,38 +1126,39 @@ fn register_popup_download_permission(
         } else {
             Some(take_pwstr(uri))
         };
-        // The policy check still applies: a popup is a navigation.
-        if let Err(err) = check_navigation_hop(url.as_deref(), popup_folder.as_deref()) {
-            let shown = url.as_deref().unwrap_or("<missing>");
-            let message = format!("blocked popup to {shown}: {err}");
-            eprintln!("turbo browser-host: {message}");
-            popup_blocked.set(message);
-            return Ok(());
-        }
-        let url = url.unwrap_or_default();
-        // GSI / OAuth popups postMessage back to the opener and then close.
-        // Navigating them into the only tab leaves a white gsi/select page
-        // with no opener. Own a real HWND + CoreWebView2 so later hops still
-        // hit NavigationStarting / DownloadStarting.
-        if is_oauth_popup_url(&url) {
-            if let Err(err) = open_host_owned_oauth_popup(
-                &environment,
-                &popup_session,
-                popup_folder.clone(),
-                Rc::clone(&popup_blocked),
-                Rc::clone(&popup_downloads),
-                &args,
-                &url,
-            ) {
-                let message = format!("oauth popup failed ({err}); cancelled: {url}");
+        // Policy first, then OAuth HWND vs same-tab. Later hops on a host-owned
+        // popup still run check_url_in_session via NavigationStarting.
+        match classify_new_window(url.as_deref(), popup_folder.as_deref()) {
+            NewWindowDisposition::Block { url, error } => {
+                let shown = url.as_deref().unwrap_or("<missing>");
+                let message = format!("blocked popup to {shown}: {error}");
                 eprintln!("turbo browser-host: {message}");
                 popup_blocked.set(message);
+                return Ok(());
             }
-            return Ok(());
+            NewWindowDisposition::OauthPopup { url, .. } => {
+                if let Err(err) = open_host_owned_oauth_popup(
+                    &environment,
+                    &popup_session,
+                    popup_folder.clone(),
+                    Rc::clone(&popup_blocked),
+                    Rc::clone(&popup_downloads),
+                    Rc::clone(&popup_book),
+                    &args,
+                    &url,
+                ) {
+                    let message = format!("oauth popup failed ({err}); cancelled: {url}");
+                    eprintln!("turbo browser-host: {message}");
+                    popup_blocked.set(message);
+                }
+                return Ok(());
+            }
+            NewWindowDisposition::SameTab { url } => {
+                let wide = CoTaskMemPWSTR::from(url.as_str());
+                let _ = unsafe { nav_target.Navigate(*wide.as_ref().as_pcwstr()) };
+                return Ok(());
+            }
         }
-        let wide = CoTaskMemPWSTR::from(url.as_str());
-        let _ = unsafe { nav_target.Navigate(*wide.as_ref().as_pcwstr()) };
-        Ok(())
     }));
     let mut token = 0i64;
     unsafe { webview.add_NewWindowRequested(&popup, &mut token) }
@@ -1141,6 +1314,7 @@ fn open_host_owned_oauth_popup(
     session_folder: Option<PathBuf>,
     blocked: Rc<BlockLog>,
     active_downloads: Rc<RefCell<HashSet<PathBuf>>>,
+    popups: Rc<RefCell<PopupBook>>,
     args: &ICoreWebView2NewWindowRequestedEventArgs,
     url: &str,
 ) -> Result<(), HostError> {
@@ -1184,13 +1358,26 @@ fn open_host_owned_oauth_popup(
             environment.clone(),
             session_id,
             session_folder,
-            blocked,
+            Rc::clone(&blocked),
             active_downloads,
+            Rc::clone(&popups),
         )?;
         unsafe { args.SetNewWindow(&webview) }
             .map_err(|e| HostError::Failed(format!("oauth SetNewWindow: {e}")))?;
-        attach_controller_ex(hwnd, controller, false);
+        attach_controller_ex(hwnd, controller.clone(), false);
+        let close_hwnd = hwnd;
+        let close_book = Rc::clone(&popups);
+        let closer = WindowCloseRequestedEventHandler::create(Box::new(move |_sender, _args| {
+            super::window::destroy(close_hwnd);
+            close_book.borrow_mut().prune();
+            Ok(())
+        }));
+        let mut close_token = 0i64;
+        unsafe { webview.add_WindowCloseRequested(&closer, &mut close_token) }
+            .map_err(|e| HostError::Failed(format!("oauth WindowCloseRequested: {e}")))?;
+        let tab_id = popups.borrow_mut().insert(hwnd, controller, webview);
         show(hwnd);
+        eprintln!("turbo browser-host: host-owned oauth popup tab {tab_id}: {url}");
         Ok(())
     })() {
         complete();
@@ -1198,7 +1385,6 @@ fn open_host_owned_oauth_popup(
         return Err(e);
     }
     complete();
-    eprintln!("turbo browser-host: host-owned oauth popup: {url}");
     Ok(())
 }
 
