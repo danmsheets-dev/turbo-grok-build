@@ -477,24 +477,30 @@ struct BwrapDenyPlan {
     deny_read: Vec<String>,
     has_globs: bool,
 }
-/// Existing grok-home credential files to `--ro-bind` (write-deny, still readable).
+/// Existing grok-home credential files to `--ro-bind` (write-deny, still
+/// readable). Missing basenames are returned separately so bwrap can bind a
+/// placeholder over the path — Landlock cannot deny create of a file that
+/// does not exist yet under a writable `$GROK_HOME`.
 #[cfg(target_os = "linux")]
 fn with_credential_write_binds(
     profile: &ProfileName,
     mut deny_write_optional: Vec<String>,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
     if *profile == ProfileName::Off {
-        return deny_write_optional;
+        return (deny_write_optional, Vec::new());
     }
+    let mut missing = Vec::new();
     for path in paths::grok_home_credential_write_deny_paths() {
+        let rendered = path.display().to_string();
         if path.exists() {
-            let rendered = path.display().to_string();
             if !deny_write_optional.iter().any(|p| p == &rendered) {
                 deny_write_optional.push(rendered);
             }
+        } else if !missing.iter().any(|p| p == &rendered) {
+            missing.push(rendered);
         }
     }
-    deny_write_optional
+    (deny_write_optional, missing)
 }
 
 #[cfg(all(feature = "enforce", target_os = "linux"))]
@@ -505,7 +511,8 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     } else {
         Vec::new()
     };
-    let deny_write_optional = with_credential_write_binds(profile, deny_write_optional);
+    let (deny_write_optional, missing_cred_read) =
+        with_credential_write_binds(profile, deny_write_optional);
     let resolved = if *profile == ProfileName::Off {
         None
     } else {
@@ -543,6 +550,11 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     }
     let (exact, globs) = deny::partition_deny_entries(&entries);
     let mut deny_read = deny::exact_deny_path_strings(workspace, &exact);
+    for path in missing_cred_read {
+        if !deny_read.iter().any(|p| p == &path) {
+            deny_read.push(path);
+        }
+    }
     let has_globs = !globs.is_empty();
     if has_globs {
         tracing::warn!(
@@ -576,7 +588,8 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     } else {
         Vec::new()
     };
-    let deny_write_optional = with_credential_write_binds(profile, deny_write_optional);
+    let (deny_write_optional, missing_cred_read) =
+        with_credential_write_binds(profile, deny_write_optional);
     let hook_plan = if requires_hook_write_deny(profile, workspace) {
         match hook_write_deny::prepare_hook_write_deny(profile) {
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
@@ -592,7 +605,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     Some(BwrapDenyPlan {
         deny_write_optional,
         hook_plan,
-        deny_read: Vec::new(),
+        deny_read: missing_cred_read,
         has_globs: false,
     })
 }

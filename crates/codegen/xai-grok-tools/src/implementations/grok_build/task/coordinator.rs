@@ -275,6 +275,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             SubagentEvent::ListRunning(request) => {
                 self.handle_list_running(request.parent_session_id, request.respond_to);
             }
+            SubagentEvent::ListKnownIds {
+                parent_session_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(self.known_ids_for_session(&parent_session_id));
+            }
             SubagentEvent::Completions(request) => {
                 let (owned, foreign): (Vec<_>, Vec<_>) =
                     std::mem::take(&mut self.pending_completions)

@@ -1041,6 +1041,11 @@ pub enum SubagentEvent {
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
+    /// Queryable ids (queued/pending/active/completed) for one parent session.
+    ListKnownIds {
+        parent_session_id: String,
+        respond_to: oneshot::Sender<Vec<String>>,
+    },
     Completions(SubagentCompletionsRequest),
     /// Cancel children of `parent_session_id` and drop its buffered completions.
     /// `respond_to`, if set, resolves when no children remain (caller should

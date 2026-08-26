@@ -672,8 +672,54 @@ fn grok_home() -> std::path::PathBuf {
 /// Uses [`repo_slug`] to derive a collision-resistant directory name from
 /// the last two meaningful path components.
 pub fn worktree_base_dir(git_root: &Path) -> std::path::PathBuf {
+    if let Ok(root) = std::env::var("GROK_WORKTREE_ROOT") {
+        let root = PathBuf::from(root.trim());
+        if !root.as_os_str().is_empty() {
+            return root.join(short_repo_hash(git_root));
+        }
+    }
+    #[cfg(windows)]
+    if let Some(base) = windows_same_volume_worktree_base(git_root) {
+        return base;
+    }
     let slug = repo_slug(git_root);
     grok_home().join("worktrees").join(slug)
+}
+
+/// Stable 8-hex fingerprint of a git root (path spelling normalized).
+fn short_repo_hash(git_root: &Path) -> String {
+    let s = git_root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:08x}", h as u32)
+}
+
+/// Same-volume short root so `git worktree add` can share objects and
+/// `cargo fmt` stays under MAX_PATH. `{drive}:\t\w\{8hex}`.
+#[cfg(windows)]
+fn windows_same_volume_worktree_base(git_root: &Path) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    let mut saw_disk = false;
+    for c in git_root.components() {
+        match c {
+            std::path::Component::Prefix(p) => match p.kind() {
+                std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_) => {
+                    prefix.push(c);
+                    saw_disk = true;
+                }
+                _ => return None,
+            },
+            std::path::Component::RootDir if saw_disk => prefix.push(c),
+            _ => break,
+        }
+    }
+    if !saw_disk || prefix.as_os_str().is_empty() {
+        return None;
+    }
+    Some(prefix.join("t").join("w").join(short_repo_hash(git_root)))
 }
 
 /// Resolves the worktree base directory (`~/.grok/worktrees/<repo_name>`)
@@ -696,10 +742,37 @@ pub fn worktree_base_dir_for_source(source_path: &Path) -> Result<std::path::Pat
         } else {
             Ok(worktrees_dir.join("repo"))
         }
+    } else if let Some(base) = short_worktree_base_if_under(source_path) {
+        Ok(base)
     } else {
         let git_root = find_main_repo_root_from_path(source_path)?;
         Ok(worktree_base_dir(&git_root))
     }
+}
+
+/// Detect `{drive}:\t\w\{hash}\...` or `$GROK_WORKTREE_ROOT\{hash}\...`.
+fn short_worktree_base_if_under(source_path: &Path) -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("GROK_WORKTREE_ROOT") {
+        let root = PathBuf::from(root.trim());
+        if !root.as_os_str().is_empty()
+            && let Ok(suffix) = source_path.strip_prefix(&root)
+            && let Some(hash) = suffix.components().next()
+        {
+            return Some(root.join(hash));
+        }
+    }
+    let comps: Vec<_> = source_path.components().collect();
+    // Prefix + RootDir + t + w + hash  (Windows) or / t / w / hash (Unix override)
+    for i in 0..comps.len().saturating_sub(2) {
+        let a = comps[i].as_os_str();
+        let b = comps.get(i + 1).map(|c| c.as_os_str());
+        if a == "t" && b == Some(std::ffi::OsStr::new("w")) {
+            if comps.get(i + 2).is_some() {
+                return Some(comps[..i + 3].iter().collect());
+            }
+        }
+    }
+    None
 }
 
 fn resolve_worktree_path(req: &CreateWorktreeRequest, git_root: &Path) -> String {
@@ -3469,4 +3542,17 @@ mod label_path_guard_tests {
         assert_eq!(repo_slug(Path::new("/aux")), "repo");
         assert_eq!(repo_slug(Path::new("/home/user/project")), "user-project");
     }
+
+    #[test]
+    fn short_repo_hash_is_stable_and_path_spelling_insensitive() {
+        assert_eq!(
+            short_repo_hash(Path::new(r"H:\Apps\grok build\turbo-grok-build")),
+            short_repo_hash(Path::new(r"h:/Apps/grok build/turbo-grok-build"))
+        );
+        assert_ne!(
+            short_repo_hash(Path::new(r"H:\Apps\a")),
+            short_repo_hash(Path::new(r"H:\Apps\b"))
+        );
+    }
+
 }

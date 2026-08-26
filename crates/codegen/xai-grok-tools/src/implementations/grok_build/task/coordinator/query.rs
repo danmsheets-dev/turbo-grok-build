@@ -30,6 +30,66 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         });
     }
 
+    fn resolve_query_id(&self, id: &str) -> String {
+        if self.completed.contains_key(id)
+            || self.active.contains_key(id)
+            || self.pending.contains_key(id)
+            || self.queued.iter().any(|q| q.request.id == id)
+        {
+            return id.to_string();
+        }
+        if let Some((canonical, _)) = self
+            .active
+            .iter()
+            .find(|(_, child)| child.child_session_id == id)
+        {
+            return canonical.clone();
+        }
+        if let Some((canonical, _)) = self
+            .completed
+            .iter()
+            .find(|(_, child)| child.child_session_id == id)
+        {
+            return canonical.clone();
+        }
+        id.to_string()
+    }
+
+    pub(super) fn known_ids_for_session(&self, parent_session_id: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        for queued in self.queued.iter() {
+            if queued.request.parent_session_id == parent_session_id
+                && !queued.request.owner.is_workflow()
+            {
+                ids.push(queued.request.id.clone());
+            }
+        }
+        for child in self.pending.values() {
+            if child.request.parent_session_id == parent_session_id
+                && !child.request.owner.is_workflow()
+            {
+                ids.push(child.request.id.clone());
+            }
+        }
+        for child in self.active.values() {
+            if child.request.parent_session_id == parent_session_id
+                && !child.request.owner.is_workflow()
+            {
+                ids.push(child.request.id.clone());
+            }
+        }
+        for child in self.completed.values() {
+            if child.request.parent_session_id == parent_session_id
+                && !child.request.owner.is_workflow()
+            {
+                ids.push(child.request.id.clone());
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     pub(super) fn handle_query(
         &mut self,
         id: String,
@@ -38,6 +98,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         timeout_ms: Option<u64>,
         respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
     ) {
+        let id = self.resolve_query_id(&id);
         if let Some(child) = self
             .completed
             .get(&id)

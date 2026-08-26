@@ -71,6 +71,11 @@ pub trait SubagentBackend: Send + Sync + 'static {
         timeout_ms: Option<u64>,
     ) -> Option<SubagentSnapshot>;
 
+    /// Subagent ids this parent session can query (running + recently completed).
+    async fn list_known_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Request cancellation of a subagent by ID.
     async fn cancel(&self, id: &str) -> SubagentCancelOutcome;
 
@@ -457,6 +462,24 @@ impl SubagentBackend for ChannelBackend {
             return None;
         }
         response_rx.await.ok().flatten()
+    }
+
+    async fn list_known_ids(&self) -> Vec<String> {
+        let (respond_to, response_rx) = oneshot::channel();
+        let Some(parent_session_id) = self.parent_session_id() else {
+            return Vec::new();
+        };
+        if self
+            .tx
+            .send(SubagentEvent::ListKnownIds {
+                parent_session_id,
+                respond_to,
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        response_rx.await.unwrap_or_default()
     }
 
     async fn cancel(&self, id: &str) -> SubagentCancelOutcome {

@@ -125,6 +125,15 @@ advisory flow, not xAI HackerOne.
 - HTTP 404 HTML is a loaded page, not `browser_navigate` failure.
 - Host injects env-resolved `PolicyParams` at session start.
 - Worktree disk gate prunes every non-live tree before refusing spawn.
+- `get_command_or_subagent_output` lists known subagent ids and resolves
+  `child_session_id` aliases so spawned reviews are addressable.
+- Windows worktrees prefer `{drive}:\t\w\{hash}` (same volume as the source
+  git repo) so `git worktree add` shares objects and `cargo fmt` stays
+  under MAX_PATH. Override with `GROK_WORKTREE_ROOT`.
+- Poolside Laguna children compact at 40% context (not 85%) so long blender
+  briefs do not die on `max_tokens_truncation`.
+- Linux bwrap binds a placeholder over missing `$GROK_HOME` credential
+  files so `auth.json` cannot be created under the writable home grant.
 
 
 ---

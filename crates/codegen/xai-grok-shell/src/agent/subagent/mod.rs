@@ -351,7 +351,7 @@ impl SubagentSpawnContext {
         let gb_per_model =
             crate::agent::config::find_model_by_id(&self.available_models, subagent_model_id)
                 .and_then(|e| e.info.auto_compact_threshold_percent);
-        crate::util::config::resolve_auto_compact_threshold_percent_from_tiers(
+        let mut pct = crate::util::config::resolve_auto_compact_threshold_percent_from_tiers(
             self.auto_compact_threshold_tiers
                 .user_per_model
                 .get(subagent_model_id)
@@ -359,7 +359,15 @@ impl SubagentSpawnContext {
             self.auto_compact_threshold_tiers.user_session,
             gb_per_model,
             self.auto_compact_threshold_tiers.remote_global,
-        )
+        );
+        let lower = subagent_model_id.to_ascii_lowercase();
+        if lower.contains("laguna")
+            || lower.contains("/poolside/")
+            || lower.starts_with("poolside/")
+        {
+            pct = pct.min(40);
+        }
+        pct
     }
     /// Bind a spawned subagent by the parent session's `--tools`/
     /// `--disallowed-tools`/`--permission-mode` restrictions.

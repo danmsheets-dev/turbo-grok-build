@@ -253,7 +253,7 @@ impl TaskOutputTool {
         } else {
             timeout_ms
         };
-        if let Some(backend) = backend
+        if let Some(ref backend) = backend
             && let Some(snapshot) = backend
                 .backend()
                 .query(task_id, waits, query_timeout_ms)
@@ -267,13 +267,22 @@ impl TaskOutputTool {
             let msg = if is_legacy {
                 render_legacy_task_output_not_found(task_id)
             } else {
-                let known = terminal.list_tasks().await;
-                if known.is_empty() {
+                let mut ids: Vec<String> = terminal
+                    .list_tasks()
+                    .await
+                    .into_iter()
+                    .map(|t| t.task_id)
+                    .collect();
+                if let Some(backend) = backend {
+                    ids.extend(backend.backend().list_known_ids().await);
+                }
+                ids.sort();
+                ids.dedup();
+                if ids.is_empty() {
                     format!(
                         "Task {task_id} not found. No background tasks or subagents exist in this session.",
                     )
                 } else {
-                    let ids: Vec<&str> = known.iter().map(|t| t.task_id.as_str()).collect();
                     format!(
                         "Task {task_id} not found. Known task IDs: [{}]",
                         ids.join(", ")
