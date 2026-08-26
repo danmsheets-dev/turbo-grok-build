@@ -15,9 +15,12 @@
 //! - `EventStreamError` / `StreamError` (mid-stream failures)
 //! - `EmptyResponse` (model returned no content/tool calls)
 //!
-//! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
-//! - 429 (rate limited) — waits the full `Retry-After`, so the attempt
-//!   count is what bounds the total wait
+//! **Retried with a dedicated cap** ([`RATE_LIMIT_RETRY_THRESHOLD`]):
+//! - 429 (rate limited) — honors `Retry-After` when present, clamped to
+//!   [`MAX_RETRY_BACKOFF`] and jittered so concurrent children (NVIDIA
+//!   Integrate has no `Retry-After`) do not re-stampede. Without the
+//!   header, exponential backoff applies. The attempt cap is what
+//!   bounds the total wait.
 //!
 //! **Special handling**:
 //! - stale model-bound reasoning/signatures/native tool state → strip it and retry once
@@ -45,9 +48,12 @@ use std::time::Duration;
 use xai_grok_sampling_types::{SamplingError, is_retryable_api_status};
 
 /// After this many rate-limit (429) retries, escalate to the caller
-/// instead of waiting again. Rate-limit waits can be long and there is
-/// no point burning a long backoff just to be rate-limited again.
-pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
+/// instead of waiting again. Must be high enough that a concurrent
+/// NVIDIA Integrate burst (no `Retry-After`, children 429 together)
+/// can back off instead of failing the child on the first retry.
+/// Each wait is clamped to [`MAX_RETRY_BACKOFF`], so this is not an
+/// unbounded stall.
+pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 6;
 
 /// Default retry budget when no env or model override is set: at most 14
 /// retries (the attempt reaching this count is fatal). With the 30s cap:
@@ -55,13 +61,12 @@ pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 /// ≈ 5.5 min total.
 pub const DEFAULT_MAX_RETRIES: u32 = 15;
 
-/// Longest single wait on the generic retry path — the exponential-backoff
-/// ceiling, and the clamp for a server `Retry-After`. Cloudflare answers 52x
-/// with `Retry-After: 60`–`120`; honoring that verbatim across 14 retries
-/// would stall a turn ~28 min instead of the ~5.5 min budget above. The 429
-/// path deliberately waits the full `Retry-After` instead, bounded by
-/// [`RATE_LIMIT_RETRY_THRESHOLD`] attempts (and by the parse-level 120s cap
-/// on the header).
+/// Longest single wait on both the generic and 429 retry paths — the
+/// exponential-backoff ceiling, and the clamp for a server `Retry-After`.
+/// Cloudflare answers 52x with `Retry-After: 60`–`120`; NVIDIA Integrate
+/// often omits the header entirely. Honoring a 120s header verbatim across
+/// the 429 attempt cap would stall a child several minutes; clamp and
+/// jitter instead so concurrent catalog Q&A can recover.
 pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Resolve max API retries from an optional env override, model config,
@@ -234,7 +239,10 @@ pub fn classify_error(
     }
 
     // Rate-limited (429): cap retries at the rate-limit threshold to
-    // avoid burning long waits.
+    // avoid burning long waits. Honor `Retry-After` when present, but
+    // clamp + jitter like the 5xx path — NVIDIA Integrate typically
+    // omits the header, and an unclamped 120s wait failed concurrent
+    // catalog children after a single retry (~3s).
     if err.is_rate_limited() {
         let next_attempt = retry_count + 1;
         // `next_attempt >= 1` also catches an effective cap of 0.
@@ -243,7 +251,7 @@ pub fn classify_error(
         }
         let backoff = err
             .retry_after()
-            .map(Duration::from_secs)
+            .map(|secs| jittered(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)))
             .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
         return RetryDecision::RetryWithBackoff {
             backoff,
@@ -643,7 +651,9 @@ mod tests {
                 is_rate_limited,
             } => {
                 assert!(is_rate_limited);
-                assert_eq!(backoff, Duration::from_secs(7));
+                // 7s clamped (already under 30s) with +/-20% jitter.
+                assert!(backoff >= Duration::from_millis(5600), "got {backoff:?}");
+                assert!(backoff <= Duration::from_millis(8400), "got {backoff:?}");
             }
             other => panic!("expected RetryWithBackoff, got {other:?}"),
         }
@@ -652,13 +662,43 @@ mod tests {
     #[test]
     fn classify_rate_limited_capped_at_threshold() {
         let err = api_err(StatusCode::TOO_MANY_REQUESTS, "slow");
-        // retry_count=1, threshold=2 -> next_attempt=2 >= 2 -> Fatal.
-        match classify_error(&err, 1, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+        // next_attempt == threshold → Fatal, whatever max_retries is.
+        let at_cap = RATE_LIMIT_RETRY_THRESHOLD.saturating_sub(1);
+        match classify_error(&err, at_cap, 15, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
                 assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
             }
             other => panic!("expected Fatal at threshold, got {other:?}"),
         }
+    }
+
+    /// NVIDIA Integrate (and other OpenAI-compat gateways) 429 on concurrent
+    /// catalog children. The first 429 must RetryWithBackoff, not Fatal, so
+    /// a subsequent 200 is accepted instead of failing the child in ~3s.
+    #[test]
+    fn retries_fake_429_then_200() {
+        let rate_limited = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 0);
+        let mut retry_count = 0u32;
+        match classify_error(&rate_limited, retry_count, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                is_rate_limited,
+                backoff,
+            } => {
+                assert!(is_rate_limited);
+                // Retry-After: 0 (NVIDIA often omits the header entirely;
+                // a present zero must not invent a long wait).
+                assert_eq!(backoff, Duration::ZERO);
+                retry_count += 1;
+            }
+            other => panic!("first 429 must retry, got {other:?}"),
+        }
+        // Second attempt is HTTP 200 — nothing to classify. The loop
+        // would return Completed. Assert we spent exactly one retry.
+        assert_eq!(retry_count, 1);
+        assert!(
+            retry_count < RATE_LIMIT_RETRY_THRESHOLD,
+            "one 429 must stay under the rate-limit cap"
+        );
     }
 
     #[test]
@@ -738,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_clamps_and_jitters_retry_after_on_generic_path_but_not_on_429() {
+    fn classify_clamps_and_jitters_retry_after_on_generic_and_429_paths() {
         // Cloudflare answers 52x with Retry-After: 60-120. Honoring that
         // verbatim across 14 retries would stall the turn ~28 min, and an
         // unjittered wait would re-hit the recovering origin in lockstep.
@@ -752,12 +792,14 @@ mod tests {
             other => panic!("expected Retry for 522, got {other:?}"),
         }
 
-        // The 429 path keeps the full wait; its total is bounded by
-        // RATE_LIMIT_RETRY_THRESHOLD attempts and the parse-level 120s cap.
+        // 429 uses the same clamp+jitter so concurrent NVIDIA children
+        // (and Cloudflare 429 pages with Retry-After: 60-120) cannot
+        // stall a turn for minutes or retry in lockstep.
         let rate_limited = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 120);
         match classify_error(&rate_limited, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithBackoff { backoff, .. } => {
-                assert_eq!(backoff, Duration::from_secs(120));
+                assert!(backoff >= Duration::from_secs(24), "got {backoff:?}");
+                assert!(backoff <= Duration::from_secs(36), "got {backoff:?}");
             }
             other => panic!("expected RetryWithBackoff for 429, got {other:?}"),
         }

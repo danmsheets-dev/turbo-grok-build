@@ -465,6 +465,99 @@ async fn retries_on_500_then_accepts_chunk_without_response_id() {
 }
 
 // ---------------------------------------------------------------------------
+// NVIDIA / OpenAI-compat 429 then 200
+// ---------------------------------------------------------------------------
+
+/// Concurrent NVIDIA Integrate catalog Q&A 429s children. A single 429
+/// with `Retry-After: 0` (NVIDIA often omits the header) must retry and
+/// accept the subsequent 200 instead of failing the child immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retries_nvidia_429_then_200() {
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    // NVIDIA Integrate: HTTP 429 + RFC7807-ish body, Retry-After
+                    // often absent; 0 keeps this test from waiting ~2s.
+                    let mut headers = HeaderMap::new();
+                    headers.insert("retry-after", "0".parse().unwrap());
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        headers,
+                        json!({ "status": 429, "title": "Too Many Requests" }).to_string(),
+                    )
+                        .into_response();
+                }
+                let events = vec![Event::default().data(
+                    json!({
+                        "object": "chat.completion.chunk",
+                        "created": 0,
+                        "model": "minimaxai/minimax-m3",
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "role": "assistant", "content": "ok" },
+                            "finish_reason": "stop"
+                        }]
+                    })
+                    .to_string(),
+                )];
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+                .into_response()
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "minimaxai/minimax-m3");
+    cfg.max_retries = Some(5);
+    let handle = SamplerActor::spawn(
+        cfg,
+        RetryPolicy {
+            // Stale spawn used to hardcode 2; the actor must floor this.
+            rate_limit_retry_threshold: 2,
+            ..RetryPolicy::default()
+        },
+        event_tx,
+    );
+
+    let rid = RequestId::from("req-nvidia-429");
+    handle.submit(rid.clone(), user_request("hi"));
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
+    server.shutdown();
+
+    let saw_retrying = events
+        .iter()
+        .any(|e| matches!(e, SamplingEvent::Retrying { .. }));
+    assert!(saw_retrying, "expected Retrying after NVIDIA 429");
+
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            if let Some(a) = response.assistant() {
+                assert_eq!(a.content.as_ref(), "ok");
+            }
+        }
+        other => panic!("expected Completed after 429→200, got {other:?}"),
+    }
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "one 429 then one 200"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Rate limit exhausts threshold
 // ---------------------------------------------------------------------------
 
@@ -512,10 +605,11 @@ async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
     }
 
     let hits = counter.load(Ordering::SeqCst);
-    // RATE_LIMIT_RETRY_THRESHOLD = 2, so the actor stops after two
+    // test_config.max_retries = 2, so the actor stops after two
     // attempts (the first attempt + one retry that also 429s = 2
-    // hits). Allow a small slack in case scheduling fires a third
-    // attempt before the threshold check.
+    // hits) even though RATE_LIMIT_RETRY_THRESHOLD is higher. Allow a
+    // small slack in case scheduling fires a third attempt before the
+    // threshold check.
     assert!((1..=3).contains(&hits), "expected 1-3 hits, got {hits}");
 }
 

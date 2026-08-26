@@ -275,7 +275,9 @@ pub struct RetryPolicy {
     /// Maximum number of retries before giving up.
     pub max_retries: u32,
     /// After this many rate-limit (429) retries, escalate to the caller.
-    /// Lower than `max_retries` because rate-limit waits can be long.
+    /// The request task floors this at
+    /// [`crate::retry::RATE_LIMIT_RETRY_THRESHOLD`] so a stale hardcoded `2`
+    /// (session spawn) cannot fail NVIDIA 429s immediately.
     pub rate_limit_retry_threshold: u32,
     #[serde(default)]
     pub retry_only_before_output: bool,

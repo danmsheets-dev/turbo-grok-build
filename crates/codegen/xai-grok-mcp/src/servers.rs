@@ -1648,7 +1648,7 @@ impl xai_tool_runtime::Tool for McpErasedTool {
 
         let is_error = call_result.is_error.unwrap_or(false);
         let mut output = if is_error {
-            let error_msg = call_result
+            let mut error_msg = call_result
                 .content
                 .iter()
                 .filter_map(|c| match c {
@@ -1657,6 +1657,11 @@ impl xai_tool_runtime::Tool for McpErasedTool {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            if crate::health::is_blender_mcp_server(server)
+                && !crate::health::blender_addon_listening()
+            {
+                error_msg = crate::health::with_blender_offline_hint(&error_msg);
+            }
             ToolOutput::MCP(MCPOutput::errored(tool.clone(), server.clone(), error_msg))
         } else {
             let expose_base64 = client.expose_image_base64();
@@ -2817,6 +2822,36 @@ pub struct McpClient {
     /// internal `Arc` clone of this mutex (the same memory) so it
     /// can clear the slot before `break`.
     liveness_handle: Arc<parking_lot::Mutex<Option<crate::liveness::TransportLivenessHandle>>>,
+    /// Stdio child stderr captured during spawn + handshake. `None` for
+    /// HTTP/ACP. Handshake failures log and append a truncated sample so
+    /// Windows 232 / docker deaths are diagnosable.
+    stdio_stderr: Option<StderrBuffer>,
+}
+
+/// Bounded stderr tap for a stdio MCP child. Shared with the drain task so
+/// `try_handshake` can include the sample after initialize fails.
+#[derive(Clone, Default)]
+struct StderrBuffer {
+    inner: Arc<parking_lot::Mutex<String>>,
+}
+
+impl StderrBuffer {
+    fn snapshot(&self) -> String {
+        self.inner.lock().clone()
+    }
+
+    fn push(&self, chunk: &str) {
+        const CAP: usize = 8192;
+        let mut g = self.inner.lock();
+        g.push_str(chunk);
+        if g.len() > CAP {
+            let mut start = g.len() - CAP;
+            while start < g.len() && !g.is_char_boundary(start) {
+                start += 1;
+            }
+            g.replace_range(0..start, "");
+        }
+    }
 }
 
 /// Shared sender slot type — the same Arc lives on the [`McpClient`]
@@ -2938,7 +2973,12 @@ impl McpClient {
             reconnect,
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             liveness_handle: Arc::new(parking_lot::Mutex::new(None)),
+            stdio_stderr: None,
         }
+    }
+
+    fn attach_stdio_stderr(&mut self, buf: StderrBuffer) {
+        self.stdio_stderr = Some(buf);
     }
 
     pub fn new_http_auth(
@@ -3623,6 +3663,27 @@ impl McpClient {
         outcome
     }
 
+    fn stdio_handshake_error(&self, msg: String) -> McpError {
+        let stderr = self
+            .stdio_stderr
+            .as_ref()
+            .map(|b| b.snapshot())
+            .unwrap_or_default();
+        if !stderr.trim().is_empty() {
+            let sample: String = stderr.chars().take(2000).collect();
+            tracing::warn!(
+                server = %self.server_name,
+                stderr = %sample,
+                "MCP handshake failed; stdio child stderr"
+            );
+        }
+        McpError::ClientError(crate::health::format_stdio_handshake_failure(
+            &self.server_name,
+            &msg,
+            &stderr,
+        ))
+    }
+
     /// Run the MCP handshake (no lock held).
     async fn try_handshake(
         &self,
@@ -3634,29 +3695,16 @@ impl McpClient {
         match pending {
             PendingTransport::Stdio(process) => {
                 let handler = self.make_client_handler();
-                tokio::time::timeout(timeout, handler.serve(*process))
+                // Keep the child stdin/stdout handles inside `process` until
+                // `serve` finishes initialize. Stderr is already being drained
+                // into `stdio_stderr` so the pipe cannot fill and kill docker.
+                let result = tokio::time::timeout(timeout, handler.serve(*process))
                     .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| {
-                        let msg = e.to_string();
-                        if msg.contains("pipe is being closed")
-                            || msg.contains("os error 232")
-                            || msg.contains("EPIPE")
-                            || msg.contains("broken pipe")
-                        {
-                            McpError::ClientError(format!(
-                                "MCP server '{name}' handshake failed: {msg}. \
-                                 The stdio child exited before initialize (common with \
-                                 `docker run --rm -i` on Windows). Pin a local `uvx`/`python` \
-                                 command, or `turbo mcp restart {name}` after `docker pull`."
-                            ))
-                        } else {
-                            McpError::HandshakeFailed {
-                                server: name.to_string(),
-                                source: Box::new(e),
-                            }
-                        }
-                    })
+                    .map_err(|_| McpError::timeout(name, timeout))?;
+                match result {
+                    Ok(svc) => Ok(svc),
+                    Err(e) => Err(self.stdio_handshake_error(e.to_string())),
+                }
             }
             PendingTransport::Http(config) => {
                 let transport =
@@ -3937,11 +3985,20 @@ impl McpClient {
     /// continues to report `true`. That is the desired semantics — a
     /// liveness probe would belong in a separate watcher, not here.
     pub async fn is_healthy(&self) -> bool {
-        let guard = self.state.lock().await;
-        match &*guard {
-            ClientState::Ready(service) => !service.is_transport_closed(),
-            _ => false,
-        }
+        let transport_open = {
+            let guard = self.state.lock().await;
+            match &*guard {
+                ClientState::Ready(service) => !service.is_transport_closed(),
+                _ => false,
+            }
+        };
+        let blender_ok =
+            if transport_open && crate::health::is_blender_mcp_server(&self.server_name) {
+                crate::health::blender_addon_listening()
+            } else {
+                true
+            };
+        crate::health::client_health_ready(&self.server_name, transport_open, blender_ok)
     }
 
     /// Atomic classification for the liveness watcher.
@@ -4208,7 +4265,29 @@ impl McpClient {
             }
         }
 
+        self.sync_blender_addon_health(&mcp_state).await;
         Ok(registrations)
+    }
+
+    /// Blender MCP stdio can list tools while the addon is down. Record that
+    /// as a per-server init failure so `mcp_server_health` / search_tool show
+    /// `partial`/`failed` without marking sibling servers failed.
+    async fn sync_blender_addon_health(&self, mcp_state: &Arc<Mutex<McpState>>) {
+        if !crate::health::is_blender_mcp_server(&self.server_name) {
+            return;
+        }
+        let mut state = mcp_state.lock().await;
+        if crate::health::blender_addon_listening() {
+            state.clear_init_failed(&self.server_name);
+        } else {
+            state.record_init_failure(
+                &self.server_name,
+                false,
+                Some(crate::health::blender_offline_reason_for_port(
+                    crate::health::blender_addon_port(),
+                )),
+            );
+        }
     }
 
     /// Call a tool directly on the MCP server (for testing/debugging).
@@ -4252,8 +4331,14 @@ fn sanitize_mcp_log_filename(name: &str) -> String {
 }
 
 /// Copy an MCP server's stderr to `~/.grok/logs/mcp/<server>.stderr.log`
-/// in a background task. Truncated per spawn.
-fn drain_mcp_stderr_to_log(server_name: &str, mut stderr: tokio::process::ChildStderr) {
+/// and a shared [`StderrBuffer`] so handshake errors can include the sample.
+/// Started immediately after spawn so the pipe stays drained through
+/// initialize (a blocked stderr pipe is a common docker/Windows 232 cause).
+fn drain_mcp_stderr_to_log_and_buffer(
+    server_name: &str,
+    mut stderr: tokio::process::ChildStderr,
+    tap: StderrBuffer,
+) {
     let log_dir = xai_grok_config::grok_home().join("logs").join("mcp");
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         tracing::warn!("MCP stderr drain: failed to create log dir: {e}");
@@ -4282,8 +4367,23 @@ fn drain_mcp_stderr_to_log(server_name: &str, mut stderr: tokio::process::ChildS
     let mut file = tokio::fs::File::from_std(file);
     let server_name = server_name.to_string();
     tokio::spawn(async move {
-        if let Err(e) = tokio::io::copy(&mut stderr, &mut file).await {
-            tracing::warn!("MCP stderr drain '{server_name}': {e}");
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut chunk = vec![0u8; 4096];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    tap.push(&String::from_utf8_lossy(&chunk[..n]));
+                    if let Err(e) = file.write_all(&chunk[..n]).await {
+                        tracing::warn!("MCP stderr drain '{server_name}': {e}");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("MCP stderr drain '{server_name}': {e}");
+                    break;
+                }
+            }
         }
     });
 }
@@ -4488,6 +4588,12 @@ pub async fn start_mcp_server(
             };
 
             let (mut transport, stderr_handle) = spawn_once(ctx.scope)?;
+            let mut stderr_buf = StderrBuffer::default();
+            // Drain immediately so stderr cannot fill the pipe during the
+            // docker settle wait or initialize write (keeps stdio alive).
+            if let Some(stderr) = stderr_handle {
+                drain_mcp_stderr_to_log_and_buffer(&name, stderr, stderr_buf.clone());
+            }
 
             // Docker + Windows named pipes: the container often exits before
             // attach, so the first initialize hits OS error 232. Wait briefly
@@ -4495,36 +4601,45 @@ pub async fn start_mcp_server(
             let is_docker =
                 command_str.eq_ignore_ascii_case("docker") || spawn_args_look_like_docker(&args);
             if is_docker {
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+                while std::time::Instant::now() < deadline {
+                    if transport.child_already_exited() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
             }
             if transport.child_already_exited() {
+                let first_stderr = stderr_buf.snapshot();
                 tracing::warn!(
                     server = %name,
+                    stderr = %first_stderr.chars().take(2000).collect::<String>(),
                     "MCP stdio child exited before handshake; respawning once"
                 );
                 drop(transport);
                 let (retry, stderr2) = spawn_once(ctx.scope)?;
                 transport = retry;
-                if is_docker {
-                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                }
+                stderr_buf = StderrBuffer::default();
                 if let Some(stderr) = stderr2 {
-                    drain_mcp_stderr_to_log(&name, stderr);
+                    drain_mcp_stderr_to_log_and_buffer(&name, stderr, stderr_buf.clone());
+                }
+                if is_docker {
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(1500);
+                    while std::time::Instant::now() < deadline {
+                        if transport.child_already_exited() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
                 }
             }
 
             tracing::debug!("MCP server '{}' spawned: PID={:?}", name, transport.id());
 
-            if let Some(stderr) = stderr_handle {
-                drain_mcp_stderr_to_log(&name, stderr);
-            }
-
-            Ok(McpClient::new_stdio(
-                name.clone(),
-                transport,
-                overrides,
-                meta_config,
-            ))
+            let mut client = McpClient::new_stdio(name.clone(), transport, overrides, meta_config);
+            client.attach_stdio_stderr(stderr_buf);
+            Ok(client)
         }
         acp::McpServer::Http(acp::McpServerHttp {
             name, url, headers, ..
@@ -5357,6 +5472,110 @@ mod tests {
         assert!(!state.init_failed.contains_key("dead-srv"));
         // Idempotent: clearing an absent entry is a no-op.
         state.clear_init_failed("never-seen");
+    }
+
+    /// One stdio handshake failure (e.g. godot-docs-mcp Windows 232) must
+    /// record only that server as failed. The catalog still finishes init
+    /// so sibling servers stay usable (fail-soft; do not poison the index).
+    #[test]
+    fn stdio_handshake_failure_does_not_poison_mcp_index() {
+        let mut state = McpState::new(vec![
+            make_stdio_server("godot-docs-mcp", "/bin/godot-docs-mcp"),
+            make_stdio_server("tasks", "/bin/tasks"),
+        ]);
+        assert!(state.try_start_init());
+        state.mark_servers_initializing(["godot-docs-mcp".to_string(), "tasks".to_string()]);
+        state.finish_init();
+        state.record_init_failure(
+            "godot-docs-mcp",
+            false,
+            Some(
+                crate::health::format_stdio_handshake_failure(
+                    "godot-docs-mcp",
+                    "The pipe is being closed. (os error 232)",
+                    "docker: pipe closed\n",
+                )
+                .chars()
+                .take(200)
+                .collect(),
+            ),
+        );
+        state.mark_server_ready("godot-docs-mcp");
+        state.mark_server_ready("tasks");
+        assert!(
+            state.is_initialized(),
+            "catalog must finish init after a per-server handshake failure"
+        );
+        assert!(state.init_failed.contains_key("godot-docs-mcp"));
+        assert!(
+            !state.init_failed.contains_key("tasks"),
+            "sibling servers must not inherit the failed handshake"
+        );
+        let detail = state
+            .init_failed
+            .get("godot-docs-mcp")
+            .expect("godot failed");
+        assert!(detail.contains("os error 232"));
+        assert!(detail.contains("godot-docs-mcp"));
+    }
+
+    /// Blender addon-down is a per-server overlay: catalog still initializes
+    /// and sibling servers are not marked failed.
+    #[test]
+    fn blender_addon_offline_does_not_poison_mcp_index() {
+        let mut state = McpState::new(vec![
+            make_stdio_server("blender", "/bin/blender-mcp"),
+            make_stdio_server("tasks", "/bin/tasks"),
+        ]);
+        assert!(state.try_start_init());
+        state.mark_servers_initializing(["blender".to_string(), "tasks".to_string()]);
+        state.finish_init();
+        state.record_init_failure(
+            "blender",
+            false,
+            Some(crate::health::blender_offline_reason_for_port(9876)),
+        );
+        state.mark_server_ready("blender");
+        state.mark_server_ready("tasks");
+        assert!(state.is_initialized());
+        assert_eq!(
+            state.init_failed.get("blender").map(String::as_str),
+            Some(crate::health::BLENDER_OFFLINE_REASON)
+        );
+        assert!(!state.init_failed.contains_key("tasks"));
+    }
+
+    #[tokio::test]
+    async fn blender_sync_health_live_probe_does_not_poison_siblings() {
+        let mut state = McpState::new(vec![
+            make_stdio_server("blender", "/bin/blender-mcp"),
+            make_stdio_server("tasks", "/bin/tasks"),
+        ]);
+        assert!(state.try_start_init());
+        state.mark_servers_initializing(["blender".to_string(), "tasks".to_string()]);
+        state.finish_init();
+        state.mark_server_ready("blender");
+        state.mark_server_ready("tasks");
+        let client = McpClient::stub("blender");
+        let mcp_state = Arc::new(Mutex::new(state));
+        client.sync_blender_addon_health(&mcp_state).await;
+        let st = mcp_state.lock().await;
+        if crate::health::blender_addon_listening() {
+            assert!(!st.init_failed.contains_key("blender"));
+        } else {
+            assert!(
+                st.init_failed
+                    .get("blender")
+                    .is_some_and(|d| d.contains("localhost")),
+                "closed addon port must mark blender failed, got {:?}",
+                st.init_failed.get("blender")
+            );
+        }
+        assert!(
+            !st.init_failed.contains_key("tasks"),
+            "blender probe must not fail sibling servers"
+        );
+        assert!(st.is_initialized());
     }
 
     #[test]

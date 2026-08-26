@@ -330,11 +330,12 @@ async fn apply_retry_decision(
     cancel_token: &CancellationToken,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
 ) -> bool {
-    let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
-        retry_mod::RATE_LIMIT_RETRY_THRESHOLD
-    } else {
-        retry_policy.rate_limit_retry_threshold
-    };
+    // Floor at the crate default so a stale caller (session spawn used to
+    // hardcode `2`) cannot fail a child on the first NVIDIA 429. `0` still
+    // means "use default"; a higher explicit cap is honored.
+    let rate_limit_threshold = retry_policy
+        .rate_limit_retry_threshold
+        .max(retry_mod::RATE_LIMIT_RETRY_THRESHOLD);
     let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
 
     // Connection-reset / broken-pipe on body upload often means nginx
