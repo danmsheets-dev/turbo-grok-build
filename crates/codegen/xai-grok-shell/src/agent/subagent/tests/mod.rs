@@ -501,9 +501,12 @@ fn subagent_max_turns_definition_wins_else_inherits_parent() {
 #[test]
 fn resume_worktree_action_covers_three_outcomes() {
     use super::{ResumeWorktreeAction, resume_worktree_action};
+    // Live preserved tree (cancel/complete + soft-preserve) must be reused even
+    // when a snapshot_ref exists. Rehydrate deletes dest and would drop
+    // uncommitted files that were never snapshotted.
     assert_eq!(
             resume_worktree_action(true, Some("refs/grok/subagents/x")),
-            ResumeWorktreeAction::Rehydrate
+            ResumeWorktreeAction::Reuse
         );
     assert_eq!(
             resume_worktree_action(false, Some("refs/grok/subagents/x")),
@@ -517,6 +520,51 @@ fn resume_worktree_action_covers_three_outcomes() {
             resume_worktree_action(false, None),
             ResumeWorktreeAction::Shared
         );
+}
+
+/// Cancelled + worktree_state=preserved + live dir → reuse, never rehydrate.
+#[test]
+fn resume_cancelled_preserved_live_tree_reuses_worktree() {
+    use super::{
+        ResumeWorktreeAction, is_durable_resume_status, resume_worktree_action,
+        resume_source_from_meta,
+    };
+    assert!(is_durable_resume_status("cancelled"));
+    assert!(is_durable_resume_status("completed"));
+    assert!(is_durable_resume_status("failed"));
+    assert!(!is_durable_resume_status("running"));
+    assert!(!is_durable_resume_status("initializing"));
+
+    let mut meta = rest::snapshot_test_meta("sa-cancel");
+    meta.status = "cancelled".into();
+    meta.worktree_state = Some("preserved".into());
+    meta.snapshot_ref = Some("refs/grok/subagents/sa-cancel".into());
+    meta.worktree_path = Some("/tmp/grok-wt/subagent-sa-cancel".into());
+    let source = resume_source_from_meta(&meta, "session-A").expect("cancelled is resumable");
+    assert_eq!(source.subagent_id, "sa-cancel");
+    assert_eq!(
+        source.worktree_path.as_deref(),
+        Some(std::path::Path::new("/tmp/grok-wt/subagent-sa-cancel"))
+    );
+    assert_eq!(
+        source.snapshot_ref.as_deref(),
+        Some("refs/grok/subagents/sa-cancel")
+    );
+    // Live tree exists (preserved) → reuse, do not destroy-and-rehydrate.
+    assert_eq!(
+        resume_worktree_action(true, source.snapshot_ref.as_deref()),
+        ResumeWorktreeAction::Reuse
+    );
+}
+
+#[test]
+fn resume_source_from_meta_rejects_running_and_wrong_parent() {
+    use super::resume_source_from_meta;
+    let mut meta = rest::snapshot_test_meta("sa-run");
+    meta.status = "running".into();
+    assert!(resume_source_from_meta(&meta, "session-A").is_none());
+    meta.status = "cancelled".into();
+    assert!(resume_source_from_meta(&meta, "other-session").is_none());
 }
 
 /// Deep-audit C1: resume isolation=worktree of a non-worktree source fails closed.

@@ -487,6 +487,12 @@ pub(crate) async fn run_shell_child(
             Some(dest) => {
                 match resume_worktree_action(dest.is_dir(), source.snapshot_ref.as_deref()) {
                     ResumeWorktreeAction::Reuse => {
+                        tracing::info!(
+                            subagent_id = %request.id,
+                            source_id = %source.subagent_id,
+                            worktree = %dest.display(),
+                            "Resuming onto preserved live worktree (uncommitted files kept)"
+                        );
                         if let Err(health) = validate_subagent_worktree_materialized(dest) {
                             if isolation_requested && !allow_shared_fallback {
                                 let msg = format!(

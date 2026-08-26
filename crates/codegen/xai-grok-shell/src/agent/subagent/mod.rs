@@ -53,9 +53,10 @@ pub(crate) enum InitialContextSource {
     New,
     /// Parent history as `<background_context>` (harness-only chat-prefix fork).
     Forked,
-    /// Resumed from a previously completed peer subagent. The child inherits
-    /// the source's raw transcript, tool state, and model. System prompt and
-    /// prompt context are freshly rendered from the current agent definition.
+    /// Resumed from a previously completed, failed, or cancelled peer
+    /// subagent. The child inherits the source's raw transcript, tool state,
+    /// and model. System prompt and prompt context are freshly rendered from
+    /// the current agent definition.
     Resumed,
 }
 /// Captured parent-side tier inputs for resolving
@@ -1603,27 +1604,42 @@ fn select_override_cwd<'a>(
         request_cwd
     }
 }
+/// Terminal statuses that `resume_from` may continue (not running / queued).
+fn is_durable_resume_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+/// Reconstruct a resume source from on-disk meta. Cancelled children are
+/// resumable the same as completed/failed so a new spawn can pick up a
+/// preserved worktree (uncommitted files) without `isolation=none`.
+fn resume_source_from_meta(
+    meta: &SubagentMeta,
+    parent_session_id: &str,
+) -> Option<ResumeSourceData> {
+    if meta.parent_session_id != parent_session_id
+        || !is_durable_resume_status(meta.status.as_str())
+    {
+        return None;
+    }
+    Some(ResumeSourceData {
+        subagent_id: meta.subagent_id.clone(),
+        child_session_id: meta.child_session_id.clone(),
+        child_cwd: meta.child_cwd.clone().unwrap_or_default(),
+        worktree_path: meta.worktree_path.as_deref().map(PathBuf::from),
+        snapshot_ref: meta.snapshot_ref.clone(),
+        subagent_type: meta.subagent_type.clone(),
+        persona: meta.persona.clone(),
+        model_id: meta.effective_model_id.clone(),
+    })
+}
+
 fn durable_resume_source_for(
     id: &str,
     parent_session_id: &str,
     parent_cwd: &Path,
 ) -> Option<ResumeSourceData> {
     let meta = durable_subagent_meta(id, parent_session_id, parent_cwd)?;
-    if meta.parent_session_id != parent_session_id
-        || !matches!(meta.status.as_str(), "completed" | "failed" | "cancelled")
-    {
-        return None;
-    }
-    Some(ResumeSourceData {
-        subagent_id: meta.subagent_id,
-        child_session_id: meta.child_session_id,
-        child_cwd: meta.child_cwd.unwrap_or_default(),
-        worktree_path: meta.worktree_path.map(PathBuf::from),
-        snapshot_ref: meta.snapshot_ref,
-        subagent_type: meta.subagent_type,
-        persona: meta.persona,
-        model_id: meta.effective_model_id,
-    })
+    resume_source_from_meta(&meta, parent_session_id)
 }
 
 /// Load on-disk `meta.json` for a subagent under the parent session (any status).
@@ -2550,7 +2566,9 @@ fn spawn_subagent_budget_monitor(
 /// What to do with a resumed subagent's isolated worktree directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResumeWorktreeAction {
-    /// Directory on disk and no snapshot ref — reuse it as-is.
+    /// Directory still on disk (soft-preserved / retain_worktree / cancel).
+    /// Reuse as-is so uncommitted files survive. Snapshot is only used when
+    /// the directory is gone — rehydrate deletes dest.
     Reuse,
     /// Directory gone but a snapshot ref exists — rehydrate from it.
     Rehydrate,
@@ -2560,11 +2578,15 @@ enum ResumeWorktreeAction {
 /// Decide how to recover a resumed subagent's worktree from its on-disk state
 /// and whether a durable snapshot is available. Pure so the three outcomes are
 /// unit-testable without git/async.
+///
+/// Prefer a live tree over snapshot rehydrate: `rehydrate_worktree_from_ref`
+/// removes `dest` first, which would drop uncommitted files left by a
+/// cancelled/preserved child.
 fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> ResumeWorktreeAction {
-    if snapshot_ref.is_some() {
-        ResumeWorktreeAction::Rehydrate
-    } else if dir_exists {
+    if dir_exists {
         ResumeWorktreeAction::Reuse
+    } else if snapshot_ref.is_some() {
+        ResumeWorktreeAction::Rehydrate
     } else {
         ResumeWorktreeAction::Shared
     }

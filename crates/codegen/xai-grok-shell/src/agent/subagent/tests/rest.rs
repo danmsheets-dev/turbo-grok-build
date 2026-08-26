@@ -503,7 +503,7 @@ fn backward_compat_meta_without_snapshot_ref() {
     assert!(meta.snapshot_ref.is_none());
 }
 /// Minimal completed-status meta for the snapshot-ref persistence tests.
-fn snapshot_test_meta(id: &str) -> SubagentMeta {
+pub(super) fn snapshot_test_meta(id: &str) -> SubagentMeta {
     SubagentMeta {
         schema_version: SubagentMeta::SCHEMA_VERSION,
         subagent_id: id.into(),
