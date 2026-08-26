@@ -1,19 +1,27 @@
-//! Session policy engine v1 (Phase 5 FR fr_01a028e7bf6875339bfa220a9adc5c9b).
+//! Context-aware session policy engine (FR fr_01a028e7bf6875339bfa220a9adc5c9b).
 //!
-//! Enforced before effects at [`crate::implementations::grok_build::search_replace`],
-//! OpenCode `write`, Codex `apply_patch`, [`crate::implementations::grok_build::bash`],
-//! and [`crate::implementations::grok_build::monitor`]. File-edit sites enforce
-//! `deny_paths` and `max_diff_lines`; command sites enforce `deny_commands`.
-//! MCP tools keep their own permission classification (`AccessKind::MCPTool`).
+//! Repo/session source: `.grok/policy.toml` (preferred) or `grok.toml` `[policy]`.
+//! Operator overlay: `GROK_POLICY_*` env vars. The pager/shell host injects the
+//! resolved snapshot as `Params<PolicyParams>` at session start.
 //!
-//! V1 configuration source: `GROK_POLICY_DENY_PATHS` /
-//! `GROK_POLICY_DENY_COMMANDS` (`;`-separated) and
-//! `GROK_POLICY_MAX_DIFF_LINES` (integer). The pager/shell host injects the
-//! env-resolved snapshot as `Params<PolicyParams>` at session start so tool
-//! lookups hit even when env is later unset. There is no `config.toml`
-//! `[policy]` table yet.
+//! **Enforced at tool dispatch** ([`FinalizedToolset::call`](crate::registry::types::FinalizedToolset))
+//! before execute — not just in the system prompt. File-edit tools still re-check
+//! `deny_paths` / `max_diff_lines` before I/O; bash/monitor re-check `deny_commands`.
+//! Violations fail closed as [`POLICY_DENIED`] (`ToolError::custom`).
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+use crate::types::tool::ToolKind;
+
+/// Custom `ToolError` code for every policy refusal.
+pub const POLICY_DENIED: &str = "policy_denied";
+
+/// Workspace-relative path of the dedicated policy file.
+pub const POLICY_TOML_RELATIVE: &str = ".grok/policy.toml";
+
+/// Alternate project file that may carry a `[policy]` table.
+pub const GROK_TOML_RELATIVE: &str = "grok.toml";
 
 /// Host/config-injected policy params.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -28,36 +36,187 @@ pub struct PolicyParams {
     /// Refuse an edit whose replacement adds more than this many lines.
     #[serde(default)]
     pub max_diff_lines: Option<u64>,
+    /// Tool kinds / names refused at dispatch (`edit`, `write`, `execute`, …).
+    #[serde(default)]
+    pub deny_tool_classes: Vec<String>,
+    /// Tool kinds / names that require `confirm: true` in the call args.
+    #[serde(default)]
+    pub require_confirm_for: Vec<String>,
+    /// Set when a policy file existed but could not be read or parsed.
+    /// Dispatch fails closed until the file is fixed.
+    #[serde(skip)]
+    pub load_error: Option<String>,
+}
+
+/// On-disk TOML shape (flat keys, or nested under `[policy]`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyFile {
+    #[serde(default)]
+    max_diff_lines: Option<u64>,
+    #[serde(default)]
+    deny_paths: Vec<String>,
+    #[serde(default)]
+    deny_commands: Vec<String>,
+    #[serde(default)]
+    deny_tool_classes: Vec<String>,
+    #[serde(default)]
+    require_confirm_for: Vec<String>,
+}
+
+impl From<PolicyFile> for PolicyParams {
+    fn from(file: PolicyFile) -> Self {
+        Self {
+            deny_paths: file.deny_paths,
+            deny_commands: file.deny_commands,
+            max_diff_lines: file.max_diff_lines,
+            deny_tool_classes: file.deny_tool_classes,
+            require_confirm_for: file.require_confirm_for,
+            load_error: None,
+        }
+    }
 }
 
 impl PolicyParams {
     /// Resolve from env first (so operators can gate without code changes),
     /// falling back to injected params for unset keys.
     pub fn resolve(injected: Option<&Self>) -> Self {
+        Self::resolve_from(injected, None)
+    }
+
+    /// File (workspace) → injected snapshot → `GROK_POLICY_*` env (highest).
+    ///
+    /// A malformed / unreadable policy file fails closed and is **not**
+    /// overwritten by injected params.
+    pub fn resolve_from(injected: Option<&Self>, workspace: Option<&Path>) -> Self {
+        let file = workspace.map(Self::load_from_workspace);
+        if let Some(file) = file.as_ref()
+            && file.load_error.is_some()
+        {
+            return file.clone();
+        }
         let mut out = injected.cloned().unwrap_or_default();
+        if let Some(file) = file.as_ref() {
+            out.overlay_file(file);
+        }
+        out.apply_env();
+        out
+    }
+
+    /// Load `.grok/policy.toml` or `grok.toml` `[policy]` from `dir`.
+    /// Missing files → default (no policy). Present-but-broken → `load_error`.
+    pub fn load_from_workspace(dir: &Path) -> Self {
+        let dedicated = dir.join(POLICY_TOML_RELATIVE);
+        if dedicated.is_file() {
+            return load_policy_file(&dedicated, PolicySource::Dedicated);
+        }
+        let grok_toml = dir.join(GROK_TOML_RELATIVE);
+        if grok_toml.is_file() {
+            return load_policy_file(&grok_toml, PolicySource::GrokToml);
+        }
+        Self::default()
+    }
+
+    fn overlay_file(&mut self, file: &Self) {
+        if !file.deny_paths.is_empty() {
+            self.deny_paths = file.deny_paths.clone();
+        }
+        if !file.deny_commands.is_empty() {
+            self.deny_commands = file.deny_commands.clone();
+        }
+        if !file.deny_tool_classes.is_empty() {
+            self.deny_tool_classes = file.deny_tool_classes.clone();
+        }
+        if !file.require_confirm_for.is_empty() {
+            self.require_confirm_for = file.require_confirm_for.clone();
+        }
+        if file.max_diff_lines.is_some() {
+            self.max_diff_lines = file.max_diff_lines;
+        }
+    }
+
+    fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("GROK_POLICY_DENY_PATHS") {
             let parsed = split_env_list(&v);
             if !parsed.is_empty() {
-                out.deny_paths = parsed;
+                self.deny_paths = parsed;
             }
         }
         if let Ok(v) = std::env::var("GROK_POLICY_DENY_COMMANDS") {
             let parsed = split_env_list(&v);
             if !parsed.is_empty() {
-                out.deny_commands = parsed;
+                self.deny_commands = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("GROK_POLICY_DENY_TOOL_CLASSES") {
+            let parsed = split_env_list(&v);
+            if !parsed.is_empty() {
+                self.deny_tool_classes = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("GROK_POLICY_REQUIRE_CONFIRM_FOR") {
+            let parsed = split_env_list(&v);
+            if !parsed.is_empty() {
+                self.require_confirm_for = parsed;
             }
         }
         if let Ok(v) = std::env::var("GROK_POLICY_MAX_DIFF_LINES")
             && let Ok(n) = v.trim().parse::<u64>()
         {
-            out.max_diff_lines = Some(n);
+            self.max_diff_lines = Some(n);
         }
-        out
+    }
+
+    /// Fail closed at the dispatcher before the tool body runs.
+    pub fn enforce_dispatch(
+        &self,
+        tool_name: &str,
+        tool_kind: Option<ToolKind>,
+        args: &serde_json::Value,
+    ) -> Result<(), xai_tool_runtime::ToolError> {
+        if let Some(err) = &self.load_error {
+            return Err(denied_error(tool_name, "policy_file", err));
+        }
+        if let Some(class) = self.class_listed(&self.deny_tool_classes, tool_name, tool_kind) {
+            return Err(denied_error(
+                tool_name,
+                "deny_tool_classes",
+                &format!("tool class `{class}`"),
+            ));
+        }
+        if let Some(class) = self.class_listed(&self.require_confirm_for, tool_name, tool_kind)
+            && !args_confirmed(args)
+        {
+            return Err(denied_error(
+                tool_name,
+                "require_confirm_for",
+                &format!("tool class `{class}` requires `confirm: true`"),
+            ));
+        }
+        if let Some(path) = dispatch_path(args)
+            && let Some(frag) = self.path_denied(Path::new(path))
+        {
+            return Err(denied_error(
+                tool_name,
+                "deny_paths",
+                &format!("`{path}` — matched deny-path fragment `{frag}`"),
+            ));
+        }
+        if let Some(added) = dispatch_added_lines(args)
+            && let Some((added, max)) = self.diff_exceeds_limit(added)
+        {
+            return Err(denied_error(
+                tool_name,
+                "max_diff_lines",
+                &format!("edit adding {added} lines (limit {max})"),
+            ));
+        }
+        Ok(())
     }
 
     /// True when any deny-path fragment matches a path component suffix
     /// (`target/` matches `repo/target/debug`, `.env` matches `.env.local`).
-    pub fn path_denied(&self, path: &std::path::Path) -> Option<String> {
+    pub fn path_denied(&self, path: &Path) -> Option<String> {
         if self.deny_paths.is_empty() {
             return None;
         }
@@ -118,6 +277,98 @@ impl PolicyParams {
             None
         }
     }
+
+    fn class_listed(
+        &self,
+        list: &[String],
+        tool_name: &str,
+        kind: Option<ToolKind>,
+    ) -> Option<String> {
+        let name = tool_name.to_ascii_lowercase();
+        let kind_key = kind.map(|k| k.as_key().to_ascii_lowercase());
+        for item in list {
+            let needle = item.trim().to_ascii_lowercase();
+            if needle.is_empty() {
+                continue;
+            }
+            if name == needle || kind_key.as_deref() == Some(needle.as_str()) {
+                return Some(item.trim().to_owned());
+            }
+        }
+        None
+    }
+}
+
+enum PolicySource {
+    Dedicated,
+    GrokToml,
+}
+
+fn load_policy_file(path: &Path, source: PolicySource) -> PolicyParams {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => match parse_policy_toml(&raw, source) {
+            Ok(file) => PolicyParams::from(file),
+            Err(e) => broken_policy(path, e),
+        },
+        Err(e) => broken_policy(path, e),
+    }
+}
+
+fn parse_policy_toml(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
+    let value: toml::Value = toml::from_str(raw).map_err(|e| format!("invalid TOML: {e}"))?;
+    match source {
+        PolicySource::Dedicated => {
+            if let Some(inner) = value.get("policy") {
+                inner
+                    .clone()
+                    .try_into()
+                    .map_err(|e| format!("invalid [policy] table: {e}"))
+            } else {
+                value
+                    .try_into()
+                    .map_err(|e| format!("invalid policy.toml: {e}"))
+            }
+        }
+        PolicySource::GrokToml => match value.get("policy") {
+            None => Ok(PolicyFile::default()),
+            Some(inner) => inner
+                .clone()
+                .try_into()
+                .map_err(|e| format!("invalid [policy] table: {e}")),
+        },
+    }
+}
+
+fn broken_policy(path: &Path, err: impl std::fmt::Display) -> PolicyParams {
+    PolicyParams {
+        load_error: Some(format!("{}: {err}", path.display())),
+        ..Default::default()
+    }
+}
+
+fn dispatch_path(args: &serde_json::Value) -> Option<&str> {
+    ["file_path", "path", "target_file"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn dispatch_added_lines(args: &serde_json::Value) -> Option<u64> {
+    let new = args
+        .get("new_string")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| args.get("content").and_then(serde_json::Value::as_str))
+        .or_else(|| args.get("contents").and_then(serde_json::Value::as_str))?;
+    let old = args
+        .get("old_string")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    Some(crate::types::output::line_diff(old, new).0.max(0) as u64)
+}
+
+fn args_confirmed(args: &serde_json::Value) -> bool {
+    args.get("confirm").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -220,13 +471,18 @@ pub fn denial(tool: &str, rule: &str, detail: &str) -> String {
     format!("policy denied ({tool}): rule `{rule}` matched {detail}")
 }
 
+/// Fail-closed `ToolError` with code [`POLICY_DENIED`].
+pub fn denied_error(tool: &str, rule: &str, detail: &str) -> xai_tool_runtime::ToolError {
+    xai_tool_runtime::ToolError::custom(POLICY_DENIED, denial(tool, rule, detail))
+}
+
 /// True when `path` is a `$GROK_HOME` credential file that must not be mutated.
-pub fn grok_home_credential_denied(path: &std::path::Path) -> bool {
+pub fn grok_home_credential_denied(path: &Path) -> bool {
     xai_grok_sandbox::write_denied_grok_home_credential(path)
 }
 
 /// Model-facing refusal for grok-home credential writes.
-pub fn grok_home_credential_denial(tool: &str, path: &std::path::Path) -> String {
+pub fn grok_home_credential_denial(tool: &str, path: &Path) -> String {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -241,13 +497,32 @@ pub fn grok_home_credential_denial(tool: &str, path: &std::path::Path) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use crate::registry::types::FinalizedToolset;
+    use crate::types::resources::{Cwd, Params};
+    use crate::types::tool::ToolNamespace;
+    use crate::types::tool_metadata::ToolMetadata;
 
     fn policy(deny_paths: &[&str], deny_commands: &[&str], max: Option<u64>) -> PolicyParams {
         PolicyParams {
             deny_paths: deny_paths.iter().map(|s| s.to_string()).collect(),
             deny_commands: deny_commands.iter().map(|s| s.to_string()).collect(),
             max_diff_lines: max,
+            ..Default::default()
         }
+    }
+
+    fn write_policy_toml(dir: &Path, body: &str) -> PathBuf {
+        let grok = dir.join(".grok");
+        fs::create_dir_all(&grok).unwrap();
+        let path = grok.join("policy.toml");
+        fs::write(&path, body).unwrap();
+        path
     }
 
     #[test]
@@ -324,5 +599,277 @@ mod tests {
         assert!(!grok_home_credential_denied(std::path::Path::new(
             "src/main.rs"
         )));
+    }
+
+    #[test]
+    fn load_policy_toml_from_grok_dir() {
+        let tmp = TempDir::new().unwrap();
+        write_policy_toml(
+            tmp.path(),
+            r#"
+max_diff_lines = 3
+deny_paths = [".env", "secrets/"]
+deny_tool_classes = ["execute"]
+require_confirm_for = ["write"]
+"#,
+        );
+        let p = PolicyParams::load_from_workspace(tmp.path());
+        assert!(p.load_error.is_none(), "{:?}", p.load_error);
+        assert_eq!(p.max_diff_lines, Some(3));
+        assert_eq!(p.deny_paths, vec![".env", "secrets/"]);
+        assert_eq!(p.deny_tool_classes, vec!["execute"]);
+        assert_eq!(p.require_confirm_for, vec!["write"]);
+    }
+
+    #[test]
+    fn load_policy_from_grok_toml_table() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("grok.toml"),
+            r#"
+[other]
+ignored = true
+[policy]
+max_diff_lines = 8
+deny_paths = ["production"]
+"#,
+        )
+        .unwrap();
+        let p = PolicyParams::load_from_workspace(tmp.path());
+        assert!(p.load_error.is_none(), "{:?}", p.load_error);
+        assert_eq!(p.max_diff_lines, Some(8));
+        assert_eq!(p.deny_paths, vec!["production"]);
+    }
+
+    #[test]
+    fn dedicated_policy_toml_wins_over_grok_toml() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("grok.toml"),
+            "[policy]\ndeny_paths = [\"from-grok\"]\n",
+        )
+        .unwrap();
+        write_policy_toml(tmp.path(), "deny_paths = [\"from-dedicated\"]\n");
+        let p = PolicyParams::load_from_workspace(tmp.path());
+        assert_eq!(p.deny_paths, vec!["from-dedicated"]);
+    }
+
+    #[test]
+    fn malformed_policy_toml_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        write_policy_toml(tmp.path(), "max_diff_lines = \"nope\"\n");
+        let p = PolicyParams::load_from_workspace(tmp.path());
+        assert!(p.load_error.is_some(), "expected load_error");
+        let err = p
+            .enforce_dispatch(
+                "write",
+                Some(ToolKind::Write),
+                &json!({"file_path": "ok.txt"}),
+            )
+            .expect_err("broken policy file must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("policy_file"), "{msg}");
+        assert_eq!(err.details.as_ref().unwrap()["code"], POLICY_DENIED);
+    }
+
+    #[test]
+    fn enforce_dispatch_refuses_write_to_deny_path() {
+        let p = policy(&[".env"], &[], None);
+        let err = p
+            .enforce_dispatch(
+                "write",
+                Some(ToolKind::Write),
+                &json!({"file_path": ".env", "content": "stolen=1\n"}),
+            )
+            .expect_err("deny_path write must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("policy denied (write)"), "{msg}");
+        assert!(msg.contains("deny_paths"), "{msg}");
+        assert_eq!(err.details.as_ref().unwrap()["code"], POLICY_DENIED);
+    }
+
+    #[test]
+    fn enforce_dispatch_refuses_when_max_diff_lines_exceeded() {
+        let p = policy(&[], &[], Some(1));
+        let err = p
+            .enforce_dispatch(
+                "search_replace",
+                Some(ToolKind::Edit),
+                &json!({
+                    "file_path": "src/lib.rs",
+                    "old_string": "before",
+                    "new_string": "after\nsecond\nthird"
+                }),
+            )
+            .expect_err("oversized edit must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("policy denied (search_replace)"), "{msg}");
+        assert!(msg.contains("max_diff_lines"), "{msg}");
+        assert_eq!(err.details.as_ref().unwrap()["code"], POLICY_DENIED);
+    }
+
+    #[test]
+    fn enforce_dispatch_refuses_denied_tool_class() {
+        let p = PolicyParams {
+            deny_tool_classes: vec!["execute".into()],
+            ..Default::default()
+        };
+        let err = p
+            .enforce_dispatch(
+                "run_terminal_cmd",
+                Some(ToolKind::Execute),
+                &json!({"command": "echo hi"}),
+            )
+            .expect_err("denied tool class must be refused");
+        assert!(err.to_string().contains("deny_tool_classes"));
+    }
+
+    #[test]
+    fn enforce_dispatch_refuses_without_confirm() {
+        let p = PolicyParams {
+            require_confirm_for: vec!["write".into()],
+            ..Default::default()
+        };
+        p.enforce_dispatch(
+            "write",
+            Some(ToolKind::Write),
+            &json!({"file_path": "ok.txt", "content": "x", "confirm": true}),
+        )
+        .expect("confirm:true must pass");
+        let err = p
+            .enforce_dispatch(
+                "write",
+                Some(ToolKind::Write),
+                &json!({"file_path": "ok.txt", "content": "x"}),
+            )
+            .expect_err("missing confirm must fail closed");
+        assert!(err.to_string().contains("require_confirm_for"));
+    }
+
+    #[derive(Debug)]
+    struct PolicyWriteStub;
+
+    impl ToolMetadata for PolicyWriteStub {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Write
+        }
+        fn tool_namespace(&self) -> ToolNamespace {
+            ToolNamespace::GrokBuild
+        }
+        fn description_template(&self) -> &str {
+            "policy write stub"
+        }
+    }
+
+    impl xai_tool_runtime::Tool for PolicyWriteStub {
+        type Args = serde_json::Value;
+        type Output = String;
+        fn id(&self) -> xai_tool_protocol::ToolId {
+            xai_tool_protocol::ToolId::new("policy_write_stub").expect("valid")
+        }
+        fn description(
+            &self,
+            _ctx: &xai_tool_runtime::ListToolsContext,
+        ) -> xai_tool_types::ToolDescription {
+            xai_tool_types::ToolDescription::new("policy_write_stub", "policy write stub")
+        }
+        async fn run(
+            &self,
+            _ctx: xai_tool_runtime::ToolCallContext,
+            _input: serde_json::Value,
+        ) -> Result<String, xai_tool_runtime::ToolError> {
+            Ok("wrote".into())
+        }
+    }
+
+    async fn dispatch_toolset(cwd: &Path, policy: PolicyParams) -> Arc<FinalizedToolset> {
+        let toolset = Arc::new(FinalizedToolset::empty_for_test());
+        toolset.update_resource(Cwd(cwd.to_path_buf())).await;
+        toolset.update_resource(Params(policy)).await;
+        toolset
+            .register_tool(
+                "write".to_string(),
+                PolicyWriteStub,
+                Some(json!({"type": "object"})),
+            )
+            .unwrap();
+        toolset
+    }
+
+    #[tokio::test]
+    async fn dispatch_refuses_write_to_deny_path() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = dispatch_toolset(
+            tmp.path(),
+            PolicyParams {
+                deny_paths: vec![".env".into()],
+                ..Default::default()
+            },
+        )
+        .await;
+        let err = toolset
+            .call(
+                "write",
+                json!({"file_path": ".env", "content": "stolen=1\n"}),
+                "call-deny-path",
+                None,
+            )
+            .await
+            .expect_err("dispatcher must refuse a deny_path write");
+        let msg = err.to_string();
+        assert!(msg.contains("policy denied (write)"), "{msg}");
+        assert!(msg.contains("deny_paths"), "{msg}");
+        assert_eq!(err.details.as_ref().unwrap()["code"], POLICY_DENIED);
+    }
+
+    #[tokio::test]
+    async fn dispatch_refuses_when_max_diff_lines_exceeded() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = dispatch_toolset(
+            tmp.path(),
+            PolicyParams {
+                max_diff_lines: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+        let err = toolset
+            .call(
+                "write",
+                json!({"file_path": "src/lib.rs", "content": "one\ntwo\nthree\n"}),
+                "call-max-diff",
+                None,
+            )
+            .await
+            .expect_err("dispatcher must refuse an oversized write");
+        let msg = err.to_string();
+        assert!(msg.contains("policy denied (write)"), "{msg}");
+        assert!(msg.contains("max_diff_lines"), "{msg}");
+        assert_eq!(err.details.as_ref().unwrap()["code"], POLICY_DENIED);
+    }
+
+    #[tokio::test]
+    async fn dispatch_loads_policy_toml_from_workspace() {
+        let tmp = TempDir::new().unwrap();
+        write_policy_toml(tmp.path(), "deny_paths = [\".env\"]\n");
+        let toolset = Arc::new(FinalizedToolset::empty_for_test());
+        toolset.update_resource(Cwd(tmp.path().to_path_buf())).await;
+        toolset
+            .register_tool(
+                "write".to_string(),
+                PolicyWriteStub,
+                Some(json!({"type": "object"})),
+            )
+            .unwrap();
+        let err = toolset
+            .call(
+                "write",
+                json!({"file_path": "config/.env.local", "content": "x\n"}),
+                "call-file-policy",
+                None,
+            )
+            .await
+            .expect_err("workspace policy.toml must be enforced at dispatch");
+        assert!(err.to_string().contains("deny_paths"), "{}", err);
     }
 }

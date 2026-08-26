@@ -394,8 +394,9 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             let policy_params = res.get::<crate::types::resources::Params<
                 crate::implementations::grok_build::policy::PolicyParams,
             >>();
-            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve_from(
                 policy_params.map(|p| &p.0),
+                Some(&cwd),
             );
             let session_folder = res
                 .get::<crate::types::resources::SessionFolder>()

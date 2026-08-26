@@ -120,8 +120,9 @@ impl xai_tool_runtime::Tool for WriteTool {
             let allowed_paths = res.get::<AllowedWritePaths>().map(|a| a.0.clone());
             let params =
                 res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
-            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve_from(
                 params.map(|p| &p.0),
+                Some(&cwd),
             );
             let session_folder = res.get::<SessionFolder>().map(|s| s.0.clone());
             (

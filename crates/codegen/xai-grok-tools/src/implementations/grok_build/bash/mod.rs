@@ -1964,8 +1964,9 @@ impl xai_tool_runtime::Tool for BashTool {
             let res = resources.lock().await;
             let params =
                 res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
-            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+            let policy = crate::implementations::grok_build::policy::PolicyParams::resolve_from(
                 params.map(|p| &p.0),
+                Some(&cwd),
             );
             if let Some(frag) = policy.command_denied(&input.command) {
                 return Err(xai_tool_runtime::ToolError::custom(
@@ -3434,13 +3435,10 @@ mod tests {
             "echo stolen > {}",
             xai_grok_config::grok_home().join("auth.json").display()
         );
-        let err = xai_tool_runtime::Tool::run(
-            &tool,
-            test_ctx(resources.into_shared()),
-            make_input(&cmd),
-        )
-        .await
-        .expect_err("$GROK_HOME credential writes must be denied");
+        let err =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(&cmd))
+                .await
+                .expect_err("$GROK_HOME credential writes must be denied");
         assert!(
             err.to_string().contains("grok_home_credentials"),
             "{}",

@@ -246,7 +246,10 @@ pub(crate) async fn run_search_replace(
     let policy = {
         let res = resources.lock().await;
         let params = res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
-        crate::implementations::grok_build::policy::PolicyParams::resolve(params.map(|p| &p.0))
+        crate::implementations::grok_build::policy::PolicyParams::resolve_from(
+            params.map(|p| &p.0),
+            Some(&cwd),
+        )
     };
     if let Some(frag) = policy.path_denied(&path) {
         return Ok(SearchReplaceOutput::InvalidInput(

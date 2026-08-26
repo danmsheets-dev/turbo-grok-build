@@ -392,8 +392,9 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                 .map(|a| a.0.clone());
             let params =
                 res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
-            policy = crate::implementations::grok_build::policy::PolicyParams::resolve(
+            policy = crate::implementations::grok_build::policy::PolicyParams::resolve_from(
                 params.map(|p| &p.0),
+                Some(&cwd),
             );
         }
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.

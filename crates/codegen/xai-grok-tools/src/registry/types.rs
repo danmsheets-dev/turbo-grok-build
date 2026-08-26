@@ -13,7 +13,7 @@ use crate::{
         output::{ToolOutput, ToolRunResult},
         params_validation::{ParamValidationError, validate_params_json},
         requirements::{EvalContext, Expr, ProposedTool, ToolRequirement},
-        resources::{InnerDispatch, Resources, SharedResources},
+        resources::{Cwd, InnerDispatch, Params, Resources, SharedResources},
         template_renderer::TemplateRenderer,
         tool::{Reminder, ToolKind, ToolNamespace},
         tool_metadata::ToolMetadata,
@@ -1575,6 +1575,8 @@ impl FinalizedToolset {
         } else {
             remap_json_keys(tool_args, &reverse_params)
         };
+        self.enforce_session_policy(tool_name, &canonical_params, None)
+            .await?;
         let mut ctx = xai_tool_runtime::ToolCallContext::new(parent_ctx.call_id.clone());
         ctx.extensions.insert(self.resources.clone());
         ctx.extensions.insert_arc(Arc::clone(&self.renderer));
@@ -1683,6 +1685,7 @@ impl FinalizedToolset {
         let this = Arc::clone(self);
         let tool_name = tool_name.to_owned();
         let tool_call_id = tool_call_id.to_owned();
+        let cwd_for_policy = cwd_override.clone();
         Box::pin(async_stream::stream! {
             let parts = match this.prepare_dispatch(
                 &tool_name,
@@ -1704,6 +1707,14 @@ impl FinalizedToolset {
                 output_converter,
                 effective_tool_name,
             } = parts;
+
+            if let Err(e) = this
+                .enforce_session_policy(&tool_name, &canonical_params, cwd_for_policy.as_deref())
+                .await
+            {
+                yield xai_tool_runtime::ToolStreamItem::Terminal(Err(e));
+                return;
+            }
 
             let mut inner = lr_handle.execute(ctx, canonical_params).await;
             while let Some(item) = inner.next().await {
@@ -1811,6 +1822,35 @@ impl FinalizedToolset {
             effective_tool_name,
         })
     }
+
+    /// Fail-closed repo/session policy gate. Runs before execute so a
+    /// `.grok/policy.toml` / `grok.toml` `[policy]` rule cannot be skipped by
+    /// a tool body that forgets to check.
+    async fn enforce_session_policy(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        cwd_override: Option<&std::path::Path>,
+    ) -> Result<(), xai_tool_runtime::ToolError> {
+        let (injected, session_cwd) = {
+            let res = self.resources.lock().await;
+            let injected = res
+                .get::<Params<crate::implementations::grok_build::policy::PolicyParams>>()
+                .map(|p| p.0.clone());
+            let session_cwd = res.get::<Cwd>().map(|c| c.0.clone());
+            (injected, session_cwd)
+        };
+        let cwd = cwd_override
+            .map(std::path::Path::to_path_buf)
+            .or(session_cwd);
+        let policy = crate::implementations::grok_build::policy::PolicyParams::resolve_from(
+            injected.as_ref(),
+            cwd.as_deref(),
+        );
+        let kind = self.get_tool_metadata(tool_name).map(|m| m.kind());
+        policy.enforce_dispatch(tool_name, kind, args)
+    }
+
     /// Post-dispatch tail shared by [`call`] / [`call_streaming`].
     ///
     /// Applies the `output_converter` to the terminal `value`, collects
