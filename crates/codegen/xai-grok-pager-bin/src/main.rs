@@ -2295,6 +2295,14 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 init_tracing_simple("cli");
                 return xai_grok_pager::issues_cmd::run(issues_args);
             }
+            Command::Pr(pr_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::pr_cmd::run(pr_args);
+            }
+            Command::Pipeline(pipeline_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::pr_cmd::run_pipeline(pipeline_args);
+            }
             Command::Features(features_args) => {
                 init_tracing_simple("cli");
                 return xai_grok_pager::features_cmd::run(features_args);

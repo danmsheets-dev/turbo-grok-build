@@ -140,6 +140,10 @@ pub enum Command {
     Subagent(crate::subagent_cmd::SubagentArgs),
     /// List, show, export, resolve, or sync Auto Developer Log product incidents
     Issues(crate::issues_cmd::IssuesArgs),
+    /// GitHub PR status and draft create (wraps `gh`; current origin only; never merges)
+    Pr(crate::pr_cmd::PrArgs),
+    /// GitHub Actions pipeline status and rerun (wraps `gh run`; current origin only)
+    Pipeline(crate::pr_cmd::PipelineArgs),
     /// Feature Request Log — list / show / export / sync capability requests from agents
     Features(crate::features_cmd::FeaturesArgs),
     /// Workspace directory atlas: status, doctor, inject-preview, build, resolve
@@ -1180,7 +1184,7 @@ impl PagerArgs {
         let Some(target) = self.session_to_resume().map(str::to_owned) else {
             return Ok(());
         };
-        use crate::app::session_title_resolve::{PinnedResumeTarget, presandbox_resume_target};
+        use crate::app::session_title_resolve::{presandbox_resume_target, PinnedResumeTarget};
         let pinned = presandbox_resume_target(&target, cwd)?;
         self.resume_target_pinned = true;
         if let PinnedResumeTarget::Title {
@@ -1292,16 +1296,14 @@ mod tests {
         let args = PagerArgs::try_parse_from(["grok", "--json-schema-file", "schema.json"])
             .expect("file-based schema flag parses");
         assert_eq!(args.json_schema_file, Some(PathBuf::from("schema.json")));
-        assert!(
-            PagerArgs::try_parse_from([
-                "grok",
-                "--json-schema",
-                "{}",
-                "--json-schema-file",
-                "schema.json"
-            ])
-            .is_err()
-        );
+        assert!(PagerArgs::try_parse_from([
+            "grok",
+            "--json-schema",
+            "{}",
+            "--json-schema-file",
+            "schema.json"
+        ])
+        .is_err());
     }
 
     fn ordinary_and_doctor_parsing_do_not_set_version_intent() {
@@ -1800,17 +1802,15 @@ mod tests {
                 ..
             })
         ));
-        assert!(
-            PagerArgs::try_parse_from([
-                "grok",
-                "login",
-                "--bedrock",
-                "--profile",
-                "dev",
-                "--chain"
-            ])
-            .is_err()
-        );
+        assert!(PagerArgs::try_parse_from([
+            "grok",
+            "login",
+            "--bedrock",
+            "--profile",
+            "dev",
+            "--chain"
+        ])
+        .is_err());
         let args = PagerArgs::try_parse_from(["grok", "logout", "--bedrock"]).expect("parses");
         assert!(matches!(
             args.command,
