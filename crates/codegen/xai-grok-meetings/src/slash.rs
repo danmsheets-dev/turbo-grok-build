@@ -70,7 +70,9 @@ pub fn usage_message() -> &'static str {
      meeting name in the filename. Only work/business content; small talk is dropped.\n\
      Coworkers type or say `Turbo: …`; Turbo auto-researches the workspace and replies.\n\
      Set GROK_MEETING_AUTO_ASK=0 to queue only. Replies prefix [Turbo].\n\
-     Teams chat post uses GROK_GRAPH_TOKEN if set (delegated Graph Chat.ReadWrite)."
+     GROK_GRAPH_TOKEN is not required to join: a missing token still sends the \
+     Teams web guest. Graph Chat.ReadWrite is only a fallback to post as you \
+     if the guest cannot join."
 }
 
 /// Split `/meeting join` rest into URL + optional meeting name.
@@ -95,8 +97,9 @@ pub fn join_instruction(url: &str, title: Option<&str>) -> String {
          Do not rewrite the URL. Pass title if provided (field `title` or `name`). \
          Do NOT use bash, Start-Process, explorer.exe, or open the URL yourself — \
          opening Teams without capture is not the feature. {MEETING_JOIN_TOOL_NAME} \
-         sends a \"Turbo (Notetaker)\" guest into a Teams meeting (falling back to WASAPI \
-         loopback+mic capture on Windows when a bot cannot join). \
+         sends a \"Turbo (Notetaker)\" guest into a Teams meeting even when \
+         GROK_GRAPH_TOKEN is missing (falling back to WASAPI loopback+mic capture \
+         on Windows only when that guest cannot join). \
          After it returns, briefly confirm the meeting id, name, platform, and capture source, \
          and — if a notetaker is waiting in the lobby — tell the operator to admit it. \
          Do not start coding.\n\n\
@@ -250,7 +253,9 @@ mod tests {
             "must say which tools are unavailable: {t}"
         );
         for blocked in ["workspace_tree", "resolve_path", "MCP"] {
-            let idx = t.find(blocked).unwrap_or_else(|| panic!("{blocked} unmentioned"));
+            let idx = t
+                .find(blocked)
+                .unwrap_or_else(|| panic!("{blocked} unmentioned"));
             let not_avail = t.find("NOT available").expect("marker");
             assert!(
                 idx < not_avail,
@@ -267,6 +272,10 @@ mod tests {
         assert!(u.contains("work folder"));
         assert!(!u.contains("projects.md"));
         assert!(!u.contains("creates projects.md"));
+        assert!(
+            u.contains("GROK_GRAPH_TOKEN is not required to join"),
+            "Graph missing must still send the web guest: {u}"
+        );
     }
 
     #[test]
@@ -285,9 +294,8 @@ mod tests {
 
     #[test]
     fn split_join_url_and_name() {
-        let (url, title) = split_join_args(
-            "https://teams.microsoft.com/l/meetup-join/abc Weekly website standup",
-        );
+        let (url, title) =
+            split_join_args("https://teams.microsoft.com/l/meetup-join/abc Weekly website standup");
         assert!(url.contains("meetup-join"));
         assert_eq!(title, Some("Weekly website standup"));
         let (url2, title2) = split_join_args("https://zoom.us/j/1");
@@ -308,6 +316,10 @@ mod tests {
         // tell the operator to admit a notetaker that is sitting there.
         assert!(t.contains("lobby"), "{t}");
         assert!(t.contains("Notetaker"), "{t}");
+        assert!(
+            t.contains("GROK_GRAPH_TOKEN"),
+            "must say Graph is not required for the guest join: {t}"
+        );
     }
 
     #[test]

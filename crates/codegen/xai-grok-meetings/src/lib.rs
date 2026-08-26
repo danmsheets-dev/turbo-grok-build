@@ -2,9 +2,11 @@
 //!
 //! This crate does **not** capture audio or talk to Zoom/Teams SDKs. Capture +
 //! Grok STT live in `xai-grok-tools` (`meeting_*` tools). Join-URL parsing,
-//! on-disk transcript/notes, and slash-command prompts live here so the pager
-//! can inject `/meeting` without pulling the audio stack.
+//! join-plan (guest/web vs local capture), on-disk transcript/notes, and
+//! slash-command prompts live here so the pager can inject `/meeting` without
+//! pulling the audio stack.
 
+pub mod join_plan;
 pub mod knowledge;
 pub mod slash;
 pub mod store;
@@ -12,6 +14,7 @@ pub mod summary;
 pub mod trigger;
 pub mod url;
 
+pub use join_plan::{GraphStatus, JoinPlan, JoinPlanOpts, JoinTransport, plan_join};
 pub use knowledge::{briefing, read_knowledge_dir, write_knowledge_dir};
 pub use slash::{
     MEETING_ASK_TOOL_NAME, MEETING_COMMAND_NAME, MEETING_JOIN_TOOL_NAME,

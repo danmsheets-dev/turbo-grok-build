@@ -142,6 +142,10 @@ impl std::fmt::Debug for TeamsBot {
 impl TeamsBot {
     /// Launch a browser, join as a guest, and stream audio and chat.
     ///
+    /// Graph is not an input and not required: a missing `GROK_GRAPH_TOKEN`
+    /// still takes this path. Chat posts as [`DEFAULT_DISPLAY_NAME`] from the
+    /// page, not as the operator.
+    ///
     /// Returns once the notetaker is in the lobby or admitted. A meeting that
     /// refuses guests, demands verification, or denies the bot returns `Err`
     /// so the caller can fall back to local capture.
@@ -418,7 +422,9 @@ async fn drive_join(
     if state == BotState::Prejoin {
         let name = serde_json::to_string(&cfg.display_name)
             .unwrap_or_else(|_| "\"Turbo (Notetaker)\"".to_string());
-        if page.evaluate(&format!("window.__turbo.setName({name})")).await?
+        if page
+            .evaluate(&format!("window.__turbo.setName({name})"))
+            .await?
             != serde_json::Value::Bool(true)
         {
             return Err(BotError::Selector {
@@ -547,6 +553,16 @@ mod tests {
         assert_eq!(cfg().display_name, DEFAULT_DISPLAY_NAME);
     }
 
+    /// Graph is chat-as-operator elsewhere. The guest join is URL + profile +
+    /// display name only — a missing GROK_GRAPH_TOKEN must still take this path.
+    #[test]
+    fn guest_join_config_does_not_take_a_graph_token() {
+        let c = cfg();
+        assert_eq!(c.display_name, DEFAULT_DISPLAY_NAME);
+        assert!(c.join_url.starts_with("https://teams."));
+        // BotConfig has no Graph field; join() does not consult GROK_GRAPH_TOKEN.
+    }
+
     #[test]
     fn init_script_embeds_config_then_tap() {
         let script = build_init_script(&cfg(), "ws://127.0.0.1:5/tok");
@@ -668,7 +684,13 @@ mod tests {
     fn every_page_state_string_in_the_tap_is_one_rust_understands() {
         let tap = include_str!("tap.js");
         for raw in [
-            "loading", "launcher", "prejoin", "lobby", "admitted", "denied", "captcha",
+            "loading",
+            "launcher",
+            "prejoin",
+            "lobby",
+            "admitted",
+            "denied",
+            "captcha",
             "sign-in-required",
         ] {
             assert!(
@@ -696,7 +718,10 @@ mod tests {
     #[test]
     fn tap_reports_captcha_rather_than_engaging() {
         let tap = include_str!("tap.js");
-        assert!(tap.contains("'captcha'"), "captcha must be a reported state");
+        assert!(
+            tap.contains("'captcha'"),
+            "captcha must be a reported state"
+        );
     }
 
     /// Tracks arrive together when several people join at once; the graph must
