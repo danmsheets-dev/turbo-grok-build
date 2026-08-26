@@ -113,6 +113,19 @@ advisory flow, not xAI HackerOne.
   wasmtime/rhai crates (F34/F37). Direct SKILL.md registration already
   requires workspace + vendor-compat (F63).
 
+#### Incident follow-through
+
+- Session `images/` / media copies under `$GROK_HOME/sessions` are no longer
+  treated as grok-home credentials.
+- Official `Godot_v*` Windows console exports are modelled under confine.
+- `gh_*` tools pin `--repo` to `origin` (not a read-only `upstream` remote).
+- `openrouter/openai/gpt-5.6-terra` aliases to ChatGPT Codex Terra.
+- Meeting copy no longer says Fathom-style; Teams is a guest in the lobby or
+  local WASAPI, and the result names which one ran.
+- HTTP 404 HTML is a loaded page, not `browser_navigate` failure.
+- Host injects env-resolved `PolicyParams` at session start.
+- Worktree disk gate prunes every non-live tree before refusing spawn.
+
 
 ---
 

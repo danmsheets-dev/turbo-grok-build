@@ -1,9 +1,10 @@
-//! Fathom-style meeting notetaker tools (`meeting_join` / `stop` / `status` /
+//! Meeting notetaker tools (`meeting_join` / `stop` / `status` /
 //! `transcript` / `notes`).
 //!
-//! v1: open the join URL, capture WASAPI loopback + mic on Windows (mic
-//! fallback), stream to Grok STT, persist transcript + notes, auto-answer
-//! `Turbo:` questions, and write a work-only recap on stop.
+//! Teams: try a guest named "Turbo (Notetaker)" in the lobby; fall back to
+//! WASAPI loopback + mic on this machine when the guest cannot join. Other
+//! platforms use local capture. Stream to Grok STT, persist transcript +
+//! notes, auto-answer `Turbo:` questions, and write a work-only recap on stop.
 
 use std::collections::HashMap;
 use std::future::Future;

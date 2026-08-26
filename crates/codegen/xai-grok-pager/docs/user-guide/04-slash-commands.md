@@ -176,7 +176,7 @@ A handful of commands only work in one of the two modes, because the surface the
 
 ### `/meeting`
 
-Fathom-style meeting notetaker (built into Turbo, not a third-party bot vendor).
+Meeting notetaker (built into Turbo). Teams tries a guest named **Turbo (Notetaker)** in the lobby; if that guest cannot join, capture is local WASAPI loopback + mic on this PC. That is not a third-party Fathom bot.
 
 ```
 /meeting join <url> [name]

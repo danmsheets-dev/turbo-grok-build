@@ -1185,6 +1185,10 @@ fn shell_program_is_modelled_for_confine(program: &str, words: &[String]) -> boo
     if densify_engine_is_modelled(program) || configured_densify_engine_basename(program) {
         return true;
     }
+    // `gh` CLI: read-only + CI rerun. Arbitrary `gh api` scripting stays denied.
+    if program == "gh" {
+        return gh_is_modelled_for_confine(words);
+    }
     // PowerShell / pwsh: only `-File`/`-f` script form is modelled (script path
     // is a confine operand). Opaque `-Command` / `-EncodedCommand` stay denied.
     if matches!(program, "powershell" | "pwsh") {
@@ -1289,9 +1293,22 @@ fn configured_densify_engine_basename(program: &str) -> bool {
     configured_densify_engine_matches(program)
 }
 
+/// Read-only `gh` status plus `gh run rerun`. `gh api` / gist / arbitrary
+/// scripting stay unmodelled (fail-closed under `--confine`).
+fn gh_is_modelled_for_confine(words: &[String]) -> bool {
+    let sub = words
+        .get(1)
+        .map(|s| s.trim_start_matches('-').to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        sub.as_str(),
+        "pr" | "run" | "auth" | "repo" | "status" | "issue" | "checks"
+    )
+}
+
 /// Blender / Godot console binaries used by densify / asset-kit subagents.
 fn densify_engine_is_modelled(program: &str) -> bool {
-    matches!(
+    if matches!(
         program,
         "blender"
             | "godot"
@@ -1301,7 +1318,12 @@ fn densify_engine_is_modelled(program: &str) -> bool {
             | "godot4_console"
             | "godot.windows.editor.x86_64"
             | "godot.windows.template_release.x86_64"
-    )
+    ) {
+        return true;
+    }
+    // Official Windows exports: Godot_v4.7-stable_win64_console.exe →
+    // `godot_v4.7-stable_win64_console` after [`normalize_program_name`].
+    program.starts_with("godot_v")
 }
 
 /// Path operands for headless Blender / Godot under confine.
@@ -3244,6 +3266,9 @@ mod tests {
             r#"& 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe' --background --python tools/blender/build_x.py"#,
             r#"cmd /c blender --background --python tools/blender/build_x.py"#,
             "godot --headless --path . --import",
+            r#""C:\Program Files\Godot\Godot_v4.7-stable_win64_console.exe" --headless --path ."#,
+            "gh run view 123 --json status",
+            "gh pr view --json number,title",
             "powershell -File tools/verify_asset_kit.ps1",
             "pwsh -NoProfile -File tools/verify_asset_kit.ps1",
             "cargo test -p xai-grok-browser --lib",
@@ -3489,6 +3514,37 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("GROK_BLENDER", v) },
             None => unsafe { std::env::remove_var("GROK_BLENDER") },
         }
+    }
+
+    #[test]
+    fn godot_official_windows_console_export_is_modelled() {
+        let cmd =
+            r#""C:\Program Files\Godot\Godot_v4.7-stable_win64_console.exe" --headless --path ."#;
+        match analyse_shell_for_confine(cmd) {
+            ConfineShellAnalysis::Modelled { .. } => {}
+            other => panic!("expected Modelled Godot 4.7 console, got {other:?}"),
+        }
+        assert_eq!(
+            shell_unmodelled_program_for_confine(cmd),
+            None,
+            "Godot_v4.7 console must not be unmodelled under confine"
+        );
+    }
+
+    #[test]
+    fn gh_status_commands_are_modelled_api_is_not() {
+        assert_eq!(
+            shell_unmodelled_program_for_confine("gh run view 123 --json status"),
+            None
+        );
+        assert_eq!(
+            shell_unmodelled_program_for_confine("gh pr view --json number"),
+            None
+        );
+        assert!(
+            shell_unmodelled_program_for_confine("gh api repos/foo/bar --jq .").is_some(),
+            "arbitrary gh api must stay fail-closed"
+        );
     }
 
     #[test]

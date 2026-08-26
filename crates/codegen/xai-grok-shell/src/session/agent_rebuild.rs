@@ -330,6 +330,12 @@ impl AgentRebuildSpec {
             builder = builder.with_preloaded_skills(skills);
         }
         let agent = builder.build().await?;
+        agent
+            .tool_bridge()
+            .update_resource(xai_grok_tools::types::resources::Params(
+                xai_grok_tools::implementations::grok_build::policy::PolicyParams::resolve(None),
+            ))
+            .await;
         let model_validator = models_manager.clone();
         agent
             .tool_bridge()

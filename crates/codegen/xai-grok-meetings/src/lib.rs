@@ -1,4 +1,4 @@
-//! Fathom-style meeting notetaker primitives used by Turbo tools and `/meeting`.
+//! Meeting notetaker primitives used by Turbo tools and `/meeting`.
 //!
 //! This crate does **not** capture audio or talk to Zoom/Teams SDKs. Capture +
 //! Grok STT live in `xai-grok-tools` (`meeting_*` tools). Join-URL parsing,

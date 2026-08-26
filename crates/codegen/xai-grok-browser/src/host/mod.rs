@@ -30,6 +30,13 @@ pub use ax::{
     resolve_uid, snapshot_cap,
 };
 
+/// HTTP error documents (404 HTML) still load a URL. Treat that as a successful
+/// navigation so agents snapshot the error page instead of a dead tab.
+pub(crate) fn http_error_document_counts_as_navigation(location_url: &str) -> bool {
+    let loc = location_url.trim();
+    !loc.is_empty() && !loc.eq_ignore_ascii_case("about:blank")
+}
+
 /// JSON-RPC parse error.
 pub(crate) const RPC_PARSE_ERROR: i64 = -32700;
 /// JSON-RPC method not found / not implemented.
@@ -1469,5 +1476,15 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("TURBO_BROWSER_IMAGE_DIR", v) },
             None => unsafe { std::env::remove_var("TURBO_BROWSER_IMAGE_DIR") },
         }
+    }
+
+    #[test]
+    fn http_404_document_is_a_loaded_page() {
+        assert!(http_error_document_counts_as_navigation(
+            "https://file-examples.com/missing"
+        ));
+        assert!(!http_error_document_counts_as_navigation("about:blank"));
+        assert!(!http_error_document_counts_as_navigation(""));
+        assert!(!http_error_document_counts_as_navigation("   "));
     }
 }

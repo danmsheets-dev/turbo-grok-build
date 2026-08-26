@@ -285,14 +285,67 @@ pub fn command_mentions_grok_home_credential_in(command: &str, home: &Path) -> b
     if !mentions_home {
         return false;
     }
-    let names_cred = GROK_HOME_CREDENTIAL_BASENAMES.iter().any(|b| {
-        let needle = format!("/{b}");
-        cmd.contains(&needle) || cmd.ends_with(*b)
-    });
-    let names_suffix = GROK_HOME_CREDENTIAL_SUFFIXES
-        .iter()
-        .any(|suffix| cmd.contains(&format!("{suffix}")));
-    names_cred || names_suffix
+    grok_home_path_tokens(&cmd).any(|token| {
+        if !token_mentions_grok_home(token, &home_n) {
+            return false;
+        }
+        if token_is_grok_home_session_artifact(token) {
+            return false;
+        }
+        grok_home_token_names_credential(token)
+    })
+}
+
+fn token_mentions_grok_home(token: &str, home_n: &str) -> bool {
+    (!home_n.is_empty() && token.contains(home_n))
+        || token.contains("/.grok/")
+        || token.contains("~/.grok")
+        || token.contains("%userprofile%/.grok")
+        || token.contains("$env:userprofile/.grok")
+        || token.contains("$home/.grok")
+}
+
+/// `$GROK_HOME/sessions/**/{images,videos,downloads,uploads}/**` holds generated
+/// media (Imagine outputs, WebView downloads), not credential files.
+fn token_is_grok_home_session_artifact(token: &str) -> bool {
+    let sessions = token.contains("/.grok/sessions/")
+        || token.contains("~/.grok/sessions")
+        || token.contains("%userprofile%/.grok/sessions")
+        || token.contains("$env:userprofile/.grok/sessions")
+        || token.contains("$home/.grok/sessions");
+    if !sessions {
+        return false;
+    }
+    const LEAVES: &[&str] = &["/images/", "/videos/", "/downloads/", "/uploads/"];
+    const MEDIA: &[&str] = &[
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".mp4", ".webm", ".mkv", ".mov", ".wav",
+        ".mp3", ".m4a",
+    ];
+    LEAVES.iter().any(|leaf| token.contains(leaf))
+        || MEDIA.iter().any(|suffix| {
+            token.ends_with(suffix) || token.contains(&format!("{suffix}."))
+        })
+}
+
+fn grok_home_token_names_credential(token: &str) -> bool {
+    if GROK_HOME_CREDENTIAL_BASENAMES.iter().any(|b| {
+        token.ends_with(*b) || token.contains(&format!("/{b}"))
+    }) {
+        return true;
+    }
+    GROK_HOME_CREDENTIAL_SUFFIXES.iter().any(|suffix| {
+        token.ends_with(suffix)
+            || token.contains(&format!("{suffix}."))
+            || token.contains(&format!("{suffix}/"))
+    })
+}
+
+fn grok_home_path_tokens(cmd: &str) -> impl Iterator<Item = &str> {
+    cmd.split(|c: char| {
+        !(c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '_' | '-' | '/' | '~' | '%' | ':' | '$'))
+    })
+    .filter(|t| !t.is_empty())
 }
 
 /// Credential paths under `$GROK_HOME` that confining profiles must write-deny.
@@ -526,5 +579,33 @@ mod tests {
         assert!(is_grok_home_credential_file(Path::new(
             "/home/u/.grok/mcp_credentials.json"
         )));
+        assert!(
+            !command_mentions_grok_home_credential_in(
+                r#"Copy-Item "$env:USERPROFILE/.grok/sessions/abc/images/1.jpg" C:\website\tmp"#,
+                home
+            ),
+            "session images/ are generated artifacts, not credentials"
+        );
+        assert!(
+            !command_mentions_grok_home_credential_in(
+                "ffmpeg -i ~/.grok/sessions/h%3a%5capps/images/hero.png out.mp4",
+                home
+            ),
+            "session media copies must not trip .key suffix matching"
+        );
+        assert!(
+            command_mentions_grok_home_credential_in(
+                "Copy-Item ~/.grok/auth.json ~/.grok/sessions/abc/images/1.jpg",
+                home
+            ),
+            "auth.json in the same command still denies"
+        );
+        assert!(
+            command_mentions_grok_home_credential_in(
+                "type ~/.grok/sessions/abc/stolen.key",
+                home
+            ),
+            "credential suffixes under sessions still deny"
+        );
     }
 }

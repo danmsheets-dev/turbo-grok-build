@@ -2259,16 +2259,19 @@ fn budget_exhausted_message(
             budget.max_tool_calls.unwrap_or_default()
         ),
         SubagentBudgetTrigger::Timeout => format!(
-            "subagent wall-clock budget exhausted (limit: {}s)",
+            "subagent wall-clock budget exhausted (limit: {}s). \
+             Partial work stays in the child worktree when isolation=worktree — use land/diff or resume_from.",
             budget.timeout_secs.unwrap_or_default()
         ),
         SubagentBudgetTrigger::Stall => format!(
-            "subagent stalled (no tool/token/turn progress and no in-flight tools for {}ms)",
+            "subagent stalled (no tool/token/turn progress and no in-flight tools for {}ms). \
+             Partial work stays in the child worktree when isolation=worktree — use land/diff or resume_from.",
             budget.stall_timeout_ms.unwrap_or_default()
         ),
         SubagentBudgetTrigger::FirstProgress => format!(
             "subagent made no tool calls or tokens within {}ms of becoming runnable \
-             (worktree setup is excluded from this clock; error_class=subagent_stall)",
+             (worktree setup is excluded from this clock; error_class=subagent_stall). \
+             Partial work stays in the child worktree when isolation=worktree — use land/diff or resume_from.",
             budget.first_progress_timeout_ms.unwrap_or_default()
         ),
         _ => "subagent execution budget requested finalization".to_string(),

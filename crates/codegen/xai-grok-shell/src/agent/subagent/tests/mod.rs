@@ -156,7 +156,30 @@ fn budget_trigger_codes_and_reasons_are_stable() {
     assert!(SubagentBudgetTrigger::MaxToolCalls.is_hard());
     assert!(SubagentBudgetTrigger::Timeout.is_hard());
     assert!(SubagentBudgetTrigger::Stall.is_hard());
+    assert!(SubagentBudgetTrigger::FirstProgress.is_hard());
     assert!(! SubagentBudgetTrigger::FinalizingTurns.is_hard());
+    let timeout_msg = budget_exhausted_message(
+        SubagentBudgetTrigger::Timeout,
+        SubagentExecutionBudget {
+            timeout_secs: Some(900),
+            ..Default::default()
+        },
+    );
+    assert!(
+        timeout_msg.contains("resume_from"),
+        "timeout must hand off the worktree: {timeout_msg}"
+    );
+    let first_msg = budget_exhausted_message(
+        SubagentBudgetTrigger::FirstProgress,
+        SubagentExecutionBudget {
+            first_progress_timeout_ms: Some(720_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        first_msg.contains("resume_from"),
+        "first-progress cancel must hand off the worktree: {first_msg}"
+    );
 }
 
 #[test]

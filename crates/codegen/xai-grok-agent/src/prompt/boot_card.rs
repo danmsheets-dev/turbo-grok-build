@@ -456,7 +456,7 @@ Operational briefing for this session. Not project rules. Prefer this for produc
 - CLI: `{bin} issues|features file --class …` · `{bin} issues|features sync` (opt-in GitHub)
 - disk: `{bin} disk report|check|clean --safe [--include …]` · `{bin} disk prune` · `{bin} subagent prune` · `{bin} tree prune`
 - tools: `{bin} tools list [--require spawn_subagent]` (headless schema assert){browser}
-- meeting: `/meeting join <url> [name]` notes (Windows: WASAPI loopback + mic). If the user pastes a Teams/Zoom/Meet/Webex URL with join/listen/notes intent, call `meeting_join` in that turn — do not ask for a slash command and do not Start-Process the URL. `Turbo: …` in chat/audio auto-asks the workspace (MCP ok) and replies `[Turbo]`; `/meeting stop` writes work-only `Meetings/YYYY-MM-DD - Name.md` with For you + Projects.
+- meeting: `/meeting join <url> [name]` notes (Teams guest "Turbo (Notetaker)" or WASAPI on this PC — not a Fathom bot). If the user pastes a Teams/Zoom/Meet/Webex URL with join/listen/notes intent, call `meeting_join` in that turn — do not ask for a slash command and do not Start-Process the URL. `Turbo: …` in chat/audio auto-asks the workspace (MCP ok) and replies `[Turbo]`; `/meeting stop` writes work-only `Meetings/YYYY-MM-DD - Name.md` with For you + Projects.
 - schedule: `/schedule [at|every] <when> <prompt>` standing jobs (no 7-day expiry). Recipes: search, stat, meeting join. Results in `Schedules/`. `/loop` still expires at 7 days.
 
 {workflows}
@@ -765,6 +765,26 @@ mod tests {
             "DisplayCwd-as-parent must not instruct a refuse"
         );
         assert!(card.text.contains("Nested spawn: yes"));
+    }
+
+    #[test]
+    fn child_card_stamps_resolved_model_not_parent_default() {
+        let ctx = BootCardContext {
+            model: "openai-codex/gpt-5.5".into(),
+            isolation: "worktree".into(),
+            cwd: "/home/u/.grok/worktrees/repo/subagent-abc".into(),
+            ..Default::default()
+        };
+        let card = render_boot_card(BootCardMode::Child, &ctx).unwrap();
+        assert!(
+            card.text.contains("openai-codex/gpt-5.5"),
+            "child card must stamp the spawn model: {}",
+            card.text
+        );
+        assert!(
+            !card.text.contains("grok-4.6"),
+            "child card must not advertise the parent default"
+        );
     }
 
     #[test]

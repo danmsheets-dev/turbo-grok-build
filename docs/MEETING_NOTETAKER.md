@@ -1,6 +1,6 @@
 # Meeting Notetaker (v3)
 
-Turbo's Fathom-style meeting notetaker. From **1.0.0-rc.9** it joins Teams
+Turbo's meeting notetaker. From **1.0.0-rc.9** it joins Teams
 meetings as a **visible guest participant** instead of recording this machine.
 
 | Version | Transport | What other participants see |

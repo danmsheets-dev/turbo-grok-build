@@ -8,9 +8,10 @@
 //!
 //! V1 configuration source: `GROK_POLICY_DENY_PATHS` /
 //! `GROK_POLICY_DENY_COMMANDS` (`;`-separated) and
-//! `GROK_POLICY_MAX_DIFF_LINES` (integer). `Params<PolicyParams>` is honored
-//! when a host injects it, but no host-injection configuration path is provided
-//! by this crate.
+//! `GROK_POLICY_MAX_DIFF_LINES` (integer). The pager/shell host injects the
+//! env-resolved snapshot as `Params<PolicyParams>` at session start so tool
+//! lookups hit even when env is later unset. There is no `config.toml`
+//! `[policy]` table yet.
 
 use serde::{Deserialize, Serialize};
 

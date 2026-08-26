@@ -13,7 +13,7 @@ use crate::url::{MeetingKind, MeetingPlatform, MeetingUrl, redact_join_secrets};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureSource {
-    /// WASAPI loopback / system mix (closest to Fathom).
+    /// WASAPI loopback / system mix (local capture of this machine).
     Loopback,
     /// Default microphone (fallback when loopback is unavailable).
     Microphone,

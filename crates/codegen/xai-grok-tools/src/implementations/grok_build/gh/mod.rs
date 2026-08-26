@@ -35,6 +35,60 @@ fn resolve_gh() -> Result<std::path::PathBuf, xai_tool_runtime::ToolError> {
     })
 }
 
+/// Pin `gh` to `origin` so a checkout with `upstream` → xai-org/grok-build
+/// does not query the read-only official remote by default.
+fn parse_github_owner_repo(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/').trim_end_matches(".git");
+    let normalized = url.replace('\\', "/");
+    let rest = if let Some(rest) = normalized.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(idx) = normalized.find("github.com/") {
+        &normalized[idx + "github.com/".len()..]
+    } else if let Some(idx) = normalized.find("github.com:") {
+        &normalized[idx + "github.com:".len()..]
+    } else {
+        return None;
+    };
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || owner.contains(':') {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn inject_repo_flag(argv: &mut Vec<String>, repo: &str) {
+    if argv.iter().any(|a| a == "--repo" || a == "-R") {
+        return;
+    }
+    if argv.is_empty() {
+        return;
+    }
+    argv.insert(1, "--repo".to_string());
+    argv.insert(2, repo.to_string());
+}
+
+async fn origin_github_repo() -> Option<String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["remote", "get-url", "origin"])
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    xai_tty_utils::detach_command(&mut cmd);
+    let output = tokio::time::timeout(GH_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = cap_bytes(output.stdout, GH_OUTPUT_CAP_BYTES);
+    let url = String::from_utf8_lossy(&stdout);
+    parse_github_owner_repo(url.trim())
+}
+
 /// Run a `gh` command with bounded timeout, capturing stdout/stderr.
 /// Returns (stdout, stderr, exit_code) on completion, or a ToolError on timeout/spawn failure.
 async fn run_gh(
@@ -43,8 +97,12 @@ async fn run_gh(
     mutating: bool,
 ) -> Result<(Vec<u8>, Vec<u8>, i32), xai_tool_runtime::ToolError> {
     let gh_path = resolve_gh()?;
+    let mut argv = argv.to_vec();
+    if let Some(repo) = origin_github_repo().await {
+        inject_repo_flag(&mut argv, &repo);
+    }
     let mut cmd = tokio::process::Command::new(&gh_path);
-    cmd.args(argv)
+    cmd.args(&argv)
         .env("GH_NO_BROWSER", "1")
         .env("CI", "1")
         .kill_on_drop(true)
@@ -1111,6 +1169,44 @@ mod tests {
             vec!["run", "rerun", "--", "12345"]
                 .iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn parse_github_owner_repo_https_and_ssh() {
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/danmsheets-dev/turbo-grok-build.git")
+                .as_deref(),
+            Some("danmsheets-dev/turbo-grok-build")
+        );
+        assert_eq!(
+            parse_github_owner_repo("git@github.com:danmsheets-dev/turbo-grok-build.git")
+                .as_deref(),
+            Some("danmsheets-dev/turbo-grok-build")
+        );
+        assert_eq!(
+            parse_github_owner_repo("ssh://git@github.com/xai-org/grok-build").as_deref(),
+            Some("xai-org/grok-build")
+        );
+        assert_eq!(parse_github_owner_repo("https://gitlab.com/foo/bar"), None);
+    }
+
+    #[test]
+    fn inject_repo_flag_after_subcommand_unless_already_set() {
+        let mut argv = vec!["run".into(), "view".into(), "--".into(), "1".into()];
+        inject_repo_flag(&mut argv, "danmsheets-dev/turbo-grok-build");
+        assert_eq!(
+            argv,
+            vec![
+                "run",
+                "--repo",
+                "danmsheets-dev/turbo-grok-build",
+                "view",
+                "--",
+                "1"
+            ]
+        );
+        inject_repo_flag(&mut argv, "other/repo");
+        assert_eq!(argv[2], "danmsheets-dev/turbo-grok-build");
     }
 
     #[test]

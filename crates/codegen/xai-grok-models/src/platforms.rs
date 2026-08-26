@@ -4606,6 +4606,12 @@ mod tests {
         assert_eq!(laguna.context_window, 262_144);
         assert_eq!(laguna.max_completion_tokens, Some(32_768));
 
+        let laguna_s = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "poolside/laguna-s-2.1")
+            .expect("laguna s");
+        assert_eq!(laguna_s.max_completion_tokens, Some(32_768));
+
         let nemotron = platform_builtin_models()
             .iter()
             .find(|m| m.catalog_key() == "nvidia/mistralai/mistral-nemotron")

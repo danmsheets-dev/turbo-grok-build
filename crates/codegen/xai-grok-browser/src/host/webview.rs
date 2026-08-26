@@ -284,8 +284,7 @@ impl AgentWebView {
             }
             // HTTP error documents (404 HTML) still have a Source URL.
             if let Ok(loc) = self.location()
-                && !loc.url.is_empty()
-                && !loc.url.eq_ignore_ascii_case("about:blank")
+                && super::http_error_document_counts_as_navigation(&loc.url)
             {
                 return Ok(loc);
             }

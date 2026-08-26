@@ -193,6 +193,16 @@ fn discover_godot_exe() -> Option<String> {
         candidates.push(base.join("Godot_v4.exe"));
         candidates.push(base.join("godot.exe"));
         candidates.push(base.join("Godot_console.exe"));
+        if let Ok(rd) = std::fs::read_dir(&base) {
+            for ent in rd.flatten() {
+                let name = ent.file_name();
+                let name = name.to_string_lossy();
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with("godot_v") && lower.ends_with(".exe") {
+                    candidates.push(ent.path());
+                }
+            }
+        }
     }
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
@@ -201,6 +211,14 @@ fn discover_godot_exe() -> Option<String> {
             candidates.push(dir.join("Godot_console.exe"));
         }
     }
+    candidates.sort_by_key(|p| {
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if name.contains("console") { 0 } else { 1 }
+    });
     candidates
         .into_iter()
         .find(|p| p.is_file())
@@ -701,6 +719,10 @@ pub(crate) async fn run_shell_child(
                 } else {
                     prune_soft_preserved_worktrees_with_cap(parent_base, (keep / 2).max(1));
                 }
+            }
+            // Last chance: drop every non-live tree before failing the spawn.
+            if ensure_min_free_space_for_worktree(parent_base).is_err() {
+                prune_soft_preserved_worktrees_by_age(parent_base, std::time::Duration::ZERO);
             }
             if let Err(msg) = ensure_min_free_space_for_worktree(parent_base) {
                 if !allow_shared_fallback {
@@ -2414,6 +2436,7 @@ pub(crate) async fn run_shell_child(
             SubagentBudgetTrigger::Timeout
                 | SubagentBudgetTrigger::MaxToolCalls
                 | SubagentBudgetTrigger::Stall
+                | SubagentBudgetTrigger::FirstProgress
         ) {
             let partial_ok = can_use_partial_budget_result(
                 true,

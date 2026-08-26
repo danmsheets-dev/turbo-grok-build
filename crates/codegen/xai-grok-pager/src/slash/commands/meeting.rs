@@ -1,4 +1,4 @@
-//! `/meeting` — Fathom-style notetaker (join URL → record → Grok STT → notes).
+//! `/meeting` — notetaker (join URL → record → Grok STT → notes).
 
 use xai_grok_tools::implementations::grok_build::{
     MEETING_COMMAND_NAME, MEETING_JOIN_TOOL_NAME, ask_instruction, join_instruction,
@@ -18,7 +18,7 @@ impl SlashCommand for MeetingCommand {
     }
 
     fn description(&self) -> &str {
-        "Fathom-style meeting notes (join URL, transcribe, recap, coworker Q&A)"
+        "Meeting notes (join URL, transcribe, recap, coworker Q&A)"
     }
 
     fn usage(&self) -> &str {

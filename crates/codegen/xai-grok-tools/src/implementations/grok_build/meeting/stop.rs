@@ -23,7 +23,7 @@ impl crate::types::tool_metadata::ToolMetadata for MeetingStopTool {
     }
 
     fn description_template(&self) -> &str {
-        "Stop the Fathom-style meeting notetaker for this session. Flushes the transcript. Then load meeting_transcript and call meeting_notes with a work-only recap so it is saved as Meetings/YYYY-MM-DD - <name>.md in the launch work folder."
+        "Stop the meeting notetaker for this session. Flushes the transcript. Then load meeting_transcript and call meeting_notes with a work-only recap so it is saved as Meetings/YYYY-MM-DD - <name>.md in the launch work folder."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
