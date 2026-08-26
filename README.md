@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-1.0.0--rc.10-blue" alt="1.0.0-rc.10">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.11-blue" alt="1.0.0-rc.11">
   <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.10`** — GitHub
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.11`** — GitHub
 **Latest** with `SHA256SUMS` so managed `~/.turbo` installs auto-update.
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
@@ -73,6 +73,7 @@ community updater and `install.ps1` / `install.sh` require:
 
 | Wire | Release | Windows asset |
 | --- | --- | --- |
+| `1.0.0-rc.11` | [v1.0.0-rc.11](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.11) | `turbo-1.0.0-rc.11-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.10` | [v1.0.0-rc.10](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.10) | `turbo-1.0.0-rc.10-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.9` | [v1.0.0-rc.9](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.9) | `turbo-1.0.0-rc.9-x86_64-pc-windows-msvc.zip` |
 | `1.0.0-rc.8` | [v1.0.0-rc.8](https://github.com/danmsheets-dev/turbo-grok-build/releases/tag/v1.0.0-rc.8) | `turbo-1.0.0-rc.8-x86_64-pc-windows-msvc.zip` |
@@ -124,6 +125,12 @@ loopback + mic on Windows fallback), and transcribes **all participants** via
 `Turbo:` questions from the launch workspace (MCP ok), and writes a work-only
 recap to `Meetings/YYYY-MM-DD - <name>.md` with **For you** and **Projects**
 sections. Audio leaves the machine for transcription.
+
+**1.0.0-rc.11** is **Security honesty**: fail-closed confine bypasses, folder-trust
+for project skills, marketplace `require_sha`, signed GitHub release attestations,
+and Agent WebView called **beta**. `--confine` is a write boundary, not an OS jail.
+Meeting audio is transcribed by xAI hosted STT. Internal campaign / claims-ledger
+files are gone from the tree.
 
 **1.0.0-rc.10** is **Teams Join Hardening and Incident Log**: `meeting_join` no
 longer hands the link to the OS when a guest bot is dispatched (which is what put
@@ -280,7 +287,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **1.0.0-rc.10** |
+| Release line | upstream cadence | **1.0.0-rc.11** |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
@@ -311,12 +318,12 @@ turbo                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash -s -- --version v1.0.0-rc.10
+curl -fsSL https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.sh | bash -s -- --version v1.0.0-rc.11
 ```
 
 ```powershell
 # Windows — pin this release
-.\install.ps1 -Version v1.0.0-rc.10
+.\install.ps1 -Version v1.0.0-rc.11
 ```
 
 Installer verifies `SHA256SUMS`, installs to `~/.turbo/bin/turbo`
@@ -572,7 +579,7 @@ Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
 
 ## Changelog & known issues
 
-- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **1.0.0-rc.10** is current
+- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **1.0.0-rc.11** is current
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
 - [`docs/workspace-tree.md`](docs/workspace-tree.md) — Workspace Tree (RC12–RC13)
 - [`docs/archive/RC11_RELEASE_NOTES.md`](docs/archive/RC11_RELEASE_NOTES.md) — Game Mode (historical)

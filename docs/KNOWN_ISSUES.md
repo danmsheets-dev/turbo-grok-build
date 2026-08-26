@@ -3,7 +3,21 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-24 (1.0.0-rc.10 Teams join hardening and incident log).
+Last reviewed: 2026-08-26 (1.0.0-rc.11 security honesty).
+
+## 1.0.0-rc.11 — Security honesty
+
+Shipped on wire `1.0.0-rc.11`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+- `--confine` is a fail-closed **write boundary** (path-prefix + program
+  classifier), not an OS filesystem jail or sandbox.
+- Meeting audio is transcribed by xAI hosted STT. A Teams guest join still
+  cannot auto-attach a launcher-opened tab (see rc.10 limits below).
+- Marketplace plugins are SHA-pinned when `require_sha` is on; they are **not**
+  cryptographically signed.
+- Agent WebView (`browser_*`) is **beta**.
+- Git history still contains deleted `marketing/` blobs; only the branch tip
+  dropped them.
 
 ## 1.0.0-rc.10 — Teams join hardening and incident log
 

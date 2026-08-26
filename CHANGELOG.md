@@ -43,6 +43,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc8** | **`1.0.0-rc.8`** | Scheduled tasks, Meeting R2, Browser R3, GitHub log sync |
 | **1.0 rc9** | **`1.0.0-rc.9`** | Meeting Tool v3: joined Teams notetaker bot |
 | **1.0 rc10** | **`1.0.0-rc.10`** | Teams join hardening and incident log |
+| **1.0 rc11** | **`1.0.0-rc.11`** | Security honesty |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -51,11 +52,14 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
-### [1.0.0-rc.11] — security honesty (in progress)
+---
 
-Fail-closed confine bypasses, permission mapping for mutating tools that were
-classified as pathless reads, folder-trust for project skills, meeting-QA
-workspace confine, Agent WebView called **beta** and permission-gated.
+## [1.0.0-rc.11] - 2026-08-26
+
+**Security honesty.** Fail-closed confine bypasses, permission mapping for
+mutating tools that were classified as pathless reads, folder-trust for project
+skills, meeting-QA workspace confine, Agent WebView called **beta** and
+permission-gated.
 
 Do not describe `--confine` as an OS jail. Meeting audio is transcribed by
 xAI hosted STT. Report vulnerabilities via this fork's GitHub private
