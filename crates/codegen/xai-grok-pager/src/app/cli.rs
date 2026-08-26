@@ -148,6 +148,8 @@ pub enum Command {
     Disk(crate::disk_cmd::DiskArgs),
     /// List registered model-facing tools (headless schema assert)
     Tools(crate::tools_cmd::ToolsArgs),
+    /// Package-scoped cargo tests; repeated `--match` ORs name prefixes in one compile
+    Test(crate::test_cmd::TestArgs),
     /// List, show, or cancel standing `/schedule` jobs (works with Turbo closed)
     Schedule(crate::schedules_cmd::ScheduleArgs),
     /// Fetch and install managed configuration
