@@ -215,6 +215,9 @@ fn path_is_under_home(path: &Path, home: &Path) -> bool {
 }
 
 /// True when `path` is a credential file under `$GROK_HOME` and must not be written.
+///
+/// Kernel sandbox is advisory on Windows; callers must fail closed on this
+/// predicate (writes, not just reads).
 pub fn write_denied_grok_home_credential(path: &Path) -> bool {
     write_denied_grok_home_credential_in(path, &grok_home())
 }
@@ -547,6 +550,21 @@ mod tests {
             Path::new(r"C:\Apps\project\auth.json"),
             home
         ));
+    }
+
+    #[test]
+    fn grok_home_auth_json_write_is_denied_even_when_kernel_advisory() {
+        // Path-agnostic policy: same matcher Unix kernels and Windows userspace.
+        let path = grok_home().join("auth.json");
+        assert!(
+            write_denied_grok_home_credential(&path),
+            "writing $GROK_HOME/auth.json must be policy-denied (Windows apply() is advisory)"
+        );
+        assert!(command_mentions_grok_home_credential(&format!(
+            "echo stolen > {}",
+            path.display()
+        )));
+        assert!(!write_denied_grok_home_credential(Path::new("src/main.rs")));
     }
 
     #[test]

@@ -378,6 +378,17 @@ impl xai_tool_runtime::Tool for BashTool {
         // Also refuse when an explicit workdir override points at a missing path.
         crate::types::tool_metadata::ensure_cwd_directory(&cwd)?;
 
+        if xai_grok_sandbox::command_mentions_grok_home_credential(&input.command) {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "policy_denied",
+                crate::implementations::grok_build::policy::denial(
+                    "bash",
+                    "grok_home_credentials",
+                    "command names a $GROK_HOME credential file (auth.json / keys)",
+                ),
+            ));
+        }
+
         // --- Compute effective timeout ---
         let timeout = Self::effective_timeout(input.timeout);
 

@@ -154,6 +154,7 @@ pub async fn exists(abs_path: &Path) -> Result<FsExistsData> {
 }
 
 pub async fn read_file(abs_path: &Path) -> Result<FsReadFileData> {
+    grok_home_credential_io_denied(abs_path, "read")?;
     let bytes = tokio::fs::read(abs_path).await?;
     Ok(build_file_entry(&bytes))
 }
@@ -169,6 +170,7 @@ pub(crate) async fn read_file_ranged(
     max_bytes: u64,
     encoding: FsReadEncoding,
 ) -> Result<FsReadFileData> {
+    grok_home_credential_io_denied(abs_path, "read")?;
     let md = tokio::fs::metadata(abs_path).await?;
     if md.is_dir() {
         anyhow::bail!("not a file: {}", abs_path.display());
@@ -227,7 +229,25 @@ pub(crate) fn check_file_size_limits(
     Ok(())
 }
 
+fn grok_home_credential_io_denied(path: &Path, op: &str) -> Result<()> {
+    if !xai_grok_sandbox::write_denied_grok_home_credential(path)
+        && !xai_grok_sandbox::is_sensitive_credential_store(path)
+    {
+        return Ok(());
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("credential");
+    anyhow::bail!(
+        "Denied: {op} of grok-home credential `{name}` is blocked \
+         (auth.json / keys under $GROK_HOME). Kernel sandbox is advisory on \
+         Windows; policy confine is fail-closed for credential writes."
+    )
+}
+
 pub async fn write_file(abs_path: &Path, content: &str, create_dirs: bool) -> Result<()> {
+    grok_home_credential_io_denied(abs_path, "write")?;
     let abs_path = abs_path.to_path_buf();
     let content = content.to_string();
 
@@ -264,6 +284,7 @@ pub(crate) fn build_file_entry(bytes: &[u8]) -> FsReadFileData {
 }
 
 pub async fn delete_file(abs_path: &Path) -> Result<()> {
+    grok_home_credential_io_denied(abs_path, "delete")?;
     tokio::fs::remove_file(abs_path).await?;
     Ok(())
 }
@@ -355,5 +376,23 @@ mod tests {
             .unwrap();
         assert_eq!(d.size, 64);
         assert_eq!(d.content.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn write_file_denies_grok_home_credential() {
+        let path = xai_grok_config::grok_home().join("auth.json");
+        let err = write_file(&path, "stolen", false)
+            .await
+            .expect_err("$GROK_HOME credentials must be write-denied");
+        let msg = err.to_string();
+        assert!(msg.contains("Denied"), "{msg}");
+        assert!(
+            msg.contains("auth.json") || msg.contains("credential"),
+            "{msg}"
+        );
+        assert!(
+            grok_home_credential_io_denied(&path, "write").is_err(),
+            "policy confine is fail-closed for credential writes (Windows kernel apply is advisory)"
+        );
     }
 }

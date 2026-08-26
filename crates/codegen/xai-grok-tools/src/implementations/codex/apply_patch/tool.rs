@@ -434,12 +434,17 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                         ),
                     ));
                 }
-                if crate::implementations::grok_build::policy::grok_home_credential_denied(path) {
+                let resolved = cwd.join(path);
+                if crate::implementations::grok_build::policy::grok_home_credential_denied(path)
+                    || crate::implementations::grok_build::policy::grok_home_credential_denied(
+                        &resolved,
+                    )
+                {
                     return Err(xai_tool_runtime::ToolError::custom(
                         "policy_denied",
                         crate::implementations::grok_build::policy::grok_home_credential_denial(
                             "apply_patch",
-                            path,
+                            &resolved,
                         ),
                     ));
                 }
@@ -695,6 +700,26 @@ mod tests {
             }
             other => panic!("Expected Success, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_denies_grok_home_credential_write() {
+        let home = xai_grok_config::grok_home();
+        let tool = ApplyPatchTool;
+        let resources = test_resources(&home);
+        let patch = wrap_patch("*** Add File: auth.json\n+stolen");
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input(&patch),
+        )
+        .await
+        .expect_err("$GROK_HOME credentials must be write-denied");
+        assert!(
+            err.to_string().contains("grok_home_credentials"),
+            "{}",
+            err.to_string()
+        );
     }
 
     #[tokio::test]

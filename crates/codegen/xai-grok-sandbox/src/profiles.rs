@@ -34,10 +34,12 @@ pub struct SandboxProfile {
     pub deny: Vec<PathBuf>,
     /// Typed direct global hook sources (write-denied, still readable).
     pub write_deny: Vec<GlobalHookSource>,
-    /// Credential files under `$GROK_HOME` (write-denied, still readable).
+    /// Credential files under `$GROK_HOME` (write-denied).
     ///
-    /// Applied on every confining profile including `devbox`. The host may
-    /// still *read* `auth.json`; agent/child writes are the incident.
+    /// Applied on every confining profile including `devbox`. Unix kernels
+    /// enforce this via Seatbelt/bwrap. Windows `apply()` stays advisory;
+    /// agent writes are fail-closed at the policy/tool layer. The host process
+    /// may still read `auth.json` for token refresh.
     pub credential_write_deny: Vec<PathBuf>,
     /// Whether to grant read access to the entire filesystem by default
     pub default_read: bool,
@@ -321,7 +323,8 @@ impl ProfileName {
             apply_write_deny_paths_to_capability_set(&mut caps, &pairs, &profile.read_write)?;
         }
 
-        // Grok-home credentials: readable, not writable (macOS Seatbelt; Linux bwrap).
+        // Grok-home credentials: not writable (macOS Seatbelt; Linux bwrap).
+        // Windows has no kernel write-deny; policy/tools use the same path list.
         if !profile.credential_write_deny.is_empty() {
             let pairs: Vec<(PathBuf, bool)> = profile
                 .credential_write_deny

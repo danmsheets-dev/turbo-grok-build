@@ -3427,6 +3427,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bash_denies_grok_home_credential_write() {
+        let resources = make_resources(MockTerminal::success("ok", 0));
+        let tool = BashTool;
+        let cmd = format!(
+            "echo stolen > {}",
+            xai_grok_config::grok_home().join("auth.json").display()
+        );
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input(&cmd),
+        )
+        .await
+        .expect_err("$GROK_HOME credential writes must be denied");
+        assert!(
+            err.to_string().contains("grok_home_credentials"),
+            "{}",
+            err.to_string()
+        );
+    }
+
+    #[tokio::test]
     async fn errors_when_terminal_not_in_resources() {
         let mut resources = Resources::new();
         resources.insert(Cwd(PathBuf::from("/tmp")));

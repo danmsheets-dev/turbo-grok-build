@@ -11,6 +11,9 @@
 //! and child processes. Network is left open at the process level (agent
 //! needs LLM API); child network is blocked per-subprocess via seccomp.
 //!
+//! On Windows, kernel `apply()` stays advisory (`applied=false`). `$GROK_HOME`
+//! credential writes are fail-closed at the policy/tool layer.
+//!
 //! The `enforce` feature (on by default) pulls in `nono` for
 //! kernel-enforced sandboxing (Landlock/Seatbelt). When disabled, the
 //! crate still provides lightweight helpers (`log_violation`,
@@ -242,18 +245,21 @@ impl SandboxManager {
         }
     }
     /// Stub when kernel enforcement is unavailable (Windows, or built without
-    /// the `enforce` feature). **Must not** set `applied = true` or otherwise
-    /// change tool behaviour: a non-enforcing profile that reports active can
-    /// flip `should_auto_allow_bash` and break Grep/vendor extraction paths
-    /// that assume a real writable-path set. Advisory only.
+    /// the `enforce` feature). **Must not** set `applied = true`: a non-enforcing
+    /// profile that reports active can flip `should_auto_allow_bash` and break
+    /// Grep/vendor extraction paths that assume a real writable-path set.
+    ///
+    /// Kernel sandbox remains advisory (`applied=false`). `$GROK_HOME`
+    /// credential writes are still fail-closed at the policy/tool layer
+    /// ([`write_denied_grok_home_credential`]) — not a Job Object / AppContainer.
     #[cfg(not(all(feature = "enforce", unix)))]
     pub fn apply(&mut self, _workspace: &Path) -> anyhow::Result<()> {
         // Keep applied=false so is_active()/should_auto_allow_bash stay off.
         self.applied = false;
         tracing::info!(
             profile = %self.profile,
-            "Sandbox profile is advisory on this platform (no kernel enforcement); \
-             tool behaviour unchanged"
+            "Sandbox kernel apply is advisory on this platform (no Job Object / AppContainer); \
+             policy confine is fail-closed for $GROK_HOME credential writes"
         );
         Ok(())
     }
@@ -662,6 +668,31 @@ mod tests {
             }
         }
     }
+    #[cfg(not(all(feature = "enforce", unix)))]
+    #[test]
+    fn apply_stays_advisory_when_kernel_unavailable() {
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-sb-adv-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut sb = SandboxManager::new(ProfileName::Workspace, &tmp);
+        sb.apply(&tmp).expect("advisory apply must succeed");
+        assert!(
+            !sb.applied,
+            "kernel sandbox must remain advisory (applied=false)"
+        );
+        assert!(
+            write_denied_grok_home_credential(&paths::grok_home().join("auth.json")),
+            "policy confine must still deny $GROK_HOME credential writes"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     #[serial(bwrap_env)]
     fn bwrap_reexec_returns_none_inside_bwrap() {

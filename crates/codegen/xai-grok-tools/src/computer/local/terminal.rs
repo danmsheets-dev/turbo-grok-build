@@ -621,6 +621,14 @@ impl LocalTerminalActor {
                 cwd.display()
             )));
         }
+        if xai_grok_sandbox::command_mentions_grok_home_credential(command) {
+            return Err(ComputerError::io_with_kind(
+                "policy denied (bash): rule `grok_home_credentials` matched command names a \
+                 $GROK_HOME credential file (auth.json / keys). Kernel sandbox is advisory on \
+                 Windows; policy confine is fail-closed for credential writes.",
+                std::io::ErrorKind::PermissionDenied,
+            ));
+        }
 
         #[cfg(unix)]
         if self.persistent_shell {
@@ -3201,6 +3209,16 @@ fn spawn_shell_command(
     search_shadows: SearchShadowConfig,
     shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
 ) -> std::io::Result<(tokio::process::Child, crate::util::ProcessGroup)> {
+    // Kernel sandbox is advisory on Windows; fail closed here for credential
+    // redirects even if a caller skipped the bash-tool policy check.
+    if xai_grok_sandbox::command_mentions_grok_home_credential(command) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "policy denied (bash): rule `grok_home_credentials` matched command names a \
+             $GROK_HOME credential file (auth.json / keys). Kernel sandbox is advisory on \
+             Windows; policy confine is fail-closed for credential writes.",
+        ));
+    }
     // Fail closed with a clear message when CWD is missing (worktree tombstone /
     // prune race). Without this Windows surfaces opaque OS error 267
     // ("The directory name is invalid") on every shell tool call.

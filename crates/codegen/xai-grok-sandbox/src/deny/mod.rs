@@ -3,6 +3,10 @@
 //! macOS: Seatbelt platform rules via [`nono::CapabilitySet::add_platform_rule`].
 //! Linux: Landlock cannot deny a subpath of an allowed tree; read-deny is
 //! enforced via bwrap bind-over (see [`crate::bwrap_reexec_command`]).
+//!
+//! Windows has no kernel jail (`SandboxManager::apply` stays `applied=false`).
+//! `$GROK_HOME` credential writes are fail-closed in userspace via
+//! [`crate::write_denied_grok_home_credential`].
 
 #[cfg(all(feature = "enforce", unix))]
 use nono::CapabilitySet;

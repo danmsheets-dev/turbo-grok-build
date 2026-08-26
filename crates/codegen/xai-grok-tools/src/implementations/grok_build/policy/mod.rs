@@ -311,4 +311,18 @@ mod tests {
         assert!(msg.starts_with("policy denied (search_replace)"));
         assert!(msg.contains("deny_paths"));
     }
+
+    #[test]
+    fn grok_home_credential_denied_auth_json() {
+        let path = xai_grok_config::grok_home().join("auth.json");
+        assert!(
+            grok_home_credential_denied(&path),
+            "writing $GROK_HOME/auth.json must be policy-denied"
+        );
+        let msg = grok_home_credential_denial("search_replace", &path);
+        assert!(msg.contains("grok_home_credentials"), "{msg}");
+        assert!(!grok_home_credential_denied(std::path::Path::new(
+            "src/main.rs"
+        )));
+    }
 }

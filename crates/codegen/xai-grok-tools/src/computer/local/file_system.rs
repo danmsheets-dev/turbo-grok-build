@@ -466,6 +466,22 @@ mod tests {
         assert!(!is_windows_transient_write_lock_raw_os_error(None));
     }
 
+    #[test]
+    fn grok_home_credential_write_is_denied() {
+        let path = xai_grok_config::grok_home().join("auth.json");
+        let err = grok_home_credential_write_error(&path, "write")
+            .expect("auth.json under $GROK_HOME must be write-denied");
+        let msg = err.to_string();
+        assert!(msg.contains("Denied"), "{msg}");
+        assert!(
+            msg.contains("auth.json") || msg.contains("credential"),
+            "{msg}"
+        );
+        assert!(
+            grok_home_credential_write_error(Path::new("src/main.rs"), "write").is_none()
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn classifies_windows_transient_write_lock_io_errors() {

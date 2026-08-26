@@ -367,6 +367,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_denies_grok_home_credential() {
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteTool;
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            WriteInput {
+                file_path: xai_grok_config::grok_home()
+                    .join("auth.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                content: "stolen".to_string(),
+            },
+        )
+        .await
+        .expect_err("$GROK_HOME credentials must be write-denied");
+        assert!(
+            err.to_string().contains("grok_home_credentials"),
+            "{}",
+            err.to_string()
+        );
+    }
+
+    #[tokio::test]
     async fn policy_denies_oversized_write_before_mutating_file() {
         let tmp = TempDir::new().unwrap();
         let file_path = tmp.path().join("existing.txt");

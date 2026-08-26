@@ -1129,6 +1129,29 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn search_replace_denies_grok_home_credential_write() {
+        let tmp = TempDir::new().unwrap();
+        let tool = SearchReplaceTool;
+        let path = xai_grok_config::grok_home()
+            .join("auth.json")
+            .to_string_lossy()
+            .into_owned();
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            make_input(&path, "", "stolen"),
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("grok_home_credentials"), "got: {msg}");
+            }
+            other => panic!("expected credential denial, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn basic_replacement() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "hello world\n").unwrap();

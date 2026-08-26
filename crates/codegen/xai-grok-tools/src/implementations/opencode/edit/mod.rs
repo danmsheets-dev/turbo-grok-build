@@ -231,6 +231,13 @@ impl xai_tool_runtime::Tool for EditTool {
             crate::types::resources::enforce_allowed_write_paths(&cwd, &path, prefixes)
                 .map_err(|e| e.into_tool_error())?;
         }
+        if crate::implementations::grok_build::policy::grok_home_credential_denied(&path) {
+            return Ok(SearchReplaceOutput::InvalidInput(
+                crate::implementations::grok_build::policy::grok_home_credential_denial(
+                    "edit", &path,
+                ),
+            ));
+        }
 
         // ── Validate input ──────────────────────────────────────────
         if path.is_dir() {

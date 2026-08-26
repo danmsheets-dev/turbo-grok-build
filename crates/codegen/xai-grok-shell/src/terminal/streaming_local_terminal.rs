@@ -279,6 +279,16 @@ pub async fn create_terminal(
 
     // Non-empty args → spawn program directly (argv preserved verbatim).
     // Empty args → treat command as a shell snippet (bash -c / cmd /C).
+    let policy_line = if args.is_empty() {
+        command.to_string()
+    } else {
+        std::iter::once(command)
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    deny_grok_home_credential_shell(&policy_line)
+        .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
     let child = if args.is_empty() {
         spawn_shell_command(command, &working_dir, &env)
     } else {
@@ -856,6 +866,20 @@ impl StreamingLocalTerminalRunner {
     }
 }
 
+/// Kernel sandbox is advisory on Windows; refuse `$GROK_HOME` credential
+/// paths in the command line (redirects, copies, `Set-Content`).
+fn deny_grok_home_credential_shell(command: &str) -> std::io::Result<()> {
+    if xai_grok_sandbox::command_mentions_grok_home_credential(command) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "policy denied (bash): rule `grok_home_credentials` matched command names a \
+             $GROK_HOME credential file (auth.json / keys). Kernel sandbox is advisory on \
+             Windows; policy confine is fail-closed for credential writes.",
+        ));
+    }
+    Ok(())
+}
+
 /// Spawn `command` via the detected shell (`bash -c` on Unix,
 /// cascading pwsh / powershell.exe / Git Bash / cmd.exe on Windows).
 fn spawn_shell_command(
@@ -863,6 +887,7 @@ fn spawn_shell_command(
     cwd: &impl AsRef<std::path::Path>,
     env: &HashMap<String, String>,
 ) -> std::io::Result<Box<dyn process_wrap::tokio::ChildWrapper>> {
+    deny_grok_home_credential_shell(command)?;
     #[cfg(unix)]
     {
         let program = crate::terminal::default_shell_path();
@@ -1604,5 +1629,19 @@ mod tests {
                 release_terminal(&session_b, &id_b).await;
             })
             .await;
+    }
+
+    #[test]
+    fn bash_denies_grok_home_credential_write() {
+        let path = xai_grok_config::grok_home().join("auth.json");
+        let err = deny_grok_home_credential_shell(&format!("echo stolen > {}", path.display()))
+            .expect_err("$GROK_HOME credential writes must be denied");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            err.to_string().contains("grok_home_credentials"),
+            "{err}"
+        );
+        deny_grok_home_credential_shell("echo hello")
+            .expect("ordinary commands must not trip credential deny");
     }
 }
