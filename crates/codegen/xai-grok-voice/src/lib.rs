@@ -21,6 +21,7 @@ pub mod live;
 pub mod pipeline;
 pub mod probe;
 pub mod stt;
+pub mod tts;
 
 pub use auth::{SharedVoiceAuth, StaticVoiceAuth, VoiceAuthProvider};
 pub use config::VoiceConfig;
@@ -36,6 +37,10 @@ pub use probe::run_mic_only_probe;
 pub use probe::{
     InputDeviceInfo, VoiceProbeOptions, VoiceProbeReport, format_probe_report, input_device_info,
     run_streaming_probe,
+};
+pub use tts::{
+    MEETING_TTS_ENV, TtsBackend, TtsEngine, TtsOutcome, format_tts_line, format_tts_status_line,
+    maybe_speak_reply, meeting_tts_enabled, spoken_text,
 };
 
 /// Whether this build can capture microphone audio (the `audio` feature).

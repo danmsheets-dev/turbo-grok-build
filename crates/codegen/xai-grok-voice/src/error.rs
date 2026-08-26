@@ -13,4 +13,12 @@ pub enum VoiceError {
 
     #[error("WebSocket: {0}")]
     WebSocket(String),
+
+    /// Local TTS (Windows SAPI) is not available on this platform/build.
+    #[error("TTS unavailable: {0}")]
+    TtsUnavailable(String),
+
+    /// Local TTS ran and failed (SAPI COM / Speak error).
+    #[error("TTS: {0}")]
+    Tts(String),
 }

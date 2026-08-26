@@ -97,9 +97,10 @@ Shipped on wire `1.0.0-rc.9`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
 
 ### Intentional limits
 
-- **Turbo cannot speak in a meeting.** `xai-grok-voice` has STT and a live
-  WebRTC session with speaker playback, but no TTS, so there is no audio source
-  to feed the meeting. Answers post to meeting chat. Tracked as
+- **Turbo cannot speak *in* a Teams meeting.** `GROK_MEETING_TTS=1` speaks
+  `meeting_reply` answers locally via Windows SAPI on this PC's speakers.
+  There is still no xAI TTS client and no injection into the notetaker's
+  silent outbound WebRTC track. Answers still post to meeting chat. Tracked as
   `fr_01a0311b05b37e50bd30be250814ad61`.
 - **Teams DOM selectors are unvalidated against a live meeting.** They are
   candidate lists overridable from disk (`GROK_MEETING_SELECTORS` or

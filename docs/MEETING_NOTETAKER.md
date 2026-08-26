@@ -70,8 +70,11 @@ Consequences:
 - The bot's own outbound audio track is **silent by construction** — it is a
   zero-gain Web Audio node, not Chromium's fake-device beep.
 
-Turbo cannot speak in the meeting yet. That needs TTS, which does not exist in
-`xai-grok-voice` today; the injection point is reserved.
+Turbo can speak **on this PC** when `GROK_MEETING_TTS=1`: `meeting_reply` uses
+Windows SAPI (`ISpVoice`) for one-shot local speaker playback. There is still
+**no xAI TTS client** and **no injection** into the notetaker's silent outbound
+track (`__turboSpeechDestination`). Participants hear the spoken answer only if
+they can hear this machine (or they read chat). Other OS report TTS unavailable.
 
 ## Chat Q&A and the trust boundary
 
@@ -194,6 +197,7 @@ local-capture paths open it for you, because only those need you in the meeting.
 | `GROK_MEETING_NO_CAPTURE` | off | Disable audio entirely (tests) |
 | `GROK_MEETING_CAPTURE` | auto | `mic` / `loopback` for the fallback path |
 | `GROK_MEETING_AUTO_ASK` | on | `0` queues `Turbo:` questions instead of answering; drain them with `/meeting ask` |
+| `GROK_MEETING_TTS` | off | `1` speaks `meeting_reply` answers locally via Windows SAPI (this PC's speakers, not the meeting bot) |
 | `GROK_GRAPH_TOKEN` | unset | Delegated Graph token for the chat fallback |
 
 ## When Teams changes its UI

@@ -215,7 +215,7 @@ The file starts with the date and meeting name. Small talk, jokes, and personal 
 /meeting ask How is the new website project going
 ```
 
-Turbo researches that workspace with the usual tools — files, connected MCP servers, web — plus current meeting notes as extra context. It does not need a separate knowledge folder. Then it calls `meeting_reply`. With `GROK_GRAPH_TOKEN` set to a delegated Graph token (`Chat.ReadWrite` + `OnlineMeetings.Read`), the answer is posted **as you** in Teams chat, prefixed `[Turbo]`. Without a token, the answer is saved as `last_reply.md` for you to paste.
+Turbo researches that workspace with the usual tools — files, connected MCP servers, web — plus current meeting notes as extra context. It does not need a separate knowledge folder. Then it calls `meeting_reply`. With `GROK_GRAPH_TOKEN` set to a delegated Graph token (`Chat.ReadWrite` + `OnlineMeetings.Read`), the answer is posted **as you** in Teams chat, prefixed `[Turbo]`. Without a token, the answer is saved as `last_reply.md` for you to paste. Set `GROK_MEETING_TTS=1` to also speak the answer locally via Windows SAPI (this PC's speakers; not injected into the meeting bot).
 
 Spoken or typed `Turbo: …` **starts a research turn automatically** (workspace files, MCP, web) and replies with `[Turbo]`. Chat detection needs `GROK_GRAPH_TOKEN`. Set `GROK_MEETING_AUTO_ASK=0` to queue only; `/meeting status` shows pending items and `/meeting ask` drains them.
 

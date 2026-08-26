@@ -523,13 +523,18 @@ impl MeetingHandle {
                     bot.audio_dropped()
                 ));
             }
+            text.push('\n');
+            text.push_str(&xai_grok_voice::tts::format_tts_status_line());
             return Ok(text);
         }
         let folder = self.folder()?;
         if let Some(id) = read_current_id(folder).ok().flatten() {
             let (store, meta) = MeetingStore::open(meeting_dir(folder, &id))
                 .map_err(|e| xai_tool_runtime::ToolError::custom("meeting_store", e.to_string()))?;
-            return Ok(format_meta(&meta, None, &store));
+            let mut text = format_meta(&meta, None, &store);
+            text.push('\n');
+            text.push_str(&xai_grok_voice::tts::format_tts_status_line());
+            return Ok(text);
         }
         Ok("No meeting notetaker is running in this session.".into())
     }
@@ -677,6 +682,16 @@ impl MeetingHandle {
                         .into(),
                 );
             }
+        }
+        let spoken = text.clone();
+        let tts =
+            tokio::task::spawn_blocking(move || xai_grok_voice::tts::maybe_speak_reply(&spoken))
+                .await
+                .unwrap_or_else(|e| xai_grok_voice::tts::TtsOutcome::Failed {
+                    reason: format!("TTS task: {e}"),
+                });
+        if let Some(line) = xai_grok_voice::tts::format_tts_line(&tts) {
+            lines.push(line);
         }
         lines.push(text);
         Ok(lines.join("\n"))
@@ -1249,6 +1264,60 @@ mod tests {
         }
         assert_eq!(store.read_meta().unwrap().status, MeetingStatus::Recording);
         assert!(lock_live().contains_key(&session));
+        let _ = stop_live_session(&session);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn reply_speaks_when_meeting_tts_enabled() {
+        let mock = xai_grok_voice::tts::RecordingTtsEngine::new();
+        let _g = xai_grok_voice::tts::TtsTestGuard::lock()
+            .set_env(Some("1"))
+            .set_engine(std::sync::Arc::new(mock.clone()));
+        let root = temp_session("meet-tts-on");
+        let store =
+            MeetingStore::create(&root, "teams-tts-1", &secret_url(), CaptureSource::None).unwrap();
+        write_current(&root, "teams-tts-1").unwrap();
+        let session = unique("sess-tts-on");
+        insert_live(&session, store.clone());
+        let handle = MeetingHandle::new(session.clone(), Some(root.clone()), None, None);
+        let out = handle.reply("The website ships Friday.").await.unwrap();
+        assert!(
+            out.contains("Spoke locally via Windows SAPI"),
+            "reply must report local SAPI: {out}"
+        );
+        assert!(
+            out.contains("not injected into the meeting bot"),
+            "must not claim in-meeting audio: {out}"
+        );
+        assert_eq!(
+            mock.spoken(),
+            vec!["The website ships Friday.".to_string()],
+            "meeting_reply must call speak with the spoken answer"
+        );
+        let _ = stop_live_session(&session);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn reply_does_not_speak_when_meeting_tts_off() {
+        let mock = xai_grok_voice::tts::RecordingTtsEngine::new();
+        let _g = xai_grok_voice::tts::TtsTestGuard::lock()
+            .set_env(None)
+            .set_engine(std::sync::Arc::new(mock.clone()));
+        let root = temp_session("meet-tts-off");
+        let store =
+            MeetingStore::create(&root, "teams-tts-0", &secret_url(), CaptureSource::None).unwrap();
+        write_current(&root, "teams-tts-0").unwrap();
+        let session = unique("sess-tts-off");
+        insert_live(&session, store.clone());
+        let handle = MeetingHandle::new(session.clone(), Some(root.clone()), None, None);
+        let out = handle.reply("The website ships Friday.").await.unwrap();
+        assert!(!out.contains("Spoke locally"), "{out}");
+        assert!(
+            mock.spoken().is_empty(),
+            "speak must not run when TTS is off"
+        );
         let _ = stop_live_session(&session);
         let _ = std::fs::remove_dir_all(&root);
     }

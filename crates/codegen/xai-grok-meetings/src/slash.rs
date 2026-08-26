@@ -72,7 +72,9 @@ pub fn usage_message() -> &'static str {
      Set GROK_MEETING_AUTO_ASK=0 to queue only. Replies prefix [Turbo].\n\
      GROK_GRAPH_TOKEN is not required to join: a missing token still sends the \
      Teams web guest. Graph Chat.ReadWrite is only a fallback to post as you \
-     if the guest cannot join."
+     if the guest cannot join.\n\
+     GROK_MEETING_TTS=1 speaks replies locally via Windows SAPI (this PC's speakers;\n\
+     not injected into the meeting bot). There is no xAI TTS client."
 }
 
 /// Split `/meeting join` rest into URL + optional meeting name.
@@ -194,7 +196,8 @@ pub fn ask_instruction(question: Option<&str>) -> String {
          4. Answer in 4–8 sentences grounded in what you found. If you cannot find it, say so.\n\
          5. Call {MEETING_REPLY_TOOL_NAME} with that answer. It posts to meeting chat as \
          \"Turbo (Notetaker)\" when the notetaker is in the meeting, falls back to Graph as the \
-         operator, and always saves the text (prefix [Turbo]).\n"
+         operator, and always saves the text (prefix [Turbo]). When GROK_MEETING_TTS=1 it also \
+         speaks locally on this PC via Windows SAPI (not into the meeting bot audio).\n"
     )
 }
 
@@ -270,6 +273,8 @@ mod tests {
         assert!(u.contains("/meeting ask"));
         assert!(u.contains("Meetings/"));
         assert!(u.contains("work folder"));
+        assert!(u.contains("GROK_MEETING_TTS"));
+        assert!(u.contains("Windows SAPI"));
         assert!(!u.contains("projects.md"));
         assert!(!u.contains("creates projects.md"));
         assert!(

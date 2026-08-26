@@ -54,6 +54,7 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
+- **Meeting TTS (opt-in).** `GROK_MEETING_TTS=1` makes `meeting_reply` speak the answer locally via Windows SAPI (`ISpVoice`) on this PC's speakers. There is no xAI TTS client in-tree; this is not injected into the Teams notetaker's silent outbound track. Other OS: reply reports TTS unavailable. Off by default.
 - Persisted Agent WebView profile so grok.com / Imagine login survives pager sessions (`$GROK_HOME/agent-browser`). `turbo browser reset-profile` or `GROK_BROWSER_FRESH_PROFILE=1` starts clean. `GROK_BROWSER_PROFILE=session` restores per-session isolation. Native `image_gen` still uses xAI API keys (`turbo login`); WebView cookies are never mixed into the Imagine API.
 
 ---
