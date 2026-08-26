@@ -186,6 +186,7 @@ fn stop_live_session(session_id: &str) -> Option<MeetingStore> {
     let live = lock_live().remove(session_id)?;
     let store = live.store.clone();
     drop(live);
+    crate::implementations::grok_build::meeting::transport::remove_bot_profile(&store);
     Some(store)
 }
 

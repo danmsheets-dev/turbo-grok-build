@@ -1185,6 +1185,7 @@ mod tests {
                     source_url_or_path: "https://example.com/mp.git".to_string(),
                     source_display_name: "Demo Marketplace".to_string(),
                     plugin_subdir: "plugins/mp-plugin".to_string(),
+                    source_git_sha: None,
                 }),
             },
         );

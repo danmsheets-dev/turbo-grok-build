@@ -297,6 +297,7 @@ async fn handle_update(
         source_url_or_path: source_url_or_path.to_string(),
         source_display_name: source.name.clone(),
         plugin_subdir: plugin_relative_path.to_string(),
+        source_git_sha: None,
     };
     let mut registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
     let require_sha = crate::plugin::marketplace_require_sha();
@@ -409,6 +410,7 @@ async fn handle_install(
             source_url_or_path: source_url_or_path.to_string(),
             source_display_name: source.name.clone(),
             plugin_subdir: plugin_relative_path.to_string(),
+            source_git_sha: None,
         };
         let mut registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
         let require_sha = crate::plugin::marketplace_require_sha();
@@ -529,6 +531,7 @@ async fn handle_install(
             source_url_or_path: source_url_or_path.to_string(),
             source_display_name: source.name.clone(),
             plugin_subdir: plugin_relative_path.to_string(),
+            source_git_sha: None,
         };
 
         let mut registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
@@ -537,6 +540,7 @@ async fn handle_install(
             plugin_relative_path,
             provenance,
             &mut registry,
+            crate::plugin::marketplace_require_sha(),
         );
         drop(marketplace_lease);
         match install_result {
@@ -1772,6 +1776,7 @@ mod default_skills_purge_tests {
                 source_url_or_path: "https://example.com/market.git".into(),
                 source_display_name: "Test".into(),
                 plugin_subdir: subdir.into(),
+                source_git_sha: None,
             }),
         }
     }

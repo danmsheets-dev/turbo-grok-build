@@ -79,6 +79,8 @@ advisory flow, not xAI HackerOne.
   are treated as external.
 - **`read_file` / credential `Read`/`Grep` of `$GROK_HOME` auth files is
   policy-denied** (F17), matching the bash write-deny.
+- **Internal campaign / claims-ledger files are gone from the tree** (F26/F27).
+  `marketing/` is gitignored. This is delete-from-tip, not a history rewrite.
 
 #### Security (MEDIUM, this round)
 
@@ -109,9 +111,21 @@ advisory flow, not xAI HackerOne.
   char boundaries (F43/F61/F62).
 - Terminal emulator bounds total cells against CSI cursor-forward
   amplification (F45).
-- NOTICE/LICENSE name Turbo Grok Build; THIRD-PARTY-NOTICES records linked
-  wasmtime/rhai crates (F34/F37). Direct SKILL.md registration already
-  requires workspace + vendor-compat (F63).
+- NOTICE/LICENSE name Turbo Grok Build; THIRD-PARTY-NOTICES is regenerated
+  from the ship graph via `cargo about` (F34/F37). Direct SKILL.md
+  registration already requires workspace + vendor-compat (F63).
+- Marketplace-vendored plugin copies require a full git SHA when
+  `require_sha` is on (default) (F47).
+- Installers fail closed on `gh attestation verify` when GitHub CLI is
+  present (`GROK_SKIP_ATTESTATION=1` to checksum-only) (F29/F31).
+
+#### Security (LOW, this round)
+
+- Test fixtures no longer embed the operator username (F83).
+- Cursor rule bodies are framed as untrusted and tag-neutralized; folder-trust
+  scans `.cursor/rules` (F86).
+- Teams bot-profile (Chromium History) is deleted when the meeting stops (F88).
+- README last-sync line matches `SOURCE_REV` (F74).
 
 #### Incident follow-through
 

@@ -23,6 +23,15 @@ pub fn bot_profile_dir(store: &MeetingStore) -> PathBuf {
     store.meta_path().with_file_name("bot-profile")
 }
 
+/// Delete the throwaway Chromium profile (F88). Join URLs with passcodes
+/// persist in Chromium History; the profile must not outlive the meeting.
+pub fn remove_bot_profile(store: &MeetingStore) {
+    let profile = bot_profile_dir(store);
+    if profile.is_dir() {
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+}
+
 /// Why the bot path was not used. `None` means it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallbackReason {
@@ -375,6 +384,13 @@ mod tests {
         let dir = bot_profile_dir(&store);
         assert_eq!(dir.file_name().unwrap(), "bot-profile");
         assert_eq!(dir.parent(), store.meta_path().parent());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("History"), b"fake").unwrap();
+        remove_bot_profile(&store);
+        assert!(
+            !dir.exists(),
+            "throwaway bot-profile must be deleted on stop"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

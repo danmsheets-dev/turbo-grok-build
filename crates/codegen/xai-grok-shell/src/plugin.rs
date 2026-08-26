@@ -1069,6 +1069,7 @@ fn install_marketplace_entry(
         source_url_or_path: source_identity,
         source_display_name: source.name.clone(),
         plugin_subdir: plugin_subdir.clone(),
+        source_git_sha: None,
     };
 
     let result = if let Some(remote_url) = entry.remote_url.as_deref() {
@@ -1084,7 +1085,14 @@ fn install_marketplace_entry(
             require_sha,
         )
     } else {
-        installer::install_from_marketplace(marketplace_root, &plugin_subdir, provenance, registry)
+        let require_sha = crate::plugin::marketplace_require_sha();
+        installer::install_from_marketplace(
+            marketplace_root,
+            &plugin_subdir,
+            provenance,
+            registry,
+            require_sha,
+        )
     };
 
     let repo_key = match result {

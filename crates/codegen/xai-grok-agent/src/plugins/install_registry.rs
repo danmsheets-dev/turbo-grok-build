@@ -74,6 +74,10 @@ pub struct MarketplaceProvenance {
     pub source_display_name: String,
     /// Plugin subdirectory within marketplace (e.g., "plugins/xai-code-review").
     pub plugin_subdir: String,
+    /// Full commit SHA of the marketplace source checkout when it is a git
+    /// repo. Required when `require_sha` is on (F47 vendored-plugin pin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_git_sha: Option<String>,
 }
 
 /// A plugin discovered within an installed repo.

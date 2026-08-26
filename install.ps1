@@ -142,13 +142,17 @@ try {
         Fail "SHA256 mismatch for ${Asset}: expected $Expected, got $Actual"
     }
     Write-Host "Checksum verified."
-    if (Get-Command gh -ErrorAction SilentlyContinue) {
+    if ($env:GROK_SKIP_ATTESTATION -eq "1") {
+        Write-Host "warning: GROK_SKIP_ATTESTATION=1 — skipping GitHub provenance check."
+    } elseif (Get-Command gh -ErrorAction SilentlyContinue) {
         & gh attestation verify $ArchivePath --repo danmsheets-dev/turbo-grok-build 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "Provenance attestation verified."
         } else {
-            Write-Host "warning: gh attestation verify skipped (no attestation on this release, or gh not logged in). Checksum still matched."
+            Fail "gh attestation verify failed. Install/login with GitHub CLI, or set GROK_SKIP_ATTESTATION=1 to install from checksum only."
         }
+    } else {
+        Write-Host "warning: gh not on PATH — SHA256SUMS checked, provenance attestation not verified. Install GitHub CLI to verify Sigstore attestations."
     }
 
     # ── Extract + install ────────────────────────────────────────────────────

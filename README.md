@@ -639,9 +639,9 @@ Artifacts ship as `turbo-<version>-<target>.tar.gz` / `.zip` + `SHA256SUMS`.
 Turbo and Hyper share a common history but diverge after the rebrand. Use
 fetch + log for compare; do not merge casually.
 
-**Last sync: RC15 (`0.2.119-r1`).** Turbo merged xAI upstream `e5478eff1`
-(0.2.119, `SOURCE_REV` `27d2088ae…`) in full and cherry-picked a set of Hyper
-fixes on top. The Turbo/Hyper fork point is `c260695cc` (2026-07-29); Hyper was
+**Last sync: 1.0.0-rc.1.** Turbo merged xAI Grok Build **1.0.0** (`75e73f3d6`,
+`SOURCE_REV` `a61c32b12…`) on `sync/1.0.0-rc1` (shared base `e5478eff1` /
+0.2.119). The Turbo/Hyper fork point is `c260695cc` (2026-07-29); Hyper was
 compared at `7a48dd755`. Anything already listed in the RC15 changelog under
 "Deliberately NOT taken" was evaluated and declined — re-read that before
 proposing it again. Note that two Hyper fixes Turbo carries (the circuit-breaker

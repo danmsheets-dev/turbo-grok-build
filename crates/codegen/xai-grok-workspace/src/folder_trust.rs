@@ -385,6 +385,15 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     if cwd.join(".cursor").join("mcp.json").is_file() {
         hit!("mcp");
     }
+    // Project `.cursor/rules` — Cursor rule bodies can be injected on file
+    // read (when `cursor_rules_on_read` is enabled). A rules-only clone must
+    // still be gated (F86).
+    for dir in &chain.dirs {
+        if directory_present_or_uncertain(&dir.join(".cursor").join("rules")) {
+            hit!("cursor-rules");
+            break;
+        }
+    }
     // Project `.envrc` — auto-sourced in a bash subshell when `direnv` isn't
     // installed (direct code-exec), so an `.envrc`-only clone must still be
     // gated. The loader reads `<cwd>/.envrc` directly (NOT a git-root walk), so
@@ -496,7 +505,7 @@ pub fn prompt_for_trust(key: &Path) -> bool {
     let _ = writeln!(err);
     let _ = writeln!(
         err,
-        "This folder contains repo-local config (.mcp.json / .grok/lsp.json / hooks) \
+        "This folder contains repo-local config (.mcp.json / .grok/lsp.json / hooks / .cursor/rules) \
          that can run commands on your machine."
     );
     let _ = writeln!(err, "  Folder: {}", key.display());
@@ -628,6 +637,13 @@ mod tests {
         let cursor = tmp.path().join(".cursor");
         std::fs::create_dir_all(&cursor).unwrap();
         std::fs::write(cursor.join("mcp.json"), "{}").unwrap();
+        assert!(repo_configs_present(tmp.path()));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_cursor_rules() {
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".cursor").join("rules")).unwrap();
         assert!(repo_configs_present(tmp.path()));
     }
 

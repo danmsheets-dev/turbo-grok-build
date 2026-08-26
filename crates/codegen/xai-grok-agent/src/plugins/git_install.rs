@@ -123,6 +123,22 @@ pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
     }
 }
 
+/// `git rev-parse HEAD` in `dir`, if it is a git worktree with a full SHA.
+pub fn resolve_git_head_sha(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?;
+    let sha = sha.trim();
+    is_full_commit_sha(sha).then(|| sha.to_string())
+}
+
 /// A full commit sha (40-hex SHA-1 or 64-hex SHA-256) — the only thing the
 /// pin policy accepts; branches, tags, and short prefixes are mutable or forgeable.
 pub fn is_full_commit_sha(s: &str) -> bool {

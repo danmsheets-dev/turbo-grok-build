@@ -733,7 +733,7 @@ args = ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--allow-unrestrict
                 "-y".to_string(),
                 "chrome-devtools-mcp@latest".to_string(),
                 "--userDataDir".to_string(),
-                r"C:\Users\dan_m\.grok\browser-profile".to_string(),
+                r"C:\Users\testuser\.grok\browser-profile".to_string(),
                 "--allow-unrestricted-paths".to_string(),
             ]),
         );

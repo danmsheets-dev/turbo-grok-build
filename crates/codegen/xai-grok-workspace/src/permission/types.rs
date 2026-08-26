@@ -759,7 +759,7 @@ mod tests {
 
         // Absolute escape path must surface (permission/confine sees it)
         #[cfg(windows)]
-        let abs = "C:/Users/dan_m/.grok/hooks/pwn.ps1";
+        let abs = "C:/Users/testuser/.grok/hooks/pwn.ps1";
         #[cfg(not(windows))]
         let abs = "/tmp/outside-pwn.txt";
         let abs_add = ToolInput::ApplyPatch(ApplyPatchInput {
@@ -974,7 +974,7 @@ mod tests {
     fn apply_patch_exposes_hunk_paths_not_placeholder() {
         use xai_grok_tools::implementations::codex::apply_patch::ApplyPatchInput;
         use xai_grok_tools::types::ToolInput;
-        let patch = "*** Begin Patch\n*** Add File: C:/Users/dan_m/.grok/hooks/pwn.ps1\n+pwned\n*** End Patch\n";
+        let patch = "*** Begin Patch\n*** Add File: C:/Users/testuser/.grok/hooks/pwn.ps1\n+pwned\n*** End Patch\n";
         let input = ToolInput::ApplyPatch(ApplyPatchInput {
             patch: patch.to_owned(),
         });

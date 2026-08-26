@@ -41,6 +41,7 @@ pub fn install_from_marketplace(
     plugin_relative_path: &str,
     provenance: MarketplaceProvenance,
     registry: &mut InstallRegistry,
+    require_sha: bool,
 ) -> Result<MarketplaceInstallResult, InstallError> {
     // Use the resolved plugin directory as the source path.
     // Each plugin gets its own repo key and symlink.
@@ -60,8 +61,20 @@ pub fn install_from_marketplace(
         subdir: None,
     };
 
-    // Local copy from the synced source checkout: the pin gate governs remote
-    // fetches only (see install_from_remote_url's security doc).
+    let source_sha = git_install::resolve_git_head_sha(marketplace_root);
+    git_install::ensure_pinned(
+        require_sha,
+        source_sha.as_deref(),
+        plugin_relative_path.as_str(),
+        &marketplace_root.display().to_string(),
+    )?;
+    let mut provenance = provenance;
+    provenance.source_git_sha = source_sha;
+
+    // Local copy from the synced source checkout. The pin above records the
+    // marketplace tree's HEAD so a later force-push is not picked up silently
+    // (F47). `install_from_source(..., false)` still applies: this path does
+    // not fetch; the fetch pin lives on the marketplace source sync.
     match git_install::install_from_source(&source, registry, false) {
         Ok(result) => {
             let repo_key = result.repo_key.clone();
@@ -111,10 +124,10 @@ pub fn install_from_marketplace(
 /// `plugin-index.json` and installing with that pin.
 ///
 /// `require_sha` (from [`crate::config::load_require_sha`]) fails such installs
-/// closed. It covers every path that fetches plugin code from a remote git URL
-/// (marketplace `remote_url` entries, direct installs, git updates). It does
-/// NOT cover plugins vendored inside a marketplace source itself — those come
-/// from the synced source checkout, whose branch is not yet pinnable.
+/// closed. It covers remote `git_url` fetches **and** copies from a marketplace
+/// source checkout: the latter must resolve a full `git rev-parse HEAD` SHA
+/// (F47). Unsigned plugin code is still unsigned — the pin only stops silent
+/// branch-tip substitution.
 pub fn install_from_remote_url(
     url: &str,
     git_ref: Option<&str>,
@@ -272,6 +285,17 @@ pub fn update_from_marketplace_entry_transactional(
             Ok::<_, InstallError>(source)
         })
         .transpose()?;
+
+    if remote_source.is_none() {
+        let source_sha = git_install::resolve_git_head_sha(marketplace_root);
+        git_install::ensure_pinned(
+            require_sha,
+            source_sha.as_deref(),
+            &entry.name,
+            &marketplace_root.display().to_string(),
+        )?;
+        provenance.source_git_sha = source_sha;
+    }
 
     let install_dir = registry.install_dir().to_path_buf();
     std::fs::create_dir_all(&install_dir).map_err(|e| InstallError::Io {
@@ -775,6 +799,7 @@ mod tests {
                     source_url_or_path: "https://example.com/market.git".into(),
                     source_display_name: "test".into(),
                     plugin_subdir: "plugins/demo".into(),
+                    source_git_sha: None,
                 },
                 registry,
                 true, // require_sha
@@ -795,6 +820,7 @@ mod tests {
                     source_url_or_path: "https://example.com/market.git".into(),
                     source_display_name: "test".into(),
                     plugin_subdir: "plugins/demo".into(),
+                    source_git_sha: None,
                 },
                 registry,
                 true,
@@ -865,6 +891,7 @@ mod tests {
                 source_url_or_path: "https://example.com/marketplace.git".into(),
                 source_display_name: "Test".into(),
                 plugin_subdir: "acme".into(),
+                source_git_sha: None,
             };
 
             // Unpinned first install (policy off) so the registry is populated.
@@ -976,6 +1003,7 @@ mod tests {
             source_url_or_path: marketplace.display().to_string(),
             source_display_name: "Test".into(),
             plugin_subdir: plugin_subdir.into(),
+            source_git_sha: None,
         }
     }
 
@@ -990,6 +1018,7 @@ mod tests {
             &plugin_subdir,
             provenance(marketplace, &plugin_subdir),
             registry,
+            false,
         )
         .unwrap()
         {
@@ -1006,10 +1035,63 @@ mod tests {
                 source_url_or_path: marketplace.path().display().to_string(),
                 source_display_name: "Test".into(),
                 plugin_subdir: "../escaped".into(),
+                source_git_sha: None,
             };
-            let result =
-                install_from_marketplace(marketplace.path(), "../escaped", provenance, registry);
+            let result = install_from_marketplace(
+                marketplace.path(),
+                "../escaped",
+                provenance,
+                registry,
+                false,
+            );
             assert!(matches!(result, Err(InstallError::InstallFailed { .. })));
+        });
+    }
+
+    #[test]
+    fn install_from_marketplace_require_sha_refuses_unpinned_checkout() {
+        with_test_registry(|registry| {
+            let marketplace = tempfile::tempdir().unwrap();
+            write_plugin(marketplace.path(), "demo", "1.0.0", "v1");
+            let plugin_subdir = "plugins/demo";
+            let result = install_from_marketplace(
+                marketplace.path(),
+                plugin_subdir,
+                provenance(marketplace.path(), plugin_subdir),
+                registry,
+                true,
+            );
+            assert!(
+                matches!(result, Err(InstallError::UnpinnedRemoteRefused { .. })),
+                "vendored marketplace copy without a git SHA must fail closed: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn update_from_marketplace_require_sha_refuses_unpinned_checkout() {
+        with_test_registry(|registry| {
+            let marketplace = tempfile::tempdir().unwrap();
+            write_plugin(marketplace.path(), "demo", "1.0.0", "old");
+            install_test_plugin(registry, marketplace.path(), "demo");
+            write_plugin(marketplace.path(), "demo", "2.0.0", "new");
+            let entry = crate::scan_marketplace(marketplace.path())
+                .entries
+                .into_iter()
+                .find(|p| p.relative_path == "plugins/demo")
+                .unwrap();
+
+            let result = update_from_marketplace_entry_transactional(
+                marketplace.path(),
+                &entry,
+                provenance(marketplace.path(), "plugins/demo"),
+                registry,
+                true,
+            );
+            assert!(
+                matches!(result, Err(InstallError::UnpinnedRemoteRefused { .. })),
+                "vendored marketplace update without a git SHA must fail closed: {result:?}"
+            );
         });
     }
 
@@ -1224,6 +1306,7 @@ mod tests {
                 source_url_or_path: "https://example.com/r.git".into(),
                 source_display_name: "Test".into(),
                 plugin_subdir: "acme".into(),
+                source_git_sha: None,
             };
             let result = install_from_remote_url(
                 "https://example.com/r.git",
@@ -1310,6 +1393,7 @@ mod tests {
                 source_url_or_path: "https://example.com/marketplace.git".into(),
                 source_display_name: "Test".into(),
                 plugin_subdir: "acme".into(),
+                source_git_sha: None,
             };
 
             let repo_key = match install_from_remote_url(
@@ -1399,6 +1483,7 @@ mod tests {
                 source_url_or_path: "https://example.com/marketplace.git".into(),
                 source_display_name: "Test".into(),
                 plugin_subdir: "acme".into(),
+                source_git_sha: None,
             };
             for bad in ["../escape", "/etc"] {
                 let entry = MarketplaceEntry {
@@ -1469,6 +1554,7 @@ mod tests {
                 source_url_or_path: "https://example.com/marketplace.git".into(),
                 source_display_name: "Test".into(),
                 plugin_subdir: "acme".into(),
+                source_git_sha: None,
             };
 
             let first_key = match install_from_remote_url(

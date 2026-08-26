@@ -2350,7 +2350,7 @@ mod tests {
         ));
         assert!(super::path_looks_like_isolated_worktree(
             std::path::Path::new(
-                r"C:\Users\dan_m\.grok\worktrees\pirates\subagent-019ffc2f-9daa\tools\x.py"
+                r"C:\Users\testuser\.grok\worktrees\pirates\subagent-019ffc2f-9daa\tools\x.py"
             )
         ));
         assert!(!super::path_looks_like_isolated_worktree(

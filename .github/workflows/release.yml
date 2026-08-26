@@ -82,6 +82,22 @@ jobs:
           fi
           echo "GROK_VERSION=$tag_version" >> "$GITHUB_ENV"
 
+      - name: SOURCE_REV must match README
+        shell: bash
+        run: |
+          rev="$(tr -d '[:space:]' < SOURCE_REV)"
+          prefix="${rev:0:9}"
+          grep -F "$prefix" README.md >/dev/null \
+            || { echo "README.md does not mention SOURCE_REV prefix $prefix" >&2; exit 1; }
+
+      - name: THIRD-PARTY-NOTICES covers ship-graph crates
+        shell: bash
+        run: |
+          for crate in wasmtime rhai cranelift-codegen alacritty_terminal; do
+            grep -F "$crate" THIRD-PARTY-NOTICES >/dev/null \
+              || { echo "THIRD-PARTY-NOTICES missing $crate; run scripts/generate-third-party-notices.py" >&2; exit 1; }
+          done
+
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup show
 
@@ -396,3 +412,13 @@ jobs:
             ```
 
             Pin a version: `bash install.sh --version ${{ github.ref_name }}`
+
+            Verify provenance (GitHub CLI):
+
+            ```sh
+            gh attestation verify turbo-${{ github.ref_name }}-<target>.tar.gz \
+              --repo danmsheets-dev/turbo-grok-build
+            ```
+
+            Installers run that check when `gh` is on PATH. Set
+            `GROK_SKIP_ATTESTATION=1` to fall back to SHA256SUMS only.

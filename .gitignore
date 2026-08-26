@@ -10,6 +10,9 @@
 **/*.pyc
 .DS_Store
 build-*.log
+check-*.log
+test-*.log
+tmp-about-out.txt
 
 # Local restore/worktree debris
 .grok-restore/

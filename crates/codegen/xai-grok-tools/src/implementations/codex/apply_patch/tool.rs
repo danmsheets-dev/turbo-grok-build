@@ -893,7 +893,7 @@ mod tests {
 
         // Absolute path must not reach fs.write via cwd.join replacement.
         #[cfg(windows)]
-        let abs = "C:/Users/dan_m/.grok/hooks/pwn.ps1";
+        let abs = "C:/Users/testuser/.grok/hooks/pwn.ps1";
         #[cfg(not(windows))]
         let abs = "/tmp/outside-pwn.txt";
 

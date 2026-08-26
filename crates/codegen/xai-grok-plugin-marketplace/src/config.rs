@@ -356,8 +356,7 @@ mod tests {
             load_require_sha(&enabled),
             "a falsy env must not relax config-set policy (tighten-only)"
         );
-        let disabled: toml::Value =
-            toml::from_str("[marketplace]\nrequire_sha = false\n").unwrap();
+        let disabled: toml::Value = toml::from_str("[marketplace]\nrequire_sha = false\n").unwrap();
         unsafe { std::env::remove_var("GROK_MARKETPLACE_REQUIRE_SHA") };
         assert!(
             !load_require_sha(&disabled),
