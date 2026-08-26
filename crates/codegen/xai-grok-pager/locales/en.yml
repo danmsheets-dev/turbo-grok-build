@@ -589,6 +589,8 @@ changes.source.unknown: "unknown source"
 changes.stale_noop: "Action affected 0 hunks (stale view?) — refreshing"
 # Codex Live (`/live`) — slash command, status, errors
 slash.live.desc: "Codex Live voice session (Space: mute, Esc: stop)"
+slash.steer.desc: "Steer the running agent without canceling"
+slash.rollback.desc: "Revert the last undoable agent write"
 live.error.auth_absent: "Codex Live requires OpenAI Codex authentication. Run /login."
 live.error.session_unbound: "No active session. Start a session first."
 live.error.unexpected_stop: "Live stopped unexpectedly. Try again."

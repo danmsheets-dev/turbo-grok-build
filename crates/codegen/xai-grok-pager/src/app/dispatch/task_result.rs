@@ -719,6 +719,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::RollbackComplete { agent_id, message } => {
+            super::steer::handle_rollback_complete(app, agent_id, message)
+        }
         TaskResult::DoctorFixApplied { target, result } => {
             let message = match result {
                 Ok(outcome) => crate::diagnostics::format_fix_success(&outcome),

@@ -31,6 +31,7 @@ mod prompt;
 mod queue;
 mod rewind;
 mod router;
+mod steer;
 mod session;
 mod settings;
 mod status;

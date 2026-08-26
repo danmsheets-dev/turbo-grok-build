@@ -1880,3 +1880,51 @@ pub(super) async fn send_changes_action(
         },
     }
 }
+
+/// Restore the newest undoable edit receipt (or a named id) from the session
+/// receipts store. Returns a user-facing message in every case.
+pub(super) async fn rollback_last_or(
+    session_id: acp::SessionId,
+    cwd: std::path::PathBuf,
+    receipt_id: Option<String>,
+) -> String {
+    use xai_grok_tools::computer::local::LocalFs;
+    use xai_grok_tools::implementations::grok_build::receipts::{
+        RollbackOutcome, list_receipts, rollback_receipt,
+    };
+
+    let info = xai_grok_shell::session::info::Info {
+        id: session_id,
+        cwd: cwd.to_string_lossy().to_string(),
+    };
+    let folder = xai_grok_shell::session::persistence::session_dir(&info);
+    let id = match receipt_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => id.to_owned(),
+        None => match list_receipts(&folder, 100).await {
+            Ok(list) => match list.into_iter().find(|r| r.kind == "edit" && r.undoable) {
+                Some(receipt) => receipt.receipt_id,
+                None => return "No undoable edit receipts in this session.".to_owned(),
+            },
+            Err(e) => return format!("Could not list receipts: {e}"),
+        },
+    };
+    let fs = LocalFs;
+    match rollback_receipt(&folder, &fs, &id).await {
+        Ok(RollbackOutcome::Restored {
+            receipt,
+            new_receipt_id,
+            restored_bytes,
+        }) => format!(
+            "Rolled back {}: restored {restored_bytes} bytes of {}. Follow-up receipt: {new_receipt_id}.",
+            receipt.receipt_id,
+            receipt.file.as_deref().unwrap_or_default()
+        ),
+        Ok(RollbackOutcome::NotUndoable(msg) | RollbackOutcome::ChangedSinceReceipt(msg)) => msg,
+        Ok(RollbackOutcome::NotFound(id)) => format!("Receipt {id} not found."),
+        Err(e) => format!("Rollback failed: {e}"),
+    }
+}

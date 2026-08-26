@@ -1651,6 +1651,26 @@ mod tests {
         assert!(!is_command_complete("/model", &reg));
         assert!(!is_command_complete("/model ", &reg));
         assert!(is_command_complete("/model grok-4", &reg));
+        // /steer requires guidance text.
+        assert!(!is_command_complete("/steer", &reg));
+        assert!(!is_command_complete("/steer ", &reg));
+        assert!(is_command_complete("/steer stay inside crates/foo", &reg));
+    }
+
+    #[test]
+    fn parses_steer_and_rollback_invocations() {
+        let steer = parse_invocation("/steer stay inside crates/foo").expect("parsed");
+        assert_eq!(steer.token, "steer");
+        assert_eq!(steer.args, "stay inside crates/foo");
+        let rollback = parse_invocation("/rollback rcpt-abc").expect("parsed");
+        assert_eq!(rollback.token, "rollback");
+        assert_eq!(rollback.args, "rcpt-abc");
+        let rollback_bare = parse_invocation("/rollback").expect("parsed");
+        assert_eq!(rollback_bare.token, "rollback");
+        assert_eq!(rollback_bare.args, "");
+        let reg = test_registry();
+        assert!(is_command_complete("/rollback", &reg));
+        assert!(is_command_complete("/rollback last", &reg));
     }
 
     #[test]

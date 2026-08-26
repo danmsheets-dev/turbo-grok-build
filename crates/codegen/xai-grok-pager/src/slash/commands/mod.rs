@@ -61,6 +61,8 @@ pub mod remember;
 pub mod rename;
 pub mod resume;
 pub mod rewind;
+pub mod rollback;
+pub mod steer;
 pub mod schedule_cmd;
 pub mod scoped_models;
 pub mod screen_mode_switch;
@@ -150,6 +152,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(btw::BtwCommand),
+        Arc::new(steer::SteerCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
         Arc::new(tree::TreeCommand),
@@ -169,6 +172,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(privacy::PrivacyCommand),
         Arc::new(rewind::RewindCommand),
+        Arc::new(rollback::RollbackCommand),
         Arc::new(jump::JumpCommand),
         Arc::new(login::LoginCommand),
         Arc::new(logout::LogoutCommand),
@@ -397,6 +401,7 @@ mod tests {
             "resume",
             "review",
             "rewind",
+            "rollback",
             "schedule",
             "scoped",
             "scoped-models",
@@ -409,6 +414,7 @@ mod tests {
             "enabled-models",
             "show-plan",
             "skills",
+            "steer",
             "summarize",
             "tasks",
             "terminal-check",
@@ -821,6 +827,22 @@ mod tests {
         assert!(
             reg.get("queue").is_some(),
             "/queue should be registered in builtins"
+        );
+    }
+    #[test]
+    fn steer_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("steer").is_some(),
+            "/steer should be registered in builtins"
+        );
+    }
+    #[test]
+    fn rollback_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("rollback").is_some(),
+            "/rollback should be registered in builtins"
         );
     }
     #[test]

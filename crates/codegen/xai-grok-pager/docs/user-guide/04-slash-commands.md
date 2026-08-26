@@ -51,6 +51,16 @@ Branch the current session into a new agent, keeping history up to this point.
 
 Roll the conversation back to an earlier turn and discard everything after it. `/undo` is the same command.
 
+### `/rollback [receipt_id]`
+
+Revert the last undoable agent write receipt for this session. Edit receipts can restore the pre-edit bytes; bash receipts are audit-only and cannot roll back. Pass a receipt id (`rcpt-...`) to undo a specific write. The file must still match the recorded post-edit hash, otherwise the command refuses so it does not clobber later edits.
+
+```
+/rollback
+/rollback last
+/rollback rcpt-...
+```
+
 ### `/edit-prompt`
 
 In minimal mode, open an external editor for an empty composer. Grok resolves `$VISUAL`, then `$EDITOR`, then `vi`; command values may include quoted arguments. Saving replaces the draft without sending it, and saving an empty file clears it. The command is hidden outside minimal mode.
@@ -451,6 +461,14 @@ Send an aside to the agent without interrupting the current task. In minimal mod
 
 ```
 /btw also check the error handling
+```
+
+### `/steer <text>`
+
+Inject mid-turn guidance into the running agent without canceling the current turn. Send-now (cancel-and-send) already exists as a chord and as the queue-row Interject button; `/steer` is the named operator slash. If no turn is running, the text is sent as a normal prompt.
+
+```
+/steer stay inside crates/foo
 ```
 
 ### `/mcps`

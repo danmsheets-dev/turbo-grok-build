@@ -792,6 +792,15 @@ pub enum Action {
     SaveRememberNoteFromModal,
     /// Send a /btw side question (bypasses queue, works while agent is busy).
     SendBtw(String),
+    /// `/steer <text>`: inject mid-turn guidance without canceling. Dispatch
+    /// maps this to [`Self::Interject`] while a turn is running, or a normal
+    /// prompt when idle. Send-now (cancel-and-send) remains a separate chord.
+    Steer(String),
+    /// `/rollback [receipt_id]`: revert the last undoable edit receipt, or a
+    /// specific `rcpt-...` id when set.
+    RollbackLast {
+        receipt_id: Option<String>,
+    },
     /// Request a session recap ("where was I" summary). `auto` is `true` for
     /// the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).
@@ -1472,6 +1481,13 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         kind: crate::views::changes_modal::ChangesActionKind,
+    },
+    /// Restore the last (or named) undoable edit receipt for this session.
+    RollbackLast {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        receipt_id: Option<String>,
     },
     /// Create a new ACP session.
     CreateSession {
@@ -3085,6 +3101,12 @@ pub enum TaskResult {
     DoctorFixApplied {
         target: DoctorFixTarget,
         result: Result<crate::diagnostics::FixOutcome, String>,
+    },
+    /// `/rollback` finished (success, refusal, or empty store). `message` is
+    /// shown as a system block.
+    RollbackComplete {
+        agent_id: AgentId,
+        message: String,
     },
 }
 #[cfg(test)]

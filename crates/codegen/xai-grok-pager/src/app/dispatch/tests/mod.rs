@@ -11,6 +11,7 @@ mod permissions;
 mod prompt;
 mod rewind;
 mod router;
+mod steer;
 mod session;
 mod settings;
 mod status;

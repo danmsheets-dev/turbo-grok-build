@@ -75,6 +75,14 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks.spawn(async move { fetch_changes(agent_id, session_id, tx, post_action).await });
         }
+        Effect::RollbackLast { agent_id, session_id, cwd, receipt_id } => {
+            tasks.spawn(async move {
+                TaskResult::RollbackComplete {
+                    agent_id,
+                    message: rollback_last_or(session_id, cwd, receipt_id).await,
+                }
+            });
+        }
         Effect::ChangesAction {
             agent_id,
             session_id,
