@@ -3,12 +3,18 @@ license = "Apache-2.0"
 edition.workspace = true
 name = "xai-grok-secrets"
 version = "0.1.0"
-description = "Regex sanitizer for Grok Build outbound data (Sentry / Mixpanel / product-event scrubbing)"
+description = "Named secrets vault + regex sanitizer for Grok Build outbound data"
 
 [dependencies]
 regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 url = { workspace = true }
+xai-grok-config = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -16307,6 +16307,7 @@ dependencies = [
  "xai-file-utils",
  "xai-grok-config",
  "xai-grok-extra-ca",
+ "xai-grok-secrets",
  "xai-grok-telemetry",
  "xai-grok-tools",
  "xai-grok-version",
@@ -16490,6 +16491,7 @@ dependencies = [
  "xai-grok-pager-render",
  "xai-grok-plugin-marketplace",
  "xai-grok-sandbox",
+ "xai-grok-secrets",
  "xai-grok-shell",
  "xai-grok-telemetry",
  "xai-grok-test-support",
@@ -16758,8 +16760,12 @@ name = "xai-grok-secrets"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
  "url",
+ "xai-grok-config",
 ]
 
 [[package]]

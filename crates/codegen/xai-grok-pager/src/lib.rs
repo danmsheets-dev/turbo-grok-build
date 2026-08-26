@@ -33,6 +33,7 @@ pub mod memory_cmd;
 pub mod memory_release;
 pub mod memory_trace;
 mod scoped_models;
+pub mod secret_cmd;
 pub mod test_cmd;
 pub mod tools_cmd;
 pub mod tree_cmd;

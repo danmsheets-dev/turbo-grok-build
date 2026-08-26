@@ -41,6 +41,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 webbrowser = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-grok-secrets = { workspace = true }
 
 # For mcp_http_client.rs (rmcp trait signatures). Must match rmcp 2.1's own
 # versions or the trait types won't unify.

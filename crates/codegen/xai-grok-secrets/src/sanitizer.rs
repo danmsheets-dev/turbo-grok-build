@@ -2,8 +2,10 @@ use regex::{Regex, RegexSet};
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-const REDACTED: &str = "[REDACTED_SECRET]";
+pub const REDACTED: &str = "[REDACTED_SECRET]";
 const REDACTED_URL_VALUE: &str = "redacted";
+/// Vault values shorter than this are not substituted (too much collateral).
+pub const MIN_VAULT_REDACT_LEN: usize = 8;
 
 /// Vendor API keys with `sk-`/`sk_` prefixes and xAI (`xai-`) keys. `\b`-anchored so
 /// `task-`/`disk-`/`risk-` don't fold a stray `sk-`.
@@ -107,6 +109,21 @@ static MATCH_ANY: LazyLock<RegexSet> = LazyLock::new(|| {
 });
 
 pub fn redact_secrets(input: &str) -> Cow<'_, str> {
+    // Production / downstream tests compile this crate with `cfg(test)` off, so
+    // developer_log's existing `redact_secrets` / JSON walk pick up vault bytes.
+    // This crate's own `cargo test --lib` stays hermetic (no `$GROK_HOME` load).
+    #[cfg(not(test))]
+    crate::vault::ensure_process_vault_redaction();
+    redact_secrets_with_values(input, &crate::vault::process_vault_redaction_values())
+}
+
+/// Regex sanitizer plus exact substitution of `extra_values` (named vault).
+pub fn redact_secrets_with_values<'a>(input: &'a str, extra_values: &[String]) -> Cow<'a, str> {
+    let after_regex = redact_secrets_regex(input);
+    redact_known_secret_values(after_regex, extra_values)
+}
+
+fn redact_secrets_regex(input: &str) -> Cow<'_, str> {
     if !MATCH_ANY.is_match(input) {
         return Cow::Borrowed(input);
     }
@@ -124,6 +141,27 @@ pub fn redact_secrets(input: &str) -> Cow<'_, str> {
         .replace_all(&s, format!("$1$2$3$4{REDACTED}"))
         .into_owned();
     Cow::Owned(s)
+}
+
+/// Longest-first exact replacement of known vault bytes.
+pub fn redact_known_secret_values<'a>(input: Cow<'a, str>, values: &[String]) -> Cow<'a, str> {
+    if values.is_empty() {
+        return input;
+    }
+    let mut owned: Option<String> = None;
+    for value in values {
+        if value.len() < MIN_VAULT_REDACT_LEN {
+            continue;
+        }
+        let hay = owned.as_deref().unwrap_or(input.as_ref());
+        if hay.contains(value.as_str()) {
+            owned = Some(hay.replace(value.as_str(), REDACTED));
+        }
+    }
+    match owned {
+        Some(s) => Cow::Owned(s),
+        None => input,
+    }
 }
 
 /// Use [`redact_json_string_values`] for the standard scrub; use this

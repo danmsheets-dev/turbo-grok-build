@@ -146,6 +146,8 @@ pub enum Command {
     Pipeline(crate::pr_cmd::PipelineArgs),
     /// Feature Request Log — list / show / export / sync capability requests from agents
     Features(crate::features_cmd::FeaturesArgs),
+    /// Named secrets vault — `get` returns a handle, never the raw secret
+    Secret(crate::secret_cmd::SecretArgs),
     /// Workspace directory atlas: status, doctor, inject-preview, build, resolve
     Tree(crate::tree_cmd::TreeArgs),
     /// Disk report and safe clean (target/debug, old worktrees, tree store)

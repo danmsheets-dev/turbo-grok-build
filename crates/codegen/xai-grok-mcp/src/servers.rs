@@ -1238,6 +1238,11 @@ pub enum McpError {
 
     #[error("MCP service error: {0}")]
     ServiceError(#[from] ServiceError),
+
+    /// Named vault secret missing or unreadable (fail closed; message never
+    /// includes secret bytes).
+    #[error("MCP server '{server}': secret vault error ({reason})")]
+    Vault { server: String, reason: String },
 }
 
 impl McpError {
@@ -1260,7 +1265,9 @@ impl McpError {
             Self::HandshakeFailed { .. } => McpErrorCategory::HandshakeFailed,
             Self::AuthRequired { .. } => McpErrorCategory::AuthRequired,
             Self::ConfineHttpRefused { .. } => McpErrorCategory::ClientError,
-            Self::ClientError(_) | Self::ServiceError(_) => McpErrorCategory::ClientError,
+            Self::ClientError(_) | Self::ServiceError(_) | Self::Vault { .. } => {
+                McpErrorCategory::ClientError
+            }
         }
     }
 
@@ -1270,7 +1277,8 @@ impl McpError {
             | Self::Timeout { server, .. }
             | Self::HandshakeFailed { server, .. }
             | Self::AuthRequired { server }
-            | Self::ConfineHttpRefused { server } => Some(server),
+            | Self::ConfineHttpRefused { server }
+            | Self::Vault { server, .. } => Some(server),
             Self::ClientError(_) | Self::ServiceError(_) => None,
         }
     }
@@ -1284,9 +1292,10 @@ impl McpError {
             Self::HandshakeFailed { source, .. } => is_auth_rejection_message(&source.to_string()),
             Self::ServiceError(e) => is_auth_rejection_message(&e.to_string()),
             Self::ClientError(s) => is_auth_rejection_message(s),
-            Self::Timeout { .. } | Self::SpawnFailed { .. } | Self::ConfineHttpRefused { .. } => {
-                false
-            }
+            Self::Timeout { .. }
+            | Self::SpawnFailed { .. }
+            | Self::ConfineHttpRefused { .. }
+            | Self::Vault { .. } => false,
         }
     }
 }
@@ -4514,6 +4523,43 @@ impl<'a> McpSpawnCtx<'a> {
     }
 }
 
+/// Resolve `secret:` placeholders and inject `GROK_SECRET_*` for a stdio
+/// handshake. Fail closed if a referenced name is missing. Raw values stay
+/// on this vec (child env) and are never logged here.
+pub(crate) fn handshake_stdio_env(
+    server: &str,
+    env: &[acp::EnvVariable],
+) -> Result<Vec<(String, String)>, McpError> {
+    handshake_stdio_env_with_vault(server, env, &load_handshake_vault(server)?)
+}
+
+fn load_handshake_vault(server: &str) -> Result<xai_grok_secrets::Vault, McpError> {
+    let vault = xai_grok_secrets::Vault::load().map_err(|e| McpError::Vault {
+        server: server.to_owned(),
+        reason: e.to_string(),
+    })?;
+    vault.install_for_redaction();
+    Ok(vault)
+}
+
+fn handshake_stdio_env_with_vault(
+    server: &str,
+    env: &[acp::EnvVariable],
+    vault: &xai_grok_secrets::Vault,
+) -> Result<Vec<(String, String)>, McpError> {
+    let mut env_pairs: Vec<(String, String)> = env
+        .iter()
+        .map(|e| (e.name.clone(), e.value.clone()))
+        .collect();
+    xai_grok_secrets::apply_vault_to_mcp_env(vault, &mut env_pairs).map_err(|e| {
+        McpError::Vault {
+            server: server.to_owned(),
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(env_pairs)
+}
+
 pub async fn start_mcp_server(
     mcp_server: acp::McpServer,
     overrides: Option<&McpClientTimeoutOverrides>,
@@ -4540,6 +4586,8 @@ pub async fn start_mcp_server(
             let _stdio_spawn_timer = xai_grok_telemetry::instrumentation::timer("mcp_stdio_spawn");
             let path_override = stdio_path_override(&env);
 
+            let env_pairs = handshake_stdio_env(&name, &env)?;
+
             let spawn_once = |scope: Option<&ProcessScope>| -> Result<
                 (SafeTokioChildProcess, Option<ChildStderr>),
                 McpError,
@@ -4556,8 +4604,8 @@ pub async fn start_mcp_server(
                     });
                 let mut cmd = Command::new(&program);
                 cmd.kill_on_drop(true).args(&spawn_args);
-                for env_variable in &env {
-                    cmd.env(&env_variable.name, &env_variable.value);
+                for (key, value) in &env_pairs {
+                    cmd.env(key, value);
                 }
                 if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
                     cmd.current_dir(root.as_path());
@@ -8357,5 +8405,67 @@ mod tests {
             server: "srv".to_string(),
         };
         assert_eq!(ev.server_name(), Some("srv"));
+    }
+
+    fn fixture(parts: &[&str]) -> String {
+        parts.concat()
+    }
+
+    fn write_vault_secret(dir: &std::path::Path, name: &str, value: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, value).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn handshake_env_injects_vault_and_resolves_placeholders() {
+        let canary = fixture(&["mcpvault", "CanaryValue99"]);
+        let dir = tempfile::tempdir().unwrap();
+        write_vault_secret(dir.path(), "svc_token", &canary);
+        let vault = xai_grok_secrets::Vault::load_from_dir(dir.path()).unwrap();
+        let env = vec![acp::EnvVariable::new(
+            "AUTH".to_string(),
+            "secret:svc_token".to_string(),
+        )];
+        let pairs = handshake_stdio_env_with_vault("demo", &env, &vault).unwrap();
+        let auth = pairs
+            .iter()
+            .find(|(k, _)| k == "AUTH")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert_eq!(auth, canary);
+        let injected = pairs
+            .iter()
+            .find(|(k, _)| k == &xai_grok_secrets::env_key_for_secret_name("svc_token"))
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert_eq!(injected, canary);
+        let err = format!(
+            "{:?}",
+            McpError::Vault {
+                server: "demo".into(),
+                reason: "secret not found".into(),
+            }
+        );
+        assert!(!err.contains(&canary));
+    }
+
+    #[test]
+    fn handshake_env_missing_secret_fails_closed() {
+        let vault = xai_grok_secrets::Vault::default();
+        let env = vec![acp::EnvVariable::new(
+            "AUTH".to_string(),
+            "secret:nope_token".to_string(),
+        )];
+        let err = handshake_stdio_env_with_vault("demo", &env, &vault).unwrap_err();
+        assert!(matches!(err, McpError::Vault { .. }), "{err}");
+        assert!(err.to_string().contains("demo"));
+        assert!(!err.to_string().contains("nope_token-value"));
     }
 }
