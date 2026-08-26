@@ -136,7 +136,10 @@ pub(super) fn dispatch_send_feedback(app: &mut AppView, text: String) -> Vec<Eff
     };
 
     agent.scrollback.push_block(RenderBlock::system(
-        "Thanks for the feedback! The Turbo Grok Build team is on it.".to_string(),
+        format!(
+            "Thanks for the feedback! The {} team is on it.",
+            xai_grok_version::PRODUCT_DISPLAY_NAME
+        ),
     ));
 
     vec![Effect::SendFeedback {

@@ -1,4 +1,4 @@
-# Agent instructions (Turbo Grok Build)
+# Agent instructions (Turbo Build)
 
 Guidance for AI agents and humans working in this monorepo. Keep builds and
 tests from filling the disk; prefer targeted compile/test over full-workspace
@@ -186,7 +186,7 @@ Rules of thumb for agents:
 
 ## Product context (short)
 
-- Product: **Turbo Grok Build** · CLI: **`turbo`** · wire version in `VERSION`
+- Product: **Turbo Build** · CLI: **`turbo`** · wire version in `VERSION`
 - Agent runtime crate: **`xai-grok-shell`** (not bash); TUI: **`xai-grok-pager`**
 - Composition root binary: **`xai-grok-pager-bin`** → `turbo`
 - Config/auth/sessions: **`~/.grok`** (shared with official `grok` if installed)

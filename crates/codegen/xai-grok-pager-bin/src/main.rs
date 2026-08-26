@@ -1849,7 +1849,7 @@ fn write_version(writer: &mut impl std::io::Write, channel_label: &str) -> std::
 }
 
 /// Machine-readable identity for harnesses (Grok Build plugin, CI).
-/// Distinguishes Turbo Grok Build from Vercel Turborepo and advertises
+/// Distinguishes Turbo Build from Vercel Turborepo and advertises
 /// headless/permission capabilities (rc2 polish).
 fn version_json_payload() -> serde_json::Value {
     let community = cfg!(feature = "community-build");

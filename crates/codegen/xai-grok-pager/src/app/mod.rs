@@ -2338,7 +2338,7 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Turbo Grok Build TUI",
+                "Turbo Build TUI",
                 "",
                 "Usage: turbo [OPTIONS] [PROMPT] [COMMAND]",
                 "",

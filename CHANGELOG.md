@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **Turbo Grok Build** (`turbo` binary).
+All notable changes to **Turbo Build** (`turbo` binary).
 
 Format: [Keep a Changelog](https://keepachangelog.com/).  
 Wire versions: [`VERSION`](./VERSION) (`1.0.0-rc.N` on Grok Build 1.0 core;
@@ -12,7 +12,7 @@ English-only product surface (UI and public docs) as of RC14.
 
 ## Pedigree (community line)
 
-Turbo Grok Build evolved from the Hyper community fork of
+Turbo Build evolved from the Hyper community fork of
 [xAI Grok Build](https://github.com/xai-org/grok-build). Multi-agent work
 accelerated at r6; product rebrand to **Turbo** at r10. From **1.0.0-rc.1**
 onward, official Grok Build is the permanent upstream core remote

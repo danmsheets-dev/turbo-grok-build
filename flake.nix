@@ -18,7 +18,7 @@
 # `outputHashes` below and rebuild. See:
 # https://nixos.org/manual/nixpkgs/unstable/#buildrustpackage
 {
-  description = "Turbo Grok Build — multi-provider community build of Grok Build (terminal AI coding agent)";
+  description = "Turbo Build — multi-provider community build of Grok Build (terminal AI coding agent)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

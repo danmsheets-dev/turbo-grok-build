@@ -332,7 +332,7 @@ sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
 # Community Turbo branding (CLI name for completions / help strings). Empty
 # feature â€” gated with `cfg!(feature = "community-build")` in this crate.
-# Forwarded from `xai-grok-pager-bin` when that binary is a Turbo Grok Build.
+# Forwarded from `xai-grok-pager-bin` when that binary is a Turbo Build.
 community-build = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds â€” used

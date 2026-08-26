@@ -317,7 +317,7 @@ const RENDER_MERMAID_CHOICES: &[EnumChoice] = &[
 // ---------------------------------------------------------------------------
 // UI-language catalog.
 //
-// Turbo Grok Build is **English-only**. The setting remains for config
+// Turbo Build is **English-only**. The setting remains for config
 // compatibility; non-`en` values are coerced to English in `i18n::canonical_language`.
 // ---------------------------------------------------------------------------
 
@@ -945,7 +945,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
             label: "Language",
-            description: "UI display language. Turbo Grok Build is English-only.",
+            description: "UI display language. Turbo Build is English-only.",
             keywords: &["language", "locale", "i18n", "english"],
             kind: SettingKind::Enum {
                 default: "en",

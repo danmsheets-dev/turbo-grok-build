@@ -9,6 +9,10 @@ pub const VERSION: &str = match option_env!("GROK_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
+/// User-facing product name for community Turbo builds.
+/// Machine identity (`--version --json` `product`) remains `turbo-grok-build`.
+pub const PRODUCT_DISPLAY_NAME: &str = "Turbo Build";
+
 /// [`TEST_VERSION_ENV`] override first, then [`VERSION`]. Trimmed so
 /// non-semver-aware callers can pass the result straight into parsing.
 pub fn installed() -> String {
@@ -71,6 +75,11 @@ mod tests {
         // display_version uses compiled VERSION — just verify the label appends
         assert_eq!(display_version(""), VERSION);
         assert!(display_version(" [stable]").ends_with("[stable]"));
+    }
+
+    #[test]
+    fn product_display_name_is_turbo_build() {
+        assert_eq!(PRODUCT_DISPLAY_NAME, "Turbo Build");
     }
 }
 

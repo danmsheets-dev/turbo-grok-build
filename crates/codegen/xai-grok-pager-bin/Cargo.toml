@@ -6,7 +6,7 @@ license = "Apache-2.0"
 authors = ["xAI"]
 default-run = "turbo"
 
-# Composition-root binary for the Turbo Grok Build TUI.
+# Composition-root binary for the Turbo Build TUI.
 # Community builds ship the artifact as `turbo` (coexists with the official
 # `grok` binary). This package exists so the binary can link both the pager
 # library and the optional `xai-grok-pager-minimal` render mode: `minimal`

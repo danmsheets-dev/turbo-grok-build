@@ -1,4 +1,4 @@
-//! UI language (i18n) — English-only for Turbo Grok Build.
+//! UI language (i18n) — English-only for Turbo Build.
 //!
 //! Translations live in `locales/en.yml` and are embedded at compile time by
 //! `rust-i18n` (loaded once in `lib.rs`). Non-English UI locales are not

@@ -1,8 +1,8 @@
 <div align="center">
 
-<h1>Turbo Grok Build</h1>
+<h1>Turbo Build</h1>
 
-<img src="docs/assets/turbo-banner.jpg" alt="Turbo Grok Build — multi-agent terminal coding" width="720">
+<img src="docs/assets/turbo-banner.jpg" alt="Turbo Build — multi-agent terminal coding" width="720">
 
 <p>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
 </p>
 
-**Turbo Grok Build** (CLI: **`turbo`**) is a heavily extended multi-agent coding
+**Turbo Build** (CLI: **`turbo`**) is a heavily extended multi-agent coding
 CLI forked from [xAI Grok Build](https://github.com/xai-org/grok-build). It keeps
 the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
@@ -23,7 +23,7 @@ logging, and agent orientation that the upstream product does not ship.
 Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.11.1`** — GitHub
 **Latest** with `SHA256SUMS` so managed `~/.turbo` installs auto-update.
 
-CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok Build**.
+CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Build**.
 
 [What changed](#what-makes-turbo-different) ·
 [Feature overview](#feature-overview) ·
@@ -44,10 +44,10 @@ CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Grok
 
 ## What makes Turbo different
 
-Upstream Grok Build is a strong single-session coding agent. **Turbo Grok Build
+Upstream Grok Build is a strong single-session coding agent. **Turbo Build
 is a multi-agent development runtime** built on that foundation.
 
-| Area | Upstream Grok Build | **Turbo Grok Build** |
+| Area | Upstream Grok Build | **Turbo Build** |
 |------|---------------------|----------------------|
 | Product focus | Official agent CLI | Community multi-agent platform |
 | Subagents | Present | Isolation by default, land/diff/discard, soft-preserve, restore |
@@ -61,7 +61,7 @@ is a multi-agent development runtime** built on that foundation.
 | Product field signal | `/feedback`, crashes | **Auto Developer Log** + **Feature Request Log** |
 | Providers | xAI-centric | Multi-provider (Grok, NVIDIA Integrate, Codex, Kimi, OpenAI, Anthropic, …) |
 | UX | TUI | TUI + **Game Mode** (`Ctrl+G` pixel office) + **`/meeting` notetaker** |
-| Branding / binary | `grok` · `~/.grok` | Product **Turbo Grok Build** · CLI **`turbo`** · binary under `~/.turbo` |
+| Branding / binary | `grok` · `~/.grok` | Product **Turbo Build** · CLI **`turbo`** · binary under `~/.turbo` |
 
 ### Prebuilt binaries and auto-update
 
@@ -285,14 +285,14 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 
 | | Official | This project |
 |---|---|---|
-| Product | Grok Build | **Turbo Grok Build** |
+| Product | Grok Build | **Turbo Build** |
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
 | Release line | upstream cadence | **1.0.0-rc.11.1** |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
-GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Grok Build**; CLI is **`turbo`**.
+GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Build**; CLI is **`turbo`**.
 
 ---
 
@@ -697,4 +697,4 @@ Apache-2.0. See [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), and
 [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES).
 
 Based on [xai-org/grok-build](https://github.com/xai-org/grok-build).
-**Turbo Grok Build** is an independent community fork — not an official xAI product.
+**Turbo Build** is an independent community fork — not an official xAI product.

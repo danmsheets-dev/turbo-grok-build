@@ -553,7 +553,7 @@ pub struct LeaderArgs {
 #[command(
     name = "turbo",
     version = env!("VERSION_WITH_COMMIT"),
-    about = "Turbo Grok Build TUI",
+    about = "Turbo Build TUI",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
