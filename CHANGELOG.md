@@ -54,9 +54,6 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
-- **Meeting TTS (opt-in).** `GROK_MEETING_TTS=1` makes `meeting_reply` speak the answer locally via Windows SAPI (`ISpVoice`) on this PC's speakers. There is no xAI TTS client in-tree; this is not injected into the Teams notetaker's silent outbound track. Other OS: reply reports TTS unavailable. Off by default.
-- Persisted Agent WebView profile so grok.com / Imagine login survives pager sessions (`$GROK_HOME/agent-browser`). `turbo browser reset-profile` or `GROK_BROWSER_FRESH_PROFILE=1` starts clean. `GROK_BROWSER_PROFILE=session` restores per-session isolation. Native `image_gen` still uses xAI API keys (`turbo login`); WebView cookies are never mixed into the Imagine API.
-
 ---
 
 ## [1.0.0-rc.12] - 2026-08-26
@@ -72,6 +69,10 @@ name is **Turbo Build**; CLI remains `turbo`.
   `$GROK_WORKTREE_ROOT` (same patterns as the start-gate).
 - Child card budget 320 tokens (measured ~146); parent short target ≤1200
   (measured ~1168; cap still 1650).
+- Depth-1 build subagents can launch named read-only review workflows.
+- xhigh/max/unbounded GP default wall-clock is 45 minutes.
+- Disk gate names the dest volume; clean seed materializes from HEAD.
+- Cancelled `resume_from` reuses a preserved live worktree.
 - Residual: isolation label is still a CWD-path heuristic, not spawn metadata.
 
 #### Brand
@@ -79,6 +80,16 @@ name is **Turbo Build**; CLI remains `turbo`.
 - Display name **Turbo Build** (`PRODUCT_DISPLAY_NAME`).
 - Machine id `--version --json` `product` stays `turbo-grok-build`.
 - GitHub repo, CLI binary `turbo`, `~/.grok` / `~/.turbo` unchanged.
+
+#### Also in this RC (open log sweep)
+
+- Windows grok_home credential **writes** fail-closed in policy (kernel sandbox still advisory).
+- MCP handshake fail-soft; Blender health probes TCP 9876.
+- NVIDIA 429 retries (6, capped jitter).
+- Persist Agent WebView profile (`$GROK_HOME/agent-browser`); OAuth popups are host-owned policy-checked tabs.
+- `/steer` `/rollback`; `turbo test --match`; `turbo pr` / `turbo pipeline`; `turbo secret get`.
+- `.grok/policy.toml` enforced at tool dispatch.
+- Teams guest/web join without Graph; optional `GROK_MEETING_TTS=1` local SAPI.
 
 ---
 
