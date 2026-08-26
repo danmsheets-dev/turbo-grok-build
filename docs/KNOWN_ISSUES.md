@@ -3,7 +3,20 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-26 (1.0.0-rc.11 security honesty).
+Last reviewed: 2026-08-26 (1.0.0-rc.12 subagent hardening).
+
+## 1.0.0-rc.12 — Subagent hardening
+
+Shipped on wire `1.0.0-rc.12`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+- Child boot-card isolation label now uses the same path patterns as the
+  start-gate (`H:\t\w\{8hex}\subagent-…`, `$GROK_WORKTREE_ROOT`,
+  `~/.grok/worktrees`, `grok-subagent-worktrees`). It is still a **CWD
+  heuristic**, not spawn metadata.
+- User-facing name is **Turbo Build**. `--version --json` `product` remains
+  `turbo-grok-build` so harnesses/plugins do not break.
+- Live pager binary must be rebuilt to inject the new child card; unit tests
+  cover the detector without a `release-dist`.
 
 ## 1.0.0-rc.11 — Security honesty
 

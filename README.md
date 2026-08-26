@@ -8,7 +8,7 @@
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/releases"><img src="https://img.shields.io/github/v/release/danmsheets-dev/turbo-grok-build?display_name=tag" alt="Release"></a>
   <a href="https://github.com/danmsheets-dev/turbo-grok-build/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflows/release.yml/badge.svg?branch=dev" alt="Release CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-1.0.0--rc.11.1-blue" alt="1.0.0-rc.11.1">
+  <img src="https://img.shields.io/badge/version-1.0.0--rc.12-blue" alt="1.0.0-rc.12">
   <img src="https://img.shields.io/badge/rust-1.94.0-orange?logo=rust" alt="Rust 1.94">
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/UI-English-brightgreen" alt="English UI">
@@ -20,7 +20,7 @@ the Rust TUI core and multi-provider stack, then layers production-grade
 **folder worktrees**, recovery tooling, deep-audit workflows, Game Mode, field
 logging, and agent orientation that the upstream product does not ship.
 
-Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.11.1`** — GitHub
+Current release line: **Grok Build 1.0 core** · wire **`1.0.0-rc.12`** — GitHub
 **Latest** with `SHA256SUMS` so managed `~/.turbo` installs auto-update.
 
 CLI binary: **`turbo`** (installs to `~/.turbo/bin`). Product name: **Turbo Build**.
@@ -263,6 +263,7 @@ Not affiliated with xAI. Based on Apache-2.0 Grok Build source.
 | **1.0-rc.8** | **`1.0.0-rc.8`** | **`/schedule`**, Meeting R2, Browser R3, GitHub Issues log sync, stock workflows |
 | **1.0-rc.9** | **`1.0.0-rc.9`** | **Meeting Tool v3:** joined Teams notetaker bot, in-page audio tap, read-only meeting Q&A |
 | **1.0-rc.10** | **`1.0.0-rc.10`** | **Teams Join Hardening:** web-join rewrite, protocol guard, honest fallback, GitHub sync preflight |
+| **1.0-rc.12** | **`1.0.0-rc.12`** | **Subagent hardening** + display name **Turbo Build** (CLI still `turbo`) |
 | **1.0-rc.11.1** | **`1.0.0-rc.11.1`** | **Windows worktree isolation hotfix** (`H:\t\w\{hash}` recognized by start gate) |
 | **1.0-rc.11** | **`1.0.0-rc.11`** | **Security honesty:** confine HIGH bypasses, permission mapping, skills trust, meeting-QA confine; Agent WebView **beta** |
 
@@ -289,7 +290,7 @@ Full per-release detail: [`CHANGELOG.md`](./CHANGELOG.md).
 | CLI binary | `grok` | **`turbo`** |
 | Install root | `~/.grok` | **`~/.turbo`** (binary only) |
 | Config / auth / sessions | `~/.grok` | **same `~/.grok`** (shared) |
-| Release line | upstream cadence | **1.0.0-rc.11.1** |
+| Release line | upstream cadence | **1.0.0-rc.12** |
 | Upstream | [xai-org/grok-build](https://github.com/xai-org/grok-build) | This fork (+ multi-provider / multi-agent patches) |
 
 GitHub repo: **`turbo-grok-build`**. Product name is **Turbo Build**; CLI is **`turbo`**.
@@ -581,7 +582,7 @@ Remove-Item -Recurse -Force target\debug -ErrorAction SilentlyContinue
 
 ## Changelog & known issues
 
-- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **1.0.0-rc.11.1** is current
+- [`CHANGELOG.md`](./CHANGELOG.md) — **official changelog** · **1.0.0-rc.12** is current
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
 - [`docs/workspace-tree.md`](docs/workspace-tree.md) — Workspace Tree (RC12–RC13)
 - [`docs/archive/RC11_RELEASE_NOTES.md`](docs/archive/RC11_RELEASE_NOTES.md) — Game Mode (historical)

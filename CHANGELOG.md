@@ -45,6 +45,7 @@ onward, official Grok Build is the permanent upstream core remote
 | **1.0 rc10** | **`1.0.0-rc.10`** | Teams join hardening and incident log |
 | **1.0 rc11** | **`1.0.0-rc.11`** | Security honesty |
 | **1.0 rc11.1** | **`1.0.0-rc.11.1`** | Windows worktree isolation hotfix |
+| **1.0 rc12** | **`1.0.0-rc.12`** | Subagent hardening + Turbo Build rename |
 
 Older release notes (r1–r13 detail) are archived under
 [`docs/archive/`](./docs/archive/).
@@ -52,6 +53,29 @@ Older release notes (r1–r13 detail) are archived under
 ---
 
 ## Unreleased
+
+---
+
+## [1.0.0-rc.12] - 2026-08-26
+
+**Subagent hardening + Turbo Build.** Child boot cards tell the truth about
+Windows short worktrees (`{drive}:\t\w\{hash}\subagent-…`). The parent boot
+card teaches that path and drops duplicated ADL/FRL prose. User-facing product
+name is **Turbo Build**; CLI remains `turbo`.
+
+#### Subagents
+
+- Boot-card `infer_isolation_label` accepts the rc.11 short root and
+  `$GROK_WORKTREE_ROOT` (same patterns as the start-gate).
+- Child card budget 320 tokens (measured ~146); parent short target ≤1200
+  (measured ~1168; cap still 1650).
+- Residual: isolation label is still a CWD-path heuristic, not spawn metadata.
+
+#### Brand
+
+- Display name **Turbo Build** (`PRODUCT_DISPLAY_NAME`).
+- Machine id `--version --json` `product` stays `turbo-grok-build`.
+- GitHub repo, CLI binary `turbo`, `~/.grok` / `~/.turbo` unchanged.
 
 ---
 
