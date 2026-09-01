@@ -24,6 +24,10 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
+/// Telemetry must never hang a caller: a wedged endpoint or a black-holed
+/// connection would otherwise keep the request future alive indefinitely.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Mixpanel {
     /// Create a new Mixpanel client with the given project token.
     pub fn new(token: impl Into<String>) -> Self {
@@ -74,6 +78,7 @@ impl Mixpanel {
 
         self.client
             .post("https://api.mixpanel.com/track")
+            .timeout(REQUEST_TIMEOUT)
             .form(&[("data", &encoded)])
             .send()
             .await?;
@@ -105,6 +110,7 @@ impl Mixpanel {
 
         self.client
             .post("https://api.mixpanel.com/engage")
+            .timeout(REQUEST_TIMEOUT)
             .form(&[("data", &encoded)])
             .send()
             .await?;
