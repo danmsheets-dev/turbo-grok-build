@@ -91,8 +91,14 @@ struct GlobalSandboxState {
     applied: bool,
     restrict_network_at_known_linux_launches: bool,
 }
-fn restrict_network_at_known_linux_launches(applied: bool, configured: bool) -> bool {
-    applied && configured && cfg!(target_os = "linux")
+/// The per-spawn seccomp filter is self-contained: it needs neither Landlock
+/// nor bwrap, so it keys on the resolved `restrict_network` alone. In the
+/// degraded states (Landlock unsupported, or `Sandbox::apply` failing inside
+/// bwrap) this filter is the only remaining enforcement. Keying on Landlock
+/// success would silently disable that session-long child-network control;
+/// keying on the config is the fail-closed direction.
+fn restrict_network_at_known_linux_launches(configured: bool) -> bool {
+    configured && cfg!(target_os = "linux")
 }
 /// Whether known Linux child launch paths should install the seccomp network filter.
 pub fn should_restrict_child_network() -> bool {
@@ -271,7 +277,6 @@ impl SandboxManager {
             logger: self.logger,
             applied: self.applied,
             restrict_network_at_known_linux_launches: restrict_network_at_known_linux_launches(
-                self.applied,
                 self.net_restricted,
             ),
         });
@@ -287,7 +292,7 @@ impl SandboxManager {
     }
     /// Whether known Linux child launch paths should install the seccomp network filter.
     pub fn restrict_child_network(&self) -> bool {
-        restrict_network_at_known_linux_launches(self.applied, self.net_restricted)
+        restrict_network_at_known_linux_launches(self.net_restricted)
     }
     /// The active profile name.
     pub fn profile(&self) -> &ProfileName {
@@ -900,13 +905,21 @@ mod tests {
         assert!(super::profile_confines("my-custom-profile"));
     }
     #[test]
-    fn known_launch_guard_is_linux_only() {
+    fn known_launch_guard_keys_on_config_not_apply_state() {
         assert_eq!(
-            restrict_network_at_known_linux_launches(true, true),
+            restrict_network_at_known_linux_launches(true),
             cfg!(target_os = "linux")
         );
-        assert!(!restrict_network_at_known_linux_launches(false, true));
-        assert!(!restrict_network_at_known_linux_launches(true, false));
+        assert!(!restrict_network_at_known_linux_launches(false));
+        // Arming the per-spawn filter must NOT require applied=true: the seccomp
+        // filter is the only enforcement left when bwrap/Landlock did not apply.
+        let manager = SandboxManager::new(ProfileName::ReadOnly, Path::new("/tmp"));
+        assert!(!manager.is_applied());
+        assert_eq!(
+            manager.restrict_child_network(),
+            cfg!(target_os = "linux"),
+            "arming must not require applied=true"
+        );
     }
     /// Create a temp workspace whose `.grok/sandbox.toml` contains `toml_body`.
     /// Returns the workspace path (caller removes it).
