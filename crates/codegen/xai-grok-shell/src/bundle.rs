@@ -170,13 +170,16 @@ pub(crate) fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Resul
     {
         let mut entry = entry_result.context("failed to read archive entry")?;
 
-        if entry.header().entry_type() != tar::EntryType::Regular {
-            continue;
-        }
-
+        // Every header consumes decompressed input, so non-regular entries
+        // (directories, symlinks, PAX records) count against the bomb bound
+        // too — otherwise a flood of them spins this loop uncapped.
         entry_count += 1;
         if entry_count > ARCHIVE_MAX_ENTRIES {
             bail!("archive exceeds maximum entry count ({ARCHIVE_MAX_ENTRIES})");
+        }
+
+        if entry.header().entry_type() != tar::EntryType::Regular {
+            continue;
         }
 
         let entry_size = entry.header().size().context("failed to read entry size")?;
@@ -362,6 +365,15 @@ fn sanitize_manifest(manifest: BundleManifest) -> BundleManifest {
     }
 }
 
+/// Characters Windows forbids in file names. `:` additionally names an NTFS
+/// alternate data stream, so extracting `notes:ads.md` would silently write
+/// hidden stream content onto a file called `notes`.
+fn has_windows_invalid_char(component: &str) -> bool {
+    component
+        .chars()
+        .any(|c| matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+}
+
 fn sanitize_relative_path(relative_path: &str) -> Option<String> {
     if relative_path.is_empty() || relative_path.starts_with('/') || relative_path.contains('\\') {
         return None;
@@ -389,12 +401,14 @@ fn sanitize_relative_path(relative_path: &str) -> Option<String> {
                 return None;
             }
             validate_bundle_name(BundleFileKind::Skill, second).ok()?;
-            // Reject components that would let extraction escape the per-skill directory.
+            // Reject components that would let extraction escape the per-skill
+            // directory, or reach an NTFS alternate data stream on Windows.
             for component in std::iter::once(third).chain(parts) {
                 if component.is_empty()
                     || component == "."
                     || component == ".."
                     || component.chars().any(char::is_control)
+                    || has_windows_invalid_char(component)
                 {
                     return None;
                 }
@@ -461,6 +475,7 @@ fn validate_bundle_name(kind: BundleFileKind, name: &str) -> Result<()> {
         || name.contains('/')
         || name.contains('\\')
         || name.chars().any(char::is_control)
+        || has_windows_invalid_char(name)
     {
         bail!("invalid bundled {} name: {name:?}", kind.label());
     }
@@ -1233,6 +1248,71 @@ mod tests {
 
         let err = extract_bundle_archive(&root, &archive).unwrap_err();
         assert!(err.to_string().contains("exceeds maximum entry count"));
+    }
+
+    #[test]
+    fn extract_archive_rejects_header_flood_of_non_regular_entries() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let v = r#"{"version":"v1"}"#;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(v.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "bundle.json", v.as_bytes())
+            .unwrap();
+
+        // Each directory entry is a 512-byte block of decompressed input the
+        // loop must process; a flood of them has to hit the entry cap even
+        // though none is ever extracted.
+        for i in 0..ARCHIVE_MAX_ENTRIES {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_mode(0o755);
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, format!("unknown/d{i}/"), &[] as &[u8])
+                .unwrap();
+        }
+
+        let encoder = builder.into_inner().unwrap();
+        let archive = encoder.finish().unwrap();
+
+        let err = extract_bundle_archive(&root, &archive).unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum entry count"));
+    }
+
+    #[test]
+    fn extract_archive_skips_windows_stream_component_names() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+
+        let archive = make_test_archive(&[
+            ("bundle.json", &br#"{"version":"v1"}"#[..]),
+            ("skills/good/SKILL.md", &b"# fine"[..]),
+            // `:` names an NTFS alternate data stream: extracting these on
+            // Windows silently writes hidden stream content onto `notes` /
+            // `evil` instead of a visible file.
+            ("skills/good/notes:ads.md", &b"hidden"[..]),
+            ("subagents/personas/evil:ads.toml", &b"instructions = \"x\""[..]),
+        ]);
+
+        let manifest = extract_bundle_archive(&root, &archive).unwrap();
+
+        assert!(manifest.checksums.contains_key("skills/good/SKILL.md"));
+        assert!(
+            !manifest.checksums.keys().any(|k| k.contains(':')),
+            "colon paths must be skipped, got {:?}",
+            manifest.checksums.keys().collect::<Vec<_>>()
+        );
+        assert!(!root.join("skills/good").join("notes").exists());
+        assert!(!root.join("personas").join("evil").exists());
     }
 
     #[test]
