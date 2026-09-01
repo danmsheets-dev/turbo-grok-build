@@ -159,6 +159,24 @@ pub(crate) fn task_model_error_for_catalog_spawn(
         spawn_catalog_candidate(key, entry, is_session_auth, config_keys)
     };
 
+    if let Some((key, entry)) =
+        find_spawnable_task_model_entry(available, requested, is_session_auth, config_keys)
+    {
+        if catalog_entry_is_eol(key) {
+            return Some(eol_model_error(requested));
+        }
+        if spawn_requires_agent_ready(subagent_type, capability_mode)
+            && !model_entry_agent_ready(entry)
+        {
+            return Some(chat_only_model_error(
+                requested,
+                available,
+                is_session_auth,
+                config_keys,
+            ));
+        }
+        return None;
+    }
     if let Some((key, entry)) = find_task_model_entry(available, requested) {
         if catalog_entry_is_eol(key) {
             return Some(eol_model_error(requested));
@@ -351,6 +369,13 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
         out.push("nvidia/meta/muse-glimmer-30b".into());
         out.push("nvidia/muse-glimmer-30b".into());
     }
+    if lower.contains("thinkingmachines/inkling")
+        || lower == "inkling"
+        || lower == "inkling:free"
+    {
+        out.push("openrouter/thinkingmachines/inkling:free".into());
+        out.push("openrouter/thinkingmachines/inkling".into());
+    }
     if lower.contains("laguna-xs-2.1") || lower.ends_with("laguna-xs") {
         out.push("nvidia/poolside/laguna-xs-2.1".into());
         out.push("nvidia/laguna-xs-2.1".into());
@@ -359,7 +384,74 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
         out.push("nvidia/mistralai/mistral-nemotron".into());
         out.push("nvidia/mistral-nemotron".into());
     }
+    if lower.contains("deepseek-v4-pro-0813") {
+        out.push("nvidia/deepseek-ai/deepseek-v4-pro-0813".into());
+        out.push("nvidia/deepseek-v4-pro-0813".into());
+    } else if lower.contains("deepseek-v4-pro")
+        && (lower.contains("nvidia") || lower.contains("deepseek-ai"))
+    {
+        out.push("nvidia/deepseek-ai/deepseek-v4-pro".into());
+        out.push("nvidia/deepseek-ai/deepseek-v4-pro-0813".into());
+    }
+    if lower.contains("deepseek-v4-flash-0731") {
+        out.push("nvidia/deepseek-ai/deepseek-v4-flash-0731".into());
+        out.push("nvidia/deepseek-v4-flash-0731".into());
+    } else if lower.contains("deepseek-v4-flash")
+        && (lower.contains("nvidia") || lower.contains("deepseek-ai"))
+    {
+        out.push("nvidia/deepseek-ai/deepseek-v4-flash".into());
+        out.push("nvidia/deepseek-ai/deepseek-v4-flash-0731".into());
+    }
+    if lower == "nvidia/moonshotai/kimi-k3"
+        || lower == "nvidia/kimi-k3"
+        || lower == "moonshotai/kimi-k3"
+        || lower.ends_with("/moonshotai/kimi-k3")
+    {
+        out.push("nvidia/moonshotai/kimi-k3".into());
+        out.push("nvidia/kimi-k3".into());
+    }
     out
+}
+
+/// Spawn-time lookup: prefer a spawnable exact catalog key, then spawnable
+/// aliases (`openai/gpt-5.6-terra` → `openai-codex/gpt-5.6-terra`), then a
+/// spawnable routing-slug match.
+///
+/// OpenRouter rows wire `model: "openai/gpt-5.6-terra"`. A routing-slug
+/// hit on that row used to win over the Codex alias, so spawn listed
+/// `openai/gpt-5.6-terra` as valid and then rejected it when OpenRouter
+/// was not credentialed.
+pub(crate) fn find_spawnable_task_model_entry<'a>(
+    available: &'a IndexMap<String, ModelEntry>,
+    requested: &str,
+    is_session_auth: bool,
+    config_keys: Option<&std::collections::HashSet<String>>,
+) -> Option<(&'a str, &'a ModelEntry)> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    let is_available = |key: &str, entry: &ModelEntry| {
+        spawn_catalog_candidate(key, entry, is_session_auth, config_keys)
+    };
+    if let Some((key, entry)) = available.get_key_value(requested)
+        && is_available(key, entry)
+    {
+        return Some((key.as_str(), entry));
+    }
+    for alias in task_model_aliases(requested) {
+        if let Some((key, entry)) = available.get_key_value(&alias)
+            && is_available(key, entry)
+        {
+            return Some((key.as_str(), entry));
+        }
+    }
+    if let Some((key, entry)) = find_task_model_entry(available, requested)
+        && is_available(key, entry)
+    {
+        return Some((key, entry));
+    }
+    None
 }
 
 /// Resolve a Task.model slug against the catalog, including common provider

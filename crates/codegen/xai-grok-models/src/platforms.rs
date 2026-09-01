@@ -2244,6 +2244,15 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
                 out.push(m);
             }
         }
+        // OpenRouter free-tier twins the Pi snapshot may omit (MiniMax M3
+        // :free). Insert-only: never overwrite a Pi row that already exists.
+        for m in openrouter_offline_fallbacks() {
+            if existing.contains_key(&m.catalog_key()) {
+                continue;
+            }
+            existing.insert(m.catalog_key(), out.len());
+            out.push(m);
+        }
         out
     });
     &MODELS
@@ -2293,7 +2302,7 @@ fn apply_catalog_compat_overrides(
         chat.supports_strict_mode = false;
         chat.supports_long_cache_retention = false;
         chat.max_tokens_field = MaxTokensField::MaxTokens;
-        chat.agent_ready = false;
+        chat.agent_ready = nvidia_integrate_agent_ready(model_id);
         chat.supports_message_model_id = false;
         if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
             chat.max_parallel_tool_calls = Some(1);
@@ -2377,7 +2386,7 @@ fn fallback_request_compat(
                 compat.supports_strict_mode = false;
                 compat.supports_long_cache_retention = false;
                 compat.max_tokens_field = MaxTokensField::MaxTokens;
-                compat.agent_ready = false;
+                compat.agent_ready = nvidia_integrate_agent_ready(model_id);
                 compat.supports_message_model_id = false;
                 // Llama 3.1 70B on Integrate rejects multi tool-calls.
                 if model_id.contains("llama-3.1-70b") || model_id.contains("llama3-1-70b") {
@@ -2446,6 +2455,62 @@ fn fallback_request_compat(
         }
         PlatformApiBackend::PiMessages => RequestCompat::PiMessages(crate::PiMessagesCompat {}),
     }
+}
+
+/// OpenRouter rows the Pi snapshot omits. Catalog keys are
+/// `openrouter/{wire_id}`.
+fn openrouter_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
+    let mk = |model: &str, name: &str, desc: &str, ctx: u64, max_out: u32| BuiltinPlatformModel {
+        provider: PlatformId::OpenRouter.provider_id(),
+        model: model.into(),
+        name: name.into(),
+        description: desc.into(),
+        context_window: ctx,
+        supports_reasoning_effort: true,
+        supported_in_api: true,
+        catalog_available: true,
+        picker_visible: true,
+        eol: false,
+        max_completion_tokens: Some(max_out),
+        api_backend: PlatformApiBackend::ChatCompletions,
+        base_url_override: None,
+        request_compat: fallback_request_compat(
+            PlatformId::OpenRouter,
+            PlatformApiBackend::ChatCompletions,
+            model,
+        ),
+        route: fallback_route(PlatformId::OpenRouter, PlatformApiBackend::ChatCompletions),
+    };
+    vec![
+        mk(
+            "minimax/minimax-m3:free",
+            "MiniMax: MiniMax M3 (free)",
+            "OpenRouter free MiniMax M3 (no credits required)",
+            CTX_256K,
+            131_072,
+        ),
+        mk(
+            "thinkingmachines/inkling:free",
+            "Thinking Machines: Inkling (free)",
+            "OpenRouter free Inkling (no credits required)",
+            524_288,
+            131_072,
+        ),
+        mk(
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "NVIDIA: Nemotron 3 Ultra",
+            "OpenRouter Nemotron 3 Ultra 550B (paid)",
+            CTX_1M,
+            65_536,
+        ),
+        mk(
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "NVIDIA: Nemotron 3 Ultra (free)",
+            "OpenRouter free Nemotron 3 Ultra 550B",
+            CTX_1M,
+            65_536,
+        ),
+    ]
 }
 
 /// Anthropic Claude subscription models (`api.anthropic.com/v1/messages` via
@@ -2585,6 +2650,11 @@ fn nvidia_wire_model_id(model: &str) -> String {
         "laguna-xs-2.1" => "poolside/laguna-xs-2.1".to_owned(),
         "mistral-nemotron" => "mistralai/mistral-nemotron".to_owned(),
         "nemotron-3.5-lightning-30b-a3b" => "nvidia/nemotron-3.5-lightning-30b-a3b".to_owned(),
+        "kimi-k3" => "moonshotai/kimi-k3".to_owned(),
+        "deepseek-v4-pro-0813" => "deepseek-ai/deepseek-v4-pro-0813".to_owned(),
+        "deepseek-v4-flash-0731" => "deepseek-ai/deepseek-v4-flash-0731".to_owned(),
+        "deepseek-v4-pro" => "deepseek-ai/deepseek-v4-pro".to_owned(),
+        "deepseek-v4-flash" => "deepseek-ai/deepseek-v4-flash".to_owned(),
         _ => model.to_owned(),
     }
 }
@@ -2610,18 +2680,17 @@ pub fn poolside_hosted_chat_compat(model_id: &str) -> RequestCompat {
 
 fn poolside_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     const MAX_OUT_32K: u32 = 32_768;
-    let mk =
-        |model: &str, name: &str, desc: &str, ctx: u64, eol: bool| BuiltinPlatformModel {
-            provider: PlatformId::Poolside.provider_id(),
-            model: model.into(),
-            name: name.into(),
-            description: desc.into(),
-            context_window: ctx,
-            supports_reasoning_effort: true,
-            supported_in_api: false,
-            catalog_available: !eol,
-            picker_visible: !eol,
-            eol,
+    let mk = |model: &str, name: &str, desc: &str, ctx: u64, eol: bool| BuiltinPlatformModel {
+        provider: PlatformId::Poolside.provider_id(),
+        model: model.into(),
+        name: name.into(),
+        description: desc.into(),
+        context_window: ctx,
+        supports_reasoning_effort: true,
+        supported_in_api: false,
+        catalog_available: !eol,
+        picker_visible: !eol,
+        eol,
         max_completion_tokens: Some(MAX_OUT_32K),
         api_backend: PlatformApiBackend::ChatCompletions,
         base_url_override: None,
@@ -2659,10 +2728,12 @@ fn poolside_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     ]
 }
 
-/// NVIDIA Integrate Chat Completions compat (strict gateway, not agent-ready).
+/// NVIDIA Integrate Chat Completions compat (strict gateway).
 ///
 /// Used for config.toml extras that occupy an `nvidia/…` catalog key without a
-/// builtin `request_compat` snapshot.
+/// builtin `request_compat` snapshot. Hang models (Ultra, Llama 3.3 70B,
+/// gpt-oss) stay `agent_ready=false`; current agentic NIMs (Lightning, Muse
+/// Glimmer, DeepSeek V4, Kimi K3) are tool-ready.
 pub fn nvidia_integrate_chat_compat(model_id: &str) -> RequestCompat {
     fallback_request_compat(
         PlatformId::Nvidia,
@@ -2703,6 +2774,23 @@ pub fn is_nvidia_glm_52_eol_slug(requested: &str) -> bool {
     lower.starts_with("nvidia/")
         || lower.contains("/nvidia/z-ai/glm-5.2")
         || lower == "nvidia/z-ai/glm-5.2"
+}
+
+/// Whether an NVIDIA Integrate model is safe for tool-using agent loops.
+///
+/// Default is chat-only (Ultra / hang Llama / gpt-oss). Current build.nvidia.com
+/// agentic NIMs opt in: Lightning, Muse Glimmer, Laguna XS, Mistral-Nemotron,
+/// DeepSeek V4, Kimi K3.
+pub fn nvidia_integrate_agent_ready(model_id: &str) -> bool {
+    let m = model_id.to_ascii_lowercase();
+    m.contains("nemotron-3.5-lightning")
+        || m.contains("nemotron-3-5-lightning")
+        || m.contains("muse-glimmer")
+        || m.contains("laguna-xs")
+        || m.contains("mistral-nemotron")
+        || m.contains("deepseek-v4")
+        || m.contains("kimi-k3")
+        || m.contains("moonshotai/kimi")
 }
 
 /// Catalog keys follow `{provider}/{model}` so
@@ -2797,6 +2885,62 @@ fn nvidia_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
             "Mistral + NVIDIA agentic coding / tool-calling model on NVIDIA Integrate (128K ctx)",
             CTX_128K,
             MAX_OUT_8K,
+        ),
+        mk(
+            "moonshotai/kimi-k3",
+            "Kimi K3",
+            "Moonshot Kimi K3 hybrid MoE on NVIDIA Integrate for long-horizon coding and agents (1M ctx)",
+            CTX_1M,
+            MAX_OUT_65K,
+        ),
+        mk(
+            "kimi-k3",
+            "Kimi K3",
+            "Moonshot Kimi K3 hybrid MoE on NVIDIA Integrate for long-horizon coding and agents (1M ctx)",
+            CTX_1M,
+            MAX_OUT_65K,
+        ),
+        mk(
+            "deepseek-ai/deepseek-v4-pro-0813",
+            "DeepSeek V4 Pro 0813",
+            "DeepSeek V4 Pro (0813) 1.6T MoE on NVIDIA Integrate, 1M ctx",
+            CTX_1M,
+            MAX_OUT_65K,
+        ),
+        mk(
+            "deepseek-v4-pro-0813",
+            "DeepSeek V4 Pro 0813",
+            "DeepSeek V4 Pro (0813) 1.6T MoE on NVIDIA Integrate, 1M ctx",
+            CTX_1M,
+            MAX_OUT_65K,
+        ),
+        mk(
+            "deepseek-ai/deepseek-v4-flash-0731",
+            "DeepSeek V4 Flash 0731",
+            "DeepSeek V4 Flash (0731) 284B MoE on NVIDIA Integrate for long-context coding (256K ctx)",
+            CTX_256K,
+            MAX_OUT_65K,
+        ),
+        mk(
+            "deepseek-v4-flash-0731",
+            "DeepSeek V4 Flash 0731",
+            "DeepSeek V4 Flash (0731) 284B MoE on NVIDIA Integrate for long-context coding (256K ctx)",
+            CTX_256K,
+            MAX_OUT_65K,
+        ),
+        mk(
+            "deepseek-ai/deepseek-v4-pro",
+            "DeepSeek V4 Pro",
+            "DeepSeek V4 Pro on NVIDIA Integrate (1M ctx)",
+            CTX_1M,
+            MAX_OUT_65K,
+        ),
+        mk(
+            "deepseek-ai/deepseek-v4-flash",
+            "DeepSeek V4 Flash",
+            "DeepSeek V4 Flash on NVIDIA Integrate (256K ctx)",
+            CTX_256K,
+            MAX_OUT_65K,
         ),
     ];
     // Bare slugs are compatibility aliases for config/subagent pins. Keep
@@ -4568,6 +4712,10 @@ mod tests {
         assert!(!chat.supports_prompt_cache_key);
         assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
         assert_eq!(lightning.context_window, 1_000_000);
+        assert!(
+            chat.agent_ready,
+            "Lightning is an agentic NIM and must be spawnable for write work"
+        );
     }
 
     #[test]
@@ -4598,6 +4746,7 @@ mod tests {
         assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
         assert_eq!(glimmer.context_window, 131_072);
         assert_eq!(glimmer.max_completion_tokens, Some(32_768));
+        assert!(chat.agent_ready, "Muse Glimmer is an agentic NIM");
 
         let laguna = platform_builtin_models()
             .iter()
@@ -4623,6 +4772,9 @@ mod tests {
             "nvidia/meta/muse-glimmer-30b",
             "nvidia/poolside/laguna-xs-2.1",
             "nvidia/mistralai/mistral-nemotron",
+            "nvidia/moonshotai/kimi-k3",
+            "nvidia/deepseek-ai/deepseek-v4-pro-0813",
+            "nvidia/deepseek-ai/deepseek-v4-flash-0731",
         ] {
             assert!(
                 platform_builtin_models()
@@ -4637,6 +4789,9 @@ mod tests {
             "nvidia/laguna-xs-2.1",
             "nvidia/mistral-nemotron",
             "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "nvidia/kimi-k3",
+            "nvidia/deepseek-v4-pro-0813",
+            "nvidia/deepseek-v4-flash-0731",
         ] {
             assert!(
                 platform_builtin_models()
@@ -4667,16 +4822,8 @@ mod tests {
         assert!(spec.accepts_api_key());
 
         for (key, wire, ctx) in [
-            (
-                "poolside/laguna-s-2.1",
-                "poolside/laguna-s-2.1",
-                CTX_1M,
-            ),
-            (
-                "poolside/laguna-xs-2.1",
-                "poolside/laguna-xs-2.1",
-                CTX_256K,
-            ),
+            ("poolside/laguna-s-2.1", "poolside/laguna-s-2.1", CTX_1M),
+            ("poolside/laguna-xs-2.1", "poolside/laguna-xs-2.1", CTX_256K),
         ] {
             let model = platform_builtin_models()
                 .iter()
@@ -4712,7 +4859,9 @@ mod tests {
         assert!(!model.catalog_available);
         assert!(catalog_key_is_eol("poolside/laguna-m.1"));
         // OpenRouter clone shares the fate so neither route 404s at the provider.
-        assert!(is_poolside_laguna_m1_eol_slug("openrouter/poolside/laguna-m.1"));
+        assert!(is_poolside_laguna_m1_eol_slug(
+            "openrouter/poolside/laguna-m.1"
+        ));
         assert!(!is_poolside_laguna_m1_eol_slug("poolside/laguna-s-2.1"));
     }
 
@@ -4722,6 +4871,15 @@ mod tests {
             ("nvidia/muse-glimmer-30b", "meta/muse-glimmer-30b"),
             ("nvidia/laguna-xs-2.1", "poolside/laguna-xs-2.1"),
             ("nvidia/mistral-nemotron", "mistralai/mistral-nemotron"),
+            ("nvidia/kimi-k3", "moonshotai/kimi-k3"),
+            (
+                "nvidia/deepseek-v4-pro-0813",
+                "deepseek-ai/deepseek-v4-pro-0813",
+            ),
+            (
+                "nvidia/deepseek-v4-flash-0731",
+                "deepseek-ai/deepseek-v4-flash-0731",
+            ),
         ] {
             let model = platform_builtin_models()
                 .into_iter()
@@ -4747,6 +4905,77 @@ mod tests {
             !is_nvidia_glm_52_eol_slug("openrouter/z-ai/glm-5.2"),
             "OpenRouter GLM-5.2 is not the NVIDIA 410 row"
         );
+    }
+
+    #[test]
+    fn openrouter_minimax_m3_free_and_ultra_are_cataloged() {
+        let keys: std::collections::HashSet<_> = platform_builtin_models()
+            .iter()
+            .map(|m| m.catalog_key())
+            .collect();
+        assert!(
+            keys.contains("openrouter/minimax/minimax-m3:free"),
+            "MiniMax M3 free slug must be spawnable"
+        );
+        assert!(
+            keys.contains("openrouter/thinkingmachines/inkling:free"),
+            "Inkling free slug must be spawnable"
+        );
+        assert!(
+            keys.contains("openrouter/nvidia/nemotron-3-ultra-550b-a55b"),
+            "OpenRouter Nemotron Ultra paid slug"
+        );
+        assert!(
+            keys.contains("openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"),
+            "OpenRouter Nemotron Ultra free slug"
+        );
+        let free = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "openrouter/minimax/minimax-m3:free")
+            .expect("m3 free");
+        assert!(free.catalog_available);
+        assert!(free.picker_visible);
+        assert!(!free.eol);
+    }
+
+    #[test]
+    fn nvidia_kimi_k3_and_deepseek_v4_are_in_builtin_catalog() {
+        let keys: std::collections::HashSet<_> = platform_builtin_models()
+            .iter()
+            .map(|m| m.catalog_key())
+            .collect();
+        for key in [
+            "nvidia/moonshotai/kimi-k3",
+            "nvidia/deepseek-ai/deepseek-v4-pro-0813",
+            "nvidia/deepseek-ai/deepseek-v4-flash-0731",
+            "nvidia/deepseek-ai/deepseek-v4-pro",
+            "nvidia/deepseek-ai/deepseek-v4-flash",
+        ] {
+            assert!(keys.contains(key), "missing NVIDIA Integrate slug {key}");
+            let row = platform_builtin_models()
+                .iter()
+                .find(|m| m.catalog_key() == key)
+                .unwrap();
+            let RequestCompat::ChatCompletions(chat) = &row.request_compat else {
+                panic!("{key} is chat completions");
+            };
+            assert!(chat.agent_ready, "{key} must be agent-ready for write work");
+            assert_eq!(chat.max_tokens_field, MaxTokensField::MaxTokens);
+        }
+        let pro = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/deepseek-ai/deepseek-v4-pro-0813")
+            .unwrap();
+        assert_eq!(pro.context_window, 1_000_000);
+        assert_eq!(
+            pro.resolved_runtime().wire_model_id,
+            "deepseek-ai/deepseek-v4-pro-0813"
+        );
+        let kimi = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "nvidia/moonshotai/kimi-k3")
+            .unwrap();
+        assert_eq!(kimi.resolved_runtime().wire_model_id, "moonshotai/kimi-k3");
     }
 
     #[test]

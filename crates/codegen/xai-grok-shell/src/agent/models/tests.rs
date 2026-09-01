@@ -2588,6 +2588,89 @@ fn gpt56_terra_openai_slash_slug_aliases_to_openai_codex() {
     assert_eq!(key, "openai-codex/gpt-5.6-terra");
 }
 
+/// OpenRouter ships `model: "openai/gpt-5.6-terra"` on
+/// `openrouter/openai/gpt-5.6-terra`. A routing-slug hit used to steal the
+/// Codex alias and then fail `spawn_catalog_candidate`, while the valid-slug
+/// list still advertised `openai/gpt-5.6-terra`.
+#[test]
+fn gpt56_terra_openai_slash_slug_prefers_codex_over_unspawnable_openrouter_row() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-5.6-terra".to_string(),
+        make_model_entry("gpt-5.6-terra"),
+    );
+    let mut openrouter = make_model_entry("openai/gpt-5.6-terra");
+    openrouter.info.id = Some("openrouter/openai/gpt-5.6-terra".into());
+    openrouter.info.user_selectable = false;
+    models.insert("openrouter/openai/gpt-5.6-terra".to_string(), openrouter);
+    assert!(
+        task_model_error_for_catalog_spawn(
+            "openai/gpt-5.6-terra",
+            &models,
+            false,
+            "general-purpose",
+            None,
+            None,
+        )
+        .is_none(),
+        "listed openai/gpt-5.6-terra must spawn via openai-codex, not the OpenRouter row"
+    );
+    let (key, _) = find_spawnable_task_model_entry(&models, "openai/gpt-5.6-terra", false, None)
+        .expect("spawnable terra alias");
+    assert_eq!(key, "openai-codex/gpt-5.6-terra");
+}
+
+#[test]
+fn nvidia_lightning_and_deepseek_v4_pro_0813_are_general_purpose() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b".to_string(),
+        nvidia_catalog_entry(
+            "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            true,
+            false,
+        ),
+    );
+    models.insert(
+        "nvidia/deepseek-ai/deepseek-v4-pro-0813".to_string(),
+        nvidia_catalog_entry(
+            "nvidia/deepseek-ai/deepseek-v4-pro-0813",
+            "deepseek-ai/deepseek-v4-pro-0813",
+            true,
+            false,
+        ),
+    );
+    models.insert(
+        "nvidia/moonshotai/kimi-k3".to_string(),
+        nvidia_catalog_entry(
+            "nvidia/moonshotai/kimi-k3",
+            "moonshotai/kimi-k3",
+            true,
+            false,
+        ),
+    );
+    for slug in [
+        "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/deepseek-ai/deepseek-v4-pro-0813",
+        "nvidia/moonshotai/kimi-k3",
+    ] {
+        assert!(
+            task_model_error_for_catalog_spawn(
+                slug,
+                &models,
+                false,
+                "general-purpose",
+                None,
+                None,
+            )
+            .is_none(),
+            "{slug} must spawn for write-capable work"
+        );
+    }
+}
+
 #[test]
 fn gpt56_terra_openrouter_slug_aliases_to_openai_codex() {
     let mut models = IndexMap::new();
