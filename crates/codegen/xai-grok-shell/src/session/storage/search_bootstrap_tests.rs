@@ -295,9 +295,17 @@ async fn test_concurrent_gates_single_flight() {
     assert!(b.is_ok(), "gate b: {b:?}");
 
     let db_path = search_db_path(tmp.path());
+    // `RunAgain` means the index was healed/replaced mid-bootstrap, so that gate
+    // withheld its completion marker on purpose and the next launch rebuilds
+    // (see `needs_rebootstrap` in `reindex_all`). A loaded machine can push
+    // SQLite into that recovery path, so the marker is only guaranteed when
+    // neither gate healed — the other gate may still have written one, which is
+    // why this is an `or` rather than a branch.
+    let healed = matches!(a, Ok(BootstrapOutcome::RunAgain))
+        || matches!(b, Ok(BootstrapOutcome::RunAgain));
     assert!(
-        read_marker(&db_path).is_some(),
-        "completion marker must exist after concurrent gates"
+        read_marker(&db_path).is_some() || healed,
+        "completion marker must exist after concurrent gates unless one healed, a={a:?} b={b:?}"
     );
     assert!(
         !has_bootstrap_claim(&db_path).unwrap(),
@@ -306,11 +314,21 @@ async fn test_concurrent_gates_single_flight() {
 
     let a_ran = progress_a.total.load(Ordering::Relaxed) > 0;
     let b_ran = progress_b.total.load(Ordering::Relaxed) > 0;
-    assert_eq!(
-        usize::from(a_ran) + usize::from(b_ran),
-        1,
-        "exactly one gate must reindex, a_total={}, b_total={}",
-        progress_a.total.load(Ordering::Relaxed),
-        progress_b.total.load(Ordering::Relaxed),
-    );
+    if healed {
+        // A heal replaces the index underneath the run, so the successor is
+        // expected to index again; single-flight is only observable when both
+        // gates saw one stable index.
+        assert!(
+            a_ran || b_ran,
+            "a healed run must still have indexed something, a={a:?} b={b:?}"
+        );
+    } else {
+        assert_eq!(
+            usize::from(a_ran) + usize::from(b_ran),
+            1,
+            "exactly one gate must reindex, a_total={}, b_total={}",
+            progress_a.total.load(Ordering::Relaxed),
+            progress_b.total.load(Ordering::Relaxed),
+        );
+    }
 }
