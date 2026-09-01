@@ -1786,7 +1786,13 @@ fn assert_no_update_mcp_servers(cmds: &[SessionCommand]) {
 }
 /// `mcp/list` refresh: two resident sessions, cache=false + committed catalog
 /// fans `RefreshMcpSearchIndex`; failed catalog and cache=true do not.
+// `build_agent_with_auth_and_proxy` sets GROK_HOME (via
+// `build_agent_with_auth_and_proxy_isolated`) and drops the guard on
+// return, so the process-global is mutated and restored inside the call.
+// A concurrent test resolving `grok_home()` in that window writes to the
+// wrong directory, so callers must be serial as that helper documents.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn mcp_list_gateway_refresh_fans_only_on_committed_uncached_catalog() {
     let local = tokio::task::LocalSet::new();
     local
@@ -1904,7 +1910,13 @@ async fn mcp_list_gateway_refresh_fans_only_on_committed_uncached_catalog() {
         .await;
 }
 /// mcp/list with gateway off must disable the cache, same as initialize.
+// `build_agent_with_auth_and_proxy` sets GROK_HOME (via
+// `build_agent_with_auth_and_proxy_isolated`) and drops the guard on
+// return, so the process-global is mutated and restored inside the call.
+// A concurrent test resolving `grok_home()` in that window writes to the
+// wrong directory, so callers must be serial as that helper documents.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn mcp_list_gateway_off_disables_cached_catalog() {
     let local = tokio::task::LocalSet::new();
     local
@@ -4856,7 +4868,13 @@ impl Drop for RestoreOtelGate {
 /// access gate must not read a previous identity's cached `allow_access`. A
 /// mismatched identity stays provisionally open (unknown), like the OTEL gate's
 /// `rearm_on_switch`.
+// `build_agent_with_auth_and_proxy` sets GROK_HOME (via
+// `build_agent_with_auth_and_proxy_isolated`) and drops the guard on
+// return, so the process-global is mutated and restored inside the call.
+// A concurrent test resolving `grok_home()` in that window writes to the
+// wrong directory, so callers must be serial as that helper documents.
 #[tokio::test]
+#[serial_test::serial]
 async fn access_gate_does_not_leak_verdict_across_identities() {
     use crate::agent::config::AgentMode;
     use crate::auth::{GrokAuth, XAI_OAUTH2_ISSUER};
