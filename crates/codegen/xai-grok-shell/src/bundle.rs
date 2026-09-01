@@ -12,6 +12,11 @@ const MANIFEST_FILE_NAME: &str = "manifest.json";
 const ARCHIVE_MAX_DECOMPRESSED_SIZE: usize = 50 * 1024 * 1024;
 const ARCHIVE_MAX_ENTRIES: usize = 1000;
 const ARCHIVE_MAX_ENTRY_SIZE: u64 = 1024 * 1024;
+/// Loop bound covering every header, extracted or not. Sized well above any
+/// real bundle's file-plus-directory count so legitimate structure is never
+/// charged against [`ARCHIVE_MAX_ENTRIES`], while still stopping an archive
+/// built entirely from skipped headers.
+const ARCHIVE_MAX_HEADERS: usize = 10_000;
 
 #[derive(Deserialize)]
 struct ArchiveBundleMetadata {
@@ -163,6 +168,7 @@ pub(crate) fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Resul
     let mut version = String::new();
     let mut total_decompressed: usize = 0;
     let mut entry_count: usize = 0;
+    let mut header_count: usize = 0;
 
     for entry_result in archive
         .entries()
@@ -170,16 +176,24 @@ pub(crate) fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Resul
     {
         let mut entry = entry_result.context("failed to read archive entry")?;
 
-        // Every header consumes decompressed input, so non-regular entries
-        // (directories, symlinks, PAX records) count against the bomb bound
-        // too — otherwise a flood of them spins this loop uncapped.
-        entry_count += 1;
-        if entry_count > ARCHIVE_MAX_ENTRIES {
-            bail!("archive exceeds maximum entry count ({ARCHIVE_MAX_ENTRIES})");
+        // Bound the loop itself, not just the extracted files. A non-regular
+        // entry (directory, symlink, PAX record) declares size 0 and is skipped
+        // below, so it moves neither `entry_count` nor `total_decompressed` — a
+        // flood of them would otherwise spin here for as long as the attacker's
+        // gzip stream decompresses. Directory structure is legitimate, so this
+        // budget is separate from (and far looser than) the file-count cap.
+        header_count += 1;
+        if header_count > ARCHIVE_MAX_HEADERS {
+            bail!("archive exceeds maximum header count ({ARCHIVE_MAX_HEADERS})");
         }
 
         if entry.header().entry_type() != tar::EntryType::Regular {
             continue;
+        }
+
+        entry_count += 1;
+        if entry_count > ARCHIVE_MAX_ENTRIES {
+            bail!("archive exceeds maximum entry count ({ARCHIVE_MAX_ENTRIES})");
         }
 
         let entry_size = entry.header().size().context("failed to read entry size")?;
@@ -1268,9 +1282,9 @@ mod tests {
             .unwrap();
 
         // Each directory entry is a 512-byte block of decompressed input the
-        // loop must process; a flood of them has to hit the entry cap even
-        // though none is ever extracted.
-        for i in 0..ARCHIVE_MAX_ENTRIES {
+        // loop must process, yet it moves neither the entry count nor the
+        // decompressed total. Only the header budget can stop it.
+        for i in 0..ARCHIVE_MAX_HEADERS {
             let mut h = tar::Header::new_gnu();
             h.set_size(0);
             h.set_mode(0o755);
@@ -1285,7 +1299,54 @@ mod tests {
         let archive = encoder.finish().unwrap();
 
         let err = extract_bundle_archive(&root, &archive).unwrap_err();
-        assert!(err.to_string().contains("exceeds maximum entry count"));
+        assert!(err.to_string().contains("exceeds maximum header count"));
+    }
+
+    #[test]
+    fn extract_archive_allows_directories_beyond_the_file_cap() {
+        // Directory structure is legitimate and must not be charged against the
+        // file-count cap: a bundle whose files plus directories exceed
+        // ARCHIVE_MAX_ENTRIES still extracts as long as the files do not.
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let v = r#"{"version":"v1"}"#;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(v.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "bundle.json", v.as_bytes())
+            .unwrap();
+
+        for i in 0..ARCHIVE_MAX_ENTRIES {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_mode(0o755);
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, format!("skills/s{i}/"), &[] as &[u8])
+                .unwrap();
+        }
+
+        let content = b"# skill";
+        let mut fh = tar::Header::new_gnu();
+        fh.set_size(content.len() as u64);
+        fh.set_mode(0o644);
+        fh.set_cksum();
+        builder
+            .append_data(&mut fh, "skills/real/SKILL.md", &content[..])
+            .unwrap();
+
+        let encoder = builder.into_inner().unwrap();
+        let archive = encoder.finish().unwrap();
+
+        let manifest = extract_bundle_archive(&root, &archive).unwrap();
+        assert!(manifest.checksums.contains_key("skills/real/SKILL.md"));
     }
 
     #[test]
