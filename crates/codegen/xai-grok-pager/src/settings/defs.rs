@@ -1362,9 +1362,11 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned, persisted to `[ui].default_selected_permission` in
         // config.toml. Read by the pager via `appearance::permission_cursor`.
-        // Canonical `always_allow_all_sessions` (the effective default) lands
-        // the first prompt's cursor on the enable-always-approve row;
-        // subsequent prompts stick to the last-used kind.
+        // Canonical `allow_once` is the effective default and must stay in step
+        // with `DefaultSelectedPermission::from_config_value`, which resolves an
+        // empty or unrecognised value to `AllowOnce` so a first prompt never
+        // preselects always-approve. Subsequent prompts stick to the last-used
+        // kind; `always_allow_all_sessions` is still selectable explicitly.
         SettingMeta {
             key: "default_selected_permission",
             category: SettingCategory::Agent,
@@ -1386,7 +1388,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "allow",
             ],
             kind: SettingKind::Enum {
-                default: DefaultSelectedPermission::AlwaysAllowAllSessions.as_canonical(),
+                default: DefaultSelectedPermission::AllowOnce.as_canonical(),
                 choices: DEFAULT_SELECTED_PERMISSION_CHOICES,
                 supports_preview: false,
             },
