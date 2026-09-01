@@ -1876,6 +1876,11 @@ pub(crate) async fn run(
     // armed only when the startup query is still unanswered.
     let mut xt_filter = super::xt_filter::XtversionFilter::new();
 
+    // Reassembles X10 mouse reports whose column byte a UTF-8-converting relay
+    // (ConPTY → WSL/SSH) split into two, so the displaced row byte is not typed
+    // into the composer. Persistent so a pair split across batches still pairs.
+    let mut x10_filter = super::x10_filter::X10ReassemblyFilter::new();
+
     // Background update check: resolves when the spawned update task
     // determines whether a newer version is available.
     let mut bg_update_rx = bg_update_rx;
@@ -2448,7 +2453,7 @@ pub(crate) async fn run(
                 let Some(ev) = maybe_ev else { break };
                 let result = drain_and_process(
                     ev, &mut input_rx, &mut app, &mut tasks, &progress_tx,
-                    &mut csi_filter, &mut xt_filter,
+                    &mut csi_filter, &mut xt_filter, &mut x10_filter,
                 ).await;
                 if result.should_quit {
                     break;
@@ -3403,6 +3408,7 @@ async fn drain_and_process(
     progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
     csi_filter: &mut super::csi_filter::CsiFragmentFilter,
     xt_filter: &mut super::xt_filter::XtversionFilter,
+    x10_filter: &mut super::x10_filter::X10ReassemblyFilter,
 ) -> DrainResult {
     let mut needs_draw = false;
     let mut had_resize = false;
@@ -3442,6 +3448,7 @@ async fn drain_and_process(
         coalesce_rapid_keys(raw_events)
     };
     let coalesced = csi_filter.filter(coalesced);
+    let coalesced = x10_filter.filter(coalesced);
     let coalesced = coalesced
         .into_iter()
         .map(normalize_input_event)
