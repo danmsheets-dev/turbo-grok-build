@@ -351,6 +351,8 @@ mod tests {
             "export",
             "feedback",
             "find",
+            "folder",
+            "folders",
             "fork",
             "full",
             "fullscreen",
