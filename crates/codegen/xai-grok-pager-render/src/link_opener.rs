@@ -47,6 +47,11 @@ pub fn browser_open_likely_available() -> bool {
 
 const BROWSER_UNAVAILABLE_NOTICE: &str = "Could not open a browser. Open this URL manually";
 
+/// How long [`open_url`] waits for the Windows opener before assuming success.
+/// Bounded because the caller is an event-loop input handler.
+#[cfg(target_os = "windows")]
+const OPEN_URL_RESULT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Multi-line copy for agent scrollback: notice, then the full URL alone
 /// so it is easy to select/copy in the TUI.
 pub fn browser_unavailable_message(url: &str) -> String {
@@ -124,15 +129,22 @@ pub fn open_url(url: &str) -> bool {
 /// splits on `&` and expands `%VAR%`, so a server-supplied URL such as
 /// `https://example.com/&calc.exe` would execute a command.
 ///
-/// Runs on a helper thread like [`shell_open_detached`] — `ShellExecuteW`
-/// may delegate to a Shell extension that expects an initialized apartment,
-/// and the TUI thread must not be COM-initialized — but joins for the
-/// result so callers can fall back to showing the URL.
+/// Runs on a helper thread like [`shell_open_detached`]: `ShellExecuteW` may
+/// delegate to a Shell extension that expects an initialized apartment, and the
+/// TUI thread must not be COM-initialized.
+///
+/// The caller is an input handler on the event loop, so this waits only
+/// [`OPEN_URL_RESULT_WAIT`] for the outcome instead of joining. A failing
+/// association reports back almost immediately, which is the case worth
+/// catching; a slower call means the Shell accepted the request and is still
+/// working, so we report success and let the detached thread finish rather than
+/// stall rendering.
 #[cfg(target_os = "windows")]
 fn spawn_url_opener(url: &str) -> bool {
     let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let (tx, rx) = std::sync::mpsc::channel();
 
-    let opener = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         use windows::Win32::System::Com::{
             COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
         };
@@ -162,9 +174,13 @@ fn spawn_url_opener(url: &str) -> bool {
             }
             result.0 as usize
         };
-        code > 32
+        // The receiver is gone once the wait below times out; the send failing
+        // is expected and means nobody is listening any more.
+        let _ = tx.send(code > 32);
     });
-    opener.join().unwrap_or(false)
+    // Timeout means "still working", not "failed": reporting failure here would
+    // show the manual-open fallback for a link that is about to open fine.
+    rx.recv_timeout(OPEN_URL_RESULT_WAIT).unwrap_or(true)
 }
 
 #[cfg(not(target_os = "windows"))]
