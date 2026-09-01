@@ -54,7 +54,60 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
+### Security
+- **Links no longer run through `cmd.exe` on Windows.** `cmd /c start` splits on
+  `&` and expands `%VAR%`, so a server- or agent-supplied URL such as
+  `https://example.com/&calc.exe` executed a command. URLs now go straight to
+  `ShellExecuteW` as a single argument.
+- **MCP tool descriptions are stripped of invisible characters.** A server could
+  hide model-directed text in a description using zero-width, bidi-override, or
+  tag-block (`U+E0000..E007F`) characters; the sanitizer only collapsed
+  whitespace. The full invisible/spoofing class is now flattened before the
+  collapse, covering both the tool catalog and compaction.
+- **Container-runtime sockets are denied in network-restricted profiles.**
+  `/run`, `/var` and `$HOME` stay readable, so a docker/podman/containerd socket
+  — a root-equivalent API — was path-reachable. System, rootless per-uid, and
+  Docker Desktop endpoints are added to the deny set and bound over at launch.
+  Applied on every resolve path, so the Landlock/Seatbelt capability set gets
+  them too, not just bwrap.
+- **Read-deny masks are verified as real mountpoints.** Containment was inferred
+  from the reproducible `__GROK_INSIDE_BWRAP` env marker, which a child can set.
+  It is now confirmed via `/proc/self/mountinfo` and `statx`, with a bound
+  sentinel directory; a hostile symlink at the sentinel path is replaced before
+  binding.
+- **The child-network seccomp filter no longer keys on apply-state.** If
+  Landlock was unsupported or `Sandbox::apply` failed inside bwrap, the
+  per-spawn filter was silently disabled — exactly the degraded state where it
+  is the only enforcement left. It now keys on the resolved config.
+- **Folder trust no longer cascades across a git-root boundary.** A grant
+  covered every subdirectory by path prefix, so a nested (or sibling) repo under
+  a trusted parent inherited the grant. A grant now covers only descendants that
+  share its workspace key.
+- **The bundle archive's entry cap could be bypassed.** The counter was bumped
+  after the non-regular-entry skip, so a flood of directory/symlink/PAX headers
+  spun the extraction loop uncapped. Every header now counts. Path
+  sanitization also rejects Windows-hostile components (`:` names an NTFS
+  alternate data stream, so `notes:ads.md` wrote hidden stream content).
+- **`TURBO_UPDATE_BASE_URL` is validated by parsing, not prefix matching.** The
+  override already compared `host_str()` so the userinfo trick
+  (`http://127.0.0.1:9@evil.com`) was rejected, but the check now requires
+  `http(s)`, refuses embedded credentials, and resolves the host to an
+  `IpAddr` — which also fixes a dead `::1` arm (`host_str()` yields `[::1]`).
+
 ### Fixed
+- **Mangled X10 mouse reports no longer type into the composer.** A
+  UTF-8-converting relay (ConPTY forwarding to WSL/SSH) splits the column byte
+  above column 95, so crossterm emitted a bogus mouse event plus a stray key
+  press. The pair is now held briefly and recombined into the real report.
+- **`web_search` accepts a domain allowlist or blocklist.** The two lists are
+  mutually exclusive and each is capped at five domains, validated at every
+  deserialize ingress so a bad config fails to parse instead of erroring
+  mid-turn.
+- **Turbo builds on Linux again.** `err_message` in the Linux-only capture
+  backend matched `VoiceError` exhaustively and was never updated when the TTS
+  variants landed, so the crate failed to compile off Windows.
+- **Mixpanel requests are bounded by a 10s timeout**, so a wedged endpoint
+  cannot keep a telemetry future alive indefinitely.
 - **Session no longer panics on context-length errors that omit stream metadata.**
   `should_compact_on_error` recovers from CLE text even when `model_metadata`
   is missing; `handle_sampling_failure` now falls back to the session
