@@ -434,6 +434,9 @@ mod tests {
         assert!(is_sensitive_credential_store(Path::new(
             "/home/x/.ssh/id_rsa"
         )));
+        // Backslash separators only split into components on Windows; on other
+        // platforms this is a single opaque component and `.ssh` is not seen.
+        #[cfg(windows)]
         assert!(is_sensitive_credential_store(Path::new(
             r"C:\Users\x\.ssh\id_rsa"
         )));
