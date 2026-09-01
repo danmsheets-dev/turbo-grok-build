@@ -393,8 +393,14 @@ struct PathSpace {
 
 fn gated_paths(root: &Path) -> Vec<(String, PathBuf)> {
     let mut paths = vec![("workspace".into(), root.to_path_buf())];
-    let wt = worktrees_base();
-    paths.push(("worktrees".into(), wt));
+    for (i, wt) in isolation_worktree_roots(Some(root)).into_iter().enumerate() {
+        let role = if i == 0 {
+            "worktrees".into()
+        } else {
+            format!("worktrees-{i}")
+        };
+        paths.push((role, wt));
+    }
     if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
         let p = PathBuf::from(td.trim());
         if !p.as_os_str().is_empty() {
@@ -458,7 +464,10 @@ fn category_storage_path(root: &Path, cat: CleanCategory) -> PathBuf {
         }
         CleanCategory::Release => target.join("release"),
         CleanCategory::ReleaseDistCaches => target.join("release-dist"),
-        CleanCategory::Worktrees => worktrees_base(),
+        CleanCategory::Worktrees => isolation_worktree_roots(Some(root))
+            .into_iter()
+            .next()
+            .unwrap_or_else(worktrees_base),
         CleanCategory::TreeStore => {
             let cfg = xai_workspace_tree::WorkspaceTreeConfig::from_env();
             xai_workspace_tree::store_root(&cfg)
@@ -716,10 +725,11 @@ fn category_sizes(root: &Path) -> BTreeMap<&'static str, u64> {
     m.insert("release", release);
     m.insert("release-dist", rd);
     m.insert("release-dist-caches", rd_caches);
-    m.insert(
-        "worktrees",
-        dir_size_capped(&worktrees_base(), 500_000).bytes,
-    );
+    let mut wt_bytes = 0u64;
+    for p in isolation_worktree_roots(Some(root)) {
+        wt_bytes = wt_bytes.saturating_add(dir_size_capped(&p, 500_000).bytes);
+    }
+    m.insert("worktrees", wt_bytes);
     let mut plugin_bytes = 0u64;
     for p in plugin_worktree_roots() {
         plugin_bytes = plugin_bytes.saturating_add(dir_size_capped(&p, 200_000).bytes);
@@ -783,9 +793,14 @@ fn report(root: Option<PathBuf>, json: bool) -> Result<()> {
     let target = target_root(&root);
     let target_sz = dir_size_capped(&target, 2_000_000);
 
-    let worktrees = worktrees_base();
-    let wt_count = count_dirs(&worktrees);
-    let subagent_count = count_subagent_dirs(&worktrees);
+    let wt_roots = isolation_worktree_roots(Some(&root));
+    let worktrees = wt_roots.first().cloned().unwrap_or_else(worktrees_base);
+    let mut wt_count = 0u64;
+    let mut subagent_count = 0u64;
+    for p in &wt_roots {
+        wt_count = wt_count.saturating_add(count_dirs(p));
+        subagent_count = subagent_count.saturating_add(count_subagent_dirs(p));
+    }
 
     let tree_cfg = xai_workspace_tree::WorkspaceTreeConfig::from_env();
     let tree_store = xai_workspace_tree::store_root(&tree_cfg);
@@ -814,6 +829,10 @@ fn report(root: Option<PathBuf>, json: bool) -> Result<()> {
             "target_release_dist_bytes": cats.get("release-dist").copied().unwrap_or(0),
             "target_release_dist_caches_bytes": cats.get("release-dist-caches").copied().unwrap_or(0),
             "worktrees_path": worktrees.display().to_string(),
+            "worktrees_paths": wt_roots
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
             "worktrees_bytes": cats.get("worktrees").copied().unwrap_or(0),
             "worktrees_dirs": wt_count,
             "worktrees_subagent_dirs": subagent_count,
@@ -909,7 +928,11 @@ fn report(root: Option<PathBuf>, json: bool) -> Result<()> {
         fmt_bytes(cats.get("worktrees").copied().unwrap_or(0)),
         wt_count,
         subagent_count,
-        worktrees.display()
+        wt_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
     );
     println!(
         "  worktree gate:  {keep_label}{}",
@@ -1582,7 +1605,7 @@ fn clean(opts: CleanOpts) -> Result<()> {
                 }
             }
             CleanCategory::Worktrees => {
-                reclaim_worktrees(&mut result, opts.worktree_hours, dry);
+                reclaim_worktrees(&mut result, opts.worktree_hours, dry, Some(&root));
             }
             CleanCategory::TreeStore => {
                 reclaim_tree_store(&mut result, opts.tree_days, dry);
@@ -1958,37 +1981,43 @@ fn reclaim_plugin_worktrees(result: &mut CleanResult, worktree_hours: u64, dry_r
     }
 }
 
-fn reclaim_worktrees(result: &mut CleanResult, worktree_hours: u64, dry_run: bool) {
-    let wt_base = worktrees_base();
-    if !wt_base.is_dir() {
-        return;
-    }
+fn reclaim_worktrees(
+    result: &mut CleanResult,
+    worktree_hours: u64,
+    dry_run: bool,
+    workspace: Option<&Path>,
+) {
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs(worktree_hours.saturating_mul(3600)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    let Ok(rd) = std::fs::read_dir(&wt_base) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    for wt_base in isolation_worktree_roots(workspace) {
+        if !wt_base.is_dir() {
             continue;
         }
-        // Nested slug dirs: walk one level of subagent-*
-        if let Ok(inner) = std::fs::read_dir(&path) {
-            for child in inner.flatten() {
-                maybe_reclaim_worktree(
-                    result,
-                    &child.path(),
-                    &child,
-                    cutoff,
-                    worktree_hours,
-                    dry_run,
-                );
+        let Ok(rd) = std::fs::read_dir(&wt_base) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
             }
+            // Nested slug dirs: walk one level of subagent-*
+            if let Ok(inner) = std::fs::read_dir(&path) {
+                for child in inner.flatten() {
+                    maybe_reclaim_worktree(
+                        result,
+                        &child.path(),
+                        &child,
+                        cutoff,
+                        worktree_hours,
+                        dry_run,
+                    );
+                }
+            }
+            // Also allow subagent-* directly under base
+            maybe_reclaim_worktree(result, &path, &entry, cutoff, worktree_hours, dry_run);
         }
-        // Also allow subagent-* directly under base
-        maybe_reclaim_worktree(result, &path, &entry, cutoff, worktree_hours, dry_run);
     }
 }
 
@@ -2356,7 +2385,12 @@ fn prune_unified(opts: PruneOpts) -> Result<()> {
         ..Default::default()
     };
     if opts.worktrees {
-        reclaim_worktrees(&mut result, opts.worktree_hours, opts.dry_run);
+        reclaim_worktrees(
+            &mut result,
+            opts.worktree_hours,
+            opts.dry_run,
+            opts.root.as_deref(),
+        );
     }
     if opts.tree_store {
         reclaim_tree_store(&mut result, opts.tree_days, opts.dry_run);
@@ -2464,6 +2498,82 @@ fn worktrees_base() -> PathBuf {
     dirs::home_dir()
         .map(|h| h.join(".grok").join("worktrees"))
         .unwrap_or_else(|| PathBuf::from(".grok").join("worktrees"))
+}
+
+/// Every isolation root spawn uses: `$GROK_WORKTREE_ROOT`, GROK_HOME/worktrees,
+/// `~/.grok/worktrees`, and on Windows `{drive}:\t\w` for a git workspace.
+///
+/// `{drive}:\t\w` is only added when `workspace` looks like a git repo so
+/// tests that point `GROK_HOME` at a tempfile do not reclaim the machine's
+/// live isolation trees.
+fn isolation_worktree_roots(workspace: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push = |p: PathBuf| {
+        if p.as_os_str().is_empty() {
+            return;
+        }
+        let key = dunce::canonicalize(&p)
+            .unwrap_or_else(|_| p.clone())
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        if out.iter().any(|existing: &PathBuf| {
+            dunce::canonicalize(existing)
+                .unwrap_or_else(|_| existing.clone())
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                == key
+        }) {
+            return;
+        }
+        out.push(p);
+    };
+    if let Ok(root) = std::env::var("GROK_WORKTREE_ROOT") {
+        let root = PathBuf::from(root.trim());
+        if !root.as_os_str().is_empty() {
+            push(root);
+        }
+    }
+    push(worktrees_base());
+    if let Some(ws) = workspace.filter(|p| looks_like_git_workspace(p)) {
+        if let Some(short) = windows_t_w_root(ws) {
+            push(short);
+        }
+    }
+    out
+}
+
+fn looks_like_git_workspace(path: &Path) -> bool {
+    let git = path.join(".git");
+    git.is_dir() || git.is_file()
+}
+
+/// `{drive}:\t\w` — parent of spawn's `{drive}:\t\w\{8hex}` isolation dir.
+#[cfg(windows)]
+fn windows_t_w_root(workspace: &Path) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    let mut saw_disk = false;
+    for c in workspace.components() {
+        match c {
+            std::path::Component::Prefix(p) => match p.kind() {
+                std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_) => {
+                    prefix.push(c);
+                    saw_disk = true;
+                }
+                _ => return None,
+            },
+            std::path::Component::RootDir if saw_disk => prefix.push(c),
+            _ => break,
+        }
+    }
+    if !saw_disk || prefix.as_os_str().is_empty() {
+        return None;
+    }
+    Some(prefix.join("t").join("w"))
+}
+
+#[cfg(not(windows))]
+fn windows_t_w_root(_workspace: &Path) -> Option<PathBuf> {
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -2681,6 +2791,51 @@ mod tests {
         assert!(s.contains(&CleanCategory::TempGrok));
         assert!(!s.contains(&CleanCategory::Release));
         assert!(!s.contains(&CleanCategory::CargoHome));
+    }
+
+    #[test]
+    #[serial_test::serial(grok_home_env)]
+    fn isolation_roots_include_grok_worktree_root_and_skip_t_w_without_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("GROK_HOME");
+        let prev_wt = std::env::var_os("GROK_WORKTREE_ROOT");
+        let home = tempfile::tempdir().unwrap();
+        let override_root = tmp.path().join("override-wt");
+        fs::create_dir_all(&override_root).unwrap();
+        unsafe {
+            std::env::set_var("GROK_HOME", home.path());
+            std::env::set_var("GROK_WORKTREE_ROOT", &override_root);
+        }
+        let no_git = isolation_worktree_roots(Some(tmp.path()));
+        assert!(
+            no_git.iter().any(|p| p == &override_root),
+            "GROK_WORKTREE_ROOT must be scanned: {no_git:?}"
+        );
+        assert!(
+            !no_git.iter().any(|p| p.ends_with(Path::new("t").join("w"))),
+            "non-git tempfile must not add {{drive}}:\\t\\w: {no_git:?}"
+        );
+        fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let with_git = isolation_worktree_roots(Some(tmp.path()));
+        #[cfg(windows)]
+        {
+            assert!(
+                with_git
+                    .iter()
+                    .any(|p| p.ends_with(Path::new("t").join("w"))),
+                "git workspace on Windows must include {{drive}}:\\t\\w: {with_git:?}"
+            );
+        }
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("GROK_HOME", v),
+                None => std::env::remove_var("GROK_HOME"),
+            }
+            match prev_wt {
+                Some(v) => std::env::set_var("GROK_WORKTREE_ROOT", v),
+                None => std::env::remove_var("GROK_WORKTREE_ROOT"),
+            }
+        }
     }
 
     #[test]
