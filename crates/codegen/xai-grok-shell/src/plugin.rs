@@ -2122,6 +2122,13 @@ mod tests {
     fn install_marketplace_plugin_with_local_installs_then_short_circuits() {
         let marketplace = tempfile::tempdir().unwrap();
         write_marketplace_plugin(marketplace.path(), "demo", "1.0.0");
+        // A marketplace source is a git checkout in practice, and `require_sha`
+        // defaults on: without a resolvable HEAD the install fails closed as an
+        // unpinned source (see `install_from_marketplace_require_sha_refuses_
+        // unpinned_checkout`). Commit the fixture so this test exercises the
+        // local-install fork rather than the pin gate.
+        xai_test_utils::git::init_git_repo(marketplace.path());
+        xai_test_utils::git::git_commit_all(marketplace.path(), "marketplace fixture");
         let install_dir = tempfile::tempdir().unwrap();
         let cache_root = tempfile::tempdir().unwrap();
         let mut registry = InstallRegistry::empty(install_dir.path().to_path_buf());
