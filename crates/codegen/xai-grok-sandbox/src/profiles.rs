@@ -356,12 +356,42 @@ impl ProfileName {
     }
 
     /// Resolve this profile into a fully-specified `SandboxProfile` for logging.
+    ///
+    /// Delegates so every resolve path — including the Landlock/Seatbelt
+    /// capability set — carries the container-runtime socket denies, not just
+    /// the bwrap launch path.
     pub fn resolve_profile(
         &self,
         workspace: &Path,
         config: &SandboxConfig,
     ) -> anyhow::Result<SandboxProfile> {
-        self.resolve(workspace, config)
+        let (profile, _) = self.resolve_profile_with_runtime_sockets(workspace, config)?;
+        Ok(profile)
+    }
+
+    /// [`Self::resolve_profile`] plus the container-runtime socket paths that
+    /// were auto-added to `deny`.
+    ///
+    /// A network-restricted profile leaves `/run`, `/var` and `$HOME` readable,
+    /// so a docker/podman/containerd socket stays path-reachable and is a
+    /// straightforward sandbox escape. The returned path list is what the bwrap
+    /// launch path binds over; the entries added to `profile.deny` are what the
+    /// kernel-level backends enforce.
+    pub(crate) fn resolve_profile_with_runtime_sockets(
+        &self,
+        workspace: &Path,
+        config: &SandboxConfig,
+    ) -> anyhow::Result<(SandboxProfile, Vec<PathBuf>)> {
+        let mut profile = self.resolve(workspace, config)?;
+        let mut runtime_socket_denies = Vec::new();
+        if profile.restrict_network {
+            crate::runtime_sockets::append_runtime_socket_denies(
+                &mut profile.deny,
+                &mut runtime_socket_denies,
+            )
+            .map_err(|error| anyhow::anyhow!("runtime-socket deny resolution failed: {error}"))?;
+        }
+        Ok((profile, runtime_socket_denies))
     }
 
     fn resolve(&self, workspace: &Path, config: &SandboxConfig) -> anyhow::Result<SandboxProfile> {

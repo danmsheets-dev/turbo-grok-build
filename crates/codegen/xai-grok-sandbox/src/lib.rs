@@ -36,6 +36,9 @@ mod logging;
 mod network_policy;
 mod paths;
 mod profiles;
+mod runtime_sockets;
+#[cfg(test)]
+mod test_util;
 mod types;
 pub use hook_write_deny::{profile_enforces_hook_write_deny, verify_hook_write_deny_enforced};
 pub use logging::SandboxLogger;
@@ -314,7 +317,7 @@ pub fn bwrap_reexec_command(
 ) -> Option<std::process::Command> {
     #[cfg(target_os = "linux")]
     {
-        bwrap_reexec_command_ex(deny_write, None, deny_read)
+        bwrap_reexec_command_ex(deny_write, None, deny_read, &[])
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -328,6 +331,7 @@ pub(crate) fn bwrap_reexec_command_ex(
     deny_write_optional: &[&str],
     hook_plan: Option<&hook_write_deny::HookWriteDenyBwrapPlan>,
     deny_read: &[&str],
+    runtime_socket_denies: &[PathBuf],
 ) -> Option<std::process::Command> {
     if is_inside_bwrap() {
         return None;
@@ -368,7 +372,24 @@ pub(crate) fn bwrap_reexec_command_ex(
     }
     cmd.arg("--dev-bind").arg("/dev").arg("/dev");
     cmd.arg("--proc").arg("/proc");
+    // The inner process re-derives its own socket deny set; hand it the outer
+    // set so a socket that appears only outside the namespace is still covered.
+    let encoded_runtime_socket_denies =
+        match runtime_sockets::encode_bwrap_runtime_socket_denies(runtime_socket_denies) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                eprintln!(
+                    "error: could not encode the container-runtime socket deny set: {error}; \
+                     refusing to start with a partial sandbox"
+                );
+                return None;
+            }
+        };
     cmd.env(BWRAP_ENV_VAR, "1");
+    cmd.env(
+        runtime_sockets::BWRAP_RUNTIME_SOCKET_DENY_ENV_VAR,
+        encoded_runtime_socket_denies,
+    );
     cmd.arg("--").arg(self_exe).args(args);
     Some(cmd)
 }
@@ -487,6 +508,8 @@ struct BwrapDenyPlan {
     hook_plan: Option<hook_write_deny::HookWriteDenyBwrapPlan>,
     deny_read: Vec<String>,
     has_globs: bool,
+    /// Container-runtime sockets auto-denied for network-restricted profiles.
+    runtime_socket_denies: Vec<PathBuf>,
 }
 /// Existing grok-home credential files to `--ro-bind` (write-deny, still
 /// readable). Missing basenames are returned separately so bwrap can bind a
@@ -527,7 +550,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     let resolved = if *profile == ProfileName::Off {
         None
     } else {
-        match profile.resolve_profile(workspace, &config) {
+        match profile.resolve_profile_with_runtime_sockets(workspace, &config) {
             Ok(r) => Some(r),
             Err(e) => {
                 if resolve_failure_must_refuse(profile, workspace) {
@@ -540,7 +563,11 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     };
     let entries = resolved
         .as_ref()
-        .map(|r| r.deny.clone())
+        .map(|(profile, _)| profile.deny.clone())
+        .unwrap_or_default();
+    let runtime_socket_denies = resolved
+        .as_ref()
+        .map(|(_, sockets)| sockets.clone())
         .unwrap_or_default();
     let needs_hooks = requires_hook_write_deny(profile, workspace);
     let hook_plan = if needs_hooks {
@@ -587,6 +614,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
         hook_plan,
         deny_read,
         has_globs,
+        runtime_socket_denies,
     })
 }
 /// Without kernel enforcement there is no read-deny; the devbox `/data`
@@ -618,6 +646,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
         hook_plan,
         deny_read: missing_cred_read,
         has_globs: false,
+        runtime_socket_denies: Vec::new(),
     })
 }
 /// Build the bwrap re-exec command a profile needs on Linux. Returns `None`
@@ -636,13 +665,19 @@ pub fn bwrap_reexec_for_profile(
         hook_plan,
         deny_read,
         has_globs,
+        runtime_socket_denies,
     } = bwrap_deny_plan(profile, workspace)?;
     if deny_write_optional.is_empty() && hook_plan.is_none() && deny_read.is_empty() && !has_globs {
         return None;
     }
     let write_opt: Vec<&str> = deny_write_optional.iter().map(String::as_str).collect();
     let read_refs: Vec<&str> = deny_read.iter().map(String::as_str).collect();
-    bwrap_reexec_command_ex(&write_opt, hook_plan.as_ref(), &read_refs)
+    bwrap_reexec_command_ex(
+        &write_opt,
+        hook_plan.as_ref(),
+        &read_refs,
+        &runtime_socket_denies,
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -836,7 +871,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&leaf);
         std::fs::rename(&moved, &leaf).unwrap();
         let plan = hook_write_deny::build_bwrap_plan(&sources).expect("plan2");
-        let cmd = bwrap_reexec_command_ex(&[], Some(&plan), &[]).expect("bwrap command");
+        let cmd = bwrap_reexec_command_ex(&[], Some(&plan), &[], &[]).expect("bwrap command");
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
