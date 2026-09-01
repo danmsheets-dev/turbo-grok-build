@@ -20,10 +20,13 @@ tmp-about-out.txt
 
 # Prebuilt Windows ship binaries (attach to GitHub Releases; too large for git/LFS on public forks)
 releases/windows/*.exe
+/turbo-*.zip
+/SHA256SUMS
 
 # Internal campaign / strategy docs — keep local or in a private repo
 marketing/
 
 # Indexed unpatched-finding list. Never push. Remove from the tree after W0–W2 close.
 docs/SECURITY-REMEDIATION-PLAN.md
+**/SECURITY-REMEDIATION-PLAN.md
 
