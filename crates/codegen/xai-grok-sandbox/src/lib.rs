@@ -36,12 +36,14 @@ mod logging;
 mod network_policy;
 mod paths;
 mod profiles;
+mod read_deny_verify;
 mod runtime_sockets;
 #[cfg(test)]
 mod test_util;
 mod types;
 pub use hook_write_deny::{profile_enforces_hook_write_deny, verify_hook_write_deny_enforced};
 pub use logging::SandboxLogger;
+pub use read_deny_verify::{verify_data_write_deny_enforced, verify_read_deny_enforced};
 pub use network_policy::{
     ChildNetworkPolicy, NETWORK_POLICY_SNAPSHOT_VERSION, NetworkPolicySnapshot,
     NetworkPolicySnapshotError, WebsiteAction, WebsiteOrigin, WebsiteOriginError, WebsitePolicy,
@@ -370,6 +372,16 @@ pub(crate) fn bwrap_reexec_command_ex(
             cmd.arg("--ro-bind").arg(&blocked).arg(path);
         }
     }
+    // Bound-over sentinel: the inner process verifies containment against a real
+    // read-only mountpoint instead of trusting a reproducible env marker.
+    let sentinel = match read_deny_verify::ensure_bwrap_sentinel_dir() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("error: could not prepare the bwrap containment sentinel: {e}");
+            return None;
+        }
+    };
+    cmd.arg("--ro-bind").arg(&sentinel).arg(&sentinel);
     cmd.arg("--dev-bind").arg("/dev").arg("/dev");
     cmd.arg("--proc").arg("/proc");
     // The inner process re-derives its own socket deny set; hand it the outer
@@ -500,6 +512,29 @@ pub fn requires_read_deny(_profile: &ProfileName, _workspace: &Path) -> bool {
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn resolve_failure_must_refuse(profile: &ProfileName, workspace: &Path) -> bool {
     requires_hook_write_deny(profile, workspace) || requires_read_deny(profile, workspace)
+}
+/// Whether an existing `/data` needs the devbox bwrap read-only bind.
+///
+/// Filesystem errors other than `NotFound` conservatively require bwrap.
+#[cfg(target_os = "linux")]
+pub fn requires_data_write_deny(profile: &ProfileName, workspace: &Path) -> bool {
+    requires_data_write_deny_for(
+        profile,
+        &profiles::load_sandbox_config(workspace),
+        data_path_requires_bind(Path::new("/data")),
+    )
+}
+#[cfg(target_os = "linux")]
+fn requires_data_write_deny_for(
+    profile: &ProfileName,
+    config: &SandboxConfig,
+    is_data_present: bool,
+) -> bool {
+    is_devbox_based(profile, config) && is_data_present
+}
+#[cfg(target_os = "linux")]
+fn data_path_requires_bind(path: &Path) -> bool {
+    path.try_exists().unwrap_or(true)
 }
 /// A profile's resolved bwrap deny plan.
 #[cfg(target_os = "linux")]

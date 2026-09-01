@@ -390,7 +390,7 @@ pub fn verify_required_hook_write_denies(paths: &[PathBuf]) -> Result<(), HookWr
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_namespace_lockdown() -> Result<(), String> {
+pub(crate) fn ensure_namespace_lockdown() -> Result<(), String> {
     use std::sync::OnceLock;
     static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
     INSTALLED
