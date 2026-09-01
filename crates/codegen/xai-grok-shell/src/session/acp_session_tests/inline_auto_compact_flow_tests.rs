@@ -1205,6 +1205,11 @@ async fn test_compact_on_error_triggers_when_tokens_exceed_new_window() {
             let actor = create_test_actor(214_000, 1_000_000, 85, gateway_tx, persistence_tx).await;
             let err = api_error_with_context_window(200_000);
             assert!(actor.should_compact_on_error(&err).await);
+            assert_eq!(
+                actor.compact_on_error_context_window(&err).await,
+                200_000,
+                "stream-advertised window wins over the session sampling config"
+            );
         })
         .await;
 }
@@ -1599,6 +1604,55 @@ async fn test_compact_on_error_noop_without_model_metadata() {
             assert!(!actor.should_compact_on_error(&err).await);
             err.message = "prompt is too long".into();
             assert!(actor.should_compact_on_error(&err).await);
+            assert_eq!(
+                actor.compact_on_error_context_window(&err).await,
+                200_000,
+                "CLE-without-metadata must fall back to the session sampling config"
+            );
+        })
+        .await;
+}
+/// Stream-delivered CLE often omits `model_metadata`. rc.3 made
+/// `should_compact_on_error` return true anyway; compact recovery must
+/// fall back to the session window instead of panicking on
+/// `expect("should_compact_on_error guarantees context_window")`.
+#[tokio::test(flavor = "current_thread")]
+async fn handle_sampling_failure_cle_without_metadata_does_not_panic() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            let err = xai_grok_sampler::SamplingErrorInfo {
+                kind: xai_grok_sampler::SamplingErrorKind::Api,
+                status_code: Some(400),
+                message: "prompt is too long".into(),
+                is_retryable: false,
+                retry_after_secs: None,
+                should_retry: None,
+                model_metadata: None,
+                empty_response_context: None,
+                doom_loop_triggers: None,
+                doom_loop_aborted_at_chunk: None,
+                credential: xai_grok_sampling_types::SentCredential::Unknown,
+            };
+            assert!(actor.should_compact_on_error(&err).await);
+            match actor.handle_sampling_failure(err).await {
+                Ok(SamplerFailureRecovery::CompactAndResubmit) => {}
+                Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. }) => {
+                    panic!("CLE-without-metadata must not take the auth-retry path")
+                }
+                Err(e) => {
+                    let data = e.data.unwrap_or_default();
+                    let msg = data.as_str().unwrap_or("");
+                    assert!(
+                        msg.contains("conversation is empty") || msg.contains("no system message"),
+                        "expected compact-path failure after CLE-without-metadata, got: {msg}"
+                    );
+                }
+            }
         })
         .await;
 }

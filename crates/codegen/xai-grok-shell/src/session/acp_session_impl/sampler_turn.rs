@@ -1082,11 +1082,7 @@ impl SessionActor {
             return Err(acp::Error::internal_error().data(message));
         }
         if self.should_compact_on_error(&error).await {
-            let cw = error
-                .model_metadata
-                .as_ref()
-                .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+            let cw = self.compact_on_error_context_window(&error).await;
             {
                 let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
                 let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);
