@@ -522,7 +522,13 @@ mod tests {
         assert!(catalog_access_token(cached_auth(Duration::hours(-1), Some("  "))).is_none());
     }
 
+    // `GROK_AUTH_PATH` is process-global, and `auth::storage::resolve_auth_json_path`
+    // ignores its `grok_home` argument whenever it is set. Setting it unserialized
+    // redirects auth.json reads/writes for every test running concurrently — it
+    // raced `ext_method_routes_pager_sent_turbo_internal_methods`, which unsets the
+    // var and expects its own grok home to be honoured.
     #[test]
+    #[serial_test::serial]
     fn resolver_returns_empty_resolution_when_no_stored_oauth() {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("auth.json");
