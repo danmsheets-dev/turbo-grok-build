@@ -571,15 +571,14 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn revoke_never_trusted_folder_writes_no_deny_and_preserves_cascade() {
+    fn revoke_never_trusted_folder_writes_no_deny_and_downgrades_cache() {
         let _sim = simulate_release_build();
         // The actual bug fix: revoking a NEVER-trusted child must write no explicit
-        // child STORE deny (returning false) so a later ancestor grant still
-        // cascades to the child — a spurious child `set_untrusted` would win
-        // most-specific and break the cascade. It must STILL downgrade the
-        // in-process cache, though, so a cached storeless grant cannot survive a
-        // mid-session untrust. GROK_HOME-isolated so the grant writes to a temp
-        // store; `#[serial]` because GROK_HOME is global.
+        // child STORE deny (returning false) — a spurious child `set_untrusted`
+        // would win most-specific and could later override a legitimate grant. It
+        // must STILL downgrade the in-process cache, though, so a cached storeless
+        // grant cannot survive a mid-session untrust. GROK_HOME-isolated so the
+        // grant writes to a temp store; `#[serial]` because GROK_HOME is global.
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("GROK_HOME", home.path());
         // Distinct git roots for parent/child so `workspace_key` does not collapse
@@ -606,25 +605,36 @@ mod tests {
             "revoke must downgrade the in-process cache even for a never-trusted folder"
         );
 
-        // A subsequent ancestor grant must still cascade to the child — proving
-        // the revoke did not poison the store with a most-specific child deny.
+        // The anti-poisoning property itself: the revoke recorded nothing for the
+        // child, so no most-specific deny is sitting in the store waiting to
+        // override a future grant.
+        assert!(
+            !TrustStore::load().has_decision(&workspace_key(&child)),
+            "revoking a never-trusted folder must record no decision"
+        );
+
+        // The child is a git root of its own, so a parent grant does not reach it
+        // (the trust cascade is gated to one workspace key). Same-root cascade is
+        // covered in `xai-grok-workspace`'s trust tests.
         let mut store = TrustStore::load();
         store.set_trusted(&workspace_key(parent.path())).unwrap();
         assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "ancestor grant must cascade to a child that was only revoked-when-untrusted"
+            !TrustStore::load().is_trusted(&workspace_key(&child)),
+            "a nested git root must not inherit the parent grant"
         );
     }
 
     #[test]
     #[serial_test::serial]
-    fn revoke_ancestor_cascade_trusted_child_writes_explicit_untrust() {
+    fn nested_git_root_is_not_covered_by_a_parent_grant() {
         let _sim = simulate_release_build();
-        // Revoke on a child trusted ONLY via an ancestor cascade (no direct child
-        // grant) must report was_trusted=true and actually untrust the child: it
-        // writes an explicit child deny (overriding the cascade) and downgrades
-        // the cache. GROK_HOME-isolated so the grant writes to a temp store;
-        // `#[serial]` because GROK_HOME is process-global.
+        // The trust cascade is gated to a single workspace key, so a child that is
+        // its own git root never inherits the parent's grant — and revoking it
+        // therefore reports was_trusted=false and leaves the parent alone. This
+        // replaces a test that asserted the opposite (a cascade across the repo
+        // boundary), which is the case the gate deliberately removes.
+        // GROK_HOME-isolated so the grant writes to a temp store; `#[serial]`
+        // because GROK_HOME is process-global.
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("GROK_HOME", home.path());
         // Distinct git roots so `workspace_key` keeps parent/child as separate
@@ -634,28 +644,32 @@ mod tests {
         std::fs::create_dir_all(&child).unwrap();
         git2::Repository::init(&child).unwrap();
 
-        // Trust the parent only; the child inherits trust via the cascade.
+        // Trust the parent only. The child is a separate git root, so the grant
+        // stops at the repo boundary.
         let mut store = TrustStore::load();
         store.set_trusted(&workspace_key(parent.path())).unwrap();
         assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "child must be trusted via the ancestor cascade before revoke"
-        );
-
-        // Revoking the cascade-trusted child reports was_trusted=true, then the
-        // child is untrusted: an explicit child deny overrides the cascade and
-        // the in-process cache is downgraded.
-        assert!(
-            revoke_folder_trust(&child),
-            "a cascade-trusted child must report was_trusted=true"
+            TrustStore::load().is_trusted(&workspace_key(parent.path())),
+            "the granted parent is trusted"
         );
         assert!(
             !TrustStore::load().is_trusted(&workspace_key(&child)),
-            "revoke must write an explicit child untrust that overrides the cascade"
+            "a nested git root must not inherit the parent grant"
+        );
+
+        // Revoking the child is therefore a no-op against a folder that was never
+        // trusted: it reports false and must not disturb the parent's grant.
+        assert!(
+            !revoke_folder_trust(&child),
+            "a child that never inherited trust reports was_trusted=false"
+        );
+        assert!(
+            TrustStore::load().is_trusted(&workspace_key(parent.path())),
+            "revoking the nested root must leave the parent grant intact"
         );
         assert!(
             !project_scope_allowed(&child),
-            "revoke must downgrade the in-process cache for the child"
+            "the untrusted nested root stays gated"
         );
     }
 
