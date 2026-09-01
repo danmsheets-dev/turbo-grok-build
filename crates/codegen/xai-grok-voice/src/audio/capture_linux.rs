@@ -234,7 +234,9 @@ fn err_message(err: &VoiceError) -> &str {
         VoiceError::Config(msg)
         | VoiceError::Auth(msg)
         | VoiceError::Stt(msg)
-        | VoiceError::WebSocket(msg) => msg.as_str(),
+        | VoiceError::WebSocket(msg)
+        | VoiceError::TtsUnavailable(msg)
+        | VoiceError::Tts(msg) => msg.as_str(),
     }
 }
 
