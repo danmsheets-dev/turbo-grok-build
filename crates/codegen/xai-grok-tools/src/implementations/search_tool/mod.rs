@@ -197,9 +197,63 @@ fn format_server_line_inner(name: &str, count: usize, desc: &Option<String>) -> 
     }
 }
 
+/// Characters flattened out of remote-influenced text.
+///
+/// Covers controls, Unicode line/paragraph separators, every format (Cf)
+/// character, variation selectors, and invisible filler letters. The format
+/// class includes the tag block (`U+E0000..=U+E007F`) used for invisible-text
+/// smuggling. Ranges are widened to whole blocks so unassigned code points fail
+/// closed.
+///
+/// This deliberately also strips ZWJ and variation selectors, so an emoji
+/// sequence in a description degrades to its component glyphs. That is the
+/// intended trade: this text is model-facing, and a server that can hide
+/// characters inside a tool description can smuggle instructions to the model.
+pub fn is_invisible_or_spoofing_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{2800}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1345F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
+        )
+}
+
+/// Flatten an MCP server's tool description to a single line for the
+/// model-facing catalog.
+///
+/// Invisible and spoofing characters are replaced with spaces before the
+/// whitespace collapse, so a server cannot hide text inside a description it
+/// supplies. Splitting on whitespace afterwards drops the introduced spaces.
 pub fn sanitize_description(s: &str) -> String {
-    s.split(['\n', '\r'])
-        .flat_map(|line| line.split_whitespace())
+    s.chars()
+        .map(|c| if is_invisible_or_spoofing_char(c) { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -385,6 +439,37 @@ mod tests {
         SearchSnapshot, ServerSummary, ToolIndex, ToolSearchIndex, ToolSearchResult,
     };
     use xai_tool_runtime::Tool;
+
+    #[test]
+    fn sanitize_description_still_flattens_whitespace() {
+        assert_eq!(
+            sanitize_description("first line\r\n  second\tline  "),
+            "first line second line"
+        );
+    }
+
+    #[test]
+    fn sanitize_description_strips_invisible_smuggling_characters() {
+        // Tag block (U+E0000..E007F) is the canonical invisible-text carrier: a
+        // server could hide model-directed instructions inside a description.
+        let smuggled = "list files\u{E0001}\u{E0069}\u{E0067}\u{E006E}";
+        assert_eq!(sanitize_description(smuggled), "list files");
+
+        // Zero-width, soft hyphen, bidi override, and Hangul filler must not
+        // survive into model-facing text either.
+        assert_eq!(
+            sanitize_description("re\u{200B}ad\u{00AD}file\u{202E}now\u{3164}"),
+            "re ad file now"
+        );
+    }
+
+    #[test]
+    fn sanitize_description_leaves_ordinary_text_untouched() {
+        assert_eq!(
+            sanitize_description("Read a file from disk (UTF-8)."),
+            "Read a file from disk (UTF-8)."
+        );
+    }
 
     struct StaticToolIndex {
         snapshot: SearchSnapshot,
