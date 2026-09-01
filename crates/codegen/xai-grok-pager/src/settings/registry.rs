@@ -1234,9 +1234,10 @@ mod tests {
                     );
                 }
                 // default_selected_permission: Option<String>; None →
-                // "always_allow_all_sessions" (the effective default; first
-                // prompt's cursor lands on the "Always allow on all sessions"
-                // row, picked explicitly in `enqueue_permission`).
+                // "allow_once". `DefaultSelectedPermission::from_config_value`
+                // resolves an empty or unrecognised value to `AllowOnce` so a
+                // first prompt never preselects always-approve; the registry
+                // default has to report the same thing.
                 ("default_selected_permission", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
                         ui.default_selected_permission, None,
@@ -1244,12 +1245,12 @@ mod tests {
                     );
                     assert_eq!(
                         *default,
-                        crate::appearance::permission_cursor::DefaultSelectedPermission::AlwaysAllowAllSessions
+                        crate::appearance::permission_cursor::DefaultSelectedPermission::AllowOnce
                             .as_canonical(),
-                        "default_selected_permission registry default must be \
-                         `always_allow_all_sessions` — the on-disk source of truth is \
-                         `UiConfig::default_selected_permission: Option<String>` (defaults to \
-                         None, mapped to the `always_allow_all_sessions` canonical)",
+                        "default_selected_permission registry default must be `allow_once` — the \
+                         on-disk source of truth is `UiConfig::default_selected_permission: \
+                         Option<String>` (defaults to None, which `from_config_value` maps to \
+                         the `allow_once` canonical)",
                     );
                 }
                 // fork_secondary_model: empty-string default = "no opinion".

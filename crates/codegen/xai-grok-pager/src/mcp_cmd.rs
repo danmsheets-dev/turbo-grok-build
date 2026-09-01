@@ -1281,15 +1281,25 @@ url = "https://mcp.example.test/sse"
 
     #[test]
     fn select_remove_site_covers_scope_presence_matrix() {
-        let user = xai_grok_shell::util::config::user_config_path();
         let project = PathBuf::from("/repo/.grok/config.toml");
+
+        // `select_remove_site` resolves the user path internally via
+        // `user_config_path()`, which is env-derived (GROK_HOME / HOME). Other
+        // tests in this binary mutate those with raw `set_var`, so capturing
+        // the path up front and comparing to the call's own resolution races.
+        // Assert what this test is actually for — the scope x presence matrix —
+        // plus that the user arm never hands back the project file.
+        let expect_user_scope = |result: Result<(McpScope, PathBuf), RemoveError>| match result {
+            Ok((McpScope::User, path)) => assert_ne!(
+                path, project,
+                "user scope must not resolve to the project config"
+            ),
+            other => panic!("expected user scope, got {other:?}"),
+        };
 
         // No scope: single hits resolve, both scopes is ambiguous, neither is
         // not found.
-        assert_eq!(
-            select_remove_site(true, None, None),
-            Ok((McpScope::User, user.clone()))
-        );
+        expect_user_scope(select_remove_site(true, None, None));
         assert_eq!(
             select_remove_site(false, Some(project.clone()), None),
             Ok((McpScope::Project, project.clone()))
@@ -1306,10 +1316,11 @@ url = "https://mcp.example.test/sse"
         );
 
         // Explicit scope: only that scope is consulted.
-        assert_eq!(
-            select_remove_site(true, Some(project.clone()), Some(McpScope::User)),
-            Ok((McpScope::User, user))
-        );
+        expect_user_scope(select_remove_site(
+            true,
+            Some(project.clone()),
+            Some(McpScope::User),
+        ));
         assert_eq!(
             select_remove_site(false, Some(project.clone()), Some(McpScope::Project)),
             Ok((McpScope::Project, project.clone()))
