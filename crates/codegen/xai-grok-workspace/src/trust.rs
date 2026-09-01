@@ -141,6 +141,7 @@ impl TrustStore {
     /// See [`is_unsafe_trust_root`].
     pub fn is_trusted(&self, workspace_key: &Path) -> bool {
         let workspace_key = canonicalize_or_owned(workspace_key);
+        let query_id = workspace_id(&workspace_key);
         // Among all recorded ancestor folders (including the key itself), the
         // longest match decides. Canonical, code-produced keys are normalized, so
         // that longest match is unique. A hand-edited store could hold
@@ -155,6 +156,13 @@ impl TrustStore {
         for (folder, record) in &self.doc.folders {
             let folder = canonicalize_or_owned(Path::new(folder));
             if is_unsafe_trust_root(&folder) || !path_is_under_key(&workspace_key, &folder) {
+                continue;
+            }
+            // A grant covers only descendants that share its workspace key (one
+            // git root). A nested or sibling git root under a recorded folder
+            // resolves to a different key and is not covered — prefix alone no
+            // longer cascades trust across a repo boundary.
+            if workspace_id(&folder) != query_id {
                 continue;
             }
             let depth = folder.components().count();
@@ -382,6 +390,15 @@ pub fn workspace_key(cwd: &Path) -> PathBuf {
         return canonicalize_or_owned(cwd);
     }
     key
+}
+
+/// The [`workspace_key`] of the nearest existing ancestor (git discovery fails
+/// on a path that does not exist yet). Used by [`TrustStore::is_trusted`] to
+/// gate a cascade grant to a single git root: a recorded folder only covers
+/// descendants that resolve to the same key, so a nested or sibling git root
+/// under a granted path is not trusted by that grant.
+fn workspace_id(path: &Path) -> PathBuf {
+    workspace_key(path.ancestors().find(|p| p.exists()).unwrap_or(path))
 }
 
 /// Git-topology-derived workspace key (pre-safety-guard); see [`workspace_key`],
@@ -887,6 +904,8 @@ mod tests {
         let repo = tmp.path().join("repo");
         let child = repo.join("crates").join("inner");
         std::fs::create_dir_all(&child).unwrap();
+        // The cascade is gated to one git root: repo and child must share a key.
+        git2::Repository::init(&repo).unwrap();
         let repo_key = canonicalize_or_owned(&repo);
         let child_key = canonicalize_or_owned(&child);
 
@@ -909,6 +928,89 @@ mod tests {
     }
 
     #[test]
+    fn parent_grant_does_not_cover_nested_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("work");
+        let nested = parent.join("evil");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        let parent_key = canonicalize_or_owned(&parent);
+        let nested_key = canonicalize_or_owned(&nested);
+
+        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&parent_key).unwrap();
+
+        assert!(
+            store.is_trusted(&parent_key),
+            "the granted folder stays trusted"
+        );
+        assert!(
+            !store.is_trusted(&nested_key),
+            "a nested git root must not inherit a parent grant"
+        );
+    }
+
+    #[test]
+    fn git_parent_grant_does_not_cover_nested_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("work");
+        let nested = parent.join("evil");
+        let sibling = parent.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        git2::Repository::init(&parent).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        let parent_key = canonicalize_or_owned(&parent);
+        let nested_key = canonicalize_or_owned(&nested);
+        let sibling_key = canonicalize_or_owned(&sibling);
+
+        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&parent_key).unwrap();
+
+        assert!(
+            store.is_trusted(&parent_key),
+            "the granted folder stays trusted"
+        );
+        assert!(
+            store.is_trusted(&sibling_key),
+            "a same-repo subdirectory is still covered"
+        );
+        assert!(
+            !store.is_trusted(&nested_key),
+            "a nested git root must not inherit a parent grant"
+        );
+        assert!(
+            !store.is_trusted(&nested_key.join("src")),
+            "a descendant of the nested git root must not inherit a parent grant"
+        );
+    }
+
+    #[test]
+    fn parent_grant_does_not_cover_nongit_descendant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("work");
+        let child = parent.join("tarball");
+        std::fs::create_dir_all(&child).unwrap();
+        let parent_key = canonicalize_or_owned(&parent);
+        let child_key = canonicalize_or_owned(&child);
+
+        // Plant a dummy .git because libgit2 discover ignores GIT_CEILING_DIRECTORIES.
+        std::fs::write(tmp.path().join(".git"), "gitdir: /nonexistent\n").unwrap();
+
+        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&parent_key).unwrap();
+
+        assert!(
+            store.is_trusted(&parent_key),
+            "the granted folder stays trusted"
+        );
+        assert!(
+            !store.is_trusted(&child_key),
+            "a non-git descendant must not inherit a parent grant"
+        );
+    }
+
+    #[test]
     fn most_specific_decision_wins_over_ancestor_cascade() {
         // An explicit child untrust must override a trusted ancestor (the bug
         // where an untrust was undone by the cascade on the next reload). The
@@ -920,6 +1022,8 @@ mod tests {
         let other = parent.join("other");
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir_all(&other).unwrap();
+        // The cascade is gated to one git root: parent/child/other must share a key.
+        git2::Repository::init(&parent).unwrap();
         let parent_key = canonicalize_or_owned(&parent);
         let child_key = canonicalize_or_owned(&child);
         let other_key = canonicalize_or_owned(&other);
@@ -957,6 +1061,8 @@ mod tests {
         let parent = tmp.path().join("parent");
         let child = parent.join("child");
         std::fs::create_dir_all(&child).unwrap();
+        // The cascade is gated to one git root: parent and child must share a key.
+        git2::Repository::init(&parent).unwrap();
         let parent_key = canonicalize_or_owned(&parent);
         let child_key = canonicalize_or_owned(&child);
 

@@ -1202,34 +1202,41 @@ mod tests {
 
     #[test]
     fn revoke_folder_trust_store_writes_no_deny_for_never_trusted_folder() {
-        // The cascade-poisoning guard: revoking a NEVER-trusted child returns
-        // false and writes NO explicit child deny, so a later ancestor grant still
-        // cascades to the child (a spurious child `set_untrusted` would win
-        // most-specific and break the cascade). This store half does NOT touch the
-        // `DECISIONS` cache — that downgrade is the shell wrapper's job.
-        // GROK_HOME-isolated so the grant writes to a temp store.
+        // The cascade-poisoning guard: revoking a NEVER-trusted folder returns
+        // false and records NO decision. A spurious `set_untrusted` would win
+        // most-specific and could break a legitimate same-root cascade. This
+        // store half does NOT touch the `DECISIONS` cache — that downgrade is the
+        // shell wrapper's job. GROK_HOME-isolated so writes go to a temp store.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set("GROK_HOME", home.path());
         let _sim = simulate_release_build();
-        // Distinct git roots so `workspace_key` keeps parent/child as separate
-        // keys (the child's own `.git` stops discovery at the child).
+        // A nested git root: `workspace_key` stops discovery at the child, so it
+        // resolves to its own key distinct from the parent's.
         let parent = repo_tmp();
         let child = parent.path().join("child");
         std::fs::create_dir_all(&child).unwrap();
         git2::Repository::init(&child).unwrap();
+        let child_key = workspace_key(&child);
 
         assert!(
             !revoke_folder_trust_store(&child),
             "revoking a never-trusted folder must return false"
         );
+        // The guard, tested directly: revoke recorded nothing for the child.
+        assert!(
+            !TrustStore::load().has_decision(&child_key),
+            "revoking a never-trusted folder must not record any decision (no poisoning deny)"
+        );
 
-        // No child deny was written, so an ancestor grant still cascades down.
+        // A parent grant does not reach across the git-root boundary to a nested
+        // repo (the git-root trust gate) — so the child stays untrusted whether
+        // or not a deny was written. Same-root cascade is covered in `trust.rs`.
         let mut store = TrustStore::load();
         store.set_trusted(&workspace_key(parent.path())).unwrap();
         assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "ancestor grant must cascade to a child revoked-while-untrusted (no poisoning deny)"
+            !TrustStore::load().is_trusted(&child_key),
+            "a nested git root is not covered by the parent grant (git-root trust gate)"
         );
     }
 
