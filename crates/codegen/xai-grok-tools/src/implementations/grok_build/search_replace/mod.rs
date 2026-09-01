@@ -163,6 +163,7 @@ pub(crate) async fn run_search_replace(
         .map(|v| v.0.clone());
     let tool_call_id = ctx.call_id.as_str().to_owned();
     let (cwd, display_cwd, fs, notification_handle, hints_enabled, confine_root, allowed_paths);
+    let resolved;
     {
         let res = resources.lock().await;
         cwd = match cwd_override {
@@ -174,25 +175,34 @@ pub(crate) async fn run_search_replace(
         notification_handle = res.require::<NotificationHandle>()?.0.clone();
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
         confine_root = res.get::<ConfineRoot>().map(|c| c.0.clone());
+        let additional_directories = res
+            .get::<crate::types::resources::AdditionalDirectories>()
+            .map(|a| a.0.clone())
+            .unwrap_or_default();
         allowed_paths = res
             .get::<crate::types::resources::AllowedWritePaths>()
             .map(|a| a.0.clone());
-    }
-    // RC13 Wave A: fail closed when session CWD / confine root is gone
-    // (worktree tombstone) before any read/write.
-    enforce_write_path(&cwd, confine_root.as_deref()).map_err(|e| e.into_tool_error())?;
-    let resolved = resolve_write_model_path(
-        &cwd,
-        display_cwd.as_deref(),
-        confine_root.as_deref(),
-        &input.file_path,
-    )
-    .map_err(|msg| {
-        xai_tool_runtime::ToolError::execution(
-            xai_tool_protocol::ToolId::new("search_replace").expect("valid"),
-            msg,
+        let write_roots = crate::types::resources::collect_write_roots(
+            &cwd,
+            confine_root.as_deref(),
+            &additional_directories,
+        );
+        drop(res);
+        crate::types::resources::enforce_write_path_in_roots(&cwd, &write_roots)
+            .map_err(|e| e.into_tool_error())?;
+        resolved = crate::types::resources::resolve_write_model_path_in_roots(
+            &cwd,
+            display_cwd.as_deref(),
+            &write_roots,
+            &input.file_path,
         )
-    })?;
+        .map_err(|msg| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("search_replace").expect("valid"),
+                msg,
+            )
+        })?;
+    }
     let path = match crate::util::fs::try_canonicalize(&resolved).await {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

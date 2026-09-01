@@ -474,6 +474,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         model_id,
         preferred_session_id,
         chat_kind,
+        additional_directories: app.additional_directories.clone(),
     });
     (agent_id, effects)
 }
@@ -482,6 +483,9 @@ pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<
     let effects =
         unregister_session_effect(get_active_agent(app).and_then(|a| a.session.session_id.clone()));
     show_welcome(app);
+    if !app.add_dir_cli {
+        app.additional_directories.clear();
+    }
     app.welcome_prompt_focused = true;
     app.session_picker_entries = None;
     app.session_picker_loading = false;
@@ -1073,6 +1077,7 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
         model_id: None,
         preferred_session_id,
         chat_kind,
+        additional_directories: app.additional_directories.clone(),
     }]
 }
 

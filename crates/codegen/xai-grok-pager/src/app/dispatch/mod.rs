@@ -18,6 +18,7 @@ mod cta;
 mod ctx;
 mod dashboard;
 mod dashboard_telemetry;
+mod folder;
 pub(crate) mod external_editor;
 mod import_claude;
 mod interject;

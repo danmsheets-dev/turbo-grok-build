@@ -15,7 +15,7 @@ pub mod terminal;
 mod terminal_snapshot_tests;
 
 pub use cgroup::{CgroupMemoryConfig, PROCESS_OOM_EXIT_CODE};
-pub use confined_fs::ConfinedFs;
+pub use confined_fs::{ConfineRootsHandle, ConfinedFs};
 pub use file_system::LocalFs;
 pub use mock_fs::MockFs;
 pub use terminal::{ExitStatus, LocalTerminalBackend};

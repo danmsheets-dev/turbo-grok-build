@@ -473,6 +473,13 @@ pub struct DenyReadGlobs(pub Vec<String>);
 #[derive(Debug, Clone)]
 pub struct ConfineRoot(pub PathBuf);
 
+/// Extra workspace roots attached to a session (ACP `additionalDirectories`).
+///
+/// These expand the write/read confine set without changing [`Cwd`], which
+/// remains the base for relative paths. Empty means no extra roots.
+#[derive(Debug, Clone, Default)]
+pub struct AdditionalDirectories(pub Vec<PathBuf>);
+
 /// Write-time path allowlist prefixes (relative, normalized). Empty = unrestricted.
 ///
 /// Inserted from spawn `allowed_paths` so tools fail closed at write time (not
@@ -753,16 +760,79 @@ pub fn resolve_model_path_confined(
     confine_root: &std::path::Path,
     input: &str,
 ) -> Result<PathBuf, String> {
+    resolve_model_path_confined_to_roots(cwd, display_cwd, &[confine_root.to_path_buf()], input)
+}
+
+/// Like [`resolve_model_path_confined`], but the path may lie under **any**
+/// root in `roots` (primary cwd / confine plus ACP additional directories).
+///
+/// Empty `roots` is unconfined (legacy default).
+pub fn resolve_model_path_confined_to_roots(
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+    roots: &[PathBuf],
+    input: &str,
+) -> Result<PathBuf, String> {
     let resolved = resolve_model_path(cwd, display_cwd, input);
-    if path_is_under_confine_root(&resolved, confine_root) {
+    if roots.is_empty() || path_is_under_any_root(&resolved, roots) {
         Ok(resolved)
     } else {
         Err(format!(
-            "path `{}` is outside the confine root `{}`",
+            "path `{}` is outside the confine roots {}",
             resolved.display(),
-            confine_root.display()
+            format_confine_roots(roots)
         ))
     }
+}
+
+fn format_confine_roots(roots: &[PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|r| format!("`{}`", r.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Collect the effective write/read confine set for a session.
+///
+/// `confine_root` is the **session** isolation worktree (tighter than process).
+/// Process `--confine` / `GROK_CONFINE` roots are consulted here; do **not**
+/// pass the first process root as `confine_root` or sibling process roots
+/// are dropped.
+///
+/// - No extras, no session confine, no process → empty (unconfined).
+/// - No extras, no session confine, process roots → those process roots.
+/// - Session confine present → `[session, ...additional]` (isolation wins).
+/// - Extras, no session, no process → `[cwd, ...additional]`.
+/// - Extras, no session, process roots → `[process..., ...additional]`.
+pub fn collect_write_roots(
+    cwd: &std::path::Path,
+    confine_root: Option<&std::path::Path>,
+    additional: &[PathBuf],
+) -> Vec<PathBuf> {
+    let process = process_confine_roots();
+    let mut roots = Vec::with_capacity(additional.len() + process.len() + 1);
+    if let Some(p) = confine_root {
+        roots.push(p.to_path_buf());
+    } else {
+        roots.extend(process.iter().cloned());
+    }
+    if roots.is_empty() {
+        if additional.is_empty() {
+            return Vec::new();
+        }
+        roots.push(cwd.to_path_buf());
+    }
+    for extra in additional {
+        if !roots.iter().any(|r| paths_equal_for_confine(r, extra)) {
+            roots.push(extra.clone());
+        }
+    }
+    roots
+}
+
+fn paths_equal_for_confine(a: &std::path::Path, b: &std::path::Path) -> bool {
+    canonicalize_for_permission(a).compare == canonicalize_for_permission(b).compare
 }
 
 /// Resolve a write-tool path: when a session [`ConfineRoot`] **or** process
@@ -775,11 +845,25 @@ pub fn resolve_write_model_path(
     confine_root: Option<&std::path::Path>,
     input: &str,
 ) -> Result<PathBuf, String> {
-    let process = process_confine_root();
-    let effective = confine_root.or(process.as_ref().map(|p| p.as_path()));
-    match effective {
-        Some(root) => resolve_model_path_confined(cwd, display_cwd, root, input),
-        None => Ok(resolve_model_path(cwd, display_cwd, input)),
+    resolve_write_model_path_in_roots(
+        cwd,
+        display_cwd,
+        &collect_write_roots(cwd, confine_root, &[]),
+        input,
+    )
+}
+
+/// Resolve a write path against a precomputed root set (cwd + extras).
+pub fn resolve_write_model_path_in_roots(
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+    roots: &[PathBuf],
+    input: &str,
+) -> Result<PathBuf, String> {
+    if roots.is_empty() {
+        Ok(resolve_model_path(cwd, display_cwd, input))
+    } else {
+        resolve_model_path_confined_to_roots(cwd, display_cwd, roots, input)
     }
 }
 
@@ -861,6 +945,15 @@ pub fn path_is_under_confine_root(path: &std::path::Path, root: &std::path::Path
     path_c.compare.starts_with(&root_c.compare)
 }
 
+/// True when `path` is under **any** of `roots` after
+/// [`canonicalize_for_permission`]. Empty `roots` is never a match (callers
+/// treat empty as unconfined before calling this).
+pub fn path_is_under_any_root(path: &std::path::Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| path_is_under_confine_root(path, root))
+}
+
 /// Canonicalise via `fs::canonicalize` when the path exists; otherwise walk
 /// up to the nearest existing ancestor, canonicalize that, and re-join the
 /// non-existent tail. Returns `(display_path, lexical_only)`.
@@ -939,13 +1032,16 @@ fn fold_for_compare(path: &std::path::Path) -> PathBuf {
     }
 }
 
-/// Process-wide confine root set at CLI startup (`--confine` /
-/// `--workspace-root`). The permission manager and path resolvers consult this
-/// so confinement is enforced even when a tool context was built without a
-/// [`ConfineRoot`] resource. `None` = unconfined (legacy default).
-static PROCESS_CONFINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// Process-wide confine roots set at CLI startup (`--confine` repeatable /
+/// `GROK_CONFINE` path list). The permission manager and path resolvers consult
+/// this so confinement is enforced even when a tool context was built without a
+/// [`ConfineRoot`] resource. Empty = unconfined (legacy default).
+static PROCESS_CONFINE_ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
 
-/// Env var exported by `--confine` so nested hyper / MCP / hooks inherit the root.
+/// Env var exported by `--confine` so nested turbo / MCP / hooks inherit the
+/// roots. Portable encoding is `;`-separated absolute paths (never `:` —
+/// Windows drive letters). On Unix, a `GROK_CONFINE` value with no `;` may
+/// also be split on `:` (PATH-style).
 pub const ENV_GROK_CONFINE: &str = "GROK_CONFINE";
 /// Marker set alongside [`ENV_GROK_CONFINE`] when this process applied confine.
 pub const ENV_GROK_CONFINE_INHERIT: &str = "GROK_CONFINE_INHERIT";
@@ -954,16 +1050,65 @@ pub const ENV_GROK_CONFINE_INHERIT: &str = "GROK_CONFINE_INHERIT";
 /// scan only (unknown programs allowed when no write operand is extracted).
 pub const ENV_GROK_CONFINE_SHELL_MODE: &str = "GROK_CONFINE_SHELL_MODE";
 
-/// Stamp the confine root for this process. Idempotent first-write-wins (CLI
-/// startup is the only writer). Canonicalise and verify the path is a directory
-/// *before* calling this.
-pub fn set_process_confine_root(root: PathBuf) {
-    let _ = PROCESS_CONFINE_ROOT.set(root);
+/// Split a `GROK_CONFINE` env value into paths.
+///
+/// `;` always splits. On Unix, `:` also splits when no `;` is present. Windows
+/// never splits on `:` so `C:\work` stays one root.
+pub fn parse_confine_path_list(raw: &str) -> Vec<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let delim = if raw.contains(';') {
+        ';'
+    } else if cfg!(not(windows)) && raw.contains(':') {
+        ':'
+    } else {
+        return vec![PathBuf::from(raw)];
+    };
+    raw.split(delim)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
-/// Current process confine root, if any.
+/// Join confine roots for `GROK_CONFINE` export. Always `;`, including on Unix.
+pub fn join_confine_path_list(roots: &[PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|p| p.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Stamp the confine roots for this process. Idempotent first-write-wins (CLI
+/// startup is the only writer). Canonicalise and verify each path is a
+/// directory *before* calling this.
+pub fn set_process_confine_roots(roots: Vec<PathBuf>) {
+    let _ = PROCESS_CONFINE_ROOTS.set(roots);
+}
+
+/// Stamp a single confine root (tests / single `--confine`).
+pub fn set_process_confine_root(root: PathBuf) {
+    set_process_confine_roots(vec![root]);
+}
+
+/// All process confine roots. Empty slice = unconfined.
+pub fn process_confine_roots() -> &'static [PathBuf] {
+    PROCESS_CONFINE_ROOTS
+        .get()
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
+/// First process confine root, if any.
+///
+/// Display / legacy single-field (`confineRoot`) only. Bound checks must use
+/// [`process_confine_roots`] / [`path_is_under_any_root`] — returning only
+/// the first root as the write jail is a lie when several were stamped.
 pub fn process_confine_root() -> Option<&'static PathBuf> {
-    PROCESS_CONFINE_ROOT.get()
+    process_confine_roots().first()
 }
 
 // ── RC13 Wave A: fail-closed write roots (cwd / confine tombstones) ─────────
@@ -1067,18 +1212,45 @@ pub fn enforce_write_path(
     cwd: &std::path::Path,
     confine_root: Option<&std::path::Path>,
 ) -> Result<(), WriteRootError> {
-    let process_root = process_confine_root().map(|p| p.as_path());
-    // Resource confine wins when present; otherwise process root.
-    let effective = confine_root.or(process_root);
-    enforce_write_roots(Some(cwd), effective)
+    enforce_write_path_in_roots(cwd, &collect_write_roots(cwd, confine_root, &[]))
+}
+
+/// Fail closed when `cwd` is gone, or when every confine root is gone.
+/// A missing extra root does not tombstone writes to remaining live roots.
+pub fn enforce_write_path_in_roots(
+    cwd: &std::path::Path,
+    roots: &[PathBuf],
+) -> Result<(), WriteRootError> {
+    if !path_is_existing_dir(cwd) {
+        return Err(WriteRootError::CwdMissing {
+            path: cwd.to_path_buf(),
+        });
+    }
+    if roots.is_empty() {
+        return Ok(());
+    }
+    if roots.iter().any(|r| path_is_existing_dir(r)) {
+        return Ok(());
+    }
+    Err(WriteRootError::ConfineRootMissing {
+        path: roots[0].clone(),
+    })
 }
 
 /// Process-confine-only preflight (LocalFs has no session Cwd resource).
+/// A missing extra process root does not tombstone writes to remaining live
+/// roots; all gone is fail-closed.
 pub fn enforce_process_confine_root_exists() -> Result<(), WriteRootError> {
-    if let Some(root) = process_confine_root() {
-        return enforce_write_roots(None, Some(root.as_path()));
+    let roots = process_confine_roots();
+    if roots.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    if roots.iter().any(|r| path_is_existing_dir(r)) {
+        return Ok(());
+    }
+    Err(WriteRootError::ConfineRootMissing {
+        path: roots[0].clone(),
+    })
 }
 
 /// Shell confinement enforcement level active for this process.
@@ -1108,7 +1280,7 @@ impl ConfineShellEnforcement {
 /// Default is fail-closed whenever a confine root is active. Callers may opt
 /// into the legacy operand-scan via `GROK_CONFINE_SHELL_MODE=operand`.
 pub fn confine_shell_enforcement() -> ConfineShellEnforcement {
-    if process_confine_root().is_none() {
+    if process_confine_roots().is_empty() {
         return ConfineShellEnforcement::OperandScan;
     }
     match std::env::var(ENV_GROK_CONFINE_SHELL_MODE)
@@ -1123,28 +1295,32 @@ pub fn confine_shell_enforcement() -> ConfineShellEnforcement {
 
 /// Pin `GROK_CONFINE` / `GROK_CONFINE_INHERIT` / `GROK_CONFINE_SHELL_MODE` on a
 /// child command so the model cannot unset or downgrade them via `env -u` /
-/// request env. No-op when unconfined.
+/// request env. No-op when unconfined. Multi-root values are `;`-joined.
 pub fn pin_confine_env_on_tokio_command(cmd: &mut tokio::process::Command) {
-    if let Some(root) = process_confine_root() {
-        cmd.env(ENV_GROK_CONFINE, root.as_os_str());
-        cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
-        cmd.env(
-            ENV_GROK_CONFINE_SHELL_MODE,
-            confine_shell_enforcement().as_str(),
-        );
+    let roots = process_confine_roots();
+    if roots.is_empty() {
+        return;
     }
+    cmd.env(ENV_GROK_CONFINE, join_confine_path_list(roots));
+    cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
+    cmd.env(
+        ENV_GROK_CONFINE_SHELL_MODE,
+        confine_shell_enforcement().as_str(),
+    );
 }
 
 /// [`std::process::Command`] counterpart of [`pin_confine_env_on_tokio_command`].
 pub fn pin_confine_env_on_std_command(cmd: &mut std::process::Command) {
-    if let Some(root) = process_confine_root() {
-        cmd.env(ENV_GROK_CONFINE, root.as_os_str());
-        cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
-        cmd.env(
-            ENV_GROK_CONFINE_SHELL_MODE,
-            confine_shell_enforcement().as_str(),
-        );
+    let roots = process_confine_roots();
+    if roots.is_empty() {
+        return;
     }
+    cmd.env(ENV_GROK_CONFINE, join_confine_path_list(roots));
+    cmd.env(ENV_GROK_CONFINE_INHERIT, "1");
+    cmd.env(
+        ENV_GROK_CONFINE_SHELL_MODE,
+        confine_shell_enforcement().as_str(),
+    );
 }
 
 /// When true, [`emit_confine_violation`] prints an NDJSON event on stdout
@@ -2534,6 +2710,137 @@ mod tests {
         // Without confine root, absolute is accepted (unconfined default).
         let bare = super::resolve_write_model_path(root, None, None, outside).unwrap();
         assert_eq!(bare, std::path::PathBuf::from(outside));
+    }
+
+    #[test]
+    fn path_is_under_any_root_accepts_extra_and_rejects_outside() {
+        let primary = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let inside_extra = extra.path().join("lib.rs");
+        std::fs::write(&inside_extra, "fn x() {}").unwrap();
+        let roots = vec![
+            primary.path().to_path_buf(),
+            extra.path().to_path_buf(),
+        ];
+        assert!(super::path_is_under_any_root(&inside_extra, &roots));
+        assert!(super::path_is_under_any_root(primary.path(), &roots));
+        let outside = primary.path().parent().unwrap().join("not-attached.txt");
+        assert!(!super::path_is_under_any_root(&outside, &roots));
+    }
+
+    #[test]
+    fn collect_write_roots_with_extras_uses_cwd_when_unconfined() {
+        let cwd = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let roots = super::collect_write_roots(cwd.path(), None, &[extra.path().to_path_buf()]);
+        assert_eq!(roots.len(), 2);
+        assert!(super::path_is_under_any_root(&cwd.path().join("a.rs"), &roots));
+        assert!(super::path_is_under_any_root(&extra.path().join("b.rs"), &roots));
+    }
+
+    #[test]
+    fn collect_write_roots_without_extras_is_empty_when_unconfined() {
+        let cwd = tempfile::tempdir().unwrap();
+        let roots = super::collect_write_roots(cwd.path(), None, &[]);
+        assert!(roots.is_empty(), "unconfined + no extras stays unconfined");
+    }
+
+    #[test]
+    fn parse_confine_path_list_semicolon_splits_and_keeps_windows_drive() {
+        let got = super::parse_confine_path_list(r"C:\work;D:\other");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], std::path::PathBuf::from(r"C:\work"));
+        assert_eq!(got[1], std::path::PathBuf::from(r"D:\other"));
+        let single = super::parse_confine_path_list(r"C:\work");
+        assert_eq!(single, vec![std::path::PathBuf::from(r"C:\work")]);
+        assert!(super::parse_confine_path_list("").is_empty());
+        assert!(super::parse_confine_path_list("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_confine_path_list_unix_colon_when_no_semicolon() {
+        let got = super::parse_confine_path_list("/a:/b");
+        if cfg!(windows) {
+            assert_eq!(got, vec![std::path::PathBuf::from("/a:/b")]);
+        } else {
+            assert_eq!(
+                got,
+                vec![
+                    std::path::PathBuf::from("/a"),
+                    std::path::PathBuf::from("/b")
+                ]
+            );
+        }
+        let semi_wins = super::parse_confine_path_list("/a:/b;/c");
+        assert_eq!(semi_wins.len(), 2);
+        assert_eq!(semi_wins[0], std::path::PathBuf::from("/a:/b"));
+        assert_eq!(semi_wins[1], std::path::PathBuf::from("/c"));
+    }
+
+    #[test]
+    fn join_confine_path_list_uses_semicolon() {
+        let joined = super::join_confine_path_list(&[
+            std::path::PathBuf::from("/a"),
+            std::path::PathBuf::from("/b"),
+        ]);
+        assert_eq!(joined, "/a;/b");
+    }
+
+    #[test]
+    fn enforce_write_path_in_roots_missing_extra_does_not_tombstone() {
+        let cwd = tempfile::tempdir().unwrap();
+        let gone = cwd.path().join("gone-extra");
+        let roots = vec![cwd.path().to_path_buf(), gone];
+        super::enforce_write_path_in_roots(cwd.path(), &roots)
+            .expect("live primary root must keep writes open");
+    }
+
+    #[test]
+    fn enforce_write_path_in_roots_all_roots_gone_is_tombstone() {
+        let cwd = tempfile::tempdir().unwrap();
+        let gone = cwd.path().join("gone-confine");
+        std::fs::create_dir(&gone).unwrap();
+        let roots = vec![gone.clone()];
+        std::fs::remove_dir(&gone).unwrap();
+        match super::enforce_write_path_in_roots(cwd.path(), &roots) {
+            Err(super::WriteRootError::ConfineRootMissing { path }) => {
+                assert_eq!(path, gone);
+            }
+            other => panic!("expected ConfineRootMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_model_path_confined_to_roots_allows_extra() {
+        let primary = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let extra_file = extra.path().join("shared.rs");
+        std::fs::write(&extra_file, "// extra").unwrap();
+        let roots = vec![
+            primary.path().to_path_buf(),
+            extra.path().to_path_buf(),
+        ];
+        let ok = super::resolve_model_path_confined_to_roots(
+            primary.path(),
+            None,
+            &roots,
+            extra_file.to_str().unwrap(),
+        )
+        .expect("extra root must be writable");
+        assert!(super::path_is_under_any_root(&ok, &roots));
+        let outside = if cfg!(windows) {
+            r"C:\Windows\System32\drivers\etc\hosts"
+        } else {
+            "/etc/hosts"
+        };
+        let err = super::resolve_model_path_confined_to_roots(
+            primary.path(),
+            None,
+            &roots,
+            outside,
+        )
+        .unwrap_err();
+        assert!(err.contains("outside the confine root"), "{err}");
     }
 
     #[test]

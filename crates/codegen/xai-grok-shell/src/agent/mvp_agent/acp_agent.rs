@@ -452,6 +452,7 @@ impl acp::Agent for MvpAgent {
             session_capabilities
                     .list(acp::SessionListCapabilities::new())
                     .resume(acp::SessionResumeCapabilities::new())
+                    .additional_directories(acp::SessionAdditionalDirectoriesCapabilities::new())
         };
         Ok(
             acp::InitializeResponse::new(acp::ProtocolVersion::V1)
@@ -2228,7 +2229,9 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             "x.ai/session/rename" | "x.ai/session/delete"
-            | "x.ai/session/update_mcp_servers" | "x.ai/session/fork"
+            | "x.ai/session/update_mcp_servers"
+            | "x.ai/session/set_additional_directories"
+            | "x.ai/session/fork"
             | "x.ai/plugins/reload" | "x.ai/commands/list"
             // Turbo-only internals: no InternalMethod variant (see
             // leader/protocol.rs). Keep in sync with

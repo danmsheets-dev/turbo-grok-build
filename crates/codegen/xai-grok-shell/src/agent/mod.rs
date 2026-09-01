@@ -1,3 +1,4 @@
+pub(crate) mod additional_directories;
 pub mod activity;
 pub mod app;
 pub mod auth_method;

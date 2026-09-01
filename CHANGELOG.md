@@ -54,6 +54,46 @@ Older release notes (r1–r13 detail) are archived under
 
 ## Unreleased
 
+### Fixed
+- **Session no longer panics on context-length errors that omit stream metadata.**
+  `should_compact_on_error` recovers from CLE text even when `model_metadata`
+  is missing; `handle_sampling_failure` now falls back to the session
+  context window instead of `expect`ing it on the error.
+- **`spawn_subagent` accepts `openai/gpt-5.6-terra`.** An OpenRouter routing-slug
+  collision no longer rejects the slug while still listing it. Spawn prefers
+  the credentialed `openai-codex/gpt-5.6-terra` alias.
+- **`turbo disk report/clean` see Windows `{drive}:\t\w` isolation trees**
+  (and `$GROK_WORKTREE_ROOT`), not only `~/.grok/worktrees`.
+
+### Added
+- **Attach extra folders** (`--add-dir`, `/folder add|remove|list`, ACP
+  `additionalDirectories`). Relative paths still resolve against primary
+  `--cwd`. Extra folders expand the **write** confine set (and workspace-tree
+  overlay); reads stay unconfined. Attaching extras on an otherwise unconfined
+  session installs a write boundary of `[cwd, extras]`. Title bar shows `+N`
+  (or `+basename` for one extra). Claude `permissions.additionalDirectories`
+  is auto-applied on **new** sessions; TUI resume resends the stored list.
+  Isolation worktrees still clone only the primary repo; extra folders stay
+  live on disk. LSP `workspaceFolders` and fsnotify include extra roots
+  (live `/folder` updates send `didChangeWorkspaceFolders` and extra
+  watchers).
+- **`--confine` / `GROK_CONFINE` as a path list.** Repeatable `--confine PATH`
+  (alias `--workspace-root`). `GROK_CONFINE` is `;`-separated (Unix also
+  splits on `:` when no `;` is present; Windows never splits on `:`). Nested
+  turbo may only tighten inherited roots — a sibling not under any inherited
+  root is a startup error. Streaming-json `start` keeps `confineRoot` (first
+  root) and adds `confineRoots` (full list).
+- OpenRouter **MiniMax M3 free** (`openrouter/minimax/minimax-m3:free`),
+  **Inkling free** (`openrouter/thinkingmachines/inkling:free`), and
+  **Nemotron 3 Ultra** (`openrouter/nvidia/nemotron-3-ultra-550b-a55b` and
+  `:free`) catalog keys for spawn.
+- NVIDIA Integrate newest NIMs: **Kimi K3** (`nvidia/moonshotai/kimi-k3`),
+  **DeepSeek V4 Pro 0813** (`nvidia/deepseek-ai/deepseek-v4-pro-0813`),
+  **DeepSeek V4 Flash 0731** (`nvidia/deepseek-ai/deepseek-v4-flash-0731`).
+  Nemotron 3.5 Lightning and Muse Glimmer are now `agent_ready` so they can
+  spawn write-capable subagents. Ultra / hang Llama / gpt-oss stay chat-only.
+  Wan2.2-Animate is a video model and is not in the text spawn catalog.
+
 ---
 
 ## [1.0.0-rc.12] - 2026-08-26

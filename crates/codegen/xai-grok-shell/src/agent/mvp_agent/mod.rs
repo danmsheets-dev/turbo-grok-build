@@ -269,6 +269,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
+    /// Extra ACP workspace roots (`additionalDirectories`). Empty = none.
+    pub additional_directories: Vec<std::path::PathBuf>,
     /// Sticky chat product kind for ACU / product skills sourcing.
     pub is_chat_kind: bool,
 }
@@ -444,6 +446,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_yolo_mode,
         session_auto_mode: false,
         prompt_display_cwd: None,
+        additional_directories: Vec::new(),
         is_chat_kind: true,
     }
 }

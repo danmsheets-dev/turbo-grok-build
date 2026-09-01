@@ -115,6 +115,7 @@ pub(crate) struct AgentRebuildSpec {
     pub compat: CompatConfig,
     pub context_window_tokens: u64,
     pub prompt_working_directory: Option<String>,
+    pub additional_directories: Vec<PathBuf>,
     pub lsp: Option<Arc<dyn LspBackend>>,
     pub plugin_registry: Option<Arc<xai_grok_agent::plugins::PluginRegistry>>,
     pub api_key_provider: Option<SharedApiKeyProvider>,
@@ -217,6 +218,7 @@ impl AgentRebuildSpec {
             compat,
             context_window_tokens,
             prompt_working_directory,
+            additional_directories,
             lsp,
             plugin_registry,
             api_key_provider,
@@ -322,6 +324,9 @@ impl AgentRebuildSpec {
         }
         if let Some(prompt_working_directory) = prompt_working_directory.clone() {
             builder = builder.with_prompt_working_directory(prompt_working_directory);
+        }
+        if !additional_directories.is_empty() {
+            builder = builder.with_additional_directories(additional_directories.clone());
         }
         if let Some(names) = persisted_skill_names {
             builder = builder.with_persisted_announced_skill_names(names);
@@ -488,6 +493,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         compat: CompatConfig::default(),
         context_window_tokens: 256_000,
         prompt_working_directory: None,
+        additional_directories: Vec::new(),
         lsp: None,
         plugin_registry: None,
         api_key_provider: None,

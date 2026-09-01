@@ -85,6 +85,8 @@ fn test_app() -> AppView {
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         cwd: PathBuf::from("/tmp"),
+        additional_directories: Vec::new(),
+        add_dir_cli: false,
         project_picker_shown: true,
         project_picker_disabled: false,
         cwd_has_git_ancestor: false,

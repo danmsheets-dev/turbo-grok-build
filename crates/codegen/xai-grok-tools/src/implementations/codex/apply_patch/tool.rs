@@ -177,23 +177,22 @@ fn validate_hunk_path(path: &std::path::Path) -> Result<(), String> {
 fn resolve_hunk_path(cwd: &std::path::Path, path: &std::path::Path) -> Result<PathBuf, String> {
     validate_hunk_path(path)?;
     let resolved = cwd.join(path);
-    if let Some(root) = crate::types::resources::process_confine_root() {
-        if !crate::types::resources::path_is_under_confine_root(&resolved, root) {
-            let root_s = root.display().to_string();
-            let path_s = path.display().to_string();
-            let resolved_s = resolved.display().to_string();
-            crate::types::resources::emit_confine_violation(
-                "apply_patch",
-                &path_s,
-                &resolved_s,
-                &root_s,
-                "apply-patch-path-outside-root",
-            );
-            return Err(format!(
-                "Denied by confine root: apply_patch path `{path_s}` is outside `{root_s}` \
-                 (resolved: `{resolved_s}`)"
-            ));
-        }
+    let roots = crate::types::resources::process_confine_roots();
+    if !roots.is_empty() && !crate::types::resources::path_is_under_any_root(&resolved, roots) {
+        let root_s = crate::types::resources::join_confine_path_list(roots);
+        let path_s = path.display().to_string();
+        let resolved_s = resolved.display().to_string();
+        crate::types::resources::emit_confine_violation(
+            "apply_patch",
+            &path_s,
+            &resolved_s,
+            &root_s,
+            "apply-patch-path-outside-root",
+        );
+        return Err(format!(
+            "Denied by confine root: apply_patch path `{path_s}` is outside `{root_s}` \
+             (resolved: `{resolved_s}`)"
+        ));
     }
     Ok(resolved)
 }

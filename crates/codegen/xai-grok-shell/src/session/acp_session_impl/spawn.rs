@@ -770,10 +770,17 @@ pub(crate) async fn spawn_session_actor(
         let raw = tool_context.cwd.as_path();
         dunce::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf())
     });
+    // Detach extra-root fsnotify from a cloned parent ToolContext so this
+    // session's watcher is not overwritten by (or overwriting) the parent.
+    tool_context.extra_watch_tx = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let additional_directories = tool_context.additional_directories.lock().clone();
+    let session_write_roots = xai_grok_tools::types::resources::collect_write_roots(
+        tool_context.cwd.as_path(),
+        session_confine_root.as_deref(),
+        &additional_directories,
+    );
     // Both ACP and local backends share ConfinedFs: process `--confine`, then
-    // the optional session worktree jail. ACP previously skipped this layer
-    // (F82), so writes that reached `fs.write_file` without the tool-layer
-    // resolve gate had no confine chokepoint.
+    // the optional session worktree jail / additionalDirectories union.
     let inner_fs: std::sync::Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem> =
         if client_fs_capable && tool_context.gateway.is_some() {
             std::sync::Arc::new(xai_grok_workspace::file_system::AcpFsAdapter::new(
@@ -784,15 +791,15 @@ pub(crate) async fn spawn_session_actor(
             std::sync::Arc::new(xai_grok_tools::computer::local::LocalFs)
         };
     let process_fs = xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(inner_fs);
+    let roots_handle = std::sync::Arc::new(std::sync::RwLock::new(session_write_roots));
+    tool_context.confine_roots = Some(std::sync::Arc::clone(&roots_handle));
     let fs_backend: std::sync::Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem> =
-        if let Some(ref root) = session_confine_root {
-            std::sync::Arc::new(xai_grok_tools::computer::local::ConfinedFs::new(
+        std::sync::Arc::new(
+            xai_grok_tools::computer::local::ConfinedFs::with_shared_session_roots(
                 process_fs,
-                root.clone(),
-            ))
-        } else {
-            process_fs
-        };
+                roots_handle,
+            ),
+        );
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
     let initial_agent_name = agent_definition.name.clone();
@@ -1027,6 +1034,7 @@ pub(crate) async fn spawn_session_actor(
         compat,
         context_window_tokens,
         prompt_working_directory: prompt_display_cwd.clone(),
+        additional_directories: additional_directories.clone(),
         lsp: tool_context.lsp.clone(),
         plugin_registry: plugin_registry.clone(),
         api_key_provider: api_key_provider.clone(),
@@ -1971,6 +1979,19 @@ pub(crate) async fn spawn_session_actor(
             session_id = %session_info.id.0,
             confine_root = %root.display(),
             "Session ConfineRoot installed (DisplayCwd / isolation worktree)"
+        );
+    }
+    if !additional_directories.is_empty() {
+        session
+            .agent
+            .borrow()
+            .tool_bridge()
+            .set_additional_directories(additional_directories.clone())
+            .await;
+        tracing::info!(
+            session_id = %session_info.id.0,
+            extra_roots = additional_directories.len(),
+            "Session AdditionalDirectories installed"
         );
     }
     if let Some(storage) = session.memory.storage() {

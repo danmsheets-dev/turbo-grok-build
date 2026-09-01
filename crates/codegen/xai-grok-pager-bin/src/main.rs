@@ -82,11 +82,11 @@ fn apply_agent_endpoint_args(
         config.endpoints.xai_api_base_url = v.clone();
     }
 }
-/// Canonicalise `--confine` / `--workspace-root` and stamp it process-wide.
-/// Fail-fast with a clear error when the path is missing or not a directory —
-/// a harness must not silently run unconfined after a typo.
-fn apply_confine_root(path: &Path) -> Result<()> {
-    xai_grok_pager::confine::apply_confine_root(path)
+/// Canonicalise `--confine` / `--workspace-root` (repeatable) and stamp them
+/// process-wide. Fail-fast with a clear error when a path is missing or not a
+/// directory — a harness must not silently run unconfined after a typo.
+fn apply_process_confine(paths: &[std::path::PathBuf]) -> Result<()> {
+    xai_grok_pager::confine::apply_process_confine(paths)
 }
 
 /// Resolve --agent-profile path: canonicalize and verify the file exists.
@@ -2127,9 +2127,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     // Fail-fast confine root: harnesses hand a worktree path and need a hard
     // guarantee that nothing is written outside it (cross-platform prefix
     // check — not the OS sandbox, which is advisory on Windows).
-    if let Some(ref confine) = args.confine {
-        apply_confine_root(confine)?;
-    }
+    apply_process_confine(&args.confine)?;
     // `grok codex` is a shim over the native OpenAI Codex platform: rewrite
     // the invocation into the standard pager flows (TUI / headless) pinned
     // to an `openai-codex/*` model before interactive-mode detection.
@@ -2553,6 +2551,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 resume: args.resume_session.or(args.load_session),
                 resume_title_pinned: args.resume_target_pinned,
                 cwd: args.cwd,
+                add_dir: args.add_dir.clone(),
                 yolo: launch_yolo.yolo,
                 trust: args.trust,
                 output_format: args.output_format,

@@ -1108,6 +1108,23 @@ fn confine_access_outside_root(
     cwd: &std::path::Path,
     path_context: Option<&RequestPathContext>,
 ) -> Option<ConfineHit> {
+    let extras = path_context
+        .map(|c| c.additional_directories.as_slice())
+        .unwrap_or(&[]);
+    let session = path_context.and_then(|c| c.confine_root.as_deref());
+    // Session isolation worktree wins when present. Process `--confine` roots
+    // are picked up by `collect_write_roots` when session is unset — passing
+    // only the first process root as `confine_root` would drop siblings.
+    // Tests pass `root` without stamping PROCESS_CONFINE_ROOTS; keep that.
+    let explicit = if session.is_some() {
+        session
+    } else if !xai_grok_tools::types::resources::process_confine_roots().is_empty() {
+        None
+    } else {
+        Some(root)
+    };
+    let roots =
+        xai_grok_tools::types::resources::collect_write_roots(cwd, explicit, extras);
     match access {
         AccessKind::Edit(path) => {
             let resolved = match path_context {
@@ -1116,7 +1133,7 @@ fn confine_access_outside_root(
                 }
                 None => resolve_model_path(cwd, None, path),
             };
-            confine_resolved_path(path, &resolved, root, "path-outside-root")
+            confine_resolved_path_in_roots(path, &resolved, &roots, "path-outside-root")
         }
         AccessKind::EditMany(paths) => {
             for path in paths {
@@ -1126,7 +1143,8 @@ fn confine_access_outside_root(
                     }
                     None => resolve_model_path(cwd, None, path),
                 };
-                if let Some(hit) = confine_resolved_path(path, &resolved, root, "path-outside-root")
+                if let Some(hit) =
+                    confine_resolved_path_in_roots(path, &resolved, &roots, "path-outside-root")
                 {
                     return Some(hit);
                 }
@@ -1219,14 +1237,16 @@ fn confine_access_outside_root(
                 // target is outside (or when parse confidence fails).
                 let resolved = resolve_model_path(cwd, None, &operand);
                 if let Some(hit) =
-                    confine_resolved_path(&operand, &resolved, root, "path-outside-root")
+                    confine_resolved_path_in_roots(&operand, &resolved, &roots, "path-outside-root")
                 {
                     return Some(hit);
                 }
             }
             None
         }
-        AccessKind::MCPTool { name, input } => confine_mcp_tool_paths(name, input, root, cwd),
+        AccessKind::MCPTool { name, input } => {
+            confine_mcp_tool_paths(name, input, &roots, cwd)
+        }
         // Read/Grep/Web*: confine is a write-boundary for harness isolation.
         // Managed Read deny rules still apply separately.
         _ => None,
@@ -1263,7 +1283,7 @@ const MCP_PATH_KEYS: &[&str] = &[
 fn confine_mcp_tool_paths(
     tool_name: &str,
     input: &serde_json::Value,
-    root: &std::path::Path,
+    roots: &[std::path::PathBuf],
     cwd: &std::path::Path,
 ) -> Option<ConfineHit> {
     let mut candidates: Vec<String> = Vec::new();
@@ -1276,7 +1296,7 @@ fn confine_mcp_tool_paths(
         let path_str = strip_file_url_prefix(&candidate);
         let resolved = resolve_model_path(cwd, None, path_str);
         if let Some(mut hit) =
-            confine_resolved_path(path_str, &resolved, root, "mcp-path-outside-root")
+            confine_resolved_path_in_roots(path_str, &resolved, &roots, "mcp-path-outside-root")
         {
             hit.detail = Some(format!(
                 "Denied by confine root: MCP tool `{tool_name}` path `{}` is outside `{}` \
@@ -1404,14 +1424,30 @@ fn confine_resolved_path(
     root: &std::path::Path,
     rule: &'static str,
 ) -> Option<ConfineHit> {
-    if xai_grok_tools::types::resources::path_is_under_confine_root(resolved, root) {
+    confine_resolved_path_in_roots(original, resolved, &[root.to_path_buf()], rule)
+}
+
+fn confine_resolved_path_in_roots(
+    original: &str,
+    resolved: &std::path::Path,
+    roots: &[std::path::PathBuf],
+    rule: &'static str,
+) -> Option<ConfineHit> {
+    if roots.is_empty()
+        || xai_grok_tools::types::resources::path_is_under_any_root(resolved, roots)
+    {
         return None;
     }
     let canon = xai_grok_tools::types::resources::canonicalize_for_permission(resolved);
+    let root_s = roots
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     Some(ConfineHit {
         path: original.to_owned(),
         resolved_path: canon.display.to_string_lossy().into_owned(),
-        root: root.display().to_string(),
+        root: root_s,
         detail: None,
         rule,
     })
@@ -2041,16 +2077,21 @@ fn spawn_permission_manager_with_pin(
                         .map(|p| p.as_path());
                     let process_confine = xai_grok_tools::types::resources::process_confine_root()
                         .map(|p| p.as_path());
+                    let extras_present = path_context.as_ref().is_some_and(|c| {
+                        !c.additional_directories.is_empty()
+                    });
                     // Align with file tools: session isolation worktree root wins
                     // when present (tighter than parent process confine). Process
                     // root remains the outer jail when no session root is set.
-                    if let Some(root) = session_confine.or(process_confine) {
-                        // Join relative shell operands against the real session
-                        // cwd (worktree), not the permission actor's global cwd.
-                        let join_cwd = path_context
-                            .as_ref()
-                            .map(|c| c.real_cwd.as_path())
-                            .unwrap_or_else(|| cwd.as_path());
+                    // Additional directories also install a session boundary.
+                    let join_cwd = path_context
+                        .as_ref()
+                        .map(|c| c.real_cwd.as_path())
+                        .unwrap_or_else(|| cwd.as_path());
+                    if let Some(root) = session_confine
+                        .or(process_confine)
+                        .or(extras_present.then_some(join_cwd))
+                    {
                         let confine_hit = confine_access_outside_root(
                             &access,
                             root,
@@ -3287,6 +3328,7 @@ mod tests {
                     real_cwd: child.path().to_path_buf(),
                     display_cwd: Some(display.path().to_path_buf()),
                     confine_root: Some(child.path().to_path_buf()),
+                    additional_directories: Vec::new(),
                 };
 
                 for displayed in [
@@ -3349,6 +3391,7 @@ mod tests {
                     // No session-scoped confine root: this case exercises
                     // identity-keyed rule matching, not confinement.
                     confine_root: None,
+                    additional_directories: Vec::new(),
                 };
 
                 // Absolute parent-workspace file: the rule keys on identity

@@ -148,6 +148,10 @@ pub struct PromptContext {
     /// When absent, inject falls back to [`Self::working_directory`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_working_directory: Option<String>,
+    /// Extra ACP workspace roots (`additionalDirectories`). Absolute paths.
+    /// Empty when the session has only the primary cwd.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<String>,
     /// Current date (`YYYY-MM-DD`) in the user's local timezone, for the
     /// `<user_info>` system prompt block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,6 +222,7 @@ impl Default for PromptContext {
             shell_path: None,
             working_directory: None,
             tool_working_directory: None,
+            additional_directories: Vec::new(),
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
@@ -277,6 +282,7 @@ impl PromptContext {
             "shell_path": self.shell_path.as_deref().unwrap_or(""),
             "working_directory": self.working_directory.as_deref().unwrap_or(""),
             "tool_working_directory": self.tool_working_directory.as_deref().unwrap_or(""),
+            "additional_directories": self.additional_directories,
             "current_date": self.current_date.as_deref().unwrap_or(""),
             "is_non_interactive": self.is_non_interactive,
             "system_prompt_label": self.system_prompt_label.as_str(),
@@ -413,6 +419,7 @@ mod tests {
             shell_path: None,
             working_directory: None,
             tool_working_directory: None,
+            additional_directories: Vec::new(),
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
@@ -770,6 +777,7 @@ mod tests {
             shell_path: None,
             working_directory: None,
             tool_working_directory: None,
+            additional_directories: Vec::new(),
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),

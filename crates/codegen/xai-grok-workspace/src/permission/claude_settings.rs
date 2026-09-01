@@ -396,7 +396,7 @@ fn global_claude_settings_paths() -> Vec<PathBuf> {
 /// (project tree + user `~/.claude`). When false, only user-tier `~/.claude`
 /// — the single choke point for env injection and permission resolution so
 /// the two cannot drift on which files an untrusted clone may contribute.
-pub(crate) fn claude_settings_paths_for_trust(cwd: &Path, project_trusted: bool) -> Vec<PathBuf> {
+pub fn claude_settings_paths_for_trust(cwd: &Path, project_trusted: bool) -> Vec<PathBuf> {
     if project_trusted {
         find_claude_settings_paths(cwd)
     } else {

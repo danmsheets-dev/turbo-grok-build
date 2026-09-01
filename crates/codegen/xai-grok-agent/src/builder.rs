@@ -51,6 +51,8 @@ pub struct AgentBuilder {
     /// shows the original project path. Tool execution (`ToolContext.cwd`,
     /// `SessionContext.cwd`) is unaffected and continues to use the real path.
     prompt_working_directory: Option<String>,
+    /// Extra ACP workspace roots shown in the prompt / tree overlay.
+    additional_directories: Vec<PathBuf>,
     terminal_backend: Arc<dyn TerminalBackend>,
     fs_backend: Arc<dyn AsyncFileSystem>,
     notification_handle: ToolNotificationHandle,
@@ -208,6 +210,7 @@ impl AgentBuilder {
         Self {
             working_directory,
             prompt_working_directory: None,
+            additional_directories: Vec::new(),
             terminal_backend,
             fs_backend: xai_grok_tools::computer::local::ConfinedFs::wrap_if_confined(Arc::new(
                 xai_grok_tools::computer::local::LocalFs,
@@ -660,6 +663,11 @@ impl AgentBuilder {
     /// rather than the internal overlay/worktree path.
     pub fn with_prompt_working_directory(mut self, cwd: String) -> Self {
         self.prompt_working_directory = Some(cwd);
+        self
+    }
+
+    pub fn with_additional_directories(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.additional_directories = dirs;
         self
     }
     fn resolve_definition(&self) -> AgentDefinition {
@@ -1228,6 +1236,11 @@ impl AgentBuilder {
             shell_path: Some(resolve_shell_for_prompt()),
             working_directory: Some(display_working_dir),
             tool_working_directory: Some(self.working_directory.to_string_lossy().into_owned()),
+            additional_directories: self
+                .additional_directories
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
             current_date: Some(
                 now.with_timezone(&chrono::Local)
                     .format("%Y-%m-%d")

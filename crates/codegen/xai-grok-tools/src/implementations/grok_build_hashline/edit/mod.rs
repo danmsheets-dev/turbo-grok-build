@@ -365,6 +365,7 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             scheme,
             hints_enabled,
             confine_root,
+            additional_directories,
             allowed_paths,
             policy,
             session_folder,
@@ -388,6 +389,10 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             let confine_root = res
                 .get::<crate::types::resources::ConfineRoot>()
                 .map(|c| c.0.clone());
+            let additional_directories = res
+                .get::<crate::types::resources::AdditionalDirectories>()
+                .map(|a| a.0.clone())
+                .unwrap_or_default();
             let allowed_paths = res
                 .get::<crate::types::resources::AllowedWritePaths>()
                 .map(|a| a.0.clone());
@@ -408,23 +413,27 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 scheme,
                 hints_enabled,
                 confine_root,
+                additional_directories,
                 allowed_paths,
                 policy,
                 session_folder,
             )
         };
+        let write_roots = crate::types::resources::collect_write_roots(
+            &cwd,
+            confine_root.as_deref(),
+            &additional_directories,
+        );
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.
-        crate::types::resources::enforce_write_path(&cwd, confine_root.as_deref())
+        crate::types::resources::enforce_write_path_in_roots(&cwd, &write_roots)
             .map_err(|e| e.into_tool_error())?;
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
-        // Confine at resolve (resource ConfineRoot or process root) + allowed_paths.
-        let joined_path = crate::types::resources::resolve_write_model_path(
+        // Confine at resolve (resource ConfineRoot / extras or process root) + allowed_paths.
+        let joined_path = crate::types::resources::resolve_write_model_path_in_roots(
             &cwd,
             display_cwd.as_deref(),
-            confine_root
-                .as_deref()
-                .or_else(|| crate::types::resources::process_confine_root().map(|p| p.as_path())),
+            &write_roots,
             &input.file_path,
         )
         .map_err(|msg| {

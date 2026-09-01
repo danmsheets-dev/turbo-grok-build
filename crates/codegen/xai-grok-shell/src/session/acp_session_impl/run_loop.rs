@@ -241,10 +241,14 @@ pub(super) async fn run_session(
             index_root.clone(),
         );
         tracing::debug!(?fs_watch_caps, "fs-notify: spawning");
-        Some(fs_watch::spawn(fs_watch::FsWatchPlan::build(
-            fs_watch_caps,
-            deps,
-        )))
+        Some({
+            let handle = fs_watch::spawn(fs_watch::FsWatchPlan::build(
+                fs_watch_caps,
+                deps,
+            ));
+            *session.tool_context.extra_watch_tx.lock() = Some(handle.extra_roots_tx.clone());
+            handle
+        })
     } else {
         tracing::debug!("fs-notify: skipped (no consumers)");
         None
@@ -628,6 +632,12 @@ pub(super) async fn run_session(
                                 .tool_bridge()
                                 .set_allowed_write_paths(paths)
                                 .await;
+                        }
+                        SessionCommand::SetAdditionalDirectories { directories, respond_to } => {
+                            let result = session
+                                .apply_additional_directories(directories)
+                                .await;
+                            let _ = respond_to.send(result);
                         }
                         SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
                             let origin = super::PromptOrigin::from_prompt_id(&prompt_id);

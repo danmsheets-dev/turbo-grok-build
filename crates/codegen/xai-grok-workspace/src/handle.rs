@@ -1891,7 +1891,7 @@ impl WorkspaceHandle {
     /// this layer so `x.ai/fs/*` cannot rely solely on the permission check.
     fn fs_confinement_active(&self) -> bool {
         self.shared.confine_fs_to_workspace_root
-            || xai_grok_tools::types::resources::process_confine_root().is_some()
+            || !xai_grok_tools::types::resources::process_confine_roots().is_empty()
     }
 
     /// Confine `path` to the workspace root (reject `..`, absolute-outside-root,
@@ -1909,8 +1909,13 @@ impl WorkspaceHandle {
         if !self.fs_confinement_active() {
             return Ok((path.to_path_buf(), None));
         }
-        if let Some(process_root) = xai_grok_tools::types::resources::process_confine_root() {
-            return self.confine_to_root(path, process_root).await;
+        let process_roots = xai_grok_tools::types::resources::process_confine_roots();
+        if !process_roots.is_empty() {
+            let matching = process_roots.iter().find(|root| {
+                xai_grok_tools::types::resources::path_is_under_confine_root(path, root)
+            });
+            let root = matching.unwrap_or(&process_roots[0]);
+            return self.confine_to_root(path, root).await;
         }
         let path_str = path.to_str().ok_or_else(|| {
             WorkspaceError::HubError(format!("non-UTF-8 path: {}", path.display()))

@@ -107,6 +107,7 @@ impl xai_tool_runtime::Tool for WriteTool {
             fs,
             notification_handle,
             confine_root,
+            additional_directories,
             allowed_paths,
             policy,
             session_folder,
@@ -117,6 +118,10 @@ impl xai_tool_runtime::Tool for WriteTool {
             let fs = res.require::<FileSystem>()?.0.clone();
             let notification_handle = res.require::<NotificationHandle>()?.0.clone();
             let confine_root = res.get::<ConfineRoot>().map(|c| c.0.clone());
+            let additional_directories = res
+                .get::<crate::types::resources::AdditionalDirectories>()
+                .map(|a| a.0.clone())
+                .unwrap_or_default();
             let allowed_paths = res.get::<AllowedWritePaths>().map(|a| a.0.clone());
             let params =
                 res.get::<Params<crate::implementations::grok_build::policy::PolicyParams>>();
@@ -131,6 +136,7 @@ impl xai_tool_runtime::Tool for WriteTool {
                 fs,
                 notification_handle,
                 confine_root,
+                additional_directories,
                 allowed_paths,
                 policy,
                 session_folder,
@@ -138,15 +144,21 @@ impl xai_tool_runtime::Tool for WriteTool {
         };
         let tool_call_id = ctx.call_id.as_str().to_owned();
 
+        let write_roots = crate::types::resources::collect_write_roots(
+            &cwd,
+            confine_root.as_deref(),
+            &additional_directories,
+        );
         // RC13 Wave A: fail closed when session CWD / confine root is gone
         // (worktree tombstone) before any path resolution or write.
-        enforce_write_path(&cwd, confine_root.as_deref()).map_err(|e| e.into_tool_error())?;
+        crate::types::resources::enforce_write_path_in_roots(&cwd, &write_roots)
+            .map_err(|e| e.into_tool_error())?;
 
-        // Resolve under ConfineRoot when present (fail closed at resolve time).
-        let path = resolve_write_model_path(
+        // Resolve under ConfineRoot / additionalDirectories when present.
+        let path = crate::types::resources::resolve_write_model_path_in_roots(
             &cwd,
             display_cwd.as_deref(),
-            confine_root.as_deref(),
+            &write_roots,
             &input.file_path,
         )
         .map_err(|msg| {

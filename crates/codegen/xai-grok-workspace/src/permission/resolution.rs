@@ -612,10 +612,10 @@ fn resolve_claude_settings_inner(
         };
 
         if let Some(dirs) = &settings.additional_directories {
-            info!(
+            debug!(
                 path = %path.display(),
                 count = dirs.len(),
-                "Claude settings: additionalDirectories parsed but not supported"
+                "Claude settings: additionalDirectories observed (session attach merges them)"
             );
         }
 

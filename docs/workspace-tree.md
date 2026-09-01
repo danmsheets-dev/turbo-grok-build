@@ -49,6 +49,8 @@ True incremental invalidation is Phase 2.
 - Prefer `resolve_path` for basenames (`ship_roster`) before inventing folders.
 - Use `workspace_tree` `summary` / `search` / `list` for layout; do **not** dump the full tree into context.
 - Subagents see their **tool CWD** atlas (worktree), not a hardcoded parent path.
+- Extra `--add-dir` / ACP `additionalDirectories` roots get their own atlas
+  (overlay). Isolation children inherit those as live folders, not worktree copies.
 
 ## Related
 

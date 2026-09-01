@@ -5,7 +5,7 @@ use crate::agent::mvp_agent::session_lifecycle::{
     CLOSE_INTAKE_WAIT, CLOSE_TOTAL_BUDGET, CloseOutcome,
 };
 use crate::agent::mvp_agent::session_setup::{
-    AttachOperation, AttachPolicy, RESUME_REFUSES_CHAT, RESUME_REFUSES_EXTRA_DIRS,
+    AttachOperation, AttachPolicy, RESUME_REFUSES_CHAT,
     load_request_for_resume,
 };
 use crate::session::SessionLiveState;
@@ -45,22 +45,26 @@ fn expected_load(meta: serde_json::Value) -> acp::LoadSessionRequest {
     .mcp_servers(mcp_servers())
     .meta(meta_of(meta))
 }
-/// The load path drops these, so resume must refuse rather than pretend. The
-/// message is asserted because a test agent has several ways to reach
-/// `invalid_params`, and the generic code alone passes without the guard.
+/// Missing extra roots must fail closed with invalid_params (not silently drop).
 #[test]
-fn resume_refuses_additional_directories_it_cannot_honor() {
+fn resume_rejects_missing_additional_directories() {
     super::run_local_for_bridge_test(|| async {
         use acp::Agent as _;
         let err = super::build_minimal_agent_for_tests()
             .resume_session(
                 resume_request(json!({}))
-                    .additional_directories(vec![std::path::PathBuf::from("/tmp/extra")]),
+                    .additional_directories(vec![std::path::PathBuf::from(
+                        "/definitely-not-an-attached-folder-turbo-test",
+                    )]),
             )
             .await
-            .expect_err("resume must refuse roots it drops");
+            .expect_err("resume must reject extras it cannot honor");
         assert_eq!(err.code, acp::Error::invalid_params().code);
-        assert_eq!(err.data, Some(json!(RESUME_REFUSES_EXTRA_DIRS)));
+        let data = err.data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            data.contains("additionalDirectories") || data.contains("does not exist"),
+            "expected additionalDirectories validation error, got: {data}"
+        );
     });
 }
 /// Every input crossed with both methods, because the interesting cases are the

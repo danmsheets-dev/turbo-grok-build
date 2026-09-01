@@ -642,6 +642,11 @@ pub struct AppView {
     pub current_ui: xai_grok_shell::agent::config::UiConfig,
     /// Working directory.
     pub cwd: PathBuf,
+    /// Extra ACP workspace roots from `--add-dir` / `additionalDirectories`.
+    pub additional_directories: Vec<PathBuf>,
+    /// `--add-dir` was passed on this process. Resume keeps these instead of
+    /// restoring a session's stored extras.
+    pub add_dir_cli: bool,
     /// Whether the project picker question has already been shown this session.
     pub project_picker_shown: bool,
     /// "Don't ask me again" opt-out from [`xai_grok_shell::util::config::resolve_hints`];
@@ -1468,6 +1473,8 @@ impl AppView {
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            additional_directories: Vec::new(),
+            add_dir_cli: false,
             project_picker_shown: false,
             project_picker_disabled: false,
             cwd_has_git_ancestor: std::env::current_dir()
@@ -4832,6 +4839,7 @@ impl AppView {
                             workspace_mode_startup_locked: self.local_workspace_startup_locked,
                             #[cfg(feature = "local-workspace")]
                             workspace_mode_ack_pending: self.welcome_local_workspace_ack_pending,
+                            additional_directories: &self.additional_directories,
                         };
                         let result = crate::views::welcome::render_welcome(
                             view_area,
@@ -5098,6 +5106,7 @@ impl AppView {
                                     esc_owned_before_agent,
                                     #[cfg(feature = "codex-live")]
                                     live_visualizer: live_visualizer_state.as_ref(),
+                                    additional_directories: &self.additional_directories,
                                 },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
@@ -5172,6 +5181,8 @@ impl AppView {
                                     caption: crate::views::announcements::usable_cta_caption(owner),
                                 },
                             );
+                            dashboard.additional_directories =
+                                self.additional_directories.clone();
                             let dash_cursor = crate::views::dashboard::render_dashboard(
                                 f.buffer_mut(),
                                 view_area,
@@ -6320,6 +6331,8 @@ pub(crate) mod tests {
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             cwd: std::path::PathBuf::from("/tmp"),
+            additional_directories: Vec::new(),
+            add_dir_cli: false,
             project_picker_shown: true,
             project_picker_disabled: false,
             cwd_has_git_ancestor: false,

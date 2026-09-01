@@ -15,8 +15,9 @@ pub use self::commands::*;
 pub use self::fork::{ForkSessionRequest, ForkSessionResponse, fork_session};
 pub use self::handle::*;
 pub use self::persistence::{
-    LocalFeedbackEntry, UserFeedbackEntry, find_local_child_for_remote, resolve_local_session,
-    resolve_local_session_any_cwd, session_exists_for_cwd,
+    LocalFeedbackEntry, UserFeedbackEntry, find_local_child_for_remote,
+    load_session_additional_directories, persist_session_additional_directories,
+    resolve_local_session, resolve_local_session_any_cwd, session_exists_for_cwd,
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};

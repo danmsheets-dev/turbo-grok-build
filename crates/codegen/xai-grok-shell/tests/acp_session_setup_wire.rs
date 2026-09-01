@@ -426,8 +426,10 @@ fn acp_session_setup_conformance() {
         .await;
         let capabilities = &init.agent_capabilities.session_capabilities;
         assert!(
-            capabilities.resume.is_some() && capabilities.close.is_some(),
-            "clients may not call resume/close unless advertised, got {capabilities:?}"
+            capabilities.resume.is_some()
+                && capabilities.close.is_some()
+                && capabilities.additional_directories.is_some(),
+            "clients may not call resume/close/additionalDirectories unless advertised, got {capabilities:?}"
         );
 
         let session_id = new_session(&conn, &cwd).await;

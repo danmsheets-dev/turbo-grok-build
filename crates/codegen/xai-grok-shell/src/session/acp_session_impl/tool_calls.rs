@@ -1372,6 +1372,7 @@ impl SessionActor {
                 real_cwd,
                 display_cwd,
                 confine_root,
+                additional_directories: self.tool_context.additional_directories.lock().clone(),
             });
             let resolution = {
                 let _pending_guard =

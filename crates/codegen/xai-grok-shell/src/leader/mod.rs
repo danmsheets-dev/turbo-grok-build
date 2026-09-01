@@ -1460,9 +1460,10 @@ pub async fn connect_or_spawn(
     if let Some(profile) = xai_grok_sandbox::requested_confinement_profile() {
         return Err(ConnectionError::SandboxConfinement(profile));
     }
-    if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
+    let confine_roots = xai_grok_tools::types::resources::process_confine_roots();
+    if !confine_roots.is_empty() {
         return Err(ConnectionError::ProcessConfinement(
-            root.display().to_string(),
+            xai_grok_tools::types::resources::join_confine_path_list(confine_roots),
         ));
     }
     let start = std::time::Instant::now();

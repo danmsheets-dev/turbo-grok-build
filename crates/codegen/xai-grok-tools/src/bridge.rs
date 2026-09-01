@@ -471,6 +471,16 @@ impl ToolBridge {
             .insert(crate::types::resources::ConfineRoot(root));
     }
 
+    /// Extra ACP workspace roots (`additionalDirectories`). Empty clears.
+    pub async fn set_additional_directories(&self, dirs: Vec<std::path::PathBuf>) {
+        let registry = &*self.registry;
+        registry
+            .resources
+            .lock()
+            .await
+            .insert(crate::types::resources::AdditionalDirectories(dirs));
+    }
+
     /// Write-time `allowed_paths` prefixes (relative). Empty means unrestricted
     /// (see [`crate::types::resources::enforce_write_path`]).
     pub async fn set_allowed_write_paths(&self, paths: Vec<String>) {

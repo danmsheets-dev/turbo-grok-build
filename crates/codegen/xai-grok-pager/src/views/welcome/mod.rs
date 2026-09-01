@@ -31,7 +31,7 @@ pub(crate) use logo::shimmer_frame;
 use logo::{logo_line_count, render_logo};
 use menu::render_menu;
 pub(crate) use toast::paint_welcome_toast;
-pub(crate) use top_bar::location_line_at;
+pub(crate) use top_bar::{extras_chip_label, location_line_at_with_extras};
 use top_bar::render_top_bar;
 #[cfg(feature = "local-workspace")]
 pub use workspace_mode::{
@@ -679,6 +679,8 @@ pub struct WelcomeRenderParams<'a> {
     /// In-TUI ACK confirm pending for Local.
     #[cfg(feature = "local-workspace")]
     pub workspace_mode_ack_pending: bool,
+    /// Extra folders (`--add-dir` / `/folder`) for the top-bar chip.
+    pub additional_directories: &'a [std::path::PathBuf],
 }
 
 /// Render the welcome screen.
@@ -714,7 +716,13 @@ pub fn render_welcome(
         width: top_bar_area.width.saturating_sub(h_margin * 2),
         height: 1,
     };
-    render_top_bar(top_bar_inner, buf, &theme, None);
+    render_top_bar(
+        top_bar_inner,
+        buf,
+        &theme,
+        None,
+        params.additional_directories,
+    );
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
@@ -2885,6 +2893,7 @@ mod tests {
             changelog_has_full_notes: false,
             welcome_announcement_expanded: false,
             upgrade_cta: None,
+            additional_directories: &[],
             privacy_banner: false,
             #[cfg(feature = "local-workspace")]
             workspace_mode: WelcomeWorkspaceMode::Sandbox,

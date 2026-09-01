@@ -17,8 +17,12 @@ pub fn render_top_bar(
     buf: &mut Buffer,
     theme: &Theme,
     announcement: Option<&xai_grok_announcements::RemoteAnnouncement>,
+    extras: &[PathBuf],
 ) {
-    let line = truncate_line(location_line(theme), area.width as usize);
+    let line = truncate_line(
+        location_line_at_with_extras(theme, &process_cwd(), extras),
+        area.width as usize,
+    );
     let line_width = line.width() as u16;
     buf.set_line(area.x, area.y, &line, line_width.min(area.width));
 
@@ -52,6 +56,15 @@ pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
 /// Render-safe: reads the per-cwd git cache; never blocks or spawns `git`.
 /// The caller width-truncates the returned line.
 pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
+    location_line_at_with_extras(theme, cwd, &[])
+}
+
+/// Location line plus a `+N` / `+basename` chip when extra folders are attached.
+pub(crate) fn location_line_at_with_extras(
+    theme: &Theme,
+    cwd: &Path,
+    extras: &[PathBuf],
+) -> Line<'static> {
     let info_style = Style::default().fg(theme.gray);
 
     let info = git_info::cwd_git_info_lazy(cwd);
@@ -81,7 +94,25 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     let cwd_display = format_cwd_display(cwd, info.as_ref());
     let cwd_style = Style::default().fg(theme.gray_dim);
     parts.push(Span::styled(cwd_display, cwd_style));
+    if let Some(chip) = extras_chip_label(extras) {
+        parts.push(Span::styled(" ", info_style));
+        parts.push(Span::styled(
+            chip,
+            Style::default().fg(theme.accent_user),
+        ));
+    }
     Line::from(parts)
+}
+
+/// `+shared-lib` for one extra, `+N` for more.
+pub(crate) fn extras_chip_label(extras: &[PathBuf]) -> Option<String> {
+    match extras.len() {
+        0 => None,
+        1 => extras[0]
+            .file_name()
+            .map(|n| format!("+{}", n.to_string_lossy())),
+        n => Some(format!("+{n}")),
+    }
 }
 
 fn process_cwd() -> PathBuf {
@@ -126,6 +157,30 @@ fn collapse_home(dir: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extras_chip_none_when_empty() {
+        assert_eq!(extras_chip_label(&[]), None);
+    }
+
+    #[test]
+    fn extras_chip_basename_for_one() {
+        assert_eq!(
+            extras_chip_label(&[PathBuf::from("/work/shared-lib")]),
+            Some("+shared-lib".into())
+        );
+    }
+
+    #[test]
+    fn extras_chip_count_for_many() {
+        assert_eq!(
+            extras_chip_label(&[
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+            ]),
+            Some("+2".into())
+        );
+    }
 
     #[test]
     fn format_cwd_plain_repo() {

@@ -430,6 +430,10 @@ impl MvpAgent {
             model_id: parent_model_id,
             auth: self.current_or_buffered_auth(),
             parent_cwd: parent_cwd.clone(),
+            additional_directories: parent_handle
+                .as_ref()
+                .map(|h| h.tool_context.additional_directories.lock().clone())
+                .unwrap_or_default(),
             parent_session_id: parent_session_id.to_string(),
             inherited_tool_overrides,
             yolo_mode,

@@ -179,6 +179,14 @@ grok -w --ref main "implement feature from main"
 # Start in a specific project directory
 grok --cwd ~/projects/my-app
 
+# Attach extra folders (relative paths still use --cwd)
+grok --cwd ~/projects/app --add-dir ~/projects/shared-lib --add-dir ~/docs/product
+# In a session: /folder add ~/docs/product   /folder list   /folder remove product
+
+# Confine writes to more than one tree (sibling extras must sit under a root)
+grok --confine ~/projects --confine ~/shared --add-dir ~/shared/lib
+# GROK_CONFINE is a `;`-separated list (`:` on Unix when no `;` is present)
+
 # Add project-specific rules
 grok --rules "Always use TypeScript. Prefer functional components."
 

@@ -394,6 +394,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::AdditionalDirectoriesUpdated { directories, error } => {
+            super::folder::handle_additional_directories_updated(app, directories, error)
+        }
         TaskResult::SessionLoadFailed {
             agent_id,
             session_id,

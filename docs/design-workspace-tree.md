@@ -119,7 +119,7 @@ Optional secondary keys:
 |---|---|---|
 | `workspace` | User-opened folder | Primary session |
 | `worktree` | Subagent isolation path (`~/.grok/worktrees/...`) | Child agent |
-| `overlay` | Explicit multi-root (if Turbo gains multi-folder) | Future |
+| `overlay` | Explicit multi-root (`--add-dir` / ACP `additionalDirectories`) | Phase 1 |
 
 ### 4.3 Trust boundary
 

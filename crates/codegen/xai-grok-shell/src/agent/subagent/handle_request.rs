@@ -1598,6 +1598,7 @@ pub(crate) async fn run_shell_child(
         child_session_env,
     )
     .with_hunk_tracking_enabled(ctx.hunk_tracking_enabled);
+    *tool_ctx.additional_directories.lock() = ctx.additional_directories.clone();
     tool_ctx.subagent_event_tx = Some(ctx.subagent_event_tx.clone());
     let task_output_budget = request
         .runtime_overrides

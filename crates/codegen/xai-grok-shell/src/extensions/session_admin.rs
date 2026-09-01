@@ -68,6 +68,9 @@ pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResul
         "x.ai/session/rename" => handle_session_rename(agent, args).await,
         "x.ai/session/delete" => handle_session_delete(agent, args).await,
         "x.ai/session/update_mcp_servers" => handle_update_mcp_servers(agent, args).await,
+        "x.ai/session/set_additional_directories" => {
+            handle_set_additional_directories(agent, args).await
+        }
         #[cfg(feature = "local-workspace")]
         "x.ai/session/add_local_workspace" => handle_add_local_workspace(agent, args).await,
         "x.ai/session/fork" => handle_session_fork(agent, args).await,
@@ -412,6 +415,41 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+async fn handle_set_additional_directories(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        session_id: acp::SessionId,
+        #[serde(default)]
+        additional_directories: Vec<std::path::PathBuf>,
+    }
+
+    let params: Params = parse_params(args)?;
+    let handle = agent
+        .resident_handle(&params.session_id)
+        .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_tx
+        .send(SessionCommand::SetAdditionalDirectories {
+            directories: params.additional_directories,
+            respond_to: tx,
+        })
+        .map_err(|_| acp::Error::internal_error().data("session closed"))?;
+    let dirs = rx
+        .await
+        .map_err(|_| acp::Error::internal_error().data("session closed"))?
+        .map_err(|e| acp::Error::invalid_params().data(e))?;
+    ExtMethodResult::success(serde_json::json!({
+        "additionalDirectories": dirs
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    }))
+    .to_ext_response()
+    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
 // session/add_local_workspace (add-only; local-workspace feature)

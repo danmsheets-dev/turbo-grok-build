@@ -92,6 +92,16 @@ pub enum Action {
     },
     /// Open the session picker overlay (from within an active session via /resume).
     ShowSessionPicker,
+    /// `/folder list` — show attached extra folders.
+    FolderList,
+    /// `/folder add <path>` — attach an extra workspace root.
+    FolderAdd {
+        path: std::path::PathBuf,
+    },
+    /// `/folder remove <path>` — detach by path or basename.
+    FolderRemove {
+        path: String,
+    },
     /// The session picker overlay was dismissed without a pick: invalidate any
     /// in-flight list/search/foreign scan so a late response can't fall
     /// through to the welcome picker fields.
@@ -1504,6 +1514,8 @@ pub enum Effect {
         /// or CLI `--chat` via `SessionFlags.chat_mode`). Does not sticky-set
         /// process-wide mode.
         chat_kind: bool,
+        /// Extra ACP workspace roots (`--add-dir` / `additionalDirectories`).
+        additional_directories: Vec<std::path::PathBuf>,
     },
     /// Change the process working directory (dashboard location picker, `/cd`).
     SetWorkingDir { path: std::path::PathBuf },
@@ -1545,6 +1557,11 @@ pub enum Effect {
         session_cwd: Option<std::path::PathBuf>,
         /// Conversation-entry bit (`source == "conversation"`), not sticky `--chat`.
         chat_kind: bool,
+    },
+    /// Live `/folder add|remove` — replace the session additionalDirectories set.
+    SetAdditionalDirectories {
+        session_id: acp::SessionId,
+        directories: Vec<std::path::PathBuf>,
     },
     /// Scan enabled foreign session stores without delaying the native list.
     ScanForeignSessions {
@@ -2421,6 +2438,11 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         error: String,
+    },
+    /// Live extra-folder attach finished (or failed).
+    AdditionalDirectoriesUpdated {
+        directories: Vec<std::path::PathBuf>,
+        error: Option<String>,
     },
     /// Local `summary.json` display fields for [`Effect::HydrateSessionMetaFromDisk`].
     SessionMetaFromDisk {

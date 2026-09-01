@@ -310,6 +310,13 @@ impl super::LspBackend for LspBackendAdapter {
         }
         results
     }
+
+    async fn set_extra_workspace_folders(&self, extras: Vec<std::path::PathBuf>) {
+        self.lsp_manager
+            .lock()
+            .await
+            .set_extra_workspace_folders(extras);
+    }
 }
 
 // ── Internal types ──────────────────────────────────────────────────────

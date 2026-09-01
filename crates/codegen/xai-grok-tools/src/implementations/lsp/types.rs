@@ -48,6 +48,10 @@ pub trait LspBackend: Send + Sync + 'static {
     /// waits briefly for diagnostics to settle, then returns all
     /// ERROR/WARNING diagnostics grouped by file.
     async fn read_diagnostics(&self, paths: &[std::path::PathBuf]) -> Vec<FileDiagnosticEntry>;
+
+    /// Extra ACP/session folders as LSP `workspaceFolders`. Empty clears extras
+    /// (primary cwd remains). Live `/folder add|remove` uses this after init.
+    async fn set_extra_workspace_folders(&self, extras: Vec<std::path::PathBuf>);
 }
 
 /// A single diagnostic entry returned by `LspBackend::read_diagnostics`.

@@ -124,6 +124,10 @@ fn dispatch_load_session_ungated(
     session_cwd: Option<std::path::PathBuf>,
     chat_kind: bool,
 ) -> Vec<Effect> {
+    if !app.add_dir_cli {
+        app.additional_directories =
+            xai_grok_shell::session::load_session_additional_directories(&session_id);
+    }
     #[cfg(feature = "local-workspace")]
     let bypass_chat_refusal = app.welcome_history_load_as_build;
     #[cfg(not(feature = "local-workspace"))]

@@ -3958,6 +3958,7 @@ impl MvpAgent {
             session_yolo_mode,
             session_auto_mode,
             prompt_display_cwd,
+            additional_directories,
             is_chat_kind,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
@@ -4133,6 +4134,16 @@ impl MvpAgent {
         if project_env_trusted {
             xai_grok_tools::util::workspace_tree_kickoff_load(cwd.as_path().to_path_buf());
         }
+        for extra in &additional_directories {
+            folder_trust::resolve_and_record(
+                extra.as_path(),
+                spawn_remote_settings.as_ref(),
+                false,
+            );
+            if folder_trust::project_scope_allowed(extra.as_path()) {
+                xai_grok_tools::util::workspace_tree_kickoff_load(extra.clone());
+            }
+        }
         let mut session_env = xai_grok_workspace::permission::claude_settings::load_claude_env_with_project(
             cwd.as_path(),
             project_env_trusted,
@@ -4153,6 +4164,7 @@ impl MvpAgent {
                 session_env,
             )
             .with_hunk_tracking_enabled(hunk_tracking_enabled);
+        *tool_ctx.additional_directories.lock() = additional_directories.clone();
         tool_ctx.process_scope = Some(ProcessScope::new());
         let workspace_ops = self
             .resolve_workspace_ops()
@@ -4387,7 +4399,10 @@ impl MvpAgent {
                                 true,
                                 xai_grok_tools::notification::ToolNotificationHandle::noop(),
                             )
-                            .with_process_scope(tool_ctx.process_scope.clone()),
+                            .with_process_scope(tool_ctx.process_scope.clone())
+                            .with_extra_workspace_folders(
+                                tool_ctx.additional_directories.lock().clone(),
+                            ),
                     ),
                 );
                 let adapter = std::sync::Arc::new(LspBackendAdapter::new(mgr));

@@ -1177,6 +1177,59 @@ impl SessionActor {
     fn session_id_string(&self) -> String {
         self.session_info.id.0.to_string()
     }
+
+    /// Live `/folder add|remove`: replace extra roots, ConfinedFs jail, persist.
+    pub(crate) async fn apply_additional_directories(
+        &self,
+        directories: Vec<std::path::PathBuf>,
+    ) -> Result<Vec<std::path::PathBuf>, String> {
+        let cwd = self.tool_context.cwd.as_path();
+        let normalized =
+            crate::agent::additional_directories::normalize_additional_directories(cwd, &directories)
+                .map_err(|e| {
+                    e.data
+                        .as_ref()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("invalid additionalDirectories")
+                        .to_string()
+                })?;
+        *self.tool_context.additional_directories.lock() = normalized.clone();
+        let session_confine = self.display_cwd.get().map(|_| {
+            dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
+        });
+        let roots = xai_grok_tools::types::resources::collect_write_roots(
+            cwd,
+            session_confine.as_deref(),
+            &normalized,
+        );
+        if let Some(handle) = &self.tool_context.confine_roots {
+            xai_grok_tools::computer::local::ConfinedFs::set_roots(handle, roots);
+        }
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .set_additional_directories(normalized.clone())
+            .await;
+        if let Some(lsp) = &self.tool_context.lsp {
+            lsp.set_extra_workspace_folders(normalized.clone()).await;
+        }
+        if let Some(tx) = self.tool_context.extra_watch_tx.lock().as_ref() {
+            let _ = tx.send(normalized.clone());
+        }
+        if let Err(e) = crate::session::persistence::persist_session_additional_directories(
+            &self.session_info,
+            &normalized,
+        ) {
+            tracing::warn!(error = %e, "failed to persist additionalDirectories");
+        }
+        for extra in &normalized {
+            crate::agent::folder_trust::resolve_and_record(extra.as_path(), None, false);
+            if crate::agent::folder_trust::project_scope_allowed(extra.as_path()) {
+                xai_grok_tools::util::workspace_tree_kickoff_load(extra.clone());
+            }
+        }
+        Ok(normalized)
+    }
     /// Send a before-turn hook via the local workspace channel.
     /// Fire-and-forget — failures are logged but do not interrupt the turn.
     async fn send_before_turn_event(

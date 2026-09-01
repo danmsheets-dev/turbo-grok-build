@@ -37,11 +37,26 @@ use agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::http_status_from_error;
 use xai_grok_shell::session::{ExtMethodResult, SessionInfoResponse};
+
+fn parse_additional_directories_response(resp: &acp::ExtResponse) -> Option<Vec<PathBuf>> {
+    let value: serde_json::Value = serde_json::from_str(resp.0.get()).ok()?;
+    let arr = value
+        .get("result")
+        .and_then(|r| r.get("additionalDirectories"))
+        .or_else(|| value.get("additionalDirectories"))
+        .and_then(|v| v.as_array())?;
+    Some(
+        arr.iter()
+            .filter_map(|v| v.as_str().map(PathBuf::from))
+            .collect(),
+    )
+}
 pub(crate) fn execute(
     effect: Effect,
     tasks: &mut JoinSet<TaskResult>,
     acp_tx: &AcpAgentTx,
     cwd: &Path,
+    additional_directories: &[PathBuf],
     session_flags: &SessionFlags,
     progress_tx: &tokio::sync::mpsc::UnboundedSender<RestoreProgressMsg>,
 ) -> (bool, EffectMeta) {
@@ -94,21 +109,19 @@ pub(crate) fn execute(
         Effect::SetWorkingDir { path } => {
             // Under `--confine`, refuse to leave the root. apply_cwd_from only
             // set_current_dir'd before; confinement makes that a real boundary.
-            let refused = xai_grok_tools::types::resources::process_confine_root().is_some_and(
-                |root| {
-                    if !xai_grok_tools::types::resources::path_is_under_confine_root(&path, root)
-                    {
-                        tracing::warn!(
-                            path = %path.display(),
-                            root = %root.display(),
-                            "SetWorkingDir refused: path outside confine root"
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                },
-            );
+            let confine_roots = xai_grok_tools::types::resources::process_confine_roots();
+            let refused = !confine_roots.is_empty()
+                && !xai_grok_tools::types::resources::path_is_under_any_root(
+                    &path,
+                    confine_roots,
+                );
+            if refused {
+                tracing::warn!(
+                    path = %path.display(),
+                    roots = %xai_grok_tools::types::resources::join_confine_path_list(confine_roots),
+                    "SetWorkingDir refused: path outside confine roots"
+                );
+            }
             if !refused
                 && let Err(e) = std::env::set_current_dir(&path)
             {
@@ -223,6 +236,7 @@ pub(crate) fn execute(
             model_id,
             preferred_session_id,
             chat_kind,
+            additional_directories,
         } => {
             let tx = acp_tx.clone();
             let compat = xai_grok_tools::types::compat::CompatConfig::default();
@@ -275,6 +289,7 @@ pub(crate) fn execute(
                     let result = helpers::acp_send_bounded(
                             acp::NewSessionRequest::new(session_cwd.clone())
                                 .mcp_servers(mcp_servers)
+                                .additional_directories(additional_directories)
                                 .meta(meta),
                             &tx,
                             "Session creation",
@@ -333,6 +348,7 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
+            let additional_directories = additional_directories.to_vec();
             let mut meta = session_flags.to_meta();
             finalize_chat_session_meta(
                 &mut meta,
@@ -593,6 +609,7 @@ pub(crate) fn execute(
                     let result = helpers::acp_send_bounded(
                             acp::NewSessionRequest::new(session_cwd.clone())
                                 .mcp_servers(mcp_servers)
+                                .additional_directories(additional_directories.clone())
                                 .meta(meta),
                             &tx,
                             "Worktree session creation",
@@ -624,6 +641,38 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::SetAdditionalDirectories { session_id, directories } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let payload = serde_json::json!({
+                    "sessionId": session_id.0,
+                    "additionalDirectories": directories
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>(),
+                });
+                let ext_req = acp::ExtRequest::new(
+                    "x.ai/session/set_additional_directories",
+                    serde_json::value::to_raw_value(&payload)
+                        .expect("serialize additionalDirectories")
+                        .into(),
+                );
+                match acp_send(ext_req, &tx).await {
+                    Ok(resp) => {
+                        let dirs = parse_additional_directories_response(&resp)
+                            .unwrap_or(directories);
+                        TaskResult::AdditionalDirectoriesUpdated {
+                            directories: dirs,
+                            error: None,
+                        }
+                    }
+                    Err(e) => TaskResult::AdditionalDirectoriesUpdated {
+                        directories,
+                        error: Some(sanitize_user_error(&e.to_string())),
+                    },
+                }
+            });
+        }
         Effect::LoadSession { agent_id, session_id, session_cwd, chat_kind } => {
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
@@ -633,6 +682,7 @@ pub(crate) fn execute(
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("x.ai/restore_code".into(), serde_json::Value::Bool(rc));
             }
+            let additional_directories = additional_directories.to_vec();
             let cwd = session_cwd.unwrap_or_else(|| cwd.to_path_buf());
             let mcp_started = std::time::Instant::now();
             let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
@@ -656,6 +706,7 @@ pub(crate) fn execute(
                                     cwd.clone(),
                                 )
                                 .mcp_servers(mcp_servers.clone())
+                                .additional_directories(additional_directories.clone())
                                 .meta(meta.clone()),
                             &tx,
                             "Session loading",

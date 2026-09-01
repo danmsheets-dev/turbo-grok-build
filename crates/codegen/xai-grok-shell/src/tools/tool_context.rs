@@ -143,6 +143,18 @@ pub struct ToolContext {
     pub fs: AsyncFsWrapper,
     pub terminal: Arc<dyn AsyncTerminalRunner>,
     pub cwd: AbsPathBuf,
+    /// Extra ACP workspace roots (`additionalDirectories`). Empty = none.
+    /// Mutex so `/folder add|remove` can update a live session (`SessionActor` is `Arc`).
+    pub additional_directories: std::sync::Arc<parking_lot::Mutex<Vec<std::path::PathBuf>>>,
+    /// Live extra-root fsnotify. Interior mut so `run_loop` can attach after
+    /// the session is `Arc`. Subagent spawn must replace this with a fresh
+    /// mutex so a child cannot overwrite the parent watcher.
+    pub extra_watch_tx: std::sync::Arc<
+        parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<std::path::PathBuf>>>>,
+    >,
+    /// Live ConfinedFs root list (shared with the write chokepoint). `None`
+    /// when the session is unconfined and has no extras.
+    pub confine_roots: Option<xai_grok_tools::computer::local::ConfineRootsHandle>,
     pub file_state_handle: Option<FileStateHandle>,
     pub session_env: Arc<HashMap<String, String>>,
     pub hunk_tracker_handle: HunkTrackerHandle,
@@ -278,6 +290,9 @@ impl ToolContext {
             fs: AsyncFsWrapper::new(fs),
             terminal,
             cwd,
+            additional_directories: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            extra_watch_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            confine_roots: None,
             file_state_handle: None,
             session_env: Arc::new(session_env),
             hunk_tracker_handle,
@@ -368,6 +383,9 @@ mod tests {
                 fs: AsyncFsWrapper::new(fs),
                 terminal,
                 cwd,
+                additional_directories: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+                extra_watch_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+                confine_roots: None,
                 file_state_handle: None,
                 session_env: Arc::new(HashMap::new()),
                 hunk_tracker_handle: HunkTrackerHandle::noop(),

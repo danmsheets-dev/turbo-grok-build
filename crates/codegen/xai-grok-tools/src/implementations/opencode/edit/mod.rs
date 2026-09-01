@@ -195,7 +195,7 @@ impl xai_tool_runtime::Tool for EditTool {
         let resources = shared_resources(&ctx)?;
         let cwd = resolve_cwd(&ctx, &resources).await?;
 
-        let (display_cwd, fs, notification_handle, confine_root, allowed_paths) = {
+        let (display_cwd, fs, notification_handle, confine_root, additional_directories, allowed_paths) = {
             let res = resources.lock().await;
             (
                 res.get::<DisplayCwd>().map(|d| d.0.clone()),
@@ -203,22 +203,30 @@ impl xai_tool_runtime::Tool for EditTool {
                 res.require::<NotificationHandle>()?.0.clone(),
                 res.get::<crate::types::resources::ConfineRoot>()
                     .map(|c| c.0.clone()),
+                res.get::<crate::types::resources::AdditionalDirectories>()
+                    .map(|a| a.0.clone())
+                    .unwrap_or_default(),
                 res.get::<crate::types::resources::AllowedWritePaths>()
                     .map(|a| a.0.clone()),
             )
         };
+        let write_roots = crate::types::resources::collect_write_roots(
+            &cwd,
+            confine_root.as_deref(),
+            &additional_directories,
+        );
         // RC13 Wave A: fail closed on tombstoned CWD / confine root.
-        crate::types::resources::enforce_write_path(&cwd, confine_root.as_deref())
+        crate::types::resources::enforce_write_path_in_roots(&cwd, &write_roots)
             .map_err(|e| e.into_tool_error())?;
         let tool_call_id = ctx.call_id.as_str().to_owned();
 
         let replace_all = input.replace_all;
 
-        // Resolve under ConfineRoot when present (audit C2).
-        let path = crate::types::resources::resolve_write_model_path(
+        // Resolve under ConfineRoot / additionalDirectories when present (audit C2).
+        let path = crate::types::resources::resolve_write_model_path_in_roots(
             &cwd,
             display_cwd.as_deref(),
-            confine_root.as_deref(),
+            &write_roots,
             &input.file_path,
         )
         .map_err(|msg| {

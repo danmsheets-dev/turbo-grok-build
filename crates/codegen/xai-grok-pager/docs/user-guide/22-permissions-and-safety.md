@@ -303,7 +303,14 @@ Supported `defaultMode` values include `default`, `auto`, `acceptEdits`, `bypass
 
 - Rules for MCP tools must use the `MCPTool(server__tool)` form; the `mcp__server__tool` form never matches (see [MCP Rules](#mcp-rules)).
 - Rules naming an unrecognized tool, and parameter rules such as `Agent(model:opus)`, are skipped with a warning rather than failing the load.
-- `permissions.additionalDirectories` is parsed but not supported.
+- `permissions.additionalDirectories` is applied on **new** sessions (union
+  with `--add-dir` / ACP extras). Invalid or stale settings paths are skipped
+  with a warning rather than aborting the session. `/folder add|remove|list`
+  changes the live extra-folder set; TUI resume resends the stored list.
+- Extra folders must lie under process `--confine` / `GROK_CONFINE` when that
+  bound is set. Repeat `--confine PATH` or set `GROK_CONFINE` to a
+  `;`-separated list so sibling trees can both be extra folders. Nested turbo
+  may only tighten inherited roots.
 
 You can import existing Claude settings interactively with **Ctrl+I** ("Import Claude settings").
 

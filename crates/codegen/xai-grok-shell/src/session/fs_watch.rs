@@ -4,7 +4,7 @@
 //! decides which consumers exist, fans events through three explicit phases, and
 //! owns one `select!` loop (event hot path + debounced refresh).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -273,6 +273,8 @@ pub(crate) struct FsWatchDeps {
     pub gateway: GatewaySender,
     pub session_id: String,
     pub cwd: PathBuf,
+    /// Extra ACP/session folders to watch in addition to `cwd`.
+    pub extra_roots: Vec<PathBuf>,
     pub index_root: PathBuf,
     pub hunk_tracker: HunkTrackerHandle,
     pub hunk_tracking_enabled: bool,
@@ -293,6 +295,7 @@ impl FsWatchDeps {
             gateway: session.notifications.gateway.clone(),
             session_id: session.session_info.id.to_string(),
             cwd: session.tool_context.cwd.to_path_buf(),
+            extra_roots: session.tool_context.additional_directories.lock().clone(),
             index_root,
             hunk_tracker: session.tool_context.hunk_tracker_handle.clone(),
             hunk_tracking_enabled: session.tool_context.hunk_tracking_enabled,
@@ -310,6 +313,7 @@ struct ClientNotify {
     gateway: GatewaySender,
     session_id: String,
     cwd: PathBuf,
+    extra_roots: Rc<RefCell<Vec<PathBuf>>>,
     mode: ClientFsMode,
 }
 
@@ -348,48 +352,61 @@ impl ClientNotify {
                 if kind == FsEventKind::Modified {
                     return;
                 }
-                let delta = fs_event_to_delta(paths, kind, &self.cwd);
-                tracing::debug!(
-                    "fs_notify delta for {:?}: {:?}, is_empty={}",
-                    kind,
-                    delta.to_json(),
-                    delta.is_empty()
-                );
-                if delta.is_empty() {
-                    return;
-                }
-                let params = serde_json::json!({
-                    "sessionId": self.session_id,
-                    "delta": delta.to_json(),
-                });
-                if let Ok(raw) = to_raw_value(&params) {
-                    self.gateway
-                        .forward_fire_and_forget(acp::ExtNotification::new(
-                            "x.ai/fs/index/delta",
-                            raw.into(),
-                        ));
+                let extras = self.extra_roots.borrow().clone();
+                for (root, grouped) in group_paths_by_index_root(paths, &self.cwd, &extras) {
+                    let delta = fs_event_to_delta(&grouped, kind, &root);
+                    tracing::debug!(
+                        root = %root.display(),
+                        "fs_notify delta for {:?}: {:?}, is_empty={}",
+                        kind,
+                        delta.to_json(),
+                        delta.is_empty()
+                    );
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    let params = serde_json::json!({
+                        "sessionId": self.session_id,
+                        "root": root.to_string_lossy(),
+                        "delta": delta.to_json(),
+                    });
+                    if let Ok(raw) = to_raw_value(&params) {
+                        self.gateway
+                            .forward_fire_and_forget(acp::ExtNotification::new(
+                                "x.ai/fs/index/delta",
+                                raw.into(),
+                            ));
+                    }
                 }
             }
         }
     }
 
     async fn send_initial_file_index(&self) {
+        self.send_index_for_root(&self.cwd).await;
+        let extras = self.extra_roots.borrow().clone();
+        for extra in extras {
+            self.send_index_for_root(&extra).await;
+        }
+    }
+
+    async fn send_index_for_root(&self, root: &Path) {
         const FILE_INDEX_CHUNK_SIZE: usize = 500;
         let session_id = &self.session_id;
-        let cwd = &self.cwd;
 
         let (index_res, build_elapsed_ms) =
-            crate::timed!({ FileIndex::from_walk_with_options(cwd, WalkOptions::default()) });
+            crate::timed!({ FileIndex::from_walk_with_options(root, WalkOptions::default()) });
         let index = match index_res {
             Ok(idx) => idx,
             Err(e) => {
-                tracing::warn!("failed to build file index for {:?}: {:?}", cwd, e);
+                tracing::warn!("failed to build file index for {:?}: {:?}", root, e);
                 return;
             }
         };
 
         let total_entries = index.len();
         tracing::info!(
+            root = %root.display(),
             "Built file index with {} entries in {}ms",
             total_entries,
             build_elapsed_ms
@@ -414,7 +431,7 @@ impl ClientNotify {
 
                 let params = serde_json::json!({
                     "sessionId": session_id,
-                    "root": cwd.to_string_lossy(),
+                    "root": root.to_string_lossy(),
                     "files": files,
                     "chunk": chunk_idx,
                     "totalChunks": total_chunks,
@@ -437,12 +454,55 @@ impl ClientNotify {
         });
 
         tracing::info!(
+            root = %root.display(),
             "Sent file index ({} entries in {} chunks) in {}ms",
             total_entries,
             total_chunks,
             send_elapsed_ms
         );
     }
+}
+
+fn path_under_index_root(path: &Path, root: &Path) -> bool {
+    if path.strip_prefix(root).is_ok() {
+        return true;
+    }
+    if let (Ok(p_canon), Ok(root_canon)) =
+        (dunce::canonicalize(path), dunce::canonicalize(root))
+    {
+        return p_canon.strip_prefix(&root_canon).is_ok();
+    }
+    false
+}
+
+fn group_paths_by_index_root(
+    paths: &[PathBuf],
+    cwd: &Path,
+    extras: &[PathBuf],
+) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut grouped: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+    let push = |groups: &mut Vec<(PathBuf, Vec<PathBuf>)>, root: PathBuf, path: PathBuf| {
+        if let Some((_, bucket)) = groups.iter_mut().find(|(r, _)| r == &root) {
+            bucket.push(path);
+        } else {
+            groups.push((root, vec![path]));
+        }
+    };
+    for path in paths {
+        if path_under_index_root(path, cwd) {
+            push(&mut grouped, cwd.to_path_buf(), path.clone());
+            continue;
+        }
+        if let Some(extra) = extras.iter().find(|e| path_under_index_root(path, e)) {
+            push(&mut grouped, extra.clone(), path.clone());
+        } else {
+            tracing::debug!(
+                path = %path.display(),
+                "fs_notify index: path not under cwd or extra roots"
+            );
+        }
+    }
+    grouped
 }
 
 #[derive(Clone)]
@@ -553,6 +613,7 @@ pub(crate) struct FsWatchPlan {
     git_head: Option<GitHead>,
     fs_config: xai_fsnotify::FsConfig,
     cwd: PathBuf,
+    extra_roots: Vec<PathBuf>,
 }
 
 impl FsWatchPlan {
@@ -565,6 +626,7 @@ impl FsWatchPlan {
             gateway: deps.gateway.clone(),
             session_id: deps.session_id.clone(),
             cwd: deps.cwd.clone(),
+            extra_roots: Rc::new(RefCell::new(deps.extra_roots.clone())),
             mode,
         });
 
@@ -603,6 +665,7 @@ impl FsWatchPlan {
             git_head,
             fs_config,
             cwd: deps.cwd,
+            extra_roots: deps.extra_roots,
         }
     }
 
@@ -851,12 +914,53 @@ impl Drop for ResetOnDrop {
 /// RAII drop-guard: dropping closes the shutdown channel and cancels the loop.
 pub(crate) struct FsWatchHandle {
     _shutdown_tx: mpsc::UnboundedSender<()>,
+    /// Full extra-root list after `/folder add|remove`. Clone onto the session
+    /// so live updates can start extra watchers.
+    pub extra_roots_tx: mpsc::UnboundedSender<Vec<PathBuf>>,
+}
+
+fn canonical_watch_key(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn start_shared_watch(
+    path: PathBuf,
+    config: xai_fsnotify::FsConfig,
+) -> Result<Arc<xai_fsnotify::FsEventSource>, xai_fsnotify::FsNotifyError> {
+    xai_fsnotify::shared(path, config)
+}
+
+fn pipe_source(
+    source: Arc<xai_fsnotify::FsEventSource>,
+    tx: mpsc::UnboundedSender<Result<FsEvent, tokio::sync::broadcast::error::RecvError>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(async move {
+        let mut rx = source.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if tx.send(Ok(ev)).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let closed = matches!(e, tokio::sync::broadcast::error::RecvError::Closed);
+                    let _ = tx.send(Err(e));
+                    if closed {
+                        break;
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Spawn the watcher task; caller holds the handle for the session lifetime.
 pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
     let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel::<()>();
+    let (extra_roots_tx, mut extra_roots_rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     let cwd = plan.cwd.clone();
+    let extra_roots = plan.extra_roots.clone();
     let fs_config = plan.fs_config.clone();
     let send_index_at_start = plan
         .client_notify
@@ -865,6 +969,7 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
 
     tracing::debug!(
         ?cwd,
+        extra_roots = extra_roots.len(),
         client_notify = plan.client_notify.is_some(),
         "fs-notify: starting FsEventSource"
     );
@@ -872,21 +977,36 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
     tokio::task::spawn_local(async move {
         tokio::task::yield_now().await;
         let start_time = std::time::Instant::now();
+        let init_cwd = cwd.clone();
+        let init_extras = extra_roots.clone();
+        let init_config = fs_config.clone();
 
-        let source = {
+        let sources = {
             let mut timer = crate::instrumentation_timer!("session.fs_notify_start");
-            timer.with_field("cwd", cwd.to_string_lossy().as_ref());
-            let init_cwd = cwd.clone();
-            let result =
-                tokio::task::spawn_blocking(move || xai_fsnotify::shared(init_cwd, fs_config))
-                    .await;
+            timer.with_field("cwd", init_cwd.to_string_lossy().as_ref());
+            let result = tokio::task::spawn_blocking(move || {
+                let cwd_src = start_shared_watch(init_cwd, init_config.clone())?;
+                let mut extras = Vec::new();
+                for extra in init_extras {
+                    match start_shared_watch(extra.clone(), init_config.clone()) {
+                        Ok(s) => extras.push((canonical_watch_key(&extra), s)),
+                        Err(e) => tracing::warn!(
+                            path = %extra.display(),
+                            error = %e,
+                            "fs-notify: extra root watch failed"
+                        ),
+                    }
+                }
+                Ok::<_, xai_fsnotify::FsNotifyError>((cwd_src, extras))
+            })
+            .await;
             let ws = xai_fsnotify::stats();
             timer.with_field("live_watchers", ws.live_watchers as u64);
             timer.with_field("watchers_created_total", ws.created_total);
             timer.with_field("watchers_reused_total", ws.reused_total);
             result
         };
-        let source = match source {
+        let (cwd_source, extra_sources) = match sources {
             Ok(Ok(s)) => {
                 tracing::debug!("FsEventSource ready in {:?}", start_time.elapsed());
                 s
@@ -901,7 +1021,13 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
             }
         };
 
-        let mut events = source.subscribe();
+        let (merge_tx, mut merge_rx) = mpsc::unbounded_channel();
+        let _cwd_pipe = pipe_source(cwd_source, merge_tx.clone());
+        let mut extra_pipes: std::collections::HashMap<PathBuf, tokio::task::JoinHandle<()>> =
+            std::collections::HashMap::new();
+        for (key, source) in extra_sources {
+            extra_pipes.insert(key, pipe_source(source, merge_tx.clone()));
+        }
         if send_index_at_start && let Some(c) = &plan.client_notify {
             c.send_initial_file_index().await;
         }
@@ -929,6 +1055,68 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                     tracing::debug!("fs_notify: shutdown");
                     break;
                 }
+                Some(new_extras) = extra_roots_rx.recv() => {
+                    let previous = if let Some(c) = &plan.client_notify {
+                        let mut live = c.extra_roots.borrow_mut();
+                        let prev = live.clone();
+                        *live = new_extras.clone();
+                        prev
+                    } else {
+                        Vec::new()
+                    };
+                    let wanted: std::collections::HashSet<PathBuf> = new_extras
+                        .iter()
+                        .map(|p| canonical_watch_key(p))
+                        .collect();
+                    extra_pipes.retain(|key, handle| {
+                        if wanted.contains(key) {
+                            true
+                        } else {
+                            handle.abort();
+                            false
+                        }
+                    });
+                    for extra in &new_extras {
+                        let key = canonical_watch_key(extra);
+                        if extra_pipes.contains_key(&key) {
+                            continue;
+                        }
+                        let cfg = fs_config.clone();
+                        let extra_for_watch = extra.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            start_shared_watch(extra_for_watch, cfg)
+                        })
+                        .await
+                        {
+                            Ok(Ok(source)) => {
+                                extra_pipes.insert(key, pipe_source(source, merge_tx.clone()));
+                            }
+                            Ok(Err(e)) => tracing::warn!(
+                                path = %extra.display(),
+                                error = %e,
+                                "fs-notify: extra root watch failed"
+                            ),
+                            Err(join_err) => tracing::warn!(
+                                path = %extra.display(),
+                                error = %join_err,
+                                "fs-notify: extra root watch task failed"
+                            ),
+                        }
+                    }
+                    if let Some(c) = &plan.client_notify
+                        && c.mode == ClientFsMode::Index
+                    {
+                        for extra in &new_extras {
+                            let key = canonical_watch_key(extra);
+                            let already = previous
+                                .iter()
+                                .any(|p| canonical_watch_key(p) == key);
+                            if !already {
+                                c.send_index_for_root(extra).await;
+                            }
+                        }
+                    }
+                }
                 _ = settle, if debounce.active() => {
                     match on_settle_due(
                         in_op,
@@ -951,14 +1139,18 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                         }
                     }
                 }
-                ev_result = events.recv() => {
+                ev_result = merge_rx.recv() => {
+                    let Some(ev_result) = ev_result else { break; };
                     let outcome = match ev_result {
                         Ok(ev) => on_event(ev, &mut in_op, &mut op_buffer),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("fs_events: dropped {n} (consumer lagged); resyncing");
                             on_resync(&mut in_op, &mut op_buffer)
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // One extra watcher closed; cwd pipe may still be live.
+                            continue;
+                        }
                     };
                     match outcome {
                         Outcome::Buffered => {}
@@ -985,6 +1177,7 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
 
     FsWatchHandle {
         _shutdown_tx: shutdown_tx,
+        extra_roots_tx,
     }
 }
 
@@ -1184,6 +1377,7 @@ mod tests {
             gateway: crate::test_support::lsp_runtime::test_gateway(),
             session_id: "s".into(),
             cwd: PathBuf::from("/repo"),
+            extra_roots: Vec::new(),
             index_root: PathBuf::from("/repo"),
             hunk_tracker: HunkTrackerHandle::noop(),
             hunk_tracking_enabled: false,
@@ -1200,6 +1394,54 @@ mod tests {
             deps,
         );
         assert!(plan.hunk.is_none());
+        assert!(plan.extra_roots.is_empty());
+    }
+
+    #[test]
+    fn extra_roots_are_copied_onto_the_plan() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let extra = PathBuf::from("/extra-lib");
+        let deps = FsWatchDeps {
+            gateway: crate::test_support::lsp_runtime::test_gateway(),
+            session_id: "s".into(),
+            cwd: PathBuf::from("/repo"),
+            extra_roots: vec![extra.clone()],
+            index_root: PathBuf::from("/repo"),
+            hunk_tracker: HunkTrackerHandle::noop(),
+            hunk_tracking_enabled: false,
+            codebase_indexes: Arc::new(parking_lot::Mutex::new(CodebaseIndexManager::new())),
+            client_fs_config: None,
+            persistence_tx: tx,
+            last_reported_branch: Arc::new(parking_lot::Mutex::new(None)),
+        };
+        let plan = FsWatchPlan::build(FsWatchCapabilities::default(), deps);
+        assert_eq!(plan.extra_roots, vec![extra]);
+    }
+
+    #[test]
+    fn group_paths_by_index_root_keeps_extra_paths() {
+        let cwd = PathBuf::from("/repo");
+        let extra = PathBuf::from("/extra-lib");
+        let extra_file = extra.join("src/lib.rs");
+        let cwd_file = cwd.join("src/main.rs");
+        let grouped = group_paths_by_index_root(
+            &[cwd_file.clone(), extra_file.clone()],
+            &cwd,
+            &[extra.clone()],
+        );
+        assert_eq!(grouped.len(), 2);
+        assert!(
+            grouped
+                .iter()
+                .any(|(root, paths)| root == &cwd && paths.contains(&cwd_file))
+        );
+        assert!(
+            grouped
+                .iter()
+                .any(|(root, paths)| root == &extra && paths.contains(&extra_file))
+        );
+        let extra_delta = fs_event_to_delta(&[extra_file], FsEventKind::Created, &extra);
+        assert!(!extra_delta.is_empty());
     }
 
     fn batch() -> FsBatch {

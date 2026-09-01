@@ -537,6 +537,8 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "export",
     "feedback",
     "find",
+    "folder",
+    "folders",
     "fork",
     "full",
     "fullscreen",

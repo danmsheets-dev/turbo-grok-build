@@ -1126,6 +1126,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CycleMode => dispatch_cycle_mode(app),
         Action::ShareSession => dispatch_share_session(app),
         Action::ShowSessionInfo => dispatch_show_session_info(app),
+        Action::FolderList => super::folder::dispatch_folder_list(app),
+        Action::FolderAdd { path } => super::folder::dispatch_folder_add(app, path),
+        Action::FolderRemove { path } => super::folder::dispatch_folder_remove(app, path),
         Action::ShowReleaseNotes { title, content } => {
             dispatch_show_release_notes(app, title, content)
         }

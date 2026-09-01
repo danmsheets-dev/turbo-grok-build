@@ -887,17 +887,30 @@ pub struct PagerArgs {
     /// Sandbox profile for filesystem and network access.
     #[arg(long, env = "GROK_SANDBOX", value_name = "PROFILE")]
     pub sandbox: Option<String>,
-    /// Confine all filesystem writes (and absolute path resolution) to this
-    /// directory. Cross-platform path-prefix enforcement — not OS sandboxing.
-    /// Alias: `--workspace-root`. Fail-fast if the path is missing or not a
-    /// directory. Harnesses should pass the git worktree they handed the agent.
+    /// Confine all filesystem writes (and absolute path resolution) to these
+    /// directories (repeatable). Cross-platform path-prefix enforcement — not
+    /// OS sandboxing. Alias: `--workspace-root`. Fail-fast if a path is missing
+    /// or not a directory. Also read from `GROK_CONFINE` as a `;`-separated
+    /// list (`:` on Unix when no `;` is present). Nested turbo may only
+    /// tighten inherited roots, never add a sibling outside them.
     #[arg(
         long = "confine",
         visible_alias = "workspace-root",
         value_name = "PATH",
-        env = "GROK_CONFINE"
+        action = ArgAction::Append,
+        value_hint = ValueHint::DirPath
     )]
-    pub confine: Option<PathBuf>,
+    pub confine: Vec<PathBuf>,
+    /// Extra workspace roots for this session (repeatable). Relative paths
+    /// still resolve against `--cwd`; these folders expand the filesystem
+    /// confine set. Absolute paths required. Alias of ACP
+    /// `additionalDirectories`.
+    #[arg(
+        long = "add-dir",
+        value_name = "PATH",
+        value_hint = ValueHint::DirPath
+    )]
+    pub add_dir: Vec<PathBuf>,
     /// Put this Turbo process in a Windows Job Object (`KILL_ON_JOB_CLOSE`) so
     /// a harness can kill the whole process tree by closing the job handle.
     /// Also enabled by env `TURBO_JOB_OBJECT=1`, `GROK_JOB_OBJECT=1`, or
@@ -1087,6 +1100,34 @@ impl PagerArgs {
             std::env::set_current_dir(cwd).map_err(|e| {
                 anyhow::anyhow!("Failed to set working directory to {:?}: {}", cwd, e)
             })?;
+        }
+        if !self.add_dir.is_empty() {
+            let mut canonical = Vec::with_capacity(self.add_dir.len());
+            for path in &self.add_dir {
+                let abs = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| anyhow::anyhow!("--add-dir: cannot resolve relative path: {e}"))?
+                        .join(path)
+                };
+                let meta = std::fs::metadata(&abs).map_err(|e| {
+                    anyhow::anyhow!(
+                        "--add-dir: path `{}` does not exist or is inaccessible: {e}",
+                        abs.display()
+                    )
+                })?;
+                if !meta.is_dir() {
+                    anyhow::bail!("--add-dir: path `{}` is not a directory", abs.display());
+                }
+                canonical.push(dunce::canonicalize(&abs).map_err(|e| {
+                    anyhow::anyhow!(
+                        "--add-dir: failed to canonicalize `{}`: {e}",
+                        abs.display()
+                    )
+                })?);
+            }
+            self.add_dir = canonical;
         }
         Ok(self)
     }
@@ -1424,6 +1465,24 @@ mod tests {
     /// The screen-mode flags are mutually exclusive: the pair exists so one
     /// can override the other's sticky config value, so accepting both in one
     /// invocation would be ambiguous.
+    #[test]
+    fn add_dir_is_repeatable() {
+        let args = PagerArgs::try_parse_from([
+            "grok",
+            "--add-dir",
+            "/tmp/a",
+            "--add-dir",
+            "/tmp/b",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.add_dir,
+            vec![
+                std::path::PathBuf::from("/tmp/a"),
+                std::path::PathBuf::from("/tmp/b")
+            ]
+        );
+    }
     #[test]
     fn minimal_and_fullscreen_flags_conflict() {
         let args = PagerArgs::try_parse_from(["grok", "--minimal"]).unwrap();

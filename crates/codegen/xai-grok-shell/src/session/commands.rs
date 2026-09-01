@@ -226,6 +226,12 @@ pub enum SessionCommand {
     SetAllowedWritePaths {
         paths: Vec<String>,
     },
+    /// Live extra-folder attach (`/folder add|remove`). Replaces the session's
+    /// additionalDirectories set, ConfinedFs roots, and persisted sidecar.
+    SetAdditionalDirectories {
+        directories: Vec<std::path::PathBuf>,
+        respond_to: oneshot::Sender<Result<Vec<std::path::PathBuf>, String>>,
+    },
     Prompt {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,

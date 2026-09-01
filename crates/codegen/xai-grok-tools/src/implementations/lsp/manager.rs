@@ -120,6 +120,8 @@ pub struct LspManager {
     pub servers: BTreeMap<String, LspServerConfig>,
     pub clients: HashMap<String, LspClient>,
     pub workspace_root: PathBuf,
+    /// Extra ACP/session folders advertised as LSP `workspaceFolders`.
+    pub extra_workspace_folders: Vec<PathBuf>,
     pub initialized: bool,
     pub tools_enabled: bool,
     pub pending_diagnostics_by_server: HashMap<String, PendingEdits>,
@@ -143,6 +145,7 @@ impl Default for LspManager {
             servers: BTreeMap::new(),
             clients: HashMap::new(),
             workspace_root: PathBuf::from("/tmp"),
+            extra_workspace_folders: Vec::new(),
             initialized: false,
             tools_enabled: false,
             pending_diagnostics_by_server: HashMap::new(),
@@ -177,6 +180,43 @@ impl LspManager {
     pub fn with_process_scope(mut self, scope: Option<ProcessScope>) -> Self {
         self.process_scope = scope;
         self
+    }
+
+    /// Extra folders included in `initialize` `workspaceFolders` (and later
+    /// `didChangeWorkspaceFolders` on live `/folder` updates).
+    pub fn with_extra_workspace_folders(mut self, extras: Vec<PathBuf>) -> Self {
+        self.extra_workspace_folders = extras;
+        self
+    }
+
+    /// Replace extra workspace folders and notify running servers.
+    pub fn set_extra_workspace_folders(&mut self, extras: Vec<PathBuf>) {
+        let old: Vec<_> = self
+            .extra_workspace_folders
+            .iter()
+            .filter_map(|p| super::client::workspace_folder_for(p))
+            .collect();
+        let new: Vec<_> = extras
+            .iter()
+            .filter_map(|p| super::client::workspace_folder_for(p))
+            .collect();
+        let added: Vec<_> = new
+            .iter()
+            .filter(|n| !old.iter().any(|o| o.uri == n.uri))
+            .cloned()
+            .collect();
+        let removed: Vec<_> = old
+            .iter()
+            .filter(|o| !new.iter().any(|n| n.uri == o.uri))
+            .cloned()
+            .collect();
+        self.extra_workspace_folders = extras;
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        for client in self.clients.values_mut() {
+            client.notify_workspace_folders_changed(added.clone(), removed.clone());
+        }
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -231,6 +271,7 @@ impl LspManager {
                 lifecycle_id,
                 server_config,
                 &self.workspace_root,
+                &self.extra_workspace_folders,
                 self.diagnostics_ready.clone(),
             )
             .await

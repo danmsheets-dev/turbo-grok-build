@@ -66,6 +66,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         model_id: acp::ModelId::new("test"),
         auth: None,
         parent_cwd: PathBuf::from("/tmp"),
+        additional_directories: Vec::new(),
         parent_session_id: "test-parent".into(),
         inherited_tool_overrides: None,
         yolo_mode: false,
@@ -185,4 +186,5 @@ impl xai_grok_tools::implementations::lsp::LspBackend for DummyLspDispatch {
     ) -> Vec<xai_grok_tools::implementations::lsp::FileDiagnosticEntry> {
         vec![]
     }
+    async fn set_extra_workspace_folders(&self, _extras: Vec<std::path::PathBuf>) {}
 }

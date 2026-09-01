@@ -90,7 +90,8 @@ started. Partial ledgers set `"usageIsIncomplete": true`.
 | `originalCwd` | Session's recorded origin when known (resume/fork) |
 | `rulesApplied` | Whether `--rules` / `--append-system-prompt` was provided (applied on new and re-synced on resume) |
 | `folderTrust` | Trust verdict and names of project-scoped capabilities dropped when untrusted |
-| `confineRoot` | Absolute path root of `--confine`, or null when unconfined |
+| `confineRoot` | First `--confine` / `GROK_CONFINE` root, or null when unconfined (legacy single-field) |
+| `confineRoots` | All process confine roots (`[]` when unconfined). Prefer this over `confineRoot` when several `--confine` paths were passed |
 | `confineInherited` | True when this process inherited `GROK_CONFINE` from a parent |
 | `confineShellEnforcement` | Under confine: `fail-closed` (default — unknown programs denied) or `operand-scan` (legacy write-operand allowlist only). **Not an OS sandbox** — path-prefix + classifier only; full Landlock/AppContainer is out of scope |
 

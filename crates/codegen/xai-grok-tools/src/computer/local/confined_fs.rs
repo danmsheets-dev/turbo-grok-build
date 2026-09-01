@@ -5,45 +5,121 @@
 //! root. Reads are left unrestricted — confine is a write boundary.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::computer::types::{AsyncFileSystem, ComputerError};
-use crate::types::resources::{
-    emit_confine_violation, path_is_under_confine_root, process_confine_root,
-};
+use crate::types::resources::{emit_confine_violation, process_confine_roots};
+
+/// Shared write-root list so `/folder add|remove` can update the chokepoint
+/// without rebuilding the session FS stack.
+pub type ConfineRootsHandle = Arc<RwLock<Vec<PathBuf>>>;
 
 /// Decorator that refuses writes/deletes outside the process confine root.
 pub struct ConfinedFs {
     inner: Arc<dyn AsyncFileSystem>,
-    root: PathBuf,
+    roots: ConfineRootsHandle,
+    /// When true, an empty live root list is unconfined (session `/folder`
+    /// start). When false, empty roots deny every write (process confine).
+    empty_is_unconfined: bool,
 }
 
 impl ConfinedFs {
     /// Wrap `inner` so writes/deletes must stay under `root`.
     pub fn new(inner: Arc<dyn AsyncFileSystem>, root: PathBuf) -> Self {
-        Self { inner, root }
+        Self::with_roots(inner, vec![root])
     }
 
-    /// Wrap `inner` with the process confine root when one is active; otherwise
-    /// return `inner` unchanged.
-    pub fn wrap_if_confined(inner: Arc<dyn AsyncFileSystem>) -> Arc<dyn AsyncFileSystem> {
-        match process_confine_root() {
-            Some(root) => Arc::new(Self::new(inner, root.clone())),
-            None => inner,
+    /// Wrap `inner` so writes/deletes must stay under **any** of `roots`.
+    /// Empty `roots` denies every write (fail closed — a confine wrapper with
+    /// no roots is a misconfiguration, not unconfined).
+    pub fn with_roots(inner: Arc<dyn AsyncFileSystem>, roots: Vec<PathBuf>) -> Self {
+        Self::with_shared_roots(inner, Arc::new(RwLock::new(roots)))
+    }
+
+    /// Wrap `inner` with a shared root list (live `/folder` updates).
+    pub fn with_shared_roots(inner: Arc<dyn AsyncFileSystem>, roots: ConfineRootsHandle) -> Self {
+        Self {
+            inner,
+            roots,
+            empty_is_unconfined: false,
         }
+    }
+
+    /// Session wrapper: empty roots mean unconfined; `/folder add` can jail later.
+    pub fn with_shared_session_roots(
+        inner: Arc<dyn AsyncFileSystem>,
+        roots: ConfineRootsHandle,
+    ) -> Self {
+        Self {
+            inner,
+            roots,
+            empty_is_unconfined: true,
+        }
+    }
+
+    /// Handle for later [`set_roots`].
+    pub fn roots_handle(&self) -> ConfineRootsHandle {
+        Arc::clone(&self.roots)
+    }
+
+    /// Replace the live write-root set.
+    pub fn set_roots(handle: &ConfineRootsHandle, roots: Vec<PathBuf>) {
+        if let Ok(mut guard) = handle.write() {
+            *guard = roots;
+        }
+    }
+
+    /// Wrap `inner` with the process confine roots when any are active;
+    /// otherwise return `inner` unchanged.
+    pub fn wrap_if_confined(inner: Arc<dyn AsyncFileSystem>) -> Arc<dyn AsyncFileSystem> {
+        let roots = process_confine_roots();
+        if roots.is_empty() {
+            inner
+        } else {
+            Arc::new(Self::with_roots(inner, roots.to_vec()))
+        }
+    }
+
+    fn live_roots(&self) -> Vec<PathBuf> {
+        let Ok(guard) = self.roots.read() else {
+            return Vec::new();
+        };
+        guard
+            .iter()
+            .filter(|root| {
+                std::fs::metadata(root)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect()
     }
 
     fn check_write(&self, path: &Path, op: &str) -> Result<(), ComputerError> {
-        // RC13 Wave A: fail closed when the confine root itself is gone
-        // (worktree tombstone / pruned isolation tree). Writing into a missing
-        // root would either recreate a partial tree outside git or succeed on
-        // the wrong volume after path rewrite — never allow that silently.
-        crate::types::resources::enforce_write_roots(None, Some(self.root.as_path()))
-            .map_err(|e| e.into_computer_error())?;
-        if path_is_under_confine_root(path, &self.root) {
+        let live = self.live_roots();
+        if live.is_empty() {
+            if self.empty_is_unconfined {
+                return Ok(());
+            }
+            let missing = self
+                .roots
+                .read()
+                .ok()
+                .and_then(|g| g.first().cloned())
+                .unwrap_or_else(|| path.to_path_buf());
+            return Err(
+                crate::types::resources::WriteRootError::ConfineRootMissing { path: missing }
+                    .into_computer_error(),
+            );
+        }
+        if crate::types::resources::path_is_under_any_root(path, &live) {
             return Ok(());
         }
-        let root_s = self.root.display().to_string();
+        let root_s = live
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         let path_s = path.display().to_string();
         let canon = crate::types::resources::canonicalize_for_permission(path);
         let resolved = canon.display.to_string_lossy().into_owned();
@@ -183,5 +259,48 @@ mod tests {
             err
         );
         assert!(!outside.exists());
+    }
+
+    #[tokio::test]
+    async fn write_under_additional_root_is_allowed() {
+        let primary = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let primary_path = dunce::canonicalize(primary.path()).unwrap();
+        let extra_path = dunce::canonicalize(extra.path()).unwrap();
+        let fs = ConfinedFs::with_roots(
+            Arc::new(LocalFs),
+            vec![primary_path, extra_path.clone()],
+        );
+        let target = extra.path().join("from-extra.txt");
+        fs.write_file(&target, b"extra")
+            .await
+            .expect("write under additional root");
+        assert_eq!(std::fs::read(&target).unwrap(), b"extra");
+        assert!(!extra_path.as_os_str().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_outside_all_roots_is_denied_when_extras_attached() {
+        let primary = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let fs = ConfinedFs::with_roots(
+            Arc::new(LocalFs),
+            vec![
+                dunce::canonicalize(primary.path()).unwrap(),
+                dunce::canonicalize(extra.path()).unwrap(),
+            ],
+        );
+        let target = outside.path().join("pwned.txt");
+        let err = fs
+            .write_file(&target, b"nope")
+            .await
+            .expect_err("outside both roots must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("confine") || msg.contains("outside"),
+            "expected confine denial, got: {msg}"
+        );
+        assert!(!target.exists());
     }
 }

@@ -86,7 +86,7 @@ async fn start_mock_client() -> (tempfile::TempDir, tempfile::TempDir, LspClient
     let config = mock_server_config(&script_path);
     let workspace = tempfile::tempdir().unwrap();
     let notify = Arc::new(tokio::sync::Notify::new());
-    let client = LspClient::start("mock".to_string(), 1, config, workspace.path(), notify)
+    let client = LspClient::start("mock".to_string(), 1, config, workspace.path(), &[], notify)
         .await
         .expect("mock LSP handshake failed");
     (script_dir, workspace, client)
@@ -194,6 +194,7 @@ async fn start_client_with(script_path: &Path) -> (tempfile::TempDir, LspClient)
         1,
         mock_server_config(script_path),
         workspace.path(),
+        &[],
         notify,
     )
     .await
@@ -579,7 +580,7 @@ async fn e2e_spawn_failure_is_graceful() {
     let workspace = tempfile::tempdir().unwrap();
     let notify = Arc::new(tokio::sync::Notify::new());
 
-    let result = LspClient::start("bad".to_string(), 1, config, workspace.path(), notify).await;
+    let result = LspClient::start("bad".to_string(), 1, config, workspace.path(), &[], notify).await;
     assert!(result.is_err());
     assert!(
         matches!(result.unwrap_err(), LspError::SpawnFailed(_)),
@@ -734,7 +735,7 @@ async fn e2e_real_typescript_language_server() {
     };
 
     let notify = Arc::new(tokio::sync::Notify::new());
-    let mut client = LspClient::start("tsserver".to_string(), 1, config, workspace.path(), notify)
+    let mut client = LspClient::start("tsserver".to_string(), 1, config, workspace.path(), &[], notify)
         .await
         .expect("real TS language server failed to start");
 
@@ -961,6 +962,7 @@ async fn e2e_restart_monitor_preserves_replacement_client() {
                 replacement_lifecycle_id,
                 mock_server_config(&script_path),
                 workspace.path(),
+                &[],
                 mgr.diagnostics_ready.clone(),
             )
             .await
@@ -996,6 +998,7 @@ async fn e2e_restart_monitor_preserves_replacement_client() {
                     healthy_lifecycle_id,
                     mock_server_config(&script_path),
                     workspace.path(),
+                    &[],
                     mgr.diagnostics_ready.clone(),
                 )
                 .await
@@ -1204,6 +1207,7 @@ async fn e2e_restart_monitor_emits_failed_on_restart_init_error() {
                 1,
                 mock_server_config(&healthy_script.1),
                 workspace.path(),
+                &[],
                 Arc::new(tokio::sync::Notify::new()),
             )
             .await
@@ -2006,6 +2010,7 @@ async fn e2e_restart_replay_requeues_pending_diagnostics() {
         lifecycle_id,
         server_config,
         workspace.path(),
+        &[],
         mgr.diagnostics_ready.clone(),
     )
     .await

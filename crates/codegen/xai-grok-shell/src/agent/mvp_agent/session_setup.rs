@@ -7,8 +7,6 @@ use super::*;
 /// `invalid_params` for the guard it is pinning.
 pub(super) const RESUME_REFUSES_CHAT: &str =
     "session/resume is not supported for chat sessions; use session/load";
-pub(super) const RESUME_REFUSES_EXTRA_DIRS: &str =
-    "session/resume does not support additionalDirectories";
 async fn read_applied_tool_overrides(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
 ) -> Option<xai_grok_sampling_types::ToolOverrides> {
@@ -241,6 +239,24 @@ impl MvpAgent {
                 arguments.meta.as_ref(),
             )
             .await?;
+        let additional_directories =
+            crate::agent::additional_directories::normalize_additional_directories(
+                cwd.as_path(),
+                &arguments.additional_directories,
+            )?;
+        let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd.as_path());
+        let (additional_directories, claude_skipped) =
+            crate::agent::additional_directories::union_with_claude_directories(
+                cwd.as_path(),
+                additional_directories,
+                project_trusted,
+            );
+        if !claude_skipped.is_empty() {
+            tracing::warn!(
+                skipped = claude_skipped.len(),
+                "Claude settings additionalDirectories: skipped invalid entries"
+            );
+        }
         let client_session_id = arguments
             .meta
             .as_ref()
@@ -320,6 +336,15 @@ impl MvpAgent {
                     .map(|s| s.to_string())
             });
         let session_info = begin_session(&session_id, &cwd);
+        if let Err(e) = crate::session::persistence::persist_session_additional_directories(
+            &session_info,
+            &additional_directories,
+        ) {
+            tracing::warn!(
+                error = %e,
+                "failed to persist additionalDirectories for session"
+            );
+        }
         let mut model_agent_type: Option<String> = None;
         let mut session_sampling_override: Option<SamplingConfig> = None;
         let mut disallowed_custom: Option<String> = None;
@@ -482,6 +507,7 @@ impl MvpAgent {
                     session_yolo_mode,
                     session_auto_mode: session_auto_mode && !session_yolo_mode,
                     prompt_display_cwd: None,
+                    additional_directories,
                     is_chat_kind: false,
                 }
             };
@@ -670,6 +696,7 @@ impl MvpAgent {
             cwd,
             mcp_servers: client_mcp_servers,
             meta: request_meta,
+            additional_directories: request_additional_directories,
             ..
         } = arguments;
         let policy = AttachPolicy::resolve(op, request_meta.as_ref(), self.restore_code);
@@ -682,6 +709,11 @@ impl MvpAgent {
         } = self
             .resolve_workspace(&cwd, client_mcp_servers, request_meta.as_ref())
             .await?;
+        let additional_directories =
+            crate::agent::additional_directories::normalize_additional_directories(
+                cwd.as_path(),
+                &request_additional_directories,
+            )?;
         let mut load_timer = crate::instrumentation_timer!("session.load_session");
         load_timer.with_field("session_id", session_id.0.as_ref());
         load_timer.with_field("cwd", cwd.as_str());
@@ -693,6 +725,15 @@ impl MvpAgent {
             });
         }
         let session_info = begin_session(&session_id, &cwd);
+        if let Err(e) = crate::session::persistence::persist_session_additional_directories(
+            &session_info,
+            &additional_directories,
+        ) {
+            tracing::warn!(
+                error = %e,
+                "failed to persist additionalDirectories for session"
+            );
+        }
         let current_session_dir = crate::session::persistence::session_dir(&session_info);
         tokio::task::spawn_blocking(move || {
             crate::session::persistence::cleanup_stale_sessions(Some(&current_session_dir));
@@ -881,6 +922,7 @@ impl MvpAgent {
                     session_yolo_mode,
                     session_auto_mode: session_auto_mode && !session_yolo_mode,
                     prompt_display_cwd,
+                    additional_directories,
                     is_chat_kind: false,
                 },
             )
@@ -1434,7 +1476,10 @@ impl MvpAgent {
     ) -> Result<acp::ResumeSessionResponse, acp::Error> {
         tracing::info!(session_id = %args.session_id.0, "session/resume");
         if !args.additional_directories.is_empty() {
-            return Err(acp::Error::invalid_params().data(RESUME_REFUSES_EXTRA_DIRS));
+            crate::agent::additional_directories::normalize_additional_directories(
+                &args.cwd,
+                &args.additional_directories,
+            )?;
         }
         if crate::agent::chat_modes::process_chat_mode_enabled()
             || ChatKindClaim::from_meta(args.meta.as_ref()).resolve(self, &args.session_id)
@@ -1480,9 +1525,11 @@ pub(super) fn load_request_for_resume(args: acp::ResumeSessionRequest) -> acp::L
         cwd,
         mcp_servers,
         meta,
+        additional_directories,
         ..
     } = args;
     acp::LoadSessionRequest::new(session_id, cwd)
         .mcp_servers(mcp_servers)
+        .additional_directories(additional_directories)
         .meta(meta.unwrap_or_default())
 }

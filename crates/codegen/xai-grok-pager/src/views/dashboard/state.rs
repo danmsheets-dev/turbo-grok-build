@@ -707,6 +707,8 @@ pub struct DashboardState {
     /// The header renders from this (not the process cwd) so it tracks a
     /// `/cd` even before `Effect::SetWorkingDir` lands, or if it fails.
     pub cwd: PathBuf,
+    /// Extra folders (`--add-dir` / `/folder`). Synced from AppView each frame.
+    pub additional_directories: Vec<PathBuf>,
     /// Worktree-label dialog — `Some` while the user is naming a worktree
     /// for a dashboard-dispatched agent. Reuses the welcome screen's
     /// [`NewWorktreeDialogState`](crate::app::app_view::NewWorktreeDialogState)
@@ -1407,6 +1409,7 @@ impl DashboardState {
             dispatch_worktree: false,
             cwd_has_git_ancestor: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            additional_directories: Vec::new(),
             worktree_dialog: None,
             pending_worktree_prompt: None,
             pending_worktree_attach: false,

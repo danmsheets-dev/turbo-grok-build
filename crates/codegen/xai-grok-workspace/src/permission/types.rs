@@ -283,6 +283,9 @@ pub struct RequestPathContext {
     /// When set, Bash/Edit confine checks use this even if process-wide
     /// `--confine` / `GROK_CONFINE` is unset (parent multi-session safe).
     pub confine_root: Option<std::path::PathBuf>,
+    /// Extra ACP workspace roots (`additionalDirectories`). Writes/reads under
+    /// any of these are inside the session confine set.
+    pub additional_directories: Vec<std::path::PathBuf>,
 }
 #[allow(clippy::large_enum_variant)]
 pub enum PermissionCommand {

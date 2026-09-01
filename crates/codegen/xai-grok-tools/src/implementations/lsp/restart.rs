@@ -84,6 +84,7 @@ async fn take_crashed_client_if_current(
         next_lifecycle_id,
         server_config,
         workspace_root: mgr.workspace_root.clone(),
+        extra_workspace_folders: mgr.extra_workspace_folders.clone(),
         diagnostics_notify: mgr.diagnostics_ready.clone(),
         tracked_docs,
         process_scope: mgr.process_scope.clone(),
@@ -131,6 +132,7 @@ struct RestartContext {
     next_lifecycle_id: u64,
     server_config: LspServerConfig,
     workspace_root: PathBuf,
+    extra_workspace_folders: Vec<PathBuf>,
     diagnostics_notify: DiagnosticsNotify,
     tracked_docs: Vec<(String, String)>,
     /// Snapshotted under the same manager lock as the rest of the context so
@@ -192,6 +194,7 @@ async fn restart_lsp_with_retries(
         mut next_lifecycle_id,
         server_config,
         workspace_root,
+        extra_workspace_folders,
         diagnostics_notify,
         tracked_docs,
         process_scope,
@@ -215,6 +218,7 @@ async fn restart_lsp_with_retries(
             next_lifecycle_id,
             server_config.clone(),
             &workspace_root,
+            &extra_workspace_folders,
             diagnostics_notify.clone(),
         )
         .await

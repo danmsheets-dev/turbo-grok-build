@@ -412,6 +412,48 @@ pub enum PersistenceMsg {
 
 pub use xai_grok_shared::session::session_dir;
 
+const ADDITIONAL_DIRECTORIES_FILE: &str = "additional_directories.json";
+
+/// Persist the effective extra-folder list for TUI resume (ACP still requires
+/// the client to resend on `session/load`; empty client list means none).
+pub fn persist_session_additional_directories(info: &Info, dirs: &[PathBuf]) -> io::Result<()> {
+    let dir = session_dir(info);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(ADDITIONAL_DIRECTORIES_FILE);
+    if dirs.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    let values: Vec<String> = dirs
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let bytes = serde_json::to_vec_pretty(&values)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    crate::session::storage::write_bytes_atomic(&path, &bytes)
+}
+
+/// Load extras previously persisted for `session_id`. Empty when none stored.
+pub fn load_session_additional_directories(session_id: &str) -> Vec<PathBuf> {
+    let Some(dir) = find_session_dir_by_id(session_id) else {
+        return Vec::new();
+    };
+    load_additional_directories_file(&dir.join(ADDITIONAL_DIRECTORIES_FILE))
+}
+
+fn load_additional_directories_file(path: &Path) -> Vec<PathBuf> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(values) = serde_json::from_slice::<Vec<String>>(&bytes) else {
+        return Vec::new();
+    };
+    values.into_iter().map(PathBuf::from).collect()
+}
+
 type RelocationResult<T> = crate::session::storage::relocation::Result<T>;
 type SummaryReader = fn(&Path) -> RelocationResult<Summary>;
 

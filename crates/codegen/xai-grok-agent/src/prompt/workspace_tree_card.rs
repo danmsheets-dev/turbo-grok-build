@@ -60,7 +60,7 @@ pub fn render_workspace_tree_card(ctx: &PromptContext) -> Option<String> {
     let index = xai_grok_tools::util::workspace_tree_try_get(&root)
         .or_else(|| xai_grok_tools::util::workspace_tree_try_load_cached(&root, &inject_cfg));
 
-    let body = match index {
+    let mut body = match index {
         Some(idx) => {
             let card = inject_card(&idx, &inject_cfg);
             if card.trim().is_empty() {
@@ -73,6 +73,38 @@ pub fn render_workspace_tree_card(ctx: &PromptContext) -> Option<String> {
             inject_building_notice()
         }
     };
+
+    if !ctx.additional_directories.is_empty() {
+        body.push_str("\nAttached folders:\n");
+        for extra in &ctx.additional_directories {
+            body.push_str("  - ");
+            body.push_str(extra);
+            body.push('\n');
+            if ctx.audience == PromptAudience::Subagent {
+                continue;
+            }
+            let extra_path = PathBuf::from(extra);
+            if let Some(idx) =
+                xai_grok_tools::util::workspace_tree_try_get(&extra_path).or_else(|| {
+                    xai_grok_tools::util::workspace_tree_try_load_cached(&extra_path, &inject_cfg)
+                })
+            {
+                let extra_card = inject_card(&idx, &inject_cfg);
+                if !extra_card.trim().is_empty() {
+                    body.push_str(&extra_card);
+                    if !body.ends_with('\n') {
+                        body.push('\n');
+                    }
+                }
+            }
+        }
+        if ctx.audience == PromptAudience::Subagent {
+            body.push_str(
+                "Attached folders are live on disk (not cloned into this worktree). \
+                 Edits there skip land/diff.\n",
+            );
+        }
+    }
 
     Some(body)
 }

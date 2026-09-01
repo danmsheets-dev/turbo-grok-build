@@ -1,18 +1,18 @@
 //! Single LSP server connection — spawn, handshake, protocol methods.
 
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_lsp::LanguageServer;
 use async_lsp::lsp_types::{
     self, ClientCapabilities, DiagnosticClientCapabilities, DiagnosticWorkspaceClientCapabilities,
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoCapability,
-    HoverClientCapabilities, InitializeParams, InitializedParams, MarkupKind,
+    DidChangeTextDocumentParams, DidChangeWorkspaceFoldersParams, DidOpenTextDocumentParams,
+    GotoCapability, HoverClientCapabilities, InitializeParams, InitializedParams, MarkupKind,
     PublishDiagnosticsClientCapabilities, ReferenceClientCapabilities,
     TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
     TextDocumentItem, TextDocumentSyncClientCapabilities, Url, VersionedTextDocumentIdentifier,
-    WorkspaceClientCapabilities,
+    WorkspaceClientCapabilities, WorkspaceFolder, WorkspaceFoldersChangeEvent,
 };
 
 use super::capabilities::ServerPolicy;
@@ -170,18 +170,38 @@ async fn spawn_transport(
     }
 }
 
-fn build_initialize_params(config: &LspServerConfig, workspace_root: &Path) -> InitializeParams {
+pub(crate) fn workspace_folder_for(path: &Path) -> Option<WorkspaceFolder> {
+    let uri = Url::from_file_path(path).ok()?;
+    Some(WorkspaceFolder {
+        uri,
+        name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "workspace".to_string()),
+    })
+}
+
+fn build_initialize_params(
+    config: &LspServerConfig,
+    workspace_root: &Path,
+    extra_folders: &[PathBuf],
+) -> InitializeParams {
     let effective_root = config.effective_root(workspace_root);
-    let workspace_uri = Url::from_file_path(effective_root).ok();
-    let workspace_folders = workspace_uri.map(|uri| {
-        vec![lsp_types::WorkspaceFolder {
-            uri,
-            name: effective_root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "workspace".to_string()),
-        }]
-    });
+    let mut workspace_folders = Vec::new();
+    if let Some(primary) = workspace_folder_for(effective_root) {
+        workspace_folders.push(primary);
+    }
+    for extra in extra_folders {
+        if extra == effective_root {
+            continue;
+        }
+        if let Some(folder) = workspace_folder_for(extra) {
+            if !workspace_folders.iter().any(|existing| existing.uri == folder.uri) {
+                workspace_folders.push(folder);
+            }
+        }
+    }
+    let workspace_folders = (!workspace_folders.is_empty()).then_some(workspace_folders);
 
     #[allow(deprecated)] // root_uri still needed for older servers
     InitializeParams {
@@ -237,6 +257,7 @@ impl LspClient {
         lifecycle_id: u64,
         config: LspServerConfig,
         workspace_root: &Path,
+        extra_folders: &[PathBuf],
         diagnostics_notify: DiagnosticsNotify,
     ) -> Result<Self, LspError> {
         let diagnostics = DiagnosticsStore::new();
@@ -253,7 +274,7 @@ impl LspClient {
         let (main_loop_handle, stderr_task, mut child_process) =
             spawn_transport(&server_name, &config, main_loop).await?;
 
-        let init_params = build_initialize_params(&config, workspace_root);
+        let init_params = build_initialize_params(&config, workspace_root, extra_folders);
 
         let init_result =
             match initialize_with_timeout(&server_name, &config, &mut server, init_params).await {
@@ -587,6 +608,7 @@ impl LspClient {
                 diagnostic: Some(DiagnosticWorkspaceClientCapabilities {
                     refresh_support: Some(true),
                 }),
+                workspace_folders: Some(true),
                 ..Default::default()
             }),
             ..Default::default()
@@ -601,6 +623,26 @@ impl LspClient {
     #[cfg(test)]
     pub fn server_name(&self) -> &str {
         &self.server_name
+    }
+
+    /// Notify the server that extra workspace folders were added or removed.
+    pub fn notify_workspace_folders_changed(
+        &mut self,
+        added: Vec<WorkspaceFolder>,
+        removed: Vec<WorkspaceFolder>,
+    ) {
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        if let Err(e) = self.socket.did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
+            event: WorkspaceFoldersChangeEvent { added, removed },
+        }) {
+            tracing::debug!(
+                server = %self.server_name,
+                error = %e,
+                "failed to send didChangeWorkspaceFolders"
+            );
+        }
     }
 
     /// Tell the server about the current contents of `path`.
@@ -893,5 +935,41 @@ impl LspClient {
             }
             None => vec![],
         })
+    }
+}
+
+#[cfg(test)]
+mod extra_folder_tests {
+    use super::*;
+    use crate::implementations::lsp::config::LspServerConfig;
+
+    #[test]
+    fn initialize_params_include_extra_workspace_folders() {
+        let primary = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let config = LspServerConfig::default();
+        let params = build_initialize_params(
+            &config,
+            primary.path(),
+            &[extra.path().to_path_buf()],
+        );
+        let folders = params.workspace_folders.expect("folders");
+        assert_eq!(folders.len(), 2, "{folders:?}");
+        let uris: Vec<_> = folders.iter().map(|f| f.uri.clone()).collect();
+        let extra_uri = Url::from_file_path(extra.path()).unwrap();
+        assert!(uris.iter().any(|u| u == &extra_uri), "{uris:?}");
+    }
+
+    #[test]
+    fn initialize_params_dedup_extra_same_as_primary() {
+        let primary = tempfile::tempdir().unwrap();
+        let config = LspServerConfig::default();
+        let params = build_initialize_params(
+            &config,
+            primary.path(),
+            &[primary.path().to_path_buf()],
+        );
+        let folders = params.workspace_folders.expect("folders");
+        assert_eq!(folders.len(), 1);
     }
 }

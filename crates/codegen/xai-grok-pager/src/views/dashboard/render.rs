@@ -919,7 +919,11 @@ fn render_header(
         1 + crate::views::announcements::upgrade_cta_reserve(cta.label, upgrade_caption) as usize
     });
     let label_budget = full_label_budget.saturating_sub(upgrade_reserve);
-    let mut location = crate::views::welcome::location_line_at(theme, &state.cwd);
+    let mut location = crate::views::welcome::location_line_at_with_extras(
+        theme,
+        &state.cwd,
+        &state.additional_directories,
+    );
     // 1-cell left inset, matching the old ` Agents` label.
     location
         .spans

@@ -763,6 +763,8 @@ pub(crate) async fn run(
         connection.models,
         connection.available_commands,
     );
+    app.additional_directories = args.add_dir.clone();
+    app.add_dir_cli = !args.add_dir.is_empty();
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
     // Startup terminal height for the auto-compact derivation; kept fresh by
@@ -4193,7 +4195,15 @@ fn process_effects(
 ) -> bool {
     let flags = session_flags_for_effects(app, &effs);
     for eff in effs {
-        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
+        let (quit, meta) = effects::execute(
+            eff,
+            tasks,
+            &app.acp_tx,
+            &app.cwd,
+            &app.additional_directories,
+            &flags,
+            progress_tx,
+        );
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle
             && let super::app_view::AuthState::Authenticating {

@@ -36,7 +36,6 @@ use std::time::Instant;
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
 /// fact extends this struct instead of every `draw` call site; tests take
 /// `Default` and override only what they exercise.
-#[derive(Default)]
 pub struct AppRenderParams<'a> {
     /// Voice feature available (shows the mic affordances).
     pub voice_available: bool,
@@ -55,6 +54,21 @@ pub struct AppRenderParams<'a> {
     /// replaced by the fixed-height Live visualizer.
     #[cfg(feature = "codex-live")]
     pub live_visualizer: Option<&'a crate::live::state::LiveVisualizerState>,
+    /// Extra folders for the status-bar `+N` chip.
+    pub additional_directories: &'a [std::path::PathBuf],
+}
+impl<'a> Default for AppRenderParams<'a> {
+    fn default() -> Self {
+        Self {
+            voice_available: false,
+            voice_listening: false,
+            voice_interim: None,
+            esc_owned_before_agent: false,
+            #[cfg(feature = "codex-live")]
+            live_visualizer: None,
+            additional_directories: &[],
+        }
+    }
 }
 /// What the bottom shortcuts bar renders this frame.
 enum ShortcutsBarContent {
@@ -894,6 +908,7 @@ impl AgentView {
             esc_owned_before_agent,
             #[cfg(feature = "codex-live")]
             live_visualizer,
+            additional_directories,
         } = app_params;
         self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
@@ -1562,6 +1577,15 @@ impl AgentView {
             status.push(
                 "bg_tasks",
                 Line::from(Span::styled(indicator, indicator_style)),
+            );
+        }
+        if let Some(chip) = crate::views::welcome::extras_chip_label(additional_directories) {
+            status.push(
+                "folders",
+                Line::from(Span::styled(
+                    chip,
+                    Style::default().fg(theme.accent_user).bg(theme.bg_base),
+                )),
             );
         }
         if self.should_show_plan_chip(&appearance) {

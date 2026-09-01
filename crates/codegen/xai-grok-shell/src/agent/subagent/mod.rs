@@ -124,6 +124,8 @@ pub(crate) struct SubagentSpawnContext {
     pub model_id: acp::ModelId,
     pub auth: Option<crate::auth::GrokAuth>,
     pub parent_cwd: PathBuf,
+    /// Parent additionalDirectories — inherited as live extra roots (not cloned).
+    pub additional_directories: Vec<PathBuf>,
     pub parent_session_id: String,
     /// The parent's cutoff at spawn, applied to the child's first turn. `None` if unset.
     pub inherited_tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
@@ -1025,8 +1027,16 @@ fn resolve_model_override_to_config(
 ) -> Option<(xai_grok_sampler::SamplerConfig, acp::ModelId)> {
     // Accept provider-prefixed aliases (`amazon-bedrock/…`) that agents copy
     // from the long platform list; canonicalize to the catalog key.
-    let (canonical_key, entry) =
-        crate::agent::models::find_task_model_entry(&ctx.available_models, model_id)?;
+    // Prefer a spawnable Codex/NVIDIA alias over an uncredentialed
+    // OpenRouter routing-slug collision (`openai/gpt-5.6-terra`).
+    let is_session_auth = crate::agent::auth_method::is_session_based_method(&ctx.auth_method_id);
+    let (canonical_key, entry) = crate::agent::models::find_spawnable_task_model_entry(
+        &ctx.available_models,
+        model_id,
+        is_session_auth,
+        None,
+    )
+    .or_else(|| crate::agent::models::find_task_model_entry(&ctx.available_models, model_id))?;
     let entry = entry.clone();
     let canonical_model_id = acp::ModelId::new(canonical_key);
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());

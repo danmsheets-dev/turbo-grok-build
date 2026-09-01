@@ -137,6 +137,7 @@ impl ClusterClient {
                 &mut self.tasks,
                 &self.app.acp_tx,
                 &self.app.cwd,
+                &self.app.additional_directories,
                 &flags,
                 &self.progress_tx,
             );

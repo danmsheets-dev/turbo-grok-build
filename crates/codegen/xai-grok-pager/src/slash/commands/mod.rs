@@ -28,6 +28,7 @@ pub mod expand;
 pub mod export;
 pub mod feedback;
 pub mod find;
+pub mod folder;
 pub mod fork;
 pub mod gboom;
 pub mod help;
@@ -142,6 +143,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(rename::RenameCommand),
         Arc::new(dashboard::DashboardCommand),
         Arc::new(cd::CdCommand),
+        Arc::new(folder::FolderCommand),
         Arc::new(theme::ThemeCommand),
         Arc::new(feedback::FeedbackCommand),
         Arc::new(announcements::AnnouncementsCommand),

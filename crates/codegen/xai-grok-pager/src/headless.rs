@@ -316,6 +316,9 @@ pub struct HeadlessOptions {
     /// the OS sandbox; materialization must not re-run local title selection.
     pub resume_title_pinned: bool,
     pub cwd: Option<PathBuf>,
+    /// Extra workspace roots (`--add-dir`). Absolute, already canonicalized
+    /// by CLI `apply_cwd`.
+    pub add_dir: Vec<PathBuf>,
     pub yolo: bool,
     pub trust: bool,
     pub output_format: OutputFormat,
@@ -1142,8 +1145,12 @@ impl HeadlessEmitter {
         if !matches!(self.format, OutputFormat::StreamingJson) {
             return;
         }
-        let confine = xai_grok_tools::types::resources::process_confine_root()
-            .map(|p| p.display().to_string());
+        let confine_roots = xai_grok_tools::types::resources::process_confine_roots();
+        let confine = confine_roots.first().map(|p| p.display().to_string());
+        let confine_roots_json: Vec<String> = confine_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
         let confine_inherited = std::env::var(xai_grok_tools::types::resources::ENV_GROK_CONFINE)
             .map(|v| !v.is_empty())
             .unwrap_or(false);
@@ -1161,6 +1168,7 @@ impl HeadlessEmitter {
             // Directory the ACP session actually uses for relative paths.
             "sessionCwd": session_cwd.display().to_string(),
             "confineRoot": confine,
+            "confineRoots": confine_roots_json,
             "confineInherited": confine_inherited,
             "confineShellEnforcement": confine_shell,
             "requestedModel": requested_model,
@@ -1640,6 +1648,7 @@ async fn open_session(
     session_id_flag: Option<&str>,
     restore_code: Option<bool>,
     allow_interactive_questions: bool,
+    additional_directories: Vec<PathBuf>,
 ) -> anyhow::Result<OpenedSession> {
     // Pager opens sessions before the agent resolves per-vendor compat;
     // default (all-on) preserves existing behavior — the agent applies
@@ -1651,6 +1660,7 @@ async fn open_session(
         let try_load: Result<acp::LoadSessionResponse, _> = acp_send(
             acp::LoadSessionRequest::new(acp::SessionId::new(sid.to_string()), cwd.to_path_buf())
                 .mcp_servers(mcp_servers.clone())
+                .additional_directories(additional_directories.clone())
                 .meta({
                     let mut m = acp::Meta::new();
                     m.insert("noReplay".into(), serde_json::Value::Bool(true));
@@ -1681,6 +1691,7 @@ async fn open_session(
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
+            .additional_directories(additional_directories)
             .meta(session_meta.as_object().cloned()),
         acp_tx,
     )
@@ -1696,6 +1707,7 @@ async fn open_session_with_id(
     cwd: &Path,
     session_id: &str,
     allow_interactive_questions: bool,
+    additional_directories: Vec<PathBuf>,
 ) -> anyhow::Result<OpenedSession> {
     let cwd_str = cwd.to_string_lossy();
     crate::app::session_startup::ensure_session_id_available(session_id, &cwd_str)?;
@@ -1704,6 +1716,7 @@ async fn open_session_with_id(
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
+            .additional_directories(additional_directories)
             .meta(
                 serde_json::json!({
                     "sessionId": session_id,
@@ -1729,6 +1742,7 @@ async fn fork_then_open(
     new_id: Option<&str>,
     restore_code: Option<bool>,
     allow_interactive_questions: bool,
+    additional_directories: Vec<PathBuf>,
 ) -> anyhow::Result<OpenedSession> {
     use crate::app::session_startup::{
         effective_fork_new_cwd, ensure_session_id_available, fork_response_error,
@@ -1763,6 +1777,7 @@ async fn fork_then_open(
         restore_code,
         // Honor CLI --allow-interactive-questions on forked sessions (C6).
         allow_interactive_questions,
+        additional_directories,
     )
     .await
     {
@@ -2158,6 +2173,7 @@ pub async fn run_single_turn(
                 None,
                 None,
                 options.allow_interactive_questions,
+                options.add_dir.clone(),
             )
             .await;
             (cwd.clone(), None, opened)
@@ -2168,6 +2184,7 @@ pub async fn run_single_turn(
                 &cwd,
                 &session_id,
                 options.allow_interactive_questions,
+                options.add_dir.clone(),
             )
             .await;
             (cwd.clone(), None, opened)
@@ -2188,6 +2205,7 @@ pub async fn run_single_turn(
                 Some(session_id.as_str()),
                 restore_code,
                 options.allow_interactive_questions,
+                options.add_dir.clone(),
             )
             .await;
             (load_cwd, orig, opened)
@@ -2207,6 +2225,7 @@ pub async fn run_single_turn(
                 new_session_id.as_deref(),
                 restore_code,
                 options.allow_interactive_questions,
+                options.add_dir.clone(),
             )
             .await;
             (load_cwd, parent_cwd.clone(), opened)
@@ -2226,22 +2245,23 @@ pub async fn run_single_turn(
 
     // Confine vs session cwd: refuse to resume into a directory the harness
     // did not authorize when --confine is set.
-    if let Some(root) = xai_grok_tools::types::resources::process_confine_root() {
-        let session_ok = xai_grok_tools::types::resources::path_is_under_confine_root(
+    let confine_roots = xai_grok_tools::types::resources::process_confine_roots();
+    if !confine_roots.is_empty()
+        && !xai_grok_tools::types::resources::path_is_under_any_root(
             &session_cwd,
-            root.as_path(),
+            confine_roots,
+        )
+    {
+        let listed = xai_grok_tools::types::resources::join_confine_path_list(confine_roots);
+        let msg = format!(
+            "session cwd {} is outside --confine roots {}; refuse to resume into \
+             an unauthorized directory. Re-run from inside a confine root, or \
+             pass a session whose original cwd is under a root.",
+            session_cwd.display(),
+            listed
         );
-        if !session_ok {
-            let msg = format!(
-                "session cwd {} is outside --confine root {}; refuse to resume into \
-                 an unauthorized directory. Re-run from inside the confine root, or \
-                 pass a session whose original cwd is under the root.",
-                session_cwd.display(),
-                root.display()
-            );
-            emitter.on_error(&msg);
-            anyhow::bail!("{msg}");
-        }
+        emitter.on_error(&msg);
+        anyhow::bail!("{msg}");
     }
 
     // `--rules` on resume/fork: shell now re-syncs via UpsertHumanRules, but

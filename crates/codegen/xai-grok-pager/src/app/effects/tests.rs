@@ -15,6 +15,7 @@ async fn subagent_model_reload_effect_round_trips_ack_without_debounce() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -65,6 +66,7 @@ async fn set_platform_api_key_effect_forwards_optional_base_url() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -98,6 +100,7 @@ async fn set_platform_api_key_effect_forwards_empty_key_clear() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -131,6 +134,7 @@ async fn set_platform_api_key_effect_surfaces_acp_data_not_bare_display() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1574,6 +1578,7 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1612,6 +1617,7 @@ async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1682,6 +1688,7 @@ async fn foreign_scan_task_supports_omp_only_sources() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1710,6 +1717,7 @@ async fn foreign_resume_detection_runs_as_task_result() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1737,6 +1745,7 @@ async fn foreign_resume_detection_runs_as_task_result() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1802,6 +1811,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             &mut tasks,
             &tx,
             Path::new("."),
+            &[],
             &SessionFlags::default(),
             &progress_tx,
         );
@@ -1911,6 +1921,7 @@ async fn fetch_session_list_sends_kind_facet_filter() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1956,6 +1967,7 @@ async fn fetch_workflows_list_sends_session_id() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
@@ -1992,6 +2004,7 @@ async fn debounce_session_search_echoes_query_and_seq() {
         &mut tasks,
         &tx,
         Path::new("."),
+        &[],
         &SessionFlags::default(),
         &progress_tx,
     );
