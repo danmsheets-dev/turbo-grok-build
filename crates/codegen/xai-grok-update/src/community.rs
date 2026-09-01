@@ -492,6 +492,40 @@ fn platform() -> Result<Platform> {
     bail!("this platform does not have a published Turbo community artifact")
 }
 
+/// Whether a debug update-base override points at a loopback host.
+///
+/// Parsed, never prefix-matched: `http://127.0.0.1:9@evil.com` *starts with* a
+/// loopback prefix but its host is `evil.com` (the userinfo trick). Requires a
+/// plain `http`/`https` URL with no embedded credentials, then resolves the
+/// host to an IP and tests `is_loopback()` — so `127.0.0.0/8`, `::1`, and the
+/// alternate IPv6 spellings all pass while any real domain (other than
+/// `localhost`) fails.
+fn is_allowed_local_base(base: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    if !matches!(u.scheme(), "http" | "https")
+        || !u.username().is_empty()
+        || u.password().is_some()
+    {
+        return false;
+    }
+    match u.host_str() {
+        Some("localhost") => true,
+        Some(host) => {
+            // `host_str()` serializes IPv6 with brackets (`[::1]`); strip them
+            // before parsing as an address.
+            let host = host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(host);
+            host.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        }
+        None => false,
+    }
+}
+
 fn update_source() -> Result<UpdateSource> {
     let Some(override_base) = std::env::var_os("TURBO_UPDATE_BASE_URL")
         .or_else(|| std::env::var_os("HYPER_UPDATE_BASE_URL"))
@@ -519,10 +553,8 @@ fn update_source() -> Result<UpdateSource> {
         .to_string_lossy()
         .trim_end_matches('/')
         .to_string();
-    let url = reqwest::Url::parse(&api_base).context("invalid TURBO_UPDATE_BASE_URL")?;
-    let local = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
-    if !local {
-        bail!("debug update-base overrides are restricted to localhost");
+    if !is_allowed_local_base(&api_base) {
+        bail!("debug update-base overrides must be an http(s) loopback host");
     }
     Ok(UpdateSource {
         api_base,
@@ -2656,6 +2688,78 @@ pub(crate) async fn run_install_target(target: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_base_override_rejects_userinfo_trick() {
+        // The whole point of the fix: a loopback host in the userinfo does not
+        // make the real host (`evil.com`) loopback.
+        for hostile in [
+            "http://127.0.0.1:9@evil.com",
+            "http://127.0.0.1@evil.com/releases",
+            "https://localhost@evil.com",
+            "http://localhost:8080@169.254.169.254/latest/meta-data",
+            "http://[::1]@evil.com",
+        ] {
+            assert!(
+                !is_allowed_local_base(hostile),
+                "userinfo trick must be rejected: {hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_base_override_accepts_plain_loopback() {
+        for ok in [
+            "http://127.0.0.1",
+            "http://127.0.0.1:8080/releases",
+            "http://127.0.0.2:3000",
+            "https://localhost:3000",
+            "http://[::1]:9999",
+        ] {
+            assert!(is_allowed_local_base(ok), "loopback base must pass: {ok}");
+        }
+    }
+
+    #[test]
+    fn local_base_override_rejects_remote_and_non_http() {
+        for bad in [
+            "https://evil.com",
+            "http://169.254.169.254/latest/meta-data", // link-local, not loopback
+            "http://localhost.evil.com",               // suffix trick, not localhost
+            "file:///etc/passwd",                      // non-http scheme
+            "not a url",
+            "",
+        ] {
+            assert!(!is_allowed_local_base(bad), "must be rejected: {bad}");
+        }
+    }
+
+    #[test]
+    fn release_asset_url_rejects_userinfo_host() {
+        // Production source (no local override): asset URLs must live on the
+        // pinned github.com repo. A userinfo loopback/github prefix must not
+        // smuggle the download onto another host.
+        let source = UpdateSource {
+            api_base: RELEASE_API_BASE.to_string(),
+            allow_insecure_local: false,
+        };
+        let good = format!(
+            "https://github.com/{RELEASE_REPO}/releases/download/v1.0.0/turbo.zip"
+        );
+        assert!(validate_release_asset_url(&source, &good).is_ok());
+
+        for hostile in [
+            format!("https://github.com@evil.com/{RELEASE_REPO}/releases/download/v1.0.0/turbo.zip"),
+            format!("https://evil.com/{RELEASE_REPO}/releases/download/v1.0.0/turbo.zip"),
+            "https://github.com/attacker/repo/releases/download/v1.0.0/turbo.zip".to_string(),
+            format!("http://github.com/{RELEASE_REPO}/releases/download/v1.0.0/turbo.zip"),
+        ] {
+            assert!(
+                validate_release_asset_url(&source, &hostile).is_err(),
+                "asset URL must be rejected: {hostile}"
+            );
+        }
+    }
 
     #[test]
     fn manifest_parser_accepts_gnu_and_star_formats() {
