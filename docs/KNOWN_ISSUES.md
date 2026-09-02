@@ -3,7 +3,25 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-08-26 (1.0.0-rc.12 subagent hardening).
+Last reviewed: 2026-09-02 (1.0.13-rc.1 upstream sync).
+
+## 1.0.13-rc.1 — Upstream sync
+
+Shipped on wire `1.0.13-rc.1`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+- Container-runtime socket masks are defense in depth. A well-known endpoint
+  that is itself a symlink (colima, Rancher Desktop, OrbStack) is skipped with
+  a warning rather than masked; the per-spawn child network filter remains the
+  guarantee.
+- Linux voice capture compiles again but has no runtime test coverage in the
+  fork; Windows (WASAPI) remains the verified backend.
+- This is the first release verified by a complete Linux run of the suite
+  (WSL Ubuntu). That run needs `rg` on PATH and a speaker player (or a
+  stand-in) for three voice playback tests; Linux runtime coverage beyond
+  the suite is still thinner than Windows.
+- The release workflow still fails at start in GitHub Actions, so the Windows
+  binary is built locally with `release-dist` and uploaded by hand; verify
+  against `SHA256SUMS`.
 
 ## 1.0.0-rc.12 — Subagent hardening
 

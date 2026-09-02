@@ -52,7 +52,7 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
-## Unreleased
+## [1.0.13-rc.1] - 2026-09-02
 
 ### Security
 - **Links no longer run through `cmd.exe` on Windows.** `cmd /c start` splits on
