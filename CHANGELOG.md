@@ -95,6 +95,13 @@ Older release notes (r1–r13 detail) are archived under
   `IpAddr` — which also fixes a dead `::1` arm (`host_str()` yields `[::1]`).
 
 ### Fixed
+- **A symlinked container-socket endpoint no longer refuses the session.** The
+  new runtime-socket deny treated a well-known endpoint that is itself a symlink
+  (`/var/run/docker.sock` under colima, Rancher Desktop, OrbStack) as fatal, and
+  `--sandbox strict` / `read-only` exited at start on those hosts. The link cannot
+  be masked in place and its target is outside the bwrap handoff policy, so it is
+  skipped with a warning; real endpoints alongside it are still masked and the
+  per-spawn child network filter remains the guarantee.
 - **Mangled X10 mouse reports no longer type into the composer.** A
   UTF-8-converting relay (ConPTY forwarding to WSL/SSH) splits the column byte
   above column 95, so crossterm emitted a bogus mouse event plus a stray key
