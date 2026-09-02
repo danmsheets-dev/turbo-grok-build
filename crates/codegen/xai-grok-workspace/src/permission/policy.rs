@@ -706,6 +706,15 @@ fn path_glob_matches(path: &str, pattern: &str, matcher: Option<&glob::Pattern>)
     if path_glob_matches_one(path, pattern, matcher) {
         return true;
     }
+    // A leading `~` is expanded to the home directory by the tools *after*
+    // this gate, so canonicalising it against the cwd would mint a false
+    // identity: on a host that cannot resolve `~/..` through the filesystem
+    // the lexical fallback collapsed `~/../key.pem` to the workspace file
+    // `key.pem` and an allow on `*.pem` leaked to it. Tilde operands are
+    // matched literally only, exactly as patterns treat `~`.
+    if is_tilde_path(Path::new(path)) {
+        return false;
+    }
     let path_c =
         xai_grok_tools::types::resources::canonicalize_for_permission(std::path::Path::new(path));
     let path_canon = normalize_path_glob_text(&path_c.display.to_string_lossy());

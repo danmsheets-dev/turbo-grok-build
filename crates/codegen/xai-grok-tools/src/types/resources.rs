@@ -974,8 +974,16 @@ fn canonicalize_with_ancestor_walk(path: &std::path::Path) -> (PathBuf, bool) {
             Some(p) if p != cursor.as_path() => p.to_path_buf(),
             _ => break,
         };
-        if let Some(name) = cursor.file_name() {
-            tail.push(name.to_os_string());
+        // `Path::file_name` is `None` for a trailing `..`, which used to drop
+        // the component and rewrite `docs/../secret.txt` (docs absent) as
+        // `docs/secret.txt` — an allowlist and confine-root bypass on hosts
+        // that cannot canonicalize through a missing directory (Linux, macOS).
+        // Windows never reached this: its path API collapses `docs\..` before
+        // the filesystem sees it.
+        match cursor.components().next_back() {
+            Some(std::path::Component::Normal(name)) => tail.push(name.to_os_string()),
+            Some(std::path::Component::ParentDir) => tail.push(std::ffi::OsString::from("..")),
+            _ => {}
         }
         cursor = parent;
         if let Ok(canon) = std::fs::canonicalize(&cursor) {
@@ -2752,7 +2760,13 @@ mod tests {
         assert_eq!(got[0], std::path::PathBuf::from(r"C:\work"));
         assert_eq!(got[1], std::path::PathBuf::from(r"D:\other"));
         let single = super::parse_confine_path_list(r"C:\work");
-        assert_eq!(single, vec![std::path::PathBuf::from(r"C:\work")]);
+        if cfg!(windows) {
+            assert_eq!(single, vec![std::path::PathBuf::from(r"C:\work")]);
+        } else {
+            // Unix splits a `;`-less list on `:`; a lone drive path is not a
+            // Unix root, so the documented rule applies.
+            assert_eq!(single.len(), 2);
+        }
         assert!(super::parse_confine_path_list("").is_empty());
         assert!(super::parse_confine_path_list("   ").is_empty());
     }
