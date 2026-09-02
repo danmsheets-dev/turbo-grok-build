@@ -195,18 +195,28 @@ fn materialized_socket_path_is_stable_after_mode_zero_mask() {
 
 #[test]
 #[cfg(unix)]
-fn materialized_socket_paths_reject_endpoint_symlinks() {
+fn materialized_socket_paths_skip_endpoint_symlinks() {
+    // colima / Rancher Desktop / OrbStack ship `docker.sock` as a symlink to a
+    // per-user socket. The link cannot be masked in place and its target is
+    // outside the automatic policy the bwrap handoff admits, so the endpoint is
+    // skipped (not an error) while real endpoints in the same set are kept.
     let root = temp_runtime_root("endpoint-symlink");
     let target = root.join("target.sock");
+    let real = root.join("containerd.sock");
     let endpoint = root.join("docker.sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+    let _target_listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+    let _real_listener = std::os::unix::net::UnixListener::bind(&real).unwrap();
     std::os::unix::fs::symlink(&target, &endpoint).unwrap();
 
-    let error = materialize_runtime_socket_deny_paths_from([endpoint])
-        .expect_err("an endpoint symlink must not redirect the automatic mask");
+    let paths = materialize_runtime_socket_deny_paths_from([endpoint.clone(), real.clone()])
+        .expect("a symlinked endpoint must be skipped, not refuse resolution");
     assert!(
-        error.to_string().contains("endpoint is a symlink"),
-        "unexpected error: {error}"
+        !paths.iter().any(|p| p.file_name() == endpoint.file_name()),
+        "the symlinked endpoint must not be masked: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p.file_name() == real.file_name()),
+        "a real endpoint alongside it must still be masked: {paths:?}"
     );
     let _ = std::fs::remove_dir_all(root);
 }

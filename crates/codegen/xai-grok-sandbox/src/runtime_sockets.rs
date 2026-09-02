@@ -130,10 +130,20 @@ fn materialize_runtime_socket_deny_paths_from(
             Err(error) => return Err(with_context(error)),
         };
         if metadata.file_type().is_symlink() {
-            return Err(with_context(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "endpoint is a symlink",
-            )));
+            // A symlinked endpoint cannot be masked in place: binding over the
+            // link leaves the real socket reachable, and the bwrap handoff only
+            // admits paths from the automatic policy, so the resolved target
+            // cannot be substituted either. colima, Rancher Desktop and OrbStack
+            // install exactly this shape (`/var/run/docker.sock` -> a per-user
+            // socket), so failing here would refuse every network-restricted
+            // session on those hosts. Skip the launch-time mask instead: these
+            // masks are defense in depth, and the per-spawn child network
+            // filter stays in force.
+            tracing::warn!(
+                path = %path.display(),
+                "runtime-socket endpoint is a symlink; skipping its launch-time mask"
+            );
+            continue;
         }
         if !paths.contains(&path) {
             paths.push(path);
