@@ -46,12 +46,18 @@ $TurboHome = if ($env:TURBO_SHARE_DIR) { $env:TURBO_SHARE_DIR } else { Join-Path
 
 # Fail closed: an env override must not point at a plaintext or third-party
 # origin that then gets executed as the installer payload.
+# Loopback is admitted for local release mirrors and the installer tests, on
+# the same typed rule as the updater: an exact loopback host with a numeric
+# port and no credentials, never a prefix match.
+if ($ApiBase.Contains('@')) {
+    Fail "TURBO_UPDATE_BASE_URL must not embed credentials"
+}
 $ApiBaseTrim = $ApiBase.TrimEnd('/')
-if (-not (
-        $ApiBaseTrim.StartsWith('https://api.github.com/', [StringComparison]::OrdinalIgnoreCase) -or
-        $ApiBaseTrim.StartsWith('https://github.com/', [StringComparison]::OrdinalIgnoreCase)
-    )) {
-    Fail "TURBO_UPDATE_BASE_URL must be an https://api.github.com or https://github.com URL"
+$GitHubBase = $ApiBaseTrim.StartsWith('https://api.github.com/', [StringComparison]::OrdinalIgnoreCase) -or
+    $ApiBaseTrim.StartsWith('https://github.com/', [StringComparison]::OrdinalIgnoreCase)
+$LoopbackBase = $ApiBase -match '^http://(127\.0\.0\.1|localhost|\[::1\]):\d+(/|$)'
+if (-not ($GitHubBase -or $LoopbackBase)) {
+    Fail "TURBO_UPDATE_BASE_URL must be an https://api.github.com or https://github.com URL (or a loopback http://127.0.0.1:<port> mirror)"
 }
 $Triple = "x86_64-pc-windows-msvc"
 

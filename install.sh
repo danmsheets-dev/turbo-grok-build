@@ -31,12 +31,16 @@ err() {
 
 # Fail closed: an env override must not point at a plaintext or third-party
 # origin that then gets executed as the installer payload.
+# Loopback is admitted for local release mirrors and the installer tests, on
+# the same typed rule as the updater: an exact loopback host with a numeric
+# port and no credentials, never a prefix match.
 case "$API_BASE" in
-    https://api.github.com/*|https://github.com/*) ;;
-    *)
-        err "TURBO_UPDATE_BASE_URL must be an https://api.github.com or https://github.com URL"
-        ;;
+    *@*) err "TURBO_UPDATE_BASE_URL must not embed credentials" ;;
 esac
+if ! printf '%s\n' "$API_BASE" \
+    | grep -Eq '^https://(api\.github\.com|github\.com)/|^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]+(/|$)'; then
+    err "TURBO_UPDATE_BASE_URL must be an https://api.github.com or https://github.com URL (or a loopback http://127.0.0.1:<port> mirror)"
+fi
 
 usage() {
     sed -n '2,20p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
