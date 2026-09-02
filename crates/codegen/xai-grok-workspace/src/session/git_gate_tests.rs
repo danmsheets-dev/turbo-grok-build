@@ -455,6 +455,64 @@ async fn invalidate_during_inflight_does_not_return_stale_walk() {
     let _ = first.await;
 }
 
+/// Regression: `invalidate` resolves the root through a cache with a short
+/// TTL; once that entry has expired and the root has no epoch entry yet, the
+/// call fell into the invalidate-all branch, which bumped only existing
+/// entries. The root stayed at epoch 0, its in-flight walk looked fresh, and
+/// the next caller joined it and got the pre-invalidation result.
+#[tokio::test]
+async fn invalidate_after_root_cache_expiry_still_retires_inflight_walk() {
+    let repo = init_temp_repo();
+    let gate = test_gate(Duration::from_secs(5), Duration::from_secs(5));
+    let walks = Arc::new(AtomicUsize::new(0));
+    let release = tokio::sync::watch::channel(false).0;
+
+    let mk_walk = |walks: Arc<AtomicUsize>, release: tokio::sync::watch::Sender<bool>| {
+        move || {
+            let walks = Arc::clone(&walks);
+            let mut rx = release.subscribe();
+            async move {
+                let n = walks.fetch_add(1, Ordering::SeqCst) + 1;
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(n)
+            }
+        }
+    };
+
+    let first = {
+        let gate = gate.clone();
+        let root = repo.path().to_path_buf();
+        let walk = mk_walk(Arc::clone(&walks), release.clone());
+        tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
+    };
+    wait_for_count(&walks, 1).await;
+    // Let the root-cache entry (80 ms under cfg(test)) expire so the
+    // invalidation cannot resolve the root and takes the fallback branch.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.invalidate(repo.path());
+
+    let second = {
+        let gate = gate.clone();
+        let root = repo.path().to_path_buf();
+        let walk = mk_walk(Arc::clone(&walks), release.clone());
+        tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
+    };
+
+    release.send(true).unwrap();
+    let after_invalidate = tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .expect("post-invalidate status hung")
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_invalidate, 2, "the walk started before the invalidation is stale");
+    wait_for_count(&walks, 2).await;
+    let _ = first.await;
+}
+
 #[tokio::test]
 async fn waiter_timeout_after_invalidate_does_not_return_stale_ok() {
     let repo = init_temp_repo();

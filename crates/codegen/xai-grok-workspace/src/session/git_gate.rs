@@ -250,6 +250,16 @@ impl GitGate {
                 );
                 ROOT_CACHE.lock().clear();
                 let mut state = self.inner.state.lock();
+                // A root only gets an epoch entry from a resolved invalidate,
+                // so a slot whose root was never invalidated before has none.
+                // Bumping only the existing entries left such a root at epoch
+                // 0 and its in-flight walk looked fresh to the next caller,
+                // which joined it and returned the pre-invalidation result.
+                let slot_roots: Vec<PathBuf> =
+                    state.slots.keys().map(|key| key.root.clone()).collect();
+                for root in slot_roots {
+                    state.epochs.entry(root).or_insert(0);
+                }
                 for epoch in state.epochs.values_mut() {
                     *epoch = epoch.saturating_add(1);
                 }
