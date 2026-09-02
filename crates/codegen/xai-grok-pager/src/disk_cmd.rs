@@ -3188,6 +3188,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cargo_target_dir_env)]
     fn target_root_honors_cargo_target_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let alt = tmp.path().join("alt-target");
@@ -3279,7 +3280,14 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cargo_target_dir_env)]
     fn discover_target_roots_finds_nested_cargo_toml() {
+        // `target_root` honours `CARGO_TARGET_DIR`; clear it so the discovery
+        // fallback is what gets asserted (the Linux suite runs with it set).
+        let prev = std::env::var_os("CARGO_TARGET_DIR");
+        unsafe {
+            std::env::remove_var("CARGO_TARGET_DIR");
+        }
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("turbo-grok-build");
         fs::create_dir_all(nested.join("target").join("debug")).unwrap();
@@ -3291,6 +3299,12 @@ mod tests {
             "nested target missing from {roots:?}"
         );
         assert_eq!(target_root(tmp.path()), nested.join("target"));
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("CARGO_TARGET_DIR", v),
+                None => std::env::remove_var("CARGO_TARGET_DIR"),
+            }
+        }
     }
 
     #[test]

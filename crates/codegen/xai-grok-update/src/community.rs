@@ -3117,23 +3117,24 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(*kind);
             header.set_mode(if kind.is_dir() { 0o755 } else { 0o644 });
+            // Write the name bytes directly: `append_data` validates through
+            // `Header::set_path`, which refuses the `..` and reserved shapes
+            // these tests exist to feed the extractor.
+            let raw = name.as_bytes();
+            header.as_gnu_mut().unwrap().name[..raw.len()].copy_from_slice(raw);
             if *kind == tar::EntryType::Symlink {
                 header.set_size(0);
                 header.set_link_name("outside").unwrap();
                 header.set_cksum();
-                builder
-                    .append_data(&mut header, *name, &[] as &[u8])
-                    .unwrap();
+                builder.append(&header, &[] as &[u8]).unwrap();
             } else if kind.is_dir() {
                 header.set_size(0);
                 header.set_cksum();
-                builder
-                    .append_data(&mut header, *name, &[] as &[u8])
-                    .unwrap();
+                builder.append(&header, &[] as &[u8]).unwrap();
             } else {
                 header.set_size(body.len() as u64);
                 header.set_cksum();
-                builder.append_data(&mut header, *name, *body).unwrap();
+                builder.append(&header, *body).unwrap();
             }
         }
         builder.into_inner().unwrap().finish().unwrap();

@@ -3331,27 +3331,56 @@ mod tests {
                     additional_directories: Vec::new(),
                 };
 
-                for displayed in [
-                    display.path().join("link/hosts"),
-                    display.path().join("src.rs"),
-                ] {
-                    assert_eq!(
-                        mgr.request_with_path_context(
-                            AccessKind::Edit(displayed.to_string_lossy().into_owned()),
-                            tool_call(),
-                            Some(context.clone()),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await,
-                        Decision::Allow
-                    );
+                // The symlink escapes the child's confine root, so the request is
+                // denied in the child's context (never the parent's) before any
+                // hub prompt; the ordinary displayed child path stays auto.
+                let escaped = mgr
+                    .request_with_path_context(
+                        AccessKind::Edit(
+                            display
+                                .path()
+                                .join("link/hosts")
+                                .to_string_lossy()
+                                .into_owned(),
+                        ),
+                        tool_call(),
+                        Some(context.clone()),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                let child_leaf = child
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                match &escaped {
+                    Decision::PolicyDeny(reason) => assert!(
+                        reason.contains("confine root") && reason.contains(&child_leaf),
+                        "denial must cite the child's confine root: {reason}"
+                    ),
+                    other => panic!("symlink out of the child root must be denied, got {other:?}"),
                 }
                 assert_eq!(
+                    mgr.request_with_path_context(
+                        AccessKind::Edit(
+                            display.path().join("src.rs").to_string_lossy().into_owned()
+                        ),
+                        tool_call(),
+                        Some(context.clone()),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await,
+                    Decision::Allow
+                );
+                assert_eq!(
                     transport.seen.lock().unwrap().len(),
-                    1,
-                    "child protected target prompts; ordinary displayed child path stays auto"
+                    0,
+                    "confine denial short-circuits before the hub; the auto path never prompts"
                 );
             })
             .await;

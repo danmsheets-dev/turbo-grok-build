@@ -638,7 +638,15 @@ mod tests {
         let link = tmp.path().join(TRUST_FILE_NAME);
         symlink(format!("shared/{TRUST_FILE_NAME}"), &link).unwrap();
 
-        TrustStore::persist_doc(&link, &TrustDocument::default()).unwrap();
+        let mut doc = TrustDocument::default();
+        doc.folders.insert(
+            "/srv/project".to_owned(),
+            FolderTrust {
+                trusted: true,
+                decided_at: None,
+            },
+        );
+        TrustStore::persist_doc(&link, &doc).unwrap();
 
         assert!(
             std::fs::symlink_metadata(&link)
@@ -646,10 +654,10 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+        let written = std::fs::read_to_string(&target).unwrap();
         assert!(
-            std::fs::read_to_string(&target)
-                .unwrap()
-                .contains("version")
+            written.contains("/srv/project"),
+            "document must be written through the link: {written}"
         );
     }
 

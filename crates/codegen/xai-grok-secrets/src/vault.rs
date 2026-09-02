@@ -608,6 +608,8 @@ mod tests {
 
     #[test]
     fn resolve_and_mcp_inject_without_leaking_into_debug_vault() {
+        // Writes the process-wide redaction registry; serialize with the other writers.
+        let _guard = env_test_lock();
         let canary = fixture(&["mcpinject", "CanaryValue99"]);
         let dir = tempfile::tempdir().unwrap();
         write_secret(dir.path(), "svc_token", &canary);
@@ -667,6 +669,8 @@ mod tests {
 
     #[test]
     fn json_walk_redacts_installed_vault_values() {
+        // Writes the process-wide redaction registry; serialize with the other writers.
+        let _guard = env_test_lock();
         let canary = fixture(&["jsoncanary", "VaultValue88"]);
         install_vault_redaction_values([canary.clone()]);
         let mut value = serde_json::json!({
@@ -691,6 +695,8 @@ mod tests {
 
     #[test]
     fn secret_get_emits_handle_not_bytes() {
+        // Writes the process-wide redaction registry; serialize with the other writers.
+        let _guard = env_test_lock();
         let canary = fixture(&["cliget", "CanaryValue99"]);
         let dir = tempfile::tempdir().unwrap();
         write_secret(dir.path(), "ci_token", &canary);

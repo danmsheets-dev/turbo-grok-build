@@ -1061,9 +1061,12 @@ mod tests {
     /// Verify that setsid() prevents hook child processes from opening
     /// `/dev/tty`. This is the core fix for GPG pinentry corruption.
     ///
-    /// The hook tries `exec 3>/dev/tty` — if detached, this fails and the
-    /// shell exits 1 (caught by `||`), making the overall command exit 0.
-    /// If NOT detached, the open succeeds and the command exits 1.
+    /// The hook tries `exec 3>/dev/tty` inside a subshell — if detached, the
+    /// open fails, the subshell exits non-zero (caught by `||`), and the
+    /// overall command exits 0. If NOT detached, the open succeeds and the
+    /// command exits 1. The subshell matters: a failed `exec` redirection is
+    /// fatal in a non-interactive POSIX shell, and dash (`/bin/sh` on Debian
+    /// and Ubuntu) then exits 2 before `||` can run.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_hook_child_cannot_open_dev_tty() {
@@ -1080,7 +1083,7 @@ mod tests {
         }
 
         // exit 0 if /dev/tty is inaccessible (DETACHED), exit 1 if accessible
-        let spec = make_shell_spec("exec 3>/dev/tty 2>/dev/null && exit 1 || exit 0");
+        let spec = make_shell_spec("( exec 3>/dev/tty ) 2>/dev/null && exit 1 || exit 0");
         let envelope = make_envelope();
         let ctx = make_ctx();
 

@@ -871,13 +871,28 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
     fn spawn_predecessor() -> Child {
-        Command::new("sleep")
+        let child = Command::new("sleep")
             .arg("300")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn sleep")
+            .expect("spawn sleep");
+        // `PredecessorTarget::open` verifies the name through
+        // `/proc/<pid>/cmdline`, which is empty for an instant while the child
+        // is still inside `exec`. Under a loaded suite the takeover could read
+        // that instant, decline without signalling, and the fixture stayed
+        // alive. Wait until the kernel reports the image, as the bash fixture
+        // does with its marker file.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process_name_matches(child.id(), "sleep") {
+            assert!(
+                Instant::now() < deadline,
+                "predecessor never reported its image"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        child
     }
 
     /// Wait (bounded) for a child to exit; returns true if it did.

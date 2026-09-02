@@ -1076,17 +1076,34 @@ mod tests {
     #[test]
     fn test_path_rewriter_maps_worktree_onto_nested_source_repo() {
         let rw = PathRewriter::new(
-            r"C:\Users\me\.grok\worktrees\grok-build-turbo-grok-build\subagent-1",
-            Some(r"H:\Apps\grok build\turbo-grok-build"),
+            "/home/me/.grok/worktrees/grok-build-turbo-grok-build/subagent-1",
+            Some("/srv/apps/grok build/turbo-grok-build"),
         )
         .expect("distinct paths");
         let rewritten = rw.rewrite_path(Path::new(
-            r"C:\Users\me\.grok\worktrees\grok-build-turbo-grok-build\subagent-1\crates\foo.rs",
+            "/home/me/.grok/worktrees/grok-build-turbo-grok-build/subagent-1/crates/foo.rs",
         ));
         assert_eq!(
             rewritten,
-            PathBuf::from(r"H:\Apps\grok build\turbo-grok-build\crates\foo.rs")
+            PathBuf::from("/srv/apps/grok build/turbo-grok-build/crates/foo.rs")
         );
+        // Backslashes only split into components on Windows; elsewhere the
+        // literal is a single component and the prefix could never strip.
+        #[cfg(windows)]
+        {
+            let rw = PathRewriter::new(
+                r"C:\Users\me\.grok\worktrees\grok-build-turbo-grok-build\subagent-1",
+                Some(r"H:\Apps\grok build\turbo-grok-build"),
+            )
+            .expect("distinct paths");
+            let rewritten = rw.rewrite_path(Path::new(
+                r"C:\Users\me\.grok\worktrees\grok-build-turbo-grok-build\subagent-1\crates\foo.rs",
+            ));
+            assert_eq!(
+                rewritten,
+                PathBuf::from(r"H:\Apps\grok build\turbo-grok-build\crates\foo.rs")
+            );
+        }
     }
 
     #[test]
