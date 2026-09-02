@@ -72,15 +72,20 @@ pub mod runtime;
 #[cfg(unix)]
 pub fn detach_from_tty() -> io::Result<()> {
     use nix::errno::Errno;
-    use nix::unistd::{Pid, setpgid, setsid};
+    use nix::unistd::{Pid, getpid, getsid, setpgid, setsid};
 
     match setsid() {
         Ok(_) => Ok(()),
-        Err(Errno::EPERM) => {
-            setpgid(Pid::from_raw(0), Pid::from_raw(0))
-                .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
-            Ok(())
-        }
+        Err(Errno::EPERM) => match setpgid(Pid::from_raw(0), Pid::from_raw(0)) {
+            Ok(()) => Ok(()),
+            // A session leader cannot `setpgid` either, but it already has
+            // everything this hook is after (no controlling terminal, own
+            // group). Stacked hooks — a caller that detaches a command it hands
+            // to a helper that detaches again — must not fail the spawn.
+            // `getsid`/`getpid` are async-signal-safe.
+            Err(Errno::EPERM) if getsid(None).is_ok_and(|sid| sid == getpid()) => Ok(()),
+            Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+        },
         Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
     }
 }
@@ -1001,6 +1006,21 @@ mod tests {
             score, "-500",
             "without the opt-in env the hook must not reset children"
         );
+    }
+
+    /// Regression: a command detached by its caller and again by a spawn
+    /// helper ran two `setsid` hooks; the second failed with EPERM (already a
+    /// session leader) and so did the `setpgid` fallback, failing the spawn.
+    #[cfg(unix)]
+    #[test]
+    fn stacked_detach_hooks_still_spawn() {
+        let mut cmd = std::process::Command::new("true");
+        detach_std_command(&mut cmd);
+        detach_std_command(&mut cmd);
+        let status = cmd
+            .status()
+            .expect("a second detach hook must not fail the spawn");
+        assert!(status.success());
     }
 
     #[test]

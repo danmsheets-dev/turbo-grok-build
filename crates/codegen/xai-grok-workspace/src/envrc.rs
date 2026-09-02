@@ -327,7 +327,10 @@ printf '%s' '{sentinel}'
         .arg(&script)
         .current_dir(dir)
         .stdin(std::process::Stdio::null());
-    xai_grok_tools::util::detach_std_command(&mut bash_cmd);
+    // `run_with_deadline` detaches the evaluator itself. Detaching here as
+    // well stacked a second `setsid` hook, which fails for a child that is
+    // already a session leader, and on Unix that failed the spawn outright:
+    // `.envrc` never loaded on Linux while Windows (a creation flag) was fine.
     let output = match run_with_deadline(bash_cmd, deadline, "bash") {
         // `truncated` is ignored here: the sentinel below is strictly
         // stronger evidence of completeness.
