@@ -324,7 +324,7 @@ mod tests {
 
         // Symlink should point to correct target
         let link_target = std::fs::read_link(&link_path).unwrap();
-        assert_eq!(link_target, PathBuf::from("target.txt"));
+        assert_eq!(link_target, std::path::PathBuf::from("target.txt"));
 
         // Directory symlink should also work
         let dir_link_path = result.worktree_path.join("link_dir");

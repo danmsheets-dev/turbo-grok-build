@@ -231,6 +231,13 @@ mod tests {
     #[test]
     fn worktree_attach_branch_name_uses_dest_basename() {
         assert_eq!(
+            worktree_attach_branch_name(Path::new("/home/x/.grok/worktrees/repo/subagent-01abc")),
+            "grok/subagent-01abc"
+        );
+        // Backslashes only split into components on Windows; elsewhere this
+        // literal is a single component and the assertion would be vacuous.
+        #[cfg(windows)]
+        assert_eq!(
             worktree_attach_branch_name(Path::new(
                 r"C:\Users\x\.grok\worktrees\repo\subagent-01abc"
             )),
