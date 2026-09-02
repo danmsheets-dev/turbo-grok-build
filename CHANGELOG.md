@@ -88,6 +88,24 @@ Older release notes (r1–r13 detail) are archived under
   spun the extraction loop uncapped. Every header now counts. Path
   sanitization also rejects Windows-hostile components (`:` names an NTFS
   alternate data stream, so `notes:ads.md` wrote hidden stream content).
+- **Allowed-write and confine checks no longer drop a `..` on Linux/macOS.**
+  The permission canonicalizer walks up to the nearest existing ancestor and
+  re-joins the missing tail; `Path::file_name` is empty for a trailing `..`,
+  so `docs/../secret.txt` (with `docs` absent) was re-joined as
+  `docs/secret.txt` and passed an allowlist scoped to `docs`. Windows never
+  reached this because its path API collapses `docs\..` before the
+  filesystem sees it. The walk now keeps `..` and collapses it lexically.
+- **Tilde operands are never canonicalized against the cwd.** On a host that
+  cannot resolve `~/..` through the filesystem, the lexical fallback
+  collapsed `~/../key.pem` to the workspace file `key.pem` and an allow on
+  `*.pem` leaked to it. Tilde paths are matched literally only, as the
+  policy already documented.
+- **The installer scripts accept a typed loopback `TURBO_UPDATE_BASE_URL`.**
+  `install.sh` / `install.ps1` pinned the base to the GitHub hosts (rc.11)
+  while the updater itself admits an exact loopback host for local mirrors
+  and tests. Both scripts now apply the updater's rule (`127.0.0.1`,
+  `localhost`, `[::1]` with a numeric port, no credentials); every other
+  origin still fails closed.
 - **`TURBO_UPDATE_BASE_URL` is validated by parsing, not prefix matching.** The
   override already compared `host_str()` so the userinfo trick
   (`http://127.0.0.1:9@evil.com`) was rejected, but the check now requires
@@ -113,6 +131,36 @@ Older release notes (r1–r13 detail) are archived under
 - **Turbo builds on Linux again.** `err_message` in the Linux-only capture
   backend matched `VoiceError` exhaustively and was never updated when the TTS
   variants landed, so the crate failed to compile off Windows.
+- **The settings screen no longer advertises `always_allow_all_sessions` as the**
+  **permission-prompt default.** The settings registry declared it while the
+  runtime resolves `allow_once`; the declaration now matches the (safer) runtime
+  behaviour, so the screen shows what actually happens.
+- **`.envrc` loads on Linux again.** The bash evaluator was detached from the
+  terminal twice (once by the loader, once by the deadline runner), so the
+  child ran two `setsid` hooks; the second failed with EPERM, its `setpgid`
+  fallback failed the same way for a session leader, and the spawn itself
+  failed. Windows only sets a creation flag, so it never noticed. The
+  duplicate detach is gone and the hook now treats an already-detached child
+  as success.
+- **Upload-queue orphan cleanup is independent of directory order.** The
+  sweep read a temp file's age from its sidecar while deleting as it went, so
+  on ext4 (hashed order) an expired sidecar could be removed first and its
+  temp file, now without a sidecar, fell back to a fresh mtime and survived.
+  Ages are decided for every entry before anything is deleted.
+- **The confine shell analyser classifies Windows-shaped program tokens the
+  same on every host.** `C:\...\blender.exe` was reported as *hiding* an
+  absolute path on Linux (host `is_absolute` is false there) and the
+  PowerShell recovery failed closed; drive and UNC shapes are now recognised
+  host-independently.
+- **Signal handlers preserve `errno`.** `signal-hook-registry` moves to 1.4.8
+  (upstream lockfile), whose dispatcher saves and restores `errno` around
+  callbacks; the ported regression test now passes.
+- **A git-status invalidation can no longer be lost while a walk is in
+  flight.** `invalidate` resolves the root through a short-lived cache; once
+  that entry had expired for a root that had never been invalidated before,
+  the fallback bumped only existing epoch entries, the root stayed at epoch
+  0, and the next caller joined the pre-invalidation walk and got its stale
+  result. Every root with a live slot is now bumped.
 - **Mixpanel requests are bounded by a 10s timeout**, so a wedged endpoint
   cannot keep a telemetry future alive indefinitely.
 - **Session no longer panics on context-length errors that omit stream metadata.**
