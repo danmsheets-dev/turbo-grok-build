@@ -933,9 +933,26 @@ fn token_has_late_expansion(token: &str) -> bool {
 /// past index 0. Those only arise from the flat Windows tokenizer gluing a
 /// redirect operator or a quoted sub-script onto a real target path; a caller
 /// that range-checks `token` as a path would silently treat it as relative.
+/// Host-independent "this token *is* an absolute path": the host's own notion
+/// plus drive-absolute (`X:\`, `X:/`) and UNC (`\\server\share`) shapes.
+/// The Windows recovery only ever sees Windows-shaped commands, so a Linux
+/// host must classify `C:\...\blender.exe` the same way Windows does
+/// instead of reporting the program token itself as *hiding* a path.
+fn token_is_absolute_path(token: &str) -> bool {
+    if std::path::Path::new(token).is_absolute() {
+        return true;
+    }
+    let bytes = token.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/'))
+        || token.starts_with(r"\\")
+}
+
 fn token_hides_absolute_path(token: &str) -> bool {
     // A token that *is* an absolute path resolves and range-checks correctly.
-    if std::path::Path::new(token).is_absolute() {
+    if token_is_absolute_path(token) {
         return false;
     }
     let bytes = token.as_bytes();
@@ -3577,6 +3594,10 @@ mod tests {
         }
     }
 
+    // `$env:TEMP` only denotes the temp directory on Windows; elsewhere the
+    // analyser cannot resolve it and fails closed (`shell-expansion`), which
+    // is the correct verdict, so the expansion contract is asserted on Windows.
+    #[cfg(windows)]
     #[test]
     fn powershell_godot_import_pipeline_models_temp_write_operand() {
         let cmd = r#"& "C:\Program Files\Godot\godot.exe" --headless --path . --import 2>&1 | Tee-Object -FilePath $env:TEMP\godot-import.log | Select-String -Pattern "ERROR|WARNING""#;
