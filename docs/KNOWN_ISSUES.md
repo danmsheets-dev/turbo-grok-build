@@ -3,7 +3,18 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-09-02 (1.0.13-rc.1 upstream sync).
+Last reviewed: 2026-09-05 (1.0.13-rc.2 Codex catalog).
+
+## 1.0.13-rc.2 — Codex catalog
+
+Shipped on wire `1.0.13-rc.2`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+- ChatGPT Codex picker adds **GPT-6 Astra** (`openai-codex/gpt-6-astra`)
+  and surfaces **GPT-5.3 Codex Spark** (`openai-codex/gpt-5.3-codex-spark`)
+  with the current Codex lineup. Astra Ultra still wires as `max`.
+- The release workflow still fails at start in GitHub Actions, so the
+  Windows binary is built locally with `release-dist` and uploaded by hand;
+  verify against `SHA256SUMS`.
 
 ## 1.0.13-rc.1 — Upstream sync
 

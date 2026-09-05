@@ -10,7 +10,7 @@ installation is required: Grok talks to the ChatGPT Codex backend directly.
 | Platform id | `openai-codex` |
 | Inference | `https://chatgpt.com/backend-api/codex` (Responses API, SSE) |
 | OAuth host | `https://auth.openai.com` |
-| Catalog models | `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.5`, `openai-codex/gpt-5.4`, `openai-codex/gpt-5.4-mini`, `openai-codex/gpt-5.3-codex-spark` |
+| Catalog models | `openai-codex/gpt-6-astra`, `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.3-codex-spark`, `openai-codex/gpt-5.5`, `openai-codex/gpt-5.4`, `openai-codex/gpt-5.4-mini` |
 | Protocol | OpenAI Responses API with `store: false`, encrypted reasoning, `instructions` system prompt |
 
 xAI login and other platform credentials remain independent. Codex
@@ -133,10 +133,10 @@ cannot be exercised in headless environments.
 
 ```bash
 grok models | grep openai-codex
-grok -m openai-codex/gpt-5.6-sol -p "ping"
+grok -m openai-codex/gpt-6-astra -p "ping"
 ```
 
-TUI: `/model openai-codex/gpt-5.6-sol`
+TUI: `/model openai-codex/gpt-6-astra`
 
 ### Reasoning effort (Codex catalog)
 
@@ -146,9 +146,11 @@ Menus follow the official OpenAI Codex CLI catalog
 
 | Model | Levels | Default |
 |-------|--------|---------|
+| `gpt-6-astra` | Light · Medium · High · Extra High · **Ultra** (wire: low · medium · high · xhigh · ultra→max) | medium |
 | `gpt-5.6-sol` | low · medium · high · xhigh · **max** · **ultra** | low |
 | `gpt-5.6-terra` | low · medium · high · xhigh · **max** · **ultra** | medium |
 | `gpt-5.6-luna` | low · medium · high · xhigh · **max** | medium |
+| `gpt-5.3-codex-spark` | low · medium · high · xhigh | low |
 | `gpt-5.5` / `gpt-5.4` / mini | low · medium · high · xhigh | medium |
 
 - **max** — maximum single-agent reasoning depth (`reasoning.effort: "max"`)

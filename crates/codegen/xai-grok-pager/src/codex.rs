@@ -145,6 +145,14 @@ mod tests {
         assert_eq!(normalize_model(None), DEFAULT_CODEX_MODEL);
         assert_eq!(normalize_model(Some("gpt-5.5")), "openai-codex/gpt-5.5");
         assert_eq!(
+            normalize_model(Some("gpt-6-astra")),
+            "openai-codex/gpt-6-astra"
+        );
+        assert_eq!(
+            normalize_model(Some("codex:gpt-6-astra")),
+            "openai-codex/gpt-6-astra"
+        );
+        assert_eq!(
             normalize_model(Some("openai-codex/gpt-5.4")),
             "openai-codex/gpt-5.4"
         );

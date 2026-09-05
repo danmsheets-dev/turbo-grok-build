@@ -2675,6 +2675,29 @@ fn resumed_tool_model_override_is_ignored() {
         );
 }
 #[test]
+fn gpt6_astra_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = indexmap::IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-6-astra".to_string(),
+        test_model_entry("gpt-6-astra"),
+    );
+    assert!(
+        super::handle_request::task_model_override_error(
+            Some("openai/gpt-6-astra"),
+            ModelOverrideProvenance::Tool,
+            false,
+            &models,
+            false,
+        )
+        .is_none(),
+        "openai/gpt-6-astra must resolve to openai-codex/gpt-6-astra"
+    );
+    let (key, _) = crate::agent::models::find_task_model_entry(&models, "openai/gpt-6-astra")
+        .expect("alias must resolve");
+    assert_eq!(key, "openai-codex/gpt-6-astra");
+}
+
+#[test]
 fn gpt55_openai_slash_slug_aliases_to_openai_codex() {
     let mut models = indexmap::IndexMap::new();
     models.insert(

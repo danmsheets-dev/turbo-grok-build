@@ -3991,12 +3991,13 @@ fn platform_effort_option(
 /// Official OpenAI Codex catalog (`codex-rs/models-manager/models.json`)
 /// `supported_reasoning_levels` for a model id (slug without platform prefix).
 ///
-/// Source of truth for GPT-5.6 Sol/Terra/Luna effort menus (includes `max` /
-/// `ultra` where the Codex CLI exposes them). Pi's thinkingLevelMap is a
-/// partial projection (has `max` for 5.6, not `ultra`); we prefer the Codex
-/// catalog so Sol/Terra users can pick Ultra. Note that `ultra` currently
-/// maps to the same wire value as `max`; automatic task delegation is a
-/// future capability and is not advertised in the option description.
+/// Source of truth for GPT-6 Astra and GPT-5.6 Sol/Terra/Luna effort menus
+/// (includes `max` / `ultra` where the Codex CLI exposes them). Pi's
+/// thinkingLevelMap is a partial projection (has `max` for 5.6, not `ultra`);
+/// we prefer the Codex catalog so Sol/Terra/Astra users can pick Ultra. Note
+/// that `ultra` currently maps to the same wire value as `max`; automatic
+/// task delegation is a future capability and is not advertised in the
+/// option description.
 fn openai_codex_catalog_efforts(
     model: &str,
 ) -> Option<(ReasoningEffort, Vec<(ReasoningEffort, &'static str)>)> {
@@ -4010,12 +4011,13 @@ fn openai_codex_catalog_efforts(
     const HIGH: (E, &str) = (E::High, "Greater reasoning depth for complex problems");
     const XHIGH: (E, &str) = (E::Xhigh, "Extra high reasoning depth for complex problems");
     const MAX: (E, &str) = (E::Max, "Maximum reasoning depth for the hardest problems");
-    // Codex CLI catalog exposes an `ultra` level for Sol/Terra. The wire value
-    // is currently identical to `max` (see `reasoning_effort_for_request`):
-    // there is no distinct API effort string, and automatic task delegation
-    // is a future client-side multi-agent policy, not a current capability.
-    // The label is kept to match the Codex CLI menu, but the description must
-    // not promise delegation that has not shipped.
+    // Codex CLI catalog exposes an `ultra` level for Sol/Terra/Astra. The
+    // wire value is currently identical to `max` (see
+    // `reasoning_effort_for_request`): there is no distinct API effort
+    // string, and automatic task delegation is a future client-side
+    // multi-agent policy, not a current capability. The label is kept to
+    // match the Codex CLI / desktop menu, but the description must not
+    // promise delegation that has not shipped.
     const ULTRA: (E, &str) = (
         E::Ultra,
         "Highest reasoning tier (wire: max; same payload as Max for now)",
@@ -4025,8 +4027,14 @@ fn openai_codex_catalog_efforts(
     // GPT-5.6 adds max; Sol/Terra also add ultra.
     let with_max = [LOW, MEDIUM, HIGH, XHIGH, MAX];
     let with_ultra = [LOW, MEDIUM, HIGH, XHIGH, MAX, ULTRA];
+    // GPT-6 Astra (Codex desktop/Work/IDE): Light · Medium · High · Extra
+    // High · Ultra. Light is the Low wire token; Extra High is xhigh;
+    // Ultra wires as max. Max is not a separate picker step.
+    let astra = [LOW, MEDIUM, HIGH, XHIGH, ULTRA];
 
     let (default, rows) = match model {
+        // Codex catalog (2026-09): Astra default medium.
+        "gpt-6-astra" => (E::Medium, astra.as_slice()),
         // Codex catalog (2026): sol default low; terra/luna default medium.
         "gpt-5.6-sol" => (E::Low, with_ultra.as_slice()),
         "gpt-5.6-terra" => (E::Medium, with_ultra.as_slice()),
@@ -4034,6 +4042,7 @@ fn openai_codex_catalog_efforts(
         "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.2" => (E::Medium, base.as_slice()),
         // Offline fallback not in current Codex models.json — same as 5.4.
         "gpt-5.3-codex-spark" => (E::Low, base.as_slice()),
+        _ if model.starts_with("gpt-6") => (E::Medium, astra.as_slice()),
         _ if model.starts_with("gpt-5.6") => (E::Medium, with_max.as_slice()),
         _ if model.starts_with("gpt-5") => (E::Medium, base.as_slice()),
         _ => return None,
@@ -4044,8 +4053,10 @@ fn openai_codex_catalog_efforts(
 /// Per-model reasoning-effort menu for built-in platform catalogs.
 ///
 /// OpenAI Codex: official Codex CLI `supported_reasoning_levels` (not a
-/// single global low/medium/max). GPT-5.6 Sol/Terra expose **max** and
-/// **ultra**; Luna exposes max but not ultra; 5.5/5.4 stop at xhigh.
+/// single global low/medium/max). GPT-6 Astra exposes Light / Medium /
+/// High / Extra High / Ultra (Low / Medium / High / Xhigh / Ultra on the
+/// wire). GPT-5.6 Sol/Terra expose **max** and **ultra**; Luna exposes max
+/// but not ultra; 5.5/5.4 stop at xhigh.
 ///
 /// Kimi K3: Pi `KIMI_K3_THINKING_LEVEL_MAP` → low / high / max only.
 fn platform_builtin_reasoning_efforts(
@@ -4067,15 +4078,18 @@ fn platform_builtin_reasoning_efforts(
                     ],
                 );
             };
+            let astra_labels = model == "gpt-6-astra" || model.starts_with("gpt-6");
             let opts = rows
                 .into_iter()
                 .map(|(value, desc)| {
                     platform_effort_option(
                         value,
                         match value {
+                            E::Low if astra_labels => "Light",
                             E::Low => "Low",
                             E::Medium => "Medium",
                             E::High => "High",
+                            E::Xhigh if astra_labels => "Extra High",
                             E::Xhigh => "X-High",
                             E::Max => "Max",
                             E::Ultra => "Ultra",
@@ -8287,12 +8301,42 @@ reasoning_effort = "low"
         }
     }
 
-    /// GPT-5.6 Sol/Terra expose max+ultra; Luna max only — matches Codex
-    /// `models.json` `supported_reasoning_levels`.
+    /// GPT-6 Astra: Light/Medium/High/Extra High/Ultra. GPT-5.6 Sol/Terra
+    /// expose max+ultra; Luna max only — matches Codex `models.json`
+    /// `supported_reasoning_levels`.
     #[test]
     fn openai_codex_builtin_exposes_codex_catalog_effort_menu() {
         let mut catalog = IndexMap::new();
         inject_moonshot_builtin_models(&mut catalog);
+        let astra = catalog
+            .get("openai-codex/gpt-6-astra")
+            .expect("astra builtin present");
+        assert!(astra.info.supports_reasoning_effort);
+        assert_eq!(astra.info.reasoning_effort, Some(ReasoningEffort::Medium));
+        let astra_vals: Vec<_> = astra
+            .info
+            .reasoning_efforts
+            .iter()
+            .map(|o| (o.value, o.label.as_str()))
+            .collect();
+        assert_eq!(
+            astra_vals,
+            vec![
+                (ReasoningEffort::Low, "Light"),
+                (ReasoningEffort::Medium, "Medium"),
+                (ReasoningEffort::High, "High"),
+                (ReasoningEffort::Xhigh, "Extra High"),
+                (ReasoningEffort::Ultra, "Ultra"),
+            ]
+        );
+        assert!(
+            !astra
+                .info
+                .reasoning_efforts
+                .iter()
+                .any(|o| o.value == ReasoningEffort::Max),
+            "Astra picker has Extra High + Ultra, not a separate Max step"
+        );
         let sol = catalog
             .get("openai-codex/gpt-5.6-sol")
             .expect("sol builtin present");
@@ -8333,6 +8377,25 @@ reasoning_effort = "low"
         assert!(
             !luna_vals.contains(&ReasoningEffort::Ultra),
             "Luna has max but not ultra in Codex catalog"
+        );
+        let spark = catalog
+            .get("openai-codex/gpt-5.3-codex-spark")
+            .expect("spark present");
+        assert_eq!(spark.info.reasoning_effort, Some(ReasoningEffort::Low));
+        let spark_vals: Vec<_> = spark
+            .info
+            .reasoning_efforts
+            .iter()
+            .map(|o| o.value)
+            .collect();
+        assert_eq!(
+            spark_vals,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh,
+            ]
         );
         // 5.5 stops at xhigh (no max/ultra).
         let g55 = catalog.get("openai-codex/gpt-5.5").expect("5.5 present");

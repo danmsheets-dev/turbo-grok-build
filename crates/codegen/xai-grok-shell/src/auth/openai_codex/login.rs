@@ -67,11 +67,13 @@ pub async fn run_openai_codex_login(
         eprintln!("  Account: {email}");
     }
     eprintln!("  Models:");
+    eprintln!("    openai-codex/gpt-6-astra");
     eprintln!("    openai-codex/gpt-5.6-sol");
     eprintln!("    openai-codex/gpt-5.6-terra");
+    eprintln!("    openai-codex/gpt-5.3-codex-spark");
     eprintln!("    openai-codex/gpt-5.5");
-    eprintln!("  e.g.  grok -m openai-codex/gpt-5.6-sol -p \"ping\"");
-    eprintln!("  TUI:  /model openai-codex/gpt-5.6-sol");
+    eprintln!("  e.g.  grok -m openai-codex/gpt-6-astra -p \"ping\"");
+    eprintln!("  TUI:  /model openai-codex/gpt-6-astra");
     Ok(auth)
 }
 

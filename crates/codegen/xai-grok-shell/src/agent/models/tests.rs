@@ -2558,6 +2558,50 @@ fn nvidia_catalog_entry(
 }
 
 #[test]
+fn gpt53_spark_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-5.3-codex-spark".to_string(),
+        make_model_entry("gpt-5.3-codex-spark"),
+    );
+    for slug in [
+        "openai/gpt-5.3-codex-spark",
+        "gpt-5.3-codex-spark",
+        "openai/gpt-5.3-spark",
+        "gpt-5.3-spark",
+    ] {
+        assert!(
+            task_model_error_for_catalog(slug, &models, false).is_none(),
+            "{slug} must resolve to openai-codex/gpt-5.3-codex-spark"
+        );
+        let (key, _) = find_task_model_entry(&models, slug).expect("spark alias must resolve");
+        assert_eq!(key, "openai-codex/gpt-5.3-codex-spark");
+    }
+}
+
+#[test]
+fn gpt6_astra_openai_slash_slug_aliases_to_openai_codex() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "openai-codex/gpt-6-astra".to_string(),
+        make_model_entry("gpt-6-astra"),
+    );
+    for slug in [
+        "openai/gpt-6-astra",
+        "gpt-6-astra",
+        "gpt-6",
+        "openrouter/openai/gpt-6-astra",
+    ] {
+        assert!(
+            task_model_error_for_catalog(slug, &models, false).is_none(),
+            "{slug} must resolve to openai-codex/gpt-6-astra"
+        );
+        let (key, _) = find_task_model_entry(&models, slug).expect("astra alias must resolve");
+        assert_eq!(key, "openai-codex/gpt-6-astra");
+    }
+}
+
+#[test]
 fn gpt55_openai_slash_slug_aliases_to_openai_codex() {
     let mut models = IndexMap::new();
     models.insert(

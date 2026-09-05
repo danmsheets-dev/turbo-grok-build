@@ -2571,21 +2571,25 @@ fn anthropic_claude_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
 ///
 /// Model lineup mirrors the Codex app-server `model/list` response and
 /// official Pi `openai-codex` provider. The backend speaks the Responses
-/// API with `store: false` + encrypted reasoning; GPT-5 family window is
-/// 400k with 128k max output.
+/// API with `store: false` + encrypted reasoning. GPT-5 family window is
+/// 400k with 128k max output; GPT-6 Astra is 1,050,000 context.
 fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     // Context window is for local budget UI only. Do **not** stamp
     // max_completion_tokens: ChatGPT Codex rejects `max_output_tokens`
     // (`{"detail":"Unsupported parameter: max_output_tokens"}`).
     const CTX_400K: u64 = 400_000;
+    const CTX_ASTRA: u64 = 1_050_000;
     macro_rules! codex {
         ($id:literal, $name:literal, $desc:literal) => {
+            codex!($id, $name, $desc, CTX_400K)
+        };
+        ($id:literal, $name:literal, $desc:literal, $ctx:expr) => {
             BuiltinPlatformModel {
                 provider: PlatformId::OpenAiCodex.provider_id(),
                 model: $id.into(),
                 name: $name.into(),
                 description: $desc.into(),
-                context_window: CTX_400K,
+                context_window: $ctx,
                 supports_reasoning_effort: true,
                 supported_in_api: false,
                 catalog_available: true,
@@ -2605,6 +2609,12 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     }
     vec![
         codex!(
+            "gpt-6-astra",
+            "GPT-6 Astra (ChatGPT)",
+            "Most capable Codex model for complex end-to-end work (ChatGPT subscription)",
+            CTX_ASTRA
+        ),
+        codex!(
             "gpt-5.6-sol",
             "GPT-5.6 Sol (ChatGPT)",
             "Latest frontier agentic coding model (ChatGPT subscription)"
@@ -2620,6 +2630,11 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
             "Fast and affordable agentic coding model (ChatGPT subscription)"
         ),
         codex!(
+            "gpt-5.3-codex-spark",
+            "GPT-5.3 Codex Spark (ChatGPT)",
+            "Ultra-fast coding model for near-instant iteration (ChatGPT subscription)"
+        ),
+        codex!(
             "gpt-5.5",
             "GPT-5.5 (ChatGPT)",
             "Frontier model for complex coding and research (ChatGPT subscription)"
@@ -2633,11 +2648,6 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
             "gpt-5.4-mini",
             "GPT-5.4 Mini (ChatGPT)",
             "Small, fast model for simpler coding tasks (ChatGPT subscription)"
-        ),
-        codex!(
-            "gpt-5.3-codex-spark",
-            "GPT-5.3 Codex Spark (ChatGPT)",
-            "Ultra-fast coding model (ChatGPT subscription)"
         ),
     ]
 }
@@ -3792,6 +3802,26 @@ mod tests {
                 .base_url_matches("https://chatgpt.com/backend-api/codex/responses")
         );
         assert!(!PlatformId::OpenAiCodex.base_url_matches("https://api.openai.com/v1"));
+
+        let astra = platform_builtin_models()
+            .iter()
+            .find(|model| model.catalog_key() == "openai-codex/gpt-6-astra")
+            .expect("openai-codex/gpt-6-astra");
+        assert_eq!(astra.name, "GPT-6 Astra (ChatGPT)");
+        assert_eq!(astra.context_window, 1_050_000);
+        assert!(astra.supports_reasoning_effort);
+        assert!(astra.picker_visible);
+        assert!(!astra.eol);
+
+        let spark = platform_builtin_models()
+            .iter()
+            .find(|model| model.catalog_key() == "openai-codex/gpt-5.3-codex-spark")
+            .expect("openai-codex/gpt-5.3-codex-spark");
+        assert_eq!(spark.name, "GPT-5.3 Codex Spark (ChatGPT)");
+        assert!(spark.supports_reasoning_effort);
+        assert!(spark.picker_visible);
+        assert!(!spark.eol);
+
         assert_eq!(PlatformId::parse("openai"), Some(PlatformId::OpenAi));
         assert_eq!(PlatformId::parse("anthropic"), Some(PlatformId::Anthropic));
         assert!(PlatformId::Anthropic.uses_x_api_key());

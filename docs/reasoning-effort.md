@@ -32,9 +32,9 @@ Not every model accepts every tier. `turbo models --json` surfaces:
 
 ```json
 {
-  "id": "openai-codex/gpt-5.6-terra",
+  "id": "openai-codex/gpt-6-astra",
   "supportsReasoningEffort": true,
-  "supportedEfforts": ["low", "medium", "high", "xhigh", "max"]
+  "supportedEfforts": ["low", "medium", "high", "xhigh", "ultra"]
 }
 ```
 

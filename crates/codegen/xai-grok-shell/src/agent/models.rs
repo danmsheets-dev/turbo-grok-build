@@ -299,6 +299,7 @@ pub(crate) fn spawnable_task_model_catalog(
 /// Common slugs agents copy from session briefs / NVIDIA docs that are not
 /// the catalog key Turbo spawn accepts.
 ///
+/// - Astra: `openai/gpt-6-astra` → `openai-codex/gpt-6-astra`
 /// - Luna: `openai/gpt-5.6-luna` → `openai-codex/gpt-5.6-luna`
 /// - Lightning: `nvidia/nemotron-3.5-lightning-30b-a3b` →
 ///   `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b`
@@ -309,6 +310,13 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
     let mut out = Vec::new();
 
     const CODEX_FAMILY: &[(&str, &str)] = &[
+        ("openai/gpt-6-astra", "openai-codex/gpt-6-astra"),
+        ("openai/gpt-6-astra-pro", "openai-codex/gpt-6-astra-pro"),
+        ("openai/gpt-6", "openai-codex/gpt-6-astra"),
+        ("gpt-6-astra", "openai-codex/gpt-6-astra"),
+        ("gpt-6-astra-pro", "openai-codex/gpt-6-astra-pro"),
+        ("gpt-6", "openai-codex/gpt-6-astra"),
+        ("openrouter/openai/gpt-6-astra", "openai-codex/gpt-6-astra"),
         ("openai/gpt-5.6-luna", "openai-codex/gpt-5.6-luna"),
         ("openai/gpt-5.6-luna-pro", "openai-codex/gpt-5.6-luna-pro"),
         ("gpt-5.6-luna", "openai-codex/gpt-5.6-luna"),
@@ -342,6 +350,8 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
             "openai-codex/gpt-5.3-codex-spark",
         ),
         ("gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"),
+        ("openai/gpt-5.3-spark", "openai-codex/gpt-5.3-codex-spark"),
+        ("gpt-5.3-spark", "openai-codex/gpt-5.3-codex-spark"),
     ];
     for (from, to) in CODEX_FAMILY {
         if lower == *from || lower.ends_with(&format!("/{from}")) {
@@ -369,10 +379,7 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
         out.push("nvidia/meta/muse-glimmer-30b".into());
         out.push("nvidia/muse-glimmer-30b".into());
     }
-    if lower.contains("thinkingmachines/inkling")
-        || lower == "inkling"
-        || lower == "inkling:free"
-    {
+    if lower.contains("thinkingmachines/inkling") || lower == "inkling" || lower == "inkling:free" {
         out.push("openrouter/thinkingmachines/inkling:free".into());
         out.push("openrouter/thinkingmachines/inkling".into());
     }

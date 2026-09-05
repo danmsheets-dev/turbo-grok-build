@@ -52,6 +52,23 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [1.0.13-rc.2] - 2026-09-05
+
+### Added
+- **ChatGPT Codex `gpt-6-astra`.** Catalog key `openai-codex/gpt-6-astra`
+  (aliases `openai/gpt-6-astra`, `gpt-6-astra`, `gpt-6`). Thinking menu
+  matches the Codex desktop picker: **Light**, **Medium**, **High**,
+  **Extra High**, **Ultra** (wire tokens `low` / `medium` / `high` /
+  `xhigh` / `ultra`→`max`). Context window 1,050,000. Default effort is
+  Medium.
+- **ChatGPT Codex Spark is a first-class picker model.**
+  `openai-codex/gpt-5.3-codex-spark` sits with the current Codex lineup
+  (after Luna), is listed after login, and accepts `gpt-5.3-spark` /
+  `openai/gpt-5.3-spark` spawn aliases. Effort menu is low · medium ·
+  high · xhigh (default low).
+
+---
+
 ## [1.0.13-rc.1] - 2026-09-02
 
 ### Security
