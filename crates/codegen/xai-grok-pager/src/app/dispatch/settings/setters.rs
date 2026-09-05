@@ -1848,8 +1848,9 @@ pub(in crate::app::dispatch) fn set_default_model(
     //
     // Chat (`--chat` / GROK_CHAT_MODE) catalogs use opaque `/rest/modes`
     // slugs that must not become the global Build `default_model`.
-    // Codex (`codex:*`) ids are session-scoped subscription routes; they are
-    // not Grok catalog models and must never persist as `default_model`.
+    // Codex (`codex:*` and native `openai-codex/*`) ids are session-scoped
+    // subscription routes; they are not Grok catalog models and must never
+    // persist as `default_model` (that file is shared by every turbo window).
     let mut effects: Vec<Effect> = Vec::new();
     if !xai_grok_shell::agent::chat_modes::process_chat_mode_enabled() && !is_codex {
         let new_id_str = new_id.0.to_string();

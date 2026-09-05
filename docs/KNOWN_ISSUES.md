@@ -3,7 +3,20 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-09-05 (1.0.13-rc.2 Codex catalog).
+Last reviewed: 2026-09-05 (1.0.13-rc.3 Codex isolation + Spark spawn).
+
+## 1.0.13-rc.3 — Codex window isolation + Spark spawn aliases
+
+Shipped on wire `1.0.13-rc.3`. Full notes: [CHANGELOG.md](../CHANGELOG.md).
+
+- Native `openai-codex/*` picker choices no longer persist as shared
+  `[models].default`, so switching Codex in one Turbo window does not
+  retarget the others.
+- Subagent spawn accepts short Spark slugs (`spark`, `codex-spark`,
+  `gpt-5.3-spark`) for `openai-codex/gpt-5.3-codex-spark`.
+- The release workflow still fails at start in GitHub Actions, so the
+  Windows binary is built locally with `release-dist` and uploaded by hand;
+  verify against `SHA256SUMS`.
 
 ## 1.0.13-rc.2 — Codex catalog
 

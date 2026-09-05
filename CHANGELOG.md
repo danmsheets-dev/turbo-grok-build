@@ -52,6 +52,24 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [1.0.13-rc.3] - 2026-09-05
+
+### Fixed
+- **Codex model picks stay in the window that chose them.** Native
+  `openai-codex/*` ids (Astra, Sol, Spark, …) were written to shared
+  `~/.grok/config.toml` as `[models].default` because persist-skip still
+  matched only the legacy `codex:` prefix. Other Turbo windows hot-reloaded
+  that default and retargeted new sessions / some subagent fallbacks.
+  Codex is session-only again. CLI `-m` / `GROK_DEFAULT_MODEL` still work.
+
+### Added
+- **Spark spawn aliases for subagents.** `spark`, `codex-spark`,
+  `gpt-5.3-spark`, and `openai-codex/spark` resolve to
+  `openai-codex/gpt-5.3-codex-spark` and are advertised on the spawn catalog
+  when Spark is available.
+
+---
+
 ## [1.0.13-rc.2] - 2026-09-05
 
 ### Added

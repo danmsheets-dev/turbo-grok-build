@@ -19,7 +19,7 @@ pub(crate) const CODEX_MODEL_PREFIX: &str = "codex:";
 pub(crate) const OPENAI_CODEX_MODEL_PREFIX: &str = "openai-codex/";
 
 pub(crate) fn is_codex_model(model_id: &acp::ModelId) -> bool {
-    model_id.0.as_ref().starts_with(CODEX_MODEL_PREFIX)
+    xai_grok_models::is_session_scoped_catalog_id(model_id.0.as_ref())
 }
 
 /// Map a legacy `codex:<model>` id onto the native `openai-codex/<model>`
@@ -110,8 +110,9 @@ impl acp::Agent for ProviderRouterAgent {
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
         // Legacy sessions saved a `codex:<model>` id from the app-server
         // era; rewrite onto the native catalog id before delegating.
+        // Native `openai-codex/*` ids pass through unchanged.
         let requested = args.model_id.0.as_ref();
-        if is_codex_model(&args.model_id) {
+        if requested.starts_with(CODEX_MODEL_PREFIX) {
             let migrated = migrate_model_id(requested);
             tracing::info!(
                 requested,
@@ -172,12 +173,18 @@ mod tests {
     }
 
     #[test]
-    fn is_codex_model_matches_only_legacy_prefix() {
+    fn is_codex_model_matches_legacy_and_native_prefix() {
         assert!(is_codex_model(&acp::ModelId::new(
             std::sync::Arc::<str>::from("codex:gpt-5.4")
         )));
-        assert!(!is_codex_model(&acp::ModelId::new(
+        assert!(is_codex_model(&acp::ModelId::new(
             std::sync::Arc::<str>::from("openai-codex/gpt-5.4")
+        )));
+        assert!(is_codex_model(&acp::ModelId::new(
+            std::sync::Arc::<str>::from("openai-codex/gpt-6-astra")
+        )));
+        assert!(!is_codex_model(&acp::ModelId::new(
+            std::sync::Arc::<str>::from("grok-4.5")
         )));
     }
 }

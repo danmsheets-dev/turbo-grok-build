@@ -455,6 +455,13 @@ pub async fn persist_models_default(
             super::settings_writes::MAX_DEFAULT_MODEL_LEN
         );
     }
+    if xai_grok_models::is_session_scoped_catalog_id(&s) {
+        tracing::info!(
+            model = %s,
+            "refusing to persist ChatGPT Codex model as models.default"
+        );
+        return Ok(());
+    }
     persist_user_choice(MODELS_DEFAULT_PATH, move |cfg| {
         cfg.models.default = if s.is_empty() { None } else { Some(s) };
         if let Some(effort) = reasoning_effort {

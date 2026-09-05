@@ -991,6 +991,38 @@ fn switch_model_deferred_when_no_session_id() {
     );
     assert!(!app.agents[&id].session.model_switch_pending);
 }
+
+#[test]
+fn switch_model_deferred_never_persists_native_openai_codex() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("openai-codex/gpt-6-astra"));
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    let effects = dispatch(
+        Action::SwitchModel {
+            model_id: model_id.clone(),
+            effort: None,
+        },
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "deferred Codex switch must not persist, got {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.models.current,
+        Some(model_id.clone())
+    );
+    assert_eq!(
+        app.agents[&id].session.deferred_model_switch,
+        Some(crate::app::agent::DeferredModelSwitch {
+            model_id,
+            effort: None,
+            prev_model_id: None,
+        })
+    );
+}
+
 #[test]
 fn deferred_switch_threads_stash_prev_into_effect() {
     let mut app = test_app_with_agent();

@@ -1048,7 +1048,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                         effort,
                         prev_model_id: rollback_prev,
                     });
-                return if unchanged {
+                return if unchanged || crate::acp::router::is_codex_model(&model_id) {
                     vec![]
                 } else {
                     vec![Effect::PersistPreferredModel {

@@ -1480,6 +1480,27 @@ fn failed_refresh_does_not_set_has_fetched_real_catalog() {
 // ── apply_config: honor changed preferred model from config ────────
 
 #[test]
+fn apply_config_ignores_openai_codex_preferred_from_other_window() {
+    let mgr = test_manager();
+    let mut cfg = config::Config::default();
+    cfg.models.default = Some("grok-4".to_string());
+
+    let prefetched = make_prefetched(&["grok-3", "grok-4", "openai-codex/gpt-6-astra"]);
+    mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+    mgr.set_current_model_id(acp::ModelId::new("grok-4"));
+
+    let mut new_cfg = config::Config::default();
+    new_cfg.models.default = Some("openai-codex/gpt-6-astra".to_string());
+    mgr.apply_config(new_cfg);
+
+    assert_eq!(
+        mgr.current_model_id().0.as_ref(),
+        "grok-4",
+        "another window persisting a Codex model must not retarget this process"
+    );
+}
+
+#[test]
 fn apply_config_honors_new_preferred_model() {
     let mgr = test_manager();
     let mut cfg = config::Config::default();
@@ -2301,6 +2322,26 @@ fn build_prefetched_map_duplicate_id_overwrites() {
 }
 
 #[test]
+fn resolve_default_model_ignores_config_openai_codex_default() {
+    let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+    catalog.insert("grok-3".to_string(), make_model_entry("grok-3"));
+    catalog.insert("grok-4".to_string(), make_model_entry("grok-4"));
+    let mut astra = make_model_entry("gpt-6-astra");
+    astra.api_key = Some("sk-test".to_string());
+    catalog.insert("openai-codex/gpt-6-astra".to_string(), astra);
+
+    let mut cfg = config::Config::default();
+    cfg.models.default = Some("openai-codex/gpt-6-astra".to_string());
+
+    let (key, _, source) = resolve_default_model(&cfg, &catalog, true);
+    assert_eq!(
+        key, "grok-3",
+        "config.toml Codex default must not become the process default"
+    );
+    assert_eq!(source, config::ConfigSource::Default);
+}
+
+#[test]
 fn resolve_default_model_prefers_id_over_model_slug() {
     let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
     catalog.insert(
@@ -2560,15 +2601,20 @@ fn nvidia_catalog_entry(
 #[test]
 fn gpt53_spark_openai_slash_slug_aliases_to_openai_codex() {
     let mut models = IndexMap::new();
+    let mut spark = make_model_entry("gpt-5.3-codex-spark");
+    spark.api_key = Some("sk-test".to_string());
     models.insert(
         "openai-codex/gpt-5.3-codex-spark".to_string(),
-        make_model_entry("gpt-5.3-codex-spark"),
+        spark,
     );
     for slug in [
         "openai/gpt-5.3-codex-spark",
         "gpt-5.3-codex-spark",
         "openai/gpt-5.3-spark",
         "gpt-5.3-spark",
+        "spark",
+        "codex-spark",
+        "openai-codex/spark",
     ] {
         assert!(
             task_model_error_for_catalog(slug, &models, false).is_none(),
@@ -2576,6 +2622,13 @@ fn gpt53_spark_openai_slash_slug_aliases_to_openai_codex() {
         );
         let (key, _) = find_task_model_entry(&models, slug).expect("spark alias must resolve");
         assert_eq!(key, "openai-codex/gpt-5.3-codex-spark");
+    }
+    let catalog = spawnable_task_model_catalog(&models, true, None);
+    for slug in ["spark", "codex-spark", "gpt-5.3-spark"] {
+        assert!(
+            catalog.advertised.iter().any(|s| s == slug),
+            "{slug} must be advertised for spawn_subagent"
+        );
     }
 }
 

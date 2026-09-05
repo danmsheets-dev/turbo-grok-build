@@ -112,6 +112,24 @@ pub(crate) fn resolve_default_model(
             (key, first, config::ConfigSource::Default)
         }
         Some(pref) => {
+            // Codex subscription models are session-only. A leaked
+            // `models.default = "openai-codex/…"` in config.toml (from the
+            // native-id persist bug) must not become this process default.
+            // CLI `-m` / `GROK_DEFAULT_MODEL` still win.
+            if xai_grok_models::is_session_scoped_catalog_id(&pref.value)
+                && !matches!(
+                    pref.source,
+                    config::ConfigSource::Cli | config::ConfigSource::Env
+                )
+            {
+                tracing::info!(
+                    model_id = %pref.value,
+                    source = %pref.source,
+                    "ignoring session-scoped Codex model as config default"
+                );
+                let (key, first) = first_or_fallback();
+                return (key, first, config::ConfigSource::Default);
+            }
             let found = visible
                 .get_key_value(&pref.value)
                 .or_else(|| visible.iter().find(|(_, m)| m.model == pref.value));

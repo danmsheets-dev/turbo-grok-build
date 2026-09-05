@@ -10,7 +10,7 @@ installation is required: Grok talks to the ChatGPT Codex backend directly.
 | Platform id | `openai-codex` |
 | Inference | `https://chatgpt.com/backend-api/codex` (Responses API, SSE) |
 | OAuth host | `https://auth.openai.com` |
-| Catalog models | `openai-codex/gpt-6-astra`, `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.3-codex-spark`, `openai-codex/gpt-5.5`, `openai-codex/gpt-5.4`, `openai-codex/gpt-5.4-mini` |
+| Catalog models | `openai-codex/gpt-6-astra`, `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.3-codex-spark` (spawn aliases `spark`, `codex-spark`, `gpt-5.3-spark`), `openai-codex/gpt-5.5`, `openai-codex/gpt-5.4`, `openai-codex/gpt-5.4-mini` |
 | Protocol | OpenAI Responses API with `store: false`, encrypted reasoning, `instructions` system prompt |
 
 xAI login and other platform credentials remain independent. Codex

@@ -240,7 +240,7 @@ fn spawn_catalog_candidate(
 }
 
 fn openai_codex_spawn_aliases(slugs: &[String], existing_keys: &[String]) -> Vec<String> {
-    slugs
+    let mut out: Vec<String> = slugs
         .iter()
         .filter_map(|key| {
             let rest = key.strip_prefix("openai-codex/")?;
@@ -251,7 +251,20 @@ fn openai_codex_spawn_aliases(slugs: &[String], existing_keys: &[String]) -> Vec
                 Some(alias)
             }
         })
-        .collect()
+        .collect();
+    // Short Spark slugs so spawn_subagent `model: spark` resolves without the
+    // full `openai-codex/gpt-5.3-codex-spark` catalog key.
+    if slugs
+        .iter()
+        .any(|key| key == "openai-codex/gpt-5.3-codex-spark")
+    {
+        for extra in ["spark", "codex-spark", "gpt-5.3-spark"] {
+            if !existing_keys.iter().any(|k| k == extra) && !out.iter().any(|k| k == extra) {
+                out.push(extra.to_string());
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn spawnable_task_model_catalog(
@@ -352,6 +365,9 @@ fn task_model_aliases(requested: &str) -> Vec<String> {
         ("gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"),
         ("openai/gpt-5.3-spark", "openai-codex/gpt-5.3-codex-spark"),
         ("gpt-5.3-spark", "openai-codex/gpt-5.3-codex-spark"),
+        ("spark", "openai-codex/gpt-5.3-codex-spark"),
+        ("codex-spark", "openai-codex/gpt-5.3-codex-spark"),
+        ("openai-codex/spark", "openai-codex/gpt-5.3-codex-spark"),
     ];
     for (from, to) in CODEX_FAMILY {
         if lower == *from || lower.ends_with(&format!("/{from}")) {
@@ -904,6 +920,9 @@ impl ModelsManager {
         }
 
         let preferred_changed = new_preferred != old_preferred && new_preferred.is_some();
+        let new_is_session_scoped = new_preferred
+            .as_deref()
+            .is_some_and(xai_grok_models::is_session_scoped_catalog_id);
         let mut campaign_defaults = std::collections::HashSet::new();
         if new_config.models.default_is_campaign_driven
             && let Some(d) = &new_preferred
@@ -923,7 +942,10 @@ impl ModelsManager {
                 .get(cur.0.as_ref())
                 .is_some_and(|e| e.info.user_selectable)
         };
-        if preferred_changed && !(campaign_only_flip && current_still_ok) {
+        // Codex ids are session-scoped. Another turbo window persisting one
+        // as `[models].default` must not retarget this process's current model.
+        if preferred_changed && !new_is_session_scoped && !(campaign_only_flip && current_still_ok)
+        {
             self.reselect_default_model(&new_config);
         } else {
             self.reselect_current_model_if_missing(&new_config);

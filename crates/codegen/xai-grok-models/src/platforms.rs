@@ -1193,6 +1193,16 @@ pub fn parse_managed_model_key(key: &str) -> Option<(ProviderId, &str)> {
     Some((spec.id.clone(), model_id))
 }
 
+/// ChatGPT Codex catalog ids must not persist as `[models].default`.
+///
+/// Native picker ids are `openai-codex/<model>`. Legacy app-server sessions
+/// used `codex:<model>`. Both are session-scoped subscription routes, not a
+/// Grok-catalog default shared across turbo windows via `~/.grok/config.toml`.
+pub fn is_session_scoped_catalog_id(id: &str) -> bool {
+    let id = id.trim();
+    id.starts_with("codex:") || id.starts_with("openai-codex/")
+}
+
 /// Wire API backend for a built-in catalog entry (maps to shell `ApiBackend`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformApiBackend {
@@ -3821,6 +3831,12 @@ mod tests {
         assert!(spark.supports_reasoning_effort);
         assert!(spark.picker_visible);
         assert!(!spark.eol);
+
+        assert!(is_session_scoped_catalog_id("openai-codex/gpt-6-astra"));
+        assert!(is_session_scoped_catalog_id("codex:gpt-5.5"));
+        assert!(is_session_scoped_catalog_id(" openai-codex/gpt-5.6-sol "));
+        assert!(!is_session_scoped_catalog_id("grok-4.5"));
+        assert!(!is_session_scoped_catalog_id("openai/gpt-5.6-sol"));
 
         assert_eq!(PlatformId::parse("openai"), Some(PlatformId::OpenAi));
         assert_eq!(PlatformId::parse("anthropic"), Some(PlatformId::Anthropic));
