@@ -112,6 +112,7 @@ echo "==> embedded assets are LF-pinned (include_str! / include_bytes!)"
 # not by extension, so a NEW `.rs` include still fails here and gets a
 # deliberate decision instead of inheriting a blanket exemption.
 scan_only_sources="
+crates/codegen/xai-grok-meeting-bot/src/selectors.rs
 crates/codegen/xai-grok-pager-minimal/src/lib.rs
 crates/codegen/xai-grok-pager-minimal/src/auth.rs
 crates/codegen/xai-grok-pager-minimal/src/commit.rs
@@ -124,6 +125,8 @@ crates/codegen/xai-grok-pager-minimal/src/todo.rs
 crates/codegen/xai-grok-pager-minimal/src/welcome.rs
 crates/codegen/xai-grok-shell/src/agent/config.rs
 crates/codegen/xai-grok-tools/src/implementations/grok_build/read_file/mod.rs
+crates/codegen/xai-grok-voice/src/tts.rs
+crates/codegen/xai-grok-workspace/src/folder_trust.rs
 "
 printf '%s\n' $scan_only_sources | LC_ALL=C sort > "$tmp/scan_only"
 
