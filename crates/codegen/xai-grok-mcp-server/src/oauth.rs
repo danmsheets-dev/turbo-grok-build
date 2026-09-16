@@ -96,13 +96,59 @@ struct PendingCode {
     issued: Instant,
 }
 
+/// A moment a TTL is measured from.
+///
+/// Tests age these instead of waiting out a real TTL, and that must not be done
+/// by subtracting from the `Instant`: how far back an `Instant` can be moved is
+/// platform-defined, and under Rust 1.94 a Windows `Instant` cannot precede
+/// boot, so on a freshly booted host `checked_sub` of an hour fails. A test
+/// build records how far the moment was pushed back and adds that to
+/// `elapsed`; a release build carries only the `Instant`.
+#[derive(Debug, Clone, Copy)]
+struct Stamp {
+    at: Instant,
+    #[cfg(test)]
+    backdated: Duration,
+}
+
+impl Stamp {
+    fn new(at: Instant) -> Self {
+        Self {
+            at,
+            #[cfg(test)]
+            backdated: Duration::ZERO,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.at.elapsed().saturating_add(self.backdated())
+    }
+
+    #[cfg(not(test))]
+    fn backdated(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    #[cfg(test)]
+    fn backdated(&self) -> Duration {
+        self.backdated
+    }
+
+    /// Push this moment `by` further into the past. This cannot fail, so a test
+    /// always gets the age it asked for.
+    #[cfg(test)]
+    fn backdate(&mut self, by: Duration) {
+        self.backdated = self.backdated.saturating_add(by);
+    }
+}
+
 /// An issued access token and the refresh token that replaces it.
 #[derive(Debug, Clone)]
 struct Grant {
     client_id: String,
     /// The resource this token may be used at, checked on every MCP request.
     resource: String,
-    issued: Instant,
+    issued: Stamp,
     refresh: String,
     refresh_issued: Instant,
 }
@@ -186,7 +232,7 @@ struct Inner {
     /// has to carry the code from their terminal to the browser, so it cannot
     /// start at process start — a server up longer than the window would
     /// refuse every correct code it was ever given.
-    consent_started: Option<Instant>,
+    consent_started: Option<Stamp>,
 }
 
 impl OauthState {
@@ -210,7 +256,7 @@ impl OauthState {
     /// than the server's uptime. Serving the page again re-arms it: a first-run
     /// setup that takes a few tries is the normal case, not an attack.
     pub fn begin_consent(&self) {
-        self.lock().consent_started = Some(Instant::now());
+        self.lock().consent_started = Some(Stamp::new(Instant::now()));
     }
 
     /// The code the operator must enter to approve a connection.
@@ -264,15 +310,19 @@ impl OauthState {
     }
 
     /// Push the consent window back by `by`, so a test can reach an expiry that
-    /// is otherwise five minutes of wall clock away. Moving the stored instant
+    /// is otherwise five minutes of wall clock away. Moving the stored stamp
     /// rather than pausing the runtime: these tests drive a real listener and a
     /// real HTTP client, and a paused clock distorts both.
     #[cfg(test)]
     pub(crate) fn testing_age_consent(&self, by: Duration) {
-        let mut inner = self.lock();
-        // A window pushed further back than the process has existed is simply
-        // one that has closed, which is what `None` already means here.
-        inner.consent_started = inner.consent_started.and_then(|at| at.checked_sub(by));
+        // The window must stay open and old, never become `None`: `approve`
+        // refuses `None` the same way, so a window that silently vanished would
+        // let an expiry test pass without the elapsed time ever being judged.
+        self.lock()
+            .consent_started
+            .as_mut()
+            .expect("no consent window is open to age")
+            .backdate(by);
     }
 
     /// Age every grant's access token by `by`, leaving its refresh timestamp
@@ -281,10 +331,9 @@ impl OauthState {
     #[cfg(test)]
     pub(crate) fn testing_age_grants(&self, by: Duration) {
         let mut inner = self.lock();
+        assert!(!inner.grants.is_empty(), "there is no grant to age");
         for grant in inner.grants.values_mut() {
-            if let Some(earlier) = grant.issued.checked_sub(by) {
-                grant.issued = earlier;
-            }
+            grant.issued.backdate(by);
         }
     }
 
@@ -582,7 +631,7 @@ impl Inner {
             let Some(oldest) = self
                 .grants
                 .iter()
-                .min_by_key(|(_, grant)| grant.issued)
+                .min_by_key(|(_, grant)| grant.issued.at)
                 .map(|(access, _)| access.clone())
             else {
                 break;
@@ -601,7 +650,7 @@ impl Inner {
             Grant {
                 client_id,
                 resource,
-                issued: now,
+                issued: Stamp::new(now),
                 refresh: refresh.clone(),
                 refresh_issued: now,
             },

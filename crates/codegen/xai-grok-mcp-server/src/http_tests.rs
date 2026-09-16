@@ -1557,6 +1557,25 @@ async fn an_access_token_stops_working_after_the_hour_it_advertises() {
     );
 }
 
+/// The wire test above ages a grant by an hour, and on a freshly booted Windows
+/// runner it still got 200: under Rust 1.94 a Windows `Instant` cannot be moved
+/// back past boot, and aging skipped any grant it could not move. Aging further
+/// back than any host has been up shows that failure on every Windows host,
+/// however long it has been running.
+#[test]
+fn a_grant_aged_further_back_than_the_host_has_been_up_still_loses_its_access_token() {
+    let state = crate::oauth::OauthState::new("http://127.0.0.1:9/abc/mcp".to_string());
+    let token = state.testing_issue_grant("http://127.0.0.1:9/abc/mcp");
+    assert!(state.accepts(&token), "a fresh token is accepted");
+
+    let a_thousand_years = std::time::Duration::from_secs(1000 * 365 * 24 * 60 * 60);
+    state.testing_age_grants(a_thousand_years);
+    assert!(
+        !state.accepts(&token),
+        "a token aged past its hour is refused, however far back it was aged"
+    );
+}
+
 /// The head of a raw request to any path, carrying no credential: the OAuth
 /// endpoints answer before one exists, which is exactly why their cost has to
 /// be bounded. [`raw_request_head`] cannot be used, since it builds the MCP
