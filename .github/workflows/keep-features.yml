@@ -90,9 +90,30 @@ jobs:
         with:
           shared-key: keep-features-windows
 
-      # Same protoc launcher the Linux job needs.
-      - name: Install dotslash (protoc launcher)
-        run: cargo install dotslash --version 0.5.7 --locked
+      # Windows cannot exec the Unix dotslash launcher at bin/protoc (os error
+      # 193) even with dotslash installed, so this job's first runs died in
+      # the xai-grok-tools-api build script before any test ran. Install a
+      # real protoc.exe and point $PROTOC at it: find_protoc checks $PROTOC
+      # before bin/protoc, and the zip's include/ dir supplies the well-known
+      # types. Copied verbatim from release.yml (minus its runner.os guard);
+      # keep the URL and SHA256 in sync. No dotslash install here: bin/protoc
+      # is the repo's only dotslash launcher, and $PROTOC bypasses it.
+      - name: Install protoc (Windows)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip"
+          $expectedSha256 = "57ea59e9f551ad8d71ffaa9b5cfbe0ca1f4e720972a1db7ec2d12ab44bff9383"
+          Invoke-WebRequest -Uri $url -OutFile protoc.zip
+          $actualSha256 = (Get-FileHash protoc.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "protoc.zip SHA256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
+          Expand-Archive protoc.zip -DestinationPath "$env:USERPROFILE\protoc" -Force
+          $protoc = Join-Path $env:USERPROFILE "protoc\bin\protoc.exe"
+          if (-not (Test-Path $protoc)) { throw "protoc.exe missing at $protoc" }
+          & $protoc --version
+          Add-Content $env:GITHUB_PATH (Join-Path $env:USERPROFILE "protoc\bin")
+          Add-Content $env:GITHUB_ENV "PROTOC=$protoc"
 
       - name: MCP server containment boundary (Windows)
         shell: bash
