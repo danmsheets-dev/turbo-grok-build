@@ -20,6 +20,8 @@ tmp-about-out.txt
 
 # Prebuilt Windows ship binaries (attach to GitHub Releases; too large for git/LFS on public forks)
 releases/windows/*.exe
+releases/windows/*.zip
+releases/windows/SHA256SUMS
 /turbo-*.zip
 /SHA256SUMS
 
