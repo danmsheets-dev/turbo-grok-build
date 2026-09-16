@@ -27,10 +27,10 @@ A raw `.exe` on the release is a convenience copy only; auto-update ignores it.
 ```powershell
 irm https://github.com/danmsheets-dev/turbo-grok-build/releases/latest/download/install.ps1 | iex
 turbo update --check
-# → turbo 1.0.13-rc.3 (latest: 1.0.13-rc.3) [stable]
+# → turbo 1.0.13-rc.5 (latest: 1.0.13-rc.5) [stable]
 ```
 
-Or pin: `.\install.ps1 -Version v1.0.13-rc.3`
+Or pin: `.\install.ps1 -Version v1.0.13-rc.5`
 
 The zip must contain a root-level `turbo.exe` plus `bundled/`. The installer
 activates the binary at `%USERPROFILE%\.turbo\bin\turbo.exe` and the bundle at
@@ -40,7 +40,7 @@ activates the binary at `%USERPROFILE%\.turbo\bin\turbo.exe` and the bundle at
 
 ```text
 turbo version
-# → turbo 1.0.13-rc.3 (<commit>)
+# → turbo 1.0.13-rc.5 (<commit>)
 ```
 
 ## Local packaging note

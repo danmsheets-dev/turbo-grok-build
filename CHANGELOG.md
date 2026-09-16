@@ -52,6 +52,38 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [1.0.13-rc.5] - 2026-09-16
+
+CI and test fixes. `turbo` behaves the same at runtime as 1.0.13-rc.4; only
+the version changes.
+
+### Fixed
+- **The Windows keep-features gate builds and passes.** The
+  `mcp-server-windows` job added in rc.4 never reached its tests:
+  `xai-grok-tools-api`'s build script cannot execute the Unix dotslash launcher
+  at `bin/protoc` on Windows (os error 193). The job now installs the same
+  SHA256-pinned `protoc.exe` as `release.yml` and sets `PROTOC`.
+- **Two `xai-grok-mcp-server` tests that failed only on GitHub's Windows
+  runners.** The canonical-root test built its "canonical" path under a temp
+  folder reached through an 8.3 short name: a third spelling, which the path
+  guard correctly refuses before touching the disk. It now builds on the
+  canonical temp folder. The access-token expiry test aged grants with
+  `Instant::checked_sub`, which under Rust 1.94 cannot reach back past boot on
+  Windows, so on a freshly booted runner nothing was aged. OAuth timestamps now
+  carry a test-only offset, and both aging helpers (grants and the consent
+  window) fail loudly instead of silently doing nothing.
+- **Repo hygiene is green again.** Three test-only `include_str!` source scans
+  (`selectors.rs`, `tts.rs`, `folder_trust.rs`) were missing from the
+  embedded-asset check's allowlist.
+
+### Changed
+- `releases/windows/*.zip` and `releases/windows/SHA256SUMS` are gitignored;
+  they ship as GitHub Release assets.
+- `xai-grok-pager-bin` and `xai-grok-version` are back in lockstep with
+  `VERSION` (rc.4 left them at `1.0.13-rc.3`).
+
+---
+
 ## [1.0.13-rc.4] - 2026-09-12
 
 ### Added
