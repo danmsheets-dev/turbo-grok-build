@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use xai_grok_tools::types::resources::canonicalize_for_permission;
 use xai_grok_tools::types::tool::ToolKind;
 
 use crate::guard::testing::{is_lefthook_config, lexical_normalize, read_git_config};
@@ -367,11 +368,17 @@ fn audit_a_path_spelled_outside_every_root_is_refused_before_touching_the_disk()
 
 #[test]
 fn a_root_can_be_named_by_the_operators_own_spelling_or_its_canonical_one() {
-    let base = tempfile::tempdir().unwrap();
-    let real = base.path().join("real");
+    let temp = tempfile::tempdir().unwrap();
+    // `real` is the canonical spelling only if the folder it sits in is. Under a
+    // temp folder reached through an 8.3 short name, as on GitHub's Windows
+    // runners (`RUNNER~1`), it is a third spelling instead, and the guard rightly
+    // refuses that before touching the disk. So build on the temp folder spelled
+    // the way the guard spells a canonical root.
+    let base = canonicalize_for_permission(temp.path()).display;
+    let real = base.join("real");
     fs::create_dir_all(&real).unwrap();
     fs::write(real.join("f.txt"), "x").unwrap();
-    let alias = base.path().join("alias");
+    let alias = base.join("alias");
     if !symlinks_or_skip(make_dir_symlink(&real, &alias), "directory") {
         return;
     }
