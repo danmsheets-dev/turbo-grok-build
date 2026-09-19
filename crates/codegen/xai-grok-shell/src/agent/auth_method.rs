@@ -412,6 +412,21 @@ impl AuthMethodKind {
                 | Self::Radius
         )
     }
+
+    /// Third-party subscription OAuth (Kimi / Codex / Claude / Copilot / Radius).
+    ///
+    /// Independent of the xAI `preferred_method` pin: `/login openai` must still
+    /// work when Grok is pinned to API key or OIDC.
+    pub fn is_third_party_subscription(self) -> bool {
+        matches!(
+            self,
+            Self::KimiCode
+                | Self::OpenAiCodex
+                | Self::AnthropicClaude
+                | Self::GitHubCopilot
+                | Self::Radius
+        )
+    }
 }
 
 /// `true` for session-based ACP methods (cached_token, grok.com, oidc).
@@ -708,6 +723,29 @@ mod tests {
         assert!(!is_session_based_method(&acp::AuthMethodId::new(
             "unknown-method"
         )));
+
+        for method_id in [
+            KIMI_CODE_METHOD_ID,
+            OPENAI_CODEX_METHOD_ID,
+            ANTHROPIC_CLAUDE_METHOD_ID,
+            GITHUB_COPILOT_METHOD_ID,
+            RADIUS_METHOD_ID,
+        ] {
+            let kind = AuthMethodKind::from_id(&acp::AuthMethodId::new(method_id));
+            assert!(
+                kind.is_third_party_subscription(),
+                "{method_id}: advertised subscription methods must classify as third-party"
+            );
+            assert!(
+                !kind.is_session_based(),
+                "{method_id}: third-party login must not drive xAI session refresh"
+            );
+            assert!(kind.needs_interactive_login());
+        }
+        assert!(
+            !AuthMethodKind::from_id(&acp::AuthMethodId::new(GROK_COM_METHOD_ID))
+                .is_third_party_subscription()
+        );
     }
 
     use xai_grok_test_support::{EnvGuard, unset_all_byok_platform_api_key_envs};

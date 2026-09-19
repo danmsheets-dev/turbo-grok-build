@@ -3973,6 +3973,19 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         {
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
+        if matches!(ctx.auth_state, AuthState::Pending { .. }) {
+            if !*ctx.prompt_focused && key!('/').matches(key) {
+                *ctx.prompt_focused = true;
+                let _ = ctx.prompt.handle_key(key);
+                return InputOutcome::Changed;
+            }
+            if *ctx.prompt_focused && key!(Enter).matches(key) {
+                if let Some(outcome) = pending_slash_login_outcome(ctx.prompt) {
+                    *ctx.prompt_focused = false;
+                    return outcome;
+                }
+            }
+        }
         if *ctx.prompt_focused {
             match ctx.prompt.handle_key(key) {
                 crate::views::prompt_widget::PromptEvent::Edited => {
@@ -4022,7 +4035,21 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     }
                     return InputOutcome::Action(Action::QuitConfirmed);
                 }
-                if key!('l').matches(key) || key!(Enter).matches(key) {
+                if !*ctx.prompt_focused {
+                    if key!('o').matches(key) {
+                        return InputOutcome::Action(Action::LoginOpenAiCodex);
+                    }
+                    if key!('k').matches(key) {
+                        return InputOutcome::Action(Action::LoginKimi);
+                    }
+                    if key!('c').matches(key) {
+                        return InputOutcome::Action(Action::LoginAnthropicClaude);
+                    }
+                }
+                if key!('l').matches(key) && !*ctx.prompt_focused {
+                    return InputOutcome::Action(Action::Login);
+                }
+                if key!(Enter).matches(key) {
                     return InputOutcome::Action(Action::Login);
                 }
             }
@@ -4359,12 +4386,30 @@ fn handle_menu_nav(
         _ => None,
     }
 }
+/// Run `/login …` typed on the unauthenticated welcome splash.
+fn pending_slash_login_outcome(
+    prompt: &mut crate::views::prompt_widget::PromptWidget,
+) -> Option<InputOutcome> {
+    let text = prompt.text().trim();
+    let args = text.strip_prefix("/login")?;
+    match crate::slash::commands::login::login_result_for_args(args.trim()) {
+        crate::slash::command::CommandResult::Action(action) => {
+            prompt.set_text("");
+            Some(InputOutcome::Action(action))
+        }
+        _ => Some(InputOutcome::Changed),
+    }
+}
+
 /// Dispatch an action for a welcome menu item when not yet authenticated.
-/// Menu layout: 0 = Login, 1 = Quit.
+/// Menu layout: 0 = Grok, 1 = OpenAI Codex, 2 = Kimi, 3 = Claude, 4 = Quit.
 fn dispatch_pending_menu_action(index: usize) -> InputOutcome {
     match index {
         0 => InputOutcome::Action(Action::Login),
-        1 => InputOutcome::Action(Action::Quit),
+        1 => InputOutcome::Action(Action::LoginOpenAiCodex),
+        2 => InputOutcome::Action(Action::LoginKimi),
+        3 => InputOutcome::Action(Action::LoginAnthropicClaude),
+        4 => InputOutcome::Action(Action::Quit),
         _ => InputOutcome::Unchanged,
     }
 }
@@ -10252,6 +10297,81 @@ pub(crate) mod tests {
         app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
+    }
+    #[test]
+    fn welcome_pending_o_triggers_openai_login() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Pending { error: None };
+        app.welcome_prompt_focused = false;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::LoginOpenAiCodex)
+        ));
+    }
+    #[test]
+    fn welcome_pending_k_triggers_kimi_login() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Pending { error: None };
+        app.welcome_prompt_focused = false;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Action(Action::LoginKimi)));
+    }
+    #[test]
+    fn welcome_pending_c_triggers_claude_login() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Pending { error: None };
+        app.welcome_prompt_focused = false;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::LoginAnthropicClaude)
+        ));
+    }
+    #[test]
+    fn welcome_pending_slash_focuses_prompt() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Pending { error: None };
+        app.welcome_prompt_focused = false;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(app.welcome_prompt_focused);
+        assert!(app.welcome_prompt.text().starts_with('/'));
+    }
+    #[test]
+    fn welcome_pending_slash_login_openai_submits() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Pending { error: None };
+        app.welcome_prompt_focused = true;
+        app.welcome_prompt.set_text("/login openai");
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::LoginOpenAiCodex)
+        ));
+    }
+    #[test]
+    fn pending_menu_action_indices_include_third_party_logins() {
+        assert!(matches!(
+            dispatch_pending_menu_action(0),
+            InputOutcome::Action(Action::Login)
+        ));
+        assert!(matches!(
+            dispatch_pending_menu_action(1),
+            InputOutcome::Action(Action::LoginOpenAiCodex)
+        ));
+        assert!(matches!(
+            dispatch_pending_menu_action(2),
+            InputOutcome::Action(Action::LoginKimi)
+        ));
+        assert!(matches!(
+            dispatch_pending_menu_action(3),
+            InputOutcome::Action(Action::LoginAnthropicClaude)
+        ));
+        assert!(matches!(
+            dispatch_pending_menu_action(4),
+            InputOutcome::Action(Action::Quit)
+        ));
     }
     #[test]
     fn welcome_pending_enter_triggers_login() {

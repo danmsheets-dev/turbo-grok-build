@@ -138,7 +138,7 @@ impl MvpAgent {
             || self.auth_manager.current_or_expired().is_some_and(|a| a.is_xai_auth())
     }
     /// `true` for session-based ACP auth methods.
-    fn is_session_based_auth(&self) -> bool {
+    pub(super) fn is_session_based_auth(&self) -> bool {
         self.auth_method_id
             .load()
             .as_deref()

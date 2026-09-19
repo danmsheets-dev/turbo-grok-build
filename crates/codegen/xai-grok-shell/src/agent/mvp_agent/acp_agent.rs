@@ -531,8 +531,10 @@ impl acp::Agent for MvpAgent {
             None,
             Some(serde_json::json!({"method": arguments.method_id.0.as_ref()})),
         );
-        if let Some(preferred) = self.cfg.borrow().grok_com_config.preferred_method {
-            let kind = auth_method::AuthMethodKind::from_id(&arguments.method_id);
+        let kind = auth_method::AuthMethodKind::from_id(&arguments.method_id);
+        if !kind.is_third_party_subscription()
+            && let Some(preferred) = self.cfg.borrow().grok_com_config.preferred_method
+        {
             let allowed = match preferred {
                 crate::auth::PreferredAuthMethod::ApiKey => kind.is_api_key(),
                 crate::auth::PreferredAuthMethod::Oidc => kind.is_session_based(),
@@ -907,6 +909,9 @@ impl acp::Agent for MvpAgent {
                 });
                 self.spawn_post_auth_settings(auth);
                 Ok(self.auth_response_with_meta())
+            }
+            _ if kind.is_third_party_subscription() => {
+                self.authenticate_third_party(arguments).await
             }
             _ => {
                 Err(

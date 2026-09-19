@@ -52,6 +52,25 @@ Older release notes (r1–r13 detail) are archived under
 
 ---
 
+## [1.0.13-rc.6] - 2026-09-18
+
+TUI third-party subscription login. `/login openai` (and Kimi, Claude, GitHub
+Copilot, Radius) actually runs OAuth instead of failing closed.
+
+### Fixed
+- **`/login openai` returned `unsupported auth method: openai-codex`.** The
+  pager advertised `openai-codex`, `kimi-code`, `anthropic-claude`,
+  `github-copilot`, and `radius` and sent those ACP method ids, but the agent
+  only handled Grok (`grok.com` / OIDC / API key / cached token). Those
+  methods now run the existing browser/device OAuth flows, restamp the catalog,
+  and do not replace an xAI session.
+- **Welcome splash `l` was the only login path.** Community first-launch still
+  does not auto-open Grok OAuth. The splash now offers **`o`** OpenAI Codex,
+  **`k`** Kimi Code, **`c`** Claude, and typed `/login openai` (etc.) without
+  requiring a Grok login first. Bare **`l`** remains Grok.
+
+---
+
 ## [1.0.13-rc.5] - 2026-09-16
 
 CI and test fixes. `turbo` behaves the same at runtime as 1.0.13-rc.4; only

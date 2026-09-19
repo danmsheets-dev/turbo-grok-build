@@ -540,7 +540,7 @@ Log in or re-authenticate without leaving the session.
 /login claude          # Anthropic Claude Pro/Max OAuth (also: anthropic)
 ```
 
-On Hyper, first launch does **not** force Grok OAuth — use `/login` when you choose. See [Authentication](02-authentication.md) and [OpenAI Codex](28-openai-codex.md).
+On Hyper, first launch does **not** force Grok OAuth — use `/login` (or the welcome-screen `o` / `k` / `c` shortcuts) when you choose. See [Authentication](02-authentication.md) and [OpenAI Codex](28-openai-codex.md).
 
 ### `/providers`
 

@@ -29,53 +29,58 @@ impl SlashCommand for LoginCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        let arg = args.trim().to_ascii_lowercase();
-        if matches!(arg.as_str(), "kimi" | "kimi-code") {
-            CommandResult::Action(Action::LoginKimi)
-        } else if matches!(
-            arg.as_str(),
-            "openai" | "openai-codex" | "codex" | "chatgpt"
-        ) {
-            CommandResult::Action(Action::LoginOpenAiCodex)
-        } else if matches!(arg.as_str(), "claude" | "anthropic" | "anthropic-claude") {
-            CommandResult::Action(Action::LoginAnthropicClaude)
-        } else if matches!(arg.as_str(), "github" | "github-copilot" | "copilot") {
-            CommandResult::Action(Action::LoginGitHubCopilot)
-        } else if matches!(arg.as_str(), "radius") {
-            CommandResult::Action(Action::LoginRadius)
-        } else if matches!(arg.as_str(), "amazon-bedrock" | "bedrock") {
-            CommandResult::Error(
-                "Amazon Bedrock supports three auth modes:\n  \
-                 • Bearer token: run `grok login --bedrock` in an interactive terminal.\n  \
-                 • AWS profile: run `grok login --bedrock --profile <name>`.\n  \
-                 • Existing AWS credential chain: run `grok login --bedrock --chain`.\n\
-                 Amazon Bedrock 支持 Bearer token、AWS profile 或现有 AWS 凭证链；\
-                 请用以上命令安全写入 Bedrock scope，不会复制 AWS access/secret key。"
-                    .into(),
-            )
-        } else if matches!(arg.as_str(), "opencode-go" | "opencodego") {
-            CommandResult::Error(
-                "OpenCode Go subscriptions use a Console-issued API key, not portable OAuth. \
-                 Subscribe at https://opencode.ai/go, then run \
-                 `/providers opencode-go <api_key>` (or set OPENCODE_API_KEY)."
-                    .into(),
-            )
-        } else if matches!(arg.as_str(), "nexus" | "providers" | "provider") {
-            // Nexus is BYOK (API key), not OAuth — redirect instead of erroring.
-            CommandResult::Error(
-                "Nexus 用 API key,不走 OAuth —— 请用 `/nexus <key>`(TUI 内)或 \
-                 `turbo nexus <key>`(命令行,登录前即可用)。空敲 `/nexus` 查看引导。"
-                    .into(),
-            )
-        } else if arg.is_empty() {
-            CommandResult::Action(Action::Login)
-        } else {
-            CommandResult::Error(format!(
-                "Unknown login target '{arg}'. Try `/login`, `/login kimi`, `/login openai`, \
-                 `/login claude`, `/login github`, `/login radius`, `/login bedrock`, or \
-                 `/login opencode-go` (API-key setup); for Nexus use `/nexus`."
-            ))
-        }
+        login_result_for_args(args)
+    }
+}
+
+/// Parse `/login` args without a command context (welcome splash Enter).
+pub fn login_result_for_args(args: &str) -> CommandResult {
+    let arg = args.trim().to_ascii_lowercase();
+    if matches!(arg.as_str(), "kimi" | "kimi-code") {
+        CommandResult::Action(Action::LoginKimi)
+    } else if matches!(
+        arg.as_str(),
+        "openai" | "openai-codex" | "codex" | "chatgpt"
+    ) {
+        CommandResult::Action(Action::LoginOpenAiCodex)
+    } else if matches!(arg.as_str(), "claude" | "anthropic" | "anthropic-claude") {
+        CommandResult::Action(Action::LoginAnthropicClaude)
+    } else if matches!(arg.as_str(), "github" | "github-copilot" | "copilot") {
+        CommandResult::Action(Action::LoginGitHubCopilot)
+    } else if matches!(arg.as_str(), "radius") {
+        CommandResult::Action(Action::LoginRadius)
+    } else if matches!(arg.as_str(), "amazon-bedrock" | "bedrock") {
+        CommandResult::Error(
+            "Amazon Bedrock supports three auth modes:\n  \
+             • Bearer token: run `grok login --bedrock` in an interactive terminal.\n  \
+             • AWS profile: run `grok login --bedrock --profile <name>`.\n  \
+             • Existing AWS credential chain: run `grok login --bedrock --chain`.\n\
+             Amazon Bedrock 支持 Bearer token、AWS profile 或现有 AWS 凭证链；\
+             请用以上命令安全写入 Bedrock scope，不会复制 AWS access/secret key。"
+                .into(),
+        )
+    } else if matches!(arg.as_str(), "opencode-go" | "opencodego") {
+        CommandResult::Error(
+            "OpenCode Go subscriptions use a Console-issued API key, not portable OAuth. \
+             Subscribe at https://opencode.ai/go, then run \
+             `/providers opencode-go <api_key>` (or set OPENCODE_API_KEY)."
+                .into(),
+        )
+    } else if matches!(arg.as_str(), "nexus" | "providers" | "provider") {
+        // Nexus is BYOK (API key), not OAuth — redirect instead of erroring.
+        CommandResult::Error(
+            "Nexus 用 API key,不走 OAuth —— 请用 `/nexus <key>`(TUI 内)或 \
+             `turbo nexus <key>`(命令行,登录前即可用)。空敲 `/nexus` 查看引导。"
+                .into(),
+        )
+    } else if arg.is_empty() {
+        CommandResult::Action(Action::Login)
+    } else {
+        CommandResult::Error(format!(
+            "Unknown login target '{arg}'. Try `/login`, `/login kimi`, `/login openai`, \
+             `/login claude`, `/login github`, `/login radius`, `/login bedrock`, or \
+             `/login opencode-go` (API-key setup); for Nexus use `/nexus`."
+        ))
     }
 }
 

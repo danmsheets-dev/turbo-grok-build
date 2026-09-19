@@ -8,6 +8,7 @@ use super::oauth::{
     DeviceAuthorization, DevicePollResult, poll_device_token, request_device_authorization,
 };
 use crate::auth::model::GrokAuth;
+use crate::auth::{AuthChannels, AuthUrlInfo, AuthUrlMode};
 use crate::auth::storage::{
     auth_json_path, read_kimi_code_auth, store_kimi_code_auth,
     store_kimi_code_auth_after_refresh_locked,
@@ -32,13 +33,28 @@ enum PollLoopOutcome {
 
 /// Run interactive Kimi Code device login and persist the token set.
 pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
+    run_kimi_code_login_with_channels(None).await
+}
+
+/// Run Kimi Code device login. When `channels` is supplied (ACP/TUI), the
+/// verification URL is pushed to the client; CLI still prints the user code.
+pub async fn run_kimi_code_login_with_channels(
+    mut channels: Option<AuthChannels>,
+) -> anyhow::Result<GrokAuth> {
     let host = xai_grok_models::PlatformId::KimiCode
         .oauth_host()
         .ok_or_else(|| anyhow::anyhow!("Kimi Code OAuth host is not configured"))?;
+    let has_client_ui = channels.is_some();
 
     loop {
         let device_auth = request_device_authorization(&host).await?;
-        prompt_on_stderr(&device_auth).await;
+        if let Some(ch) = channels.take() {
+            push_device_url(ch, &device_auth).await;
+        } else if !has_client_ui {
+            prompt_on_stderr(&device_auth).await;
+        } else {
+            let _ = open_browser_detached(&device_auth.verification_uri_complete).await;
+        }
 
         match complete_device_code_login(&host, &device_auth).await? {
             PollLoopOutcome::Done(auth) => {
@@ -497,6 +513,17 @@ async fn complete_device_code_login(
             }
         }
     }
+}
+
+async fn push_device_url(channels: AuthChannels, device_auth: &DeviceAuthorization) {
+    let display_uri = device_auth.verification_uri_complete.clone();
+    if let Some(tx) = channels.url_tx {
+        let _ = tx.send(AuthUrlInfo {
+            url: display_uri.clone(),
+            mode: AuthUrlMode::Device,
+        });
+    }
+    let _ = open_browser_detached(&display_uri).await;
 }
 
 async fn prompt_on_stderr(device_auth: &DeviceAuthorization) {

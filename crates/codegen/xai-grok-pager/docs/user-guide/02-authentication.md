@@ -21,8 +21,8 @@ Credentials live under `~/.grok/auth.json` in **separate scopes** so logging out
 
 **Hyper does not auto-open the Grok browser login.** You land on the welcome splash:
 
-1. Press **`l`** when you want the default xAI interactive login (`grok.com` or configured enterprise OIDC).
-2. Or enter a session after any credential is already configured, then use slash commands:
+1. Press **`l`** for xAI (`grok.com` or configured enterprise OIDC), **`o`** for OpenAI Codex, **`k`** for Kimi Code, or **`c`** for Claude.
+2. Or type a slash command on the splash (`/login openai`, `/login kimi`, …) without signing into Grok first:
 
 ```text
 /login kimi            # Kimi Code OAuth
